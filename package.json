@@ -21,7 +21,7 @@
     "verify": "bash scripts/verify.sh"
   },
   "peerDependencies": {
-    "@cplieger/web-terminal-engine": ">=0.1.0"
+    "@cplieger/web-terminal-engine": ">=1.2.0"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
