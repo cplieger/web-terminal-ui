@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Local pre-publish verification for @cplieger/web-terminal-ui.
 #
-# The engine (@cplieger/web-terminal) is not published yet, so npm cannot
+# The engine (@cplieger/web-terminal-engine) is not published yet, so npm cannot
 # resolve the peer dependency. This script overlays the LOCAL working-tree
-# engine into node_modules/@cplieger/web-terminal (the same technique vibecli's
+# engine into node_modules/@cplieger/web-terminal-engine (the same technique vibecli's
 # dev-build.sh uses) and then runs the real gates: tsgo typecheck (source +
 # tests) and vitest.
 #
@@ -15,11 +15,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ENGINE_DIR="${ENGINE_DIR:-../vterm}"
-PKG="node_modules/@cplieger/web-terminal"
+PKG="node_modules/@cplieger/web-terminal-engine"
 
 if [ ! -d "$ENGINE_DIR/web/src" ]; then
   echo "error: engine source not found at $ENGINE_DIR/web/src" >&2
-  echo "       set ENGINE_DIR to the local @cplieger/web-terminal checkout" >&2
+  echo "       set ENGINE_DIR to the local @cplieger/web-terminal-engine checkout" >&2
   exit 1
 fi
 

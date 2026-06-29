@@ -1,7 +1,7 @@
 # @cplieger/web-terminal-ui
 
 The reference touch-first browser UI for
-[`@cplieger/web-terminal`](https://github.com/cplieger/web-terminal) — the part
+[`@cplieger/web-terminal-engine`](https://github.com/cplieger/web-terminal-engine) — the part
 that turns the engine's render/scroll/connection/keyboard modules into a
 usable terminal on a phone as well as a desktop.
 
@@ -26,10 +26,10 @@ depend on the engine directly and skip this package.
 ## Install
 
 ```sh
-npm install @cplieger/web-terminal-ui @cplieger/web-terminal
+npm install @cplieger/web-terminal-ui @cplieger/web-terminal-engine
 ```
 
-`@cplieger/web-terminal` is a peer dependency — the UI is built on the engine,
+`@cplieger/web-terminal-engine` is a peer dependency — the UI is built on the engine,
 and both halves of the wire protocol must stay in lockstep, so the consumer
 pins the engine version explicitly.
 

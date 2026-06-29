@@ -26,7 +26,7 @@
 // uses the textarea as its anchor; we move the textarea to the cursor
 // for the same reason.
 
-import { keyboard } from "@cplieger/web-terminal";
+import { keyboard } from "@cplieger/web-terminal-engine";
 const { bracketTextForPaste, prepareTextForTerminal } = keyboard;
 
 // Single-character invisible placeholder used by app.ts to keep the

@@ -1,6 +1,6 @@
 // @cplieger/web-terminal-ui — reference touch-first browser terminal UI.
 //
-// mount() wires the @cplieger/web-terminal engine to a fixed DOM scaffold
+// mount() wires the @cplieger/web-terminal-engine engine to a fixed DOM scaffold
 // (see scaffold/index.html for the required element ids) and owns the
 // touch-first input model: a display-only #term-output, a hidden <textarea>
 // that owns the keyboard + IME + local typing buffer, a mobile key toolbar,
@@ -12,7 +12,7 @@
 // Single-instance per page: the module holds the one terminal's DOM refs and
 // state, matching a terminal-per-page model. Call mount() exactly once.
 
-import { render, keyboard, scroll, connection } from "@cplieger/web-terminal";
+import { render, keyboard, scroll, connection } from "@cplieger/web-terminal-engine";
 import * as viewport from "./viewport.js";
 import * as composition from "./composition.js";
 import * as status from "./status.js";
@@ -117,7 +117,7 @@ function setCtrlArmed(on: boolean): void {
 }
 
 // Map one printable character to its Ctrl+<char> C0 control byte,
-// mirroring the Ctrl handling in @cplieger/web-terminal's keyboard mapper.
+// mirroring the Ctrl handling in @cplieger/web-terminal-engine's keyboard mapper.
 function ctrlByteFor(ch: string): string | null {
   const code = ch.toLowerCase().charCodeAt(0);
   if (code >= 97 && code <= 122) {

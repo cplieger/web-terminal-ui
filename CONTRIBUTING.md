@@ -1,7 +1,7 @@
 # Contributing to web-terminal-ui
 
 `@cplieger/web-terminal-ui` is the reference touch-first browser UI built on the
-[`@cplieger/web-terminal`](https://github.com/cplieger/web-terminal) engine,
+[`@cplieger/web-terminal-engine`](https://github.com/cplieger/web-terminal-engine) engine,
 published as TypeScript source to npm and JSR. This guide covers the
 architecture, the local workflow, and the conventions a contributor needs;
 org-wide defaults are inherited from
@@ -50,7 +50,7 @@ not move keyboard handling onto the output element.
 ## Local development
 
 Requires Node and npm, plus a sibling checkout of the engine (the UI is built
-on the unpublished `@cplieger/web-terminal`).
+on the unpublished `@cplieger/web-terminal-engine`).
 
 ```sh
 npm install                # devDeps; the engine peer is overlaid by verify.sh
@@ -58,9 +58,9 @@ npm run verify             # overlay local engine + tsgo (src & tests) + vitest
 ```
 
 `scripts/verify.sh` copies the local engine's `web/src` into
-`node_modules/@cplieger/web-terminal` (gitignored) so `tsgo` and `vitest` can
-resolve the bare `@cplieger/web-terminal` specifier before the engine is
-published. Point it at a non-default location with `ENGINE_DIR=../web-terminal
+`node_modules/@cplieger/web-terminal-engine` (gitignored) so `tsgo` and `vitest` can
+resolve the bare `@cplieger/web-terminal-engine` specifier before the engine is
+published. Point it at a non-default location with `ENGINE_DIR=../web-terminal-engine
 npm run verify`. The individual gates are also available:
 
 ```sh
