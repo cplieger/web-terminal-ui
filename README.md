@@ -1,5 +1,11 @@
 # @cplieger/web-terminal-ui
 
+[![npm](https://img.shields.io/npm/v/@cplieger/web-terminal-ui)](https://www.npmjs.com/package/@cplieger/web-terminal-ui)
+[![JSR](https://jsr.io/badges/@cplieger/web-terminal-ui)](https://jsr.io/@cplieger/web-terminal-ui)
+[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-ui/badges/coverage.json)](https://github.com/cplieger/web-terminal-ui/actions/workflows/coverage.yml)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13431/badge)](https://www.bestpractices.dev/projects/13431)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/web-terminal-ui/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/web-terminal-ui)
+
 The reference touch-first browser UI for
 [`@cplieger/web-terminal-engine`](https://github.com/cplieger/web-terminal-engine) — the part
 that turns the engine's render/scroll/connection/keyboard modules into a
@@ -70,6 +76,22 @@ the UI is single-instance per page.
 | `src/*.ts`               | The UI modules (`mount`, IME, predictive echo, viewport, status). |
 | `css/*.css` + `MANIFEST` | The default theme + layout; concatenate in MANIFEST order.        |
 | `scaffold/index.html`    | A reference HTML scaffold with the required element ids.          |
+
+## Related projects
+
+The web-terminal family:
+
+- [`web-terminal-engine`](https://github.com/cplieger/web-terminal-engine) — the
+  Go session engine + TypeScript browser renderer this UI is built on (peer
+  dependency).
+- [`web-terminal-server`](https://github.com/cplieger/web-terminal-server) — a
+  ready-to-run container that serves this UI over HTTP + WebSocket for any
+  command.
+
+Consumers that ship this UI:
+
+- [`vibekit`](https://github.com/cplieger/vibekit)
+- [`vibecli`](https://github.com/cplieger/vibecli)
 
 ## License
 
