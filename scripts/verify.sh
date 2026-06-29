@@ -9,12 +9,11 @@
 #
 # Not for CI or release — CI resolves the published engine. The overlay dir is
 # gitignored. Override the engine location with ENGINE_DIR=... if the sibling
-# checkout lives elsewhere (default ../vterm; the engine's local directory is
-# still named vterm until its directory/GitHub rename).
+# checkout lives elsewhere (default ../web-terminal-engine).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ENGINE_DIR="${ENGINE_DIR:-../vterm}"
+ENGINE_DIR="${ENGINE_DIR:-../web-terminal-engine}"
 PKG="node_modules/@cplieger/web-terminal-engine"
 
 if [ ! -d "$ENGINE_DIR/web/src" ]; then
