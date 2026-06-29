@@ -16,9 +16,6 @@
       "css/MANIFEST",
       "scaffold/index.html"
     ],
-    "exclude": [
-      "src/**/*.test.ts",
-      "src/fc-strict-setup.ts"
-    ]
+    "exclude": ["src/**/*.test.ts", "src/fc-strict-setup.ts"]
   }
 }
