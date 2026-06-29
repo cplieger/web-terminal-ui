@@ -1,10 +1,4 @@
 {
-  "entry": ["src/**/*.test.ts"],
-  "project": ["src/**/*.ts", "!**/*.d.ts"],
-  "ignoreDependencies": ["@eslint/js", "typescript-eslint", "html-validate"],
-  "ignoreBinaries": ["tsgo"],
-  "treatConfigHintsAsErrors": true,
-  "typescript": {
-    "config": ["tsconfig.json", "tsconfig.test.json"]
-  }
+  "ignoreDependencies": ["html-validate"],
+  "ignoreBinaries": ["tsgo"]
 }
