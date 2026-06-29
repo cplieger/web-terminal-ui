@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.vitest-cache/
+coverage/
+
+# Local engine overlay for pre-publish typecheck (scripts/verify.sh)
+node_modules/@cplieger/web-terminal/
+
+# Kiro skill artifacts (code-review, refactor, steering-maintenance, judgement)
+**/.code-review/
+**/.judgement/
+**/.refactor/
+**/.steering-maintenance/

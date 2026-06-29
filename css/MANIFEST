@@ -1,0 +1,5 @@
+# web-terminal-ui CSS bundle manifest
+# Files concatenated in declared order to produce the served style.css.
+00-tokens.css
+01-reset.css
+02-app.css

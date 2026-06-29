@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.vitest-cache/
+coverage/
+
+# The HTML scaffold is owned by html-validate (uppercase DOCTYPE, omitted void
+# end tags), which conflicts with prettier's HTML preferences. Lint it with
+# html-validate, not prettier.
+scaffold/
