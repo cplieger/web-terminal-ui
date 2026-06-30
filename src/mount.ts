@@ -1,13 +1,14 @@
 // @cplieger/web-terminal-ui — reference touch-first browser terminal UI.
 //
-// mount() wires the @cplieger/web-terminal-engine engine to a fixed DOM scaffold
-// (see scaffold/index.html for the required element ids) and owns the
-// touch-first input model: a display-only #term-output, a hidden <textarea>
-// that owns the keyboard + IME + local typing buffer, a mobile key toolbar,
-// a viewport-clamped context menu, predictive echo, and viewport/keyboard-
-// inset handling. This is the full default UI extracted from vibecli; a
-// consumer either mounts it as-is on the scaffold or builds its own UI on the
-// engine directly.
+// mount(root) builds the entire terminal subtree inside a single host-provided
+// container element and owns the touch-first input model: a display-only
+// terminal output, a hidden <textarea> that owns the keyboard + IME + local
+// typing buffer, a mobile key toolbar, a viewport-clamped context menu,
+// predictive echo, and viewport/keyboard-inset handling. The consumer's HTML
+// is just <head> + one empty root element (+ an optional loading overlay) +
+// the importmap; mount creates everything else, so there is no shared
+// element-id contract to keep in sync. A consumer that wants a different UI
+// builds on the engine directly instead.
 //
 // Single-instance per page: the module holds the one terminal's DOM refs and
 // state, matching a terminal-per-page model. Call mount() exactly once.
@@ -28,6 +29,11 @@ export interface MountOptions {
    *  server is sized against the real web font's cell metrics rather than a
    *  fallback. Default '14px "MonaspiceNe NFM"'. */
   fontReady?: string;
+  /** Optional pre-JS loading overlay element (lives in the served HTML so it
+   *  paints before this module loads). mount fades it out and removes it once
+   *  the first screen frame renders. The consumer owns the element; mount only
+   *  dismisses it. */
+  loading?: HTMLElement;
 }
 
 export interface TerminalUI {
@@ -61,10 +67,13 @@ let termWrap!: HTMLElement;
 let input!: HTMLTextAreaElement;
 let compositionViewEl!: HTMLElement;
 let ctxMenu!: HTMLElement;
-let ctrlBtn: HTMLElement | null = null;
 
 // --- Mutable UI state ---
-let ctrlArmed = false;
+// Sticky-Ctrl state + the C0 mapping table + the toolbar button wiring all
+// live in the engine's keyboard.bindMobileToolbar; mount() binds it against
+// the required #key-toolbar and keeps the controller so the input handler
+// can route typed text through its applyStickyCtrl.
+let toolbarCtrl!: keyboard.MobileToolbarController;
 let fontsLoaded = false;
 let wsOpen = false;
 let lastPointerType = "mouse";
@@ -81,10 +90,43 @@ let longPressOrigin = { x: 0, y: 0 };
 // the Paste button from our custom menu on iOS to steer them there.
 let isIOS = false;
 
-function getRequired(id: string): HTMLElement {
-  const el = document.getElementById(id);
+// The terminal subtree mount() builds inside the host-provided root. Static,
+// trusted markup (no interpolation) parsed once via a <template>. Element refs
+// are then picked out by class with scoped queries — no global getElementById,
+// no element-id contract the consumer must reproduce. The only ids are on the
+// kb-* toolbar buttons, which the engine's bindMobileToolbar resolves with a
+// scoped `toolbar.querySelector('#id')` (not a document-global lookup). The
+// predicted-cursor overlay is created and owned by the engine renderer; the
+// loading overlay stays in the consumer's served HTML (it must paint before
+// this module loads).
+const TERMINAL_TEMPLATE = `
+<div class="term">
+  <div class="term-output" role="log" aria-live="off" aria-roledescription="Terminal" aria-label="Terminal"></div>
+  <textarea class="term-input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Terminal input" tabindex="-1"></textarea>
+  <div class="composition-view" aria-hidden="true"></div>
+</div>
+<div class="conn-banner" role="status" aria-live="polite"></div>
+<div class="key-toolbar collapsed no-transition" aria-label="Navigation keys" role="toolbar">
+  <button type="button" id="kb-toggle" class="kb-toggle" aria-label="Toggle key toolbar"><svg class="icon-hamburger" viewBox="0 0 24 24"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg><svg class="icon-close" viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
+  <button type="button" id="kb-tab" class="kb-key kb-r1c1" aria-label="Tab">TAB</button>
+  <button type="button" id="kb-esc" class="kb-key kb-r1c2" aria-label="Escape">ESC</button>
+  <button type="button" id="kb-up" class="kb-key kb-r1c3" aria-label="Up"><svg viewBox="0 0 24 24"><polyline points="6 15 12 9 18 15"/></svg></button>
+  <button type="button" id="kb-enter" class="kb-key kb-r1c4" aria-label="Enter"><svg viewBox="0 0 24 24"><polyline points="9 10 4 15 9 20"/><polyline points="20 4 20 15 4 15"/></svg></button>
+  <button type="button" class="kb-scroll-bottom" aria-label="Scroll to bottom"><svg viewBox="0 0 24 24"><path fill="none" d="M7 13l5 5 5-5M7 6l5 5 5-5"/></svg></button>
+  <button type="button" id="kb-ctrl" class="kb-key kb-r2c1" aria-label="Sticky Ctrl modifier" aria-pressed="false">CTRL</button>
+  <button type="button" id="kb-left" class="kb-key kb-r2c2" aria-label="Left"><svg viewBox="0 0 24 24"><polyline points="15 6 9 12 15 18"/></svg></button>
+  <button type="button" id="kb-down" class="kb-key kb-r2c3" aria-label="Down"><svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></button>
+  <button type="button" id="kb-right" class="kb-key kb-r2c4" aria-label="Right"><svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg></button>
+</div>
+<div class="ctx-menu"></div>`;
+
+// Pick a freshly-built element out of the root by class. Throws if the
+// template and the selector ever drift apart (a build-time invariant, not a
+// host-scaffold dependency).
+function pick(root: ParentNode, selector: string): HTMLElement {
+  const el = root.querySelector<HTMLElement>(selector);
   if (!el) {
-    throw new Error(`web-terminal-ui: missing required scaffold element #${id}`);
+    throw new Error(`web-terminal-ui: mount() failed to build element ${selector}`);
   }
   return el;
 }
@@ -101,61 +143,6 @@ function send(bytes: string): void {
   if (!connection.sendBinary(buf)) {
     /* connection not ready — drop silently */
   }
-}
-
-// --- Sticky Ctrl modifier ---
-// The iOS virtual keyboard has no Ctrl key, so control sequences
-// (Ctrl+C, Ctrl+L = clear screen, Ctrl+X, ...) are otherwise
-// unreachable on touch. The toolbar's Ctrl button arms a one-shot
-// modifier: tap it, then tap a letter on the virtual keyboard and that
-// keystroke is sent as its C0 control byte. Auto-disarms after one
-// printable character.
-function setCtrlArmed(on: boolean): void {
-  ctrlArmed = on;
-  ctrlBtn?.classList.toggle("armed", on);
-  ctrlBtn?.setAttribute("aria-pressed", on ? "true" : "false");
-}
-
-// Map one printable character to its Ctrl+<char> C0 control byte,
-// mirroring the Ctrl handling in @cplieger/web-terminal-engine's keyboard mapper.
-function ctrlByteFor(ch: string): string | null {
-  const code = ch.toLowerCase().charCodeAt(0);
-  if (code >= 97 && code <= 122) {
-    return String.fromCharCode(code - 96); // a–z → 0x01–0x1a
-  }
-  switch (ch) {
-    case " ":
-    case "@":
-      return "\x00";
-    case "[":
-      return "\x1b";
-    case "\\":
-      return "\x1c";
-    case "]":
-      return "\x1d";
-    case "^":
-      return "\x1e";
-    case "_":
-      return "\x1f";
-    case "?":
-      return "\x7f";
-    default:
-      return null;
-  }
-}
-
-// Apply a one-shot armed Ctrl to freshly-typed text: a single printable
-// character becomes its control byte; longer input (paste) just disarms
-// and passes through unchanged.
-function applyStickyCtrl(data: string): string {
-  if (!ctrlArmed) {
-    return data;
-  }
-  setCtrlArmed(false);
-  if (data.length === 1) {
-    return ctrlByteFor(data) ?? data;
-  }
-  return data;
 }
 
 function resetInputPlaceholder(): void {
@@ -317,24 +304,50 @@ function showCtxMenu(x: number, y: number): void {
   ctxMenu.style.top = `${top}px`;
 }
 
-export function mount(opts: MountOptions = {}): TerminalUI {
+export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
   const wsPath = opts.wsPath ?? DEFAULT_WS_PATH;
   const fontReady = opts.fontReady ?? DEFAULT_FONT_READY;
 
-  // --- DOM refs ---
-  outputEl = getRequired("term-output");
-  termWrap = getRequired("term");
-  input = getRequired("term-input") as HTMLTextAreaElement;
-  compositionViewEl = getRequired("composition-view");
-  ctxMenu = getRequired("ctx-menu");
-  ctrlBtn = document.getElementById("kb-ctrl");
+  // --- Build the terminal subtree inside the host-provided root ---
+  const tpl = document.createElement("template");
+  tpl.innerHTML = TERMINAL_TEMPLATE;
+  root.replaceChildren(tpl.content);
+
+  // --- DOM refs (picked from the just-built subtree by class) ---
+  termWrap = pick(root, ".term");
+  outputEl = pick(root, ".term-output");
+  input = pick(root, ".term-input") as HTMLTextAreaElement;
+  compositionViewEl = pick(root, ".composition-view");
+  ctxMenu = pick(root, ".ctx-menu");
+  const banner = pick(root, ".conn-banner");
+  const toolbar = pick(root, ".key-toolbar");
 
   isIOS =
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 
+  // markReady fires once: when the first screen frame has rendered AND the web
+  // font is loaded. It tells the status banner the initial load is over (so it
+  // may show reconnect state from here on) and fades out the consumer's
+  // loading overlay if one was passed.
+  let ready = false;
+  function markReady(): void {
+    if (ready) {
+      return;
+    }
+    ready = true;
+    status.setLoaded();
+    const ld = opts.loading;
+    if (ld) {
+      ld.classList.add("fade");
+      ld.addEventListener("transitionend", () => {
+        ld.remove();
+      });
+    }
+  }
+
   // --- Initialize layers ---
-  status.init();
+  status.init({ banner });
 
   render.init({
     output: outputEl,
@@ -370,10 +383,7 @@ export function mount(opts: MountOptions = {}): TerminalUI {
     onUserScrollChange(scrolledUp) {
       // Toggle .scrolled-up on the toolbar so CSS can show/hide the
       // scroll-bottom button and grow the pill vertically.
-      const toolbar = document.getElementById("key-toolbar");
-      if (toolbar) {
-        toolbar.classList.toggle("scrolled-up", scrolledUp);
-      }
+      toolbar.classList.toggle("scrolled-up", scrolledUp);
     },
   });
 
@@ -386,13 +396,7 @@ export function mount(opts: MountOptions = {}): TerminalUI {
       if (msg.type === "screen") {
         render.handleScreen(msg);
         if (fontsLoaded) {
-          const ld = document.getElementById("loading");
-          if (ld) {
-            ld.classList.add("fade");
-            ld.addEventListener("transitionend", () => {
-              ld.remove();
-            });
-          }
+          markReady();
         }
         predict.onScreenFrame(msg.cursor[0], msg.cursor[1], msg.cursorHidden);
       } else if (msg.type === "scroll") {
@@ -482,16 +486,18 @@ export function mount(opts: MountOptions = {}): TerminalUI {
       // space byte. (Native paste is bracketed in composition.ts's paste
       // handler before this fires; the insertFromPaste data here is a
       // fallback for browsers that don't raise a separate paste event.)
-      send(applyStickyCtrl(ev.data.replace(/\u00A0/g, " ")));
+      send(toolbarCtrl.applyStickyCtrl(ev.data.replace(/\u00A0/g, " ")));
     } else {
       // Fallback: anything in the textarea past the placeholder is new
       // content. Covers browsers that don't populate inputType / data
       // (older WebKit).
       const v = input.value;
       if (v.length > INPUT_PLACEHOLDER.length && v.startsWith(INPUT_PLACEHOLDER)) {
-        send(applyStickyCtrl(v.slice(INPUT_PLACEHOLDER.length).replace(/\u00A0/g, " ")));
+        send(
+          toolbarCtrl.applyStickyCtrl(v.slice(INPUT_PLACEHOLDER.length).replace(/\u00A0/g, " ")),
+        );
       } else if (v !== INPUT_PLACEHOLDER && v.length > 0) {
-        send(applyStickyCtrl(v.replace(/\u00A0/g, " ")));
+        send(toolbarCtrl.applyStickyCtrl(v.replace(/\u00A0/g, " ")));
       }
     }
     resetInputPlaceholder();
@@ -651,21 +657,19 @@ export function mount(opts: MountOptions = {}): TerminalUI {
   });
 
   // --- Scroll-to-bottom (inside toolbar grid) ---
-  const scrollBtn = document.getElementById("scroll-bottom");
-  if (scrollBtn) {
-    // pointerdown (like the other toolbar keys) so touch devices enter
-    // :active and show press feedback; preventDefault keeps focus on the
-    // terminal. click is kept for keyboard activation of the desktop FAB.
-    // scrollToBottom() is idempotent, so the pointerdown+click pair on a
-    // mouse press is harmless.
-    scrollBtn.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      scroll.scrollToBottom();
-    });
-    scrollBtn.addEventListener("click", () => {
-      scroll.scrollToBottom();
-    });
-  }
+  const scrollBtn = pick(root, ".kb-scroll-bottom");
+  // pointerdown (like the other toolbar keys) so touch devices enter
+  // :active and show press feedback; preventDefault keeps focus on the
+  // terminal. click is kept for keyboard activation of the desktop FAB.
+  // scrollToBottom() is idempotent, so the pointerdown+click pair on a
+  // mouse press is harmless.
+  scrollBtn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    scroll.scrollToBottom();
+  });
+  scrollBtn.addEventListener("click", () => {
+    scroll.scrollToBottom();
+  });
 
   // --- Context menu ---
   termWrap.addEventListener("contextmenu", (e: MouseEvent) => {
@@ -750,44 +754,18 @@ export function mount(opts: MountOptions = {}): TerminalUI {
   });
 
   // --- Mobile key toolbar ---
-  const keyToolbar = document.getElementById("key-toolbar");
-  if (keyToolbar) {
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
-        keyToolbar.classList.remove("no-transition");
-      }),
-    );
-    const toggleBtn = document.getElementById("kb-toggle");
-    toggleBtn?.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      keyToolbar.classList.toggle("collapsed");
-    });
-
-    const keyMap: Record<string, string> = {
-      "kb-up": "\x1b[A",
-      "kb-down": "\x1b[B",
-      "kb-left": "\x1b[D",
-      "kb-right": "\x1b[C",
-      "kb-esc": "\x1b",
-      "kb-tab": "\t",
-      "kb-enter": "\r",
-    };
-
-    for (const [id, seq] of Object.entries(keyMap)) {
-      document.getElementById(id)?.addEventListener("pointerdown", (e) => {
-        e.preventDefault();
-        setCtrlArmed(false);
-        send(seq);
-      });
-    }
-
-    // Sticky Ctrl: tap to arm/disarm. preventDefault keeps focus on the
-    // terminal so the iOS virtual keyboard stays up for the next tap.
-    ctrlBtn?.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      setCtrlArmed(!ctrlArmed);
-    });
-  }
+  // The engine's keyboard.bindMobileToolbar wires the collapse toggle, the
+  // arrows (DECCKM-aware — SS3 under application-cursor mode, matching
+  // mapKeyboardEvent), Tab / Enter / Esc, and the sticky-Ctrl button on the
+  // built toolbar. It returns the controller whose applyStickyCtrl the input
+  // handler above applies to typed text. The no-transition priming below
+  // stays local (a UI-specific concern).
+  toolbarCtrl = keyboard.bindMobileToolbar({ toolbar, send });
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      toolbar.classList.remove("no-transition");
+    }),
+  );
 
   // --- Copy feedback toast ---
   document.addEventListener("copy", () => {

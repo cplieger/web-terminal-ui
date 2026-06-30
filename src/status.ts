@@ -21,6 +21,11 @@ let banner: HTMLElement | null = null;
 let state: State = "connecting";
 let stableTimer: ReturnType<typeof setTimeout> | null = null;
 let consecutiveFailures = 0;
+// True once the first screen frame has rendered (mount calls setLoaded()).
+// Until then the initial loading overlay is up and we suppress the
+// reconnect/offline banner so the two don't stack — this replaces the old
+// `document.getElementById("loading")` probe.
+let loaded = false;
 
 /** Mark the connection as open. Hides the banner. */
 export function open(): void {
@@ -28,9 +33,16 @@ export function open(): void {
   setState("open", 0);
 }
 
+/** Mark the terminal as past its initial load (first screen frame rendered).
+ *  Until this is called the connection banner stays suppressed so it never
+ *  stacks on top of the consumer's loading overlay. */
+export function setLoaded(): void {
+  loaded = true;
+}
+
 /** Mark a reconnect attempt in progress (after a close, before re-open). */
 export function reconnecting(): void {
-  if (document.getElementById("loading")) {
+  if (!loaded) {
     return;
   }
   setState("reconnecting", CONNECTING_GRACE_MS);
@@ -39,7 +51,7 @@ export function reconnecting(): void {
 /** Mark the connection as closed; shows banner after grace period. */
 export function closed(): void {
   consecutiveFailures++;
-  if (document.getElementById("loading")) {
+  if (!loaded) {
     return;
   }
   setState(consecutiveFailures > 3 ? "offline" : "reconnecting", CONNECTING_GRACE_MS);
@@ -111,19 +123,19 @@ function dismissToast(): void {
   }
 }
 
-export function init(): void {
-  banner = document.getElementById("conn-banner");
+export function init(opts: { banner: HTMLElement }): void {
+  banner = opts.banner;
   applyState();
 
   // Hover-pause: stop the auto-dismiss timer while the user hovers
   // (gives them time to read longer messages or click actions).
-  banner?.addEventListener("mouseenter", () => {
+  banner.addEventListener("mouseenter", () => {
     if (toastDismissTimer !== null) {
       clearTimeout(toastDismissTimer);
       toastDismissTimer = null;
     }
   });
-  banner?.addEventListener("mouseleave", () => {
+  banner.addEventListener("mouseleave", () => {
     if (banner?.dataset["state"] === "toast" && banner.classList.contains("visible")) {
       scheduleToastDismiss(toastDismissMs);
     }
