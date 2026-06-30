@@ -17,12 +17,13 @@ The package is a thin UI layer over the engine. The engine owns the VT screen
 buffer, the wire protocol, rendering, scrolling, and the WebSocket/resume
 lifecycle; this package owns the input model and chrome.
 
-- `mount.ts` — the entry. Acquires the scaffold's DOM refs, initializes the
-  engine layers (`render` / `scroll` / `connection`) and the local modules,
-  and wires every listener: textarea input + keydown, tap-to-focus
+- `mount.ts` — the entry. Builds the terminal subtree inside the host-provided
+  root element, picks its DOM refs by class, initializes the engine layers
+  (`render` / `scroll` / `connection`) and the local modules, and wires every
+  listener: textarea input + keydown, tap-to-focus
   (pointerup-based to stay inside iOS's user-gesture window), the context menu,
   the mobile key toolbar, sticky-Ctrl, font-load + viewport resize, and the
-  visibility/pageshow/online reconnect hooks. `mount(opts)` is the only public
+  visibility/pageshow/online reconnect hooks. `mount(root, opts)` is the only public
   export.
 - `composition.ts` — IME / composition (`compositionstart/update/end` + native
   `paste`). Mirrors xterm.js's CompositionHelper; the deferred read at
@@ -40,7 +41,7 @@ its `MountOptions` / `TerminalUI` types. Keep the README's API section in sync.
 
 ### The input-model contract (protect this)
 
-`#term-output` is **display-only** and is never focused or made
+The terminal output element is **display-only** and is never focused or made
 contenteditable; the hidden `<textarea>` is the single keyboard target. This
 split is deliberate and load-bearing: it is what lets the first touch-drag
 scroll instead of placing a caret, lets a tap on a sparse screen land on the
