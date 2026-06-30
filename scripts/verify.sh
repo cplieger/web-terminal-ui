@@ -17,12 +17,12 @@ ENGINE_DIR="${ENGINE_DIR:-../web-terminal-engine}"
 PKG="node_modules/@cplieger/web-terminal-engine"
 
 if [ ! -d "$ENGINE_DIR/web/src" ]; then
-  echo "error: engine source not found at $ENGINE_DIR/web/src" >&2
-  echo "       set ENGINE_DIR to the local @cplieger/web-terminal-engine checkout" >&2
+  printf '%s\n' "error: engine source not found at $ENGINE_DIR/web/src" >&2
+  printf '%s\n' "       set ENGINE_DIR to the local @cplieger/web-terminal-engine checkout" >&2
   exit 1
 fi
 
-echo "[1/4] overlay local engine -> $PKG"
+printf '%s\n' "[1/4] overlay local engine -> $PKG"
 mkdir -p "$PKG/src"
 find "$PKG/src" -maxdepth 1 -name '*.ts' -delete
 # Ship only runtime source; tests/fuzz/setup pull in vitest/fast-check which
@@ -36,13 +36,13 @@ done
 # Minimal manifest so bundler resolution maps the bare specifier to src.
 cp "$ENGINE_DIR/web/package.json" "$PKG/package.json"
 
-echo "[2/4] tsgo typecheck (source)"
+printf '%s\n' "[2/4] tsgo typecheck (source)"
 tsgo -p tsconfig.json
 
-echo "[3/4] tsgo typecheck (tests)"
+printf '%s\n' "[3/4] tsgo typecheck (tests)"
 tsgo -p tsconfig.test.json
 
-echo "[4/4] vitest"
+printf '%s\n' "[4/4] vitest"
 npx vitest --run
 
-echo "OK"
+printf '%s\n' "OK"

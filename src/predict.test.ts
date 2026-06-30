@@ -149,3 +149,79 @@ describe("predict: reset()", () => {
     expect(predict.get()).toEqual({ row: 0, col: 0, active: false });
   });
 });
+
+describe("predict: frozen when the server cursor is hidden", () => {
+  it("onScreenFrame with cursorHidden=true deactivates prediction", () => {
+    predict.onScreenFrame(3, 7, true);
+    expect(predict.get()).toEqual({ row: 3, col: 7, active: false });
+  });
+  it("applyInput is a no-op while frozen", () => {
+    predict.onScreenFrame(3, 7, true);
+    predict.applyInput(enc("abc"));
+    expect(predict.get()).toEqual({ row: 3, col: 7, active: false });
+  });
+  it("a later non-hidden frame re-arms prediction", () => {
+    predict.onScreenFrame(3, 7, true);
+    predict.applyInput(enc("abc"));
+    predict.onScreenFrame(3, 7, false);
+    predict.applyInput(enc("ab"));
+    expect(predict.get()).toEqual({ row: 3, col: 9, active: true });
+  });
+});
+
+describe("predict: subscribe notifies on every state change", () => {
+  it("fires onChange for applyInput, onScreenFrame, and reset", () => {
+    let calls = 0;
+    predict.subscribe(() => {
+      calls++;
+    });
+    predict.onScreenFrame(0, 0);
+    const afterFrame = calls;
+    predict.applyInput(enc("a"));
+    const afterInput = calls;
+    predict.reset();
+    const afterReset = calls;
+    // Drop the counter reference so it can't leak into later tests
+    // (module state is shared under isolate:false, with no unsubscribe).
+    predict.subscribe(() => {
+      // no-op
+    });
+    expect(afterFrame).toBeGreaterThan(0);
+    expect(afterInput).toBeGreaterThan(afterFrame);
+    expect(afterReset).toBeGreaterThan(afterInput);
+  });
+});
+
+describe("predict: a pending wrap is cleared by CR, LF, and BS", () => {
+  it("CR clears the pending wrap before resetting the column", () => {
+    predict.setDimensions(5, 10);
+    predict.onScreenFrame(0, 4);
+    predict.applyInput(enc("x"));
+    predict.applyInput(new Uint8Array([0x0d]));
+    predict.applyInput(enc("y"));
+    expect(predict.get()).toEqual({ row: 0, col: 1, active: true });
+  });
+  it("LF clears the pending wrap before advancing the row", () => {
+    predict.setDimensions(5, 10);
+    predict.onScreenFrame(0, 4);
+    predict.applyInput(enc("x"));
+    predict.applyInput(new Uint8Array([0x0a]));
+    predict.applyInput(enc("y"));
+    expect(predict.get()).toEqual({ row: 1, col: 4, active: true });
+  });
+  it("BS clears the pending wrap before backing up", () => {
+    predict.setDimensions(5, 10);
+    predict.onScreenFrame(0, 4);
+    predict.applyInput(enc("x"));
+    predict.applyInput(new Uint8Array([0x08]));
+    predict.applyInput(enc("y"));
+    expect(predict.get()).toEqual({ row: 0, col: 4, active: true });
+  });
+});
+
+describe("predict: 3-byte UTF-8 codepoint advances one cell", () => {
+  it("CJK ideograph counts as a single cell", () => {
+    predict.applyInput(enc("中x")); // the CJK char is 3 UTF-8 bytes
+    expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
+  });
+});

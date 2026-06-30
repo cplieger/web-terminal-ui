@@ -48,11 +48,10 @@
    client-side cap or a server-reported resume gap). A quiet, centered,
    non-selectable divider so the user knows scrollback doesn't go further up. */
 .term-trim-marker {
-  color: color-mix(in oklch, var(--text) 45%, transparent);
+  color: color-mix(in oklch, var(--text) 60%, transparent);
   font-size: 0.6875rem;
   text-align: center;
   padding: 2px 0;
-  opacity: 0.7;
   user-select: none;
   font-family: var(--font-ui);
 }
@@ -141,10 +140,11 @@
   display: block;
 }
 
-/* Connection-state banner: floats top-center with a subtle backdrop
-   blur. Hidden until status.ts sets `.visible`. Distinct from the
-   `.pill` family because it wants to span across the full top center
-   visually rather than dock to a corner. */
+/* Connection-state banner: bottom-center on touch (lifted above the
+   virtual keyboard via --kb-inset), top-center on desktop. Subtle
+   backdrop blur. Hidden until status.ts sets `.visible`. Distinct from
+   the `.pill` family because it wants to span the full width centrally
+   rather than dock to a corner. */
 .conn-banner {
   position: fixed;
   bottom: var(--sp-3);
@@ -205,6 +205,18 @@
 @media (pointer: coarse) {
   .conn-banner {
     bottom: calc(var(--sp-3) + var(--kb-inset, 0px));
+  }
+}
+
+/* Desktop (pointer: fine): move the banner to top-center so it no longer
+   shares the bottom-center anchor with the scroll-to-bottom FAB
+   (.kb-scroll-bottom). Sharing it let the banner (pointer-events:auto,
+   z-index:20) render over the FAB and intercept its click. Touch keeps
+   the bottom placement and the --kb-inset keyboard lift above. */
+@media (pointer: fine) {
+  .conn-banner {
+    top: var(--sp-3);
+    bottom: auto;
   }
 }
 
@@ -430,7 +442,7 @@
   z-index: 10;
   transition:
     opacity var(--dur-standard) var(--ease-standard),
-    background-color 150ms var(--ease-standard),
+    background-color var(--dur-micro) var(--ease-standard),
     display var(--dur-standard) allow-discrete;
 }
 
@@ -696,9 +708,9 @@
   opacity: 0;
   scale: 0.95;
   transition:
-    opacity 0.15s ease,
-    scale 0.15s ease,
-    display 0.15s allow-discrete;
+    opacity var(--dur-exit) var(--ease-standard),
+    scale var(--dur-exit) var(--ease-standard),
+    display var(--dur-exit) allow-discrete;
 }
 
 .ctx-menu.visible {
@@ -727,4 +739,16 @@
 
 .ctx-menu button:active {
   background: var(--text-active);
+}
+
+/* Touch (long-press) menu: bump the rows to the 44px --touch-target
+   standard the rest of the touch UI uses (the key-toolbar grid is
+   repeat(4, var(--touch-target))). Desktop right-click keeps the
+   compact 24px menu. padding-block re-centres the label in the taller box. */
+@media (pointer: coarse) {
+  .ctx-menu button {
+    min-height: var(--touch-target);
+    padding-block: var(--sp-2);
+    touch-action: manipulation;
+  }
 }

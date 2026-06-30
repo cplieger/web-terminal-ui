@@ -18,6 +18,7 @@ import * as viewport from "./viewport.js";
 import * as composition from "./composition.js";
 import * as status from "./status.js";
 import * as predict from "./predict.js";
+import { INPUT_PLACEHOLDER, resetToPlaceholder } from "./input-placeholder.js";
 
 const { mapKeyboardEvent, bracketTextForPaste, prepareTextForTerminal } = keyboard;
 
@@ -44,34 +45,22 @@ export interface TerminalUI {
 const DEFAULT_WS_PATH = "/ws";
 const DEFAULT_FONT_READY = '14px "MonaspiceNe NFM"';
 
-// Single-character placeholder kept in the hidden textarea so iOS soft
-// keyboards have something to "delete" when the user holds Backspace.
-// iOS only fires repeating `input` events with
-// inputType="deleteContentBackward" when the textarea has content to
-// delete; with a perpetually empty textarea, holding Backspace deletes
-// one char and stops because iOS sees nothing more to remove. The
-// placeholder itself is invisible (textarea has opacity:0) and we strip
-// it out of every send. NBSP chosen specifically so screen-reader
-// announcement of the input state stays empty-ish rather than "space".
-const INPUT_PLACEHOLDER = "\u00A0";
-
 const TAP_MOVEMENT_PX = 10;
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_MOVE_THRESHOLD_PX = 10;
 
 const encoder = new TextEncoder();
 
-// --- DOM refs (assigned in mount() from the scaffold) ---
+// --- DOM refs (picked by class from the subtree mount() builds) ---
 let outputEl!: HTMLElement;
 let termWrap!: HTMLElement;
 let input!: HTMLTextAreaElement;
-let compositionViewEl!: HTMLElement;
 let ctxMenu!: HTMLElement;
 
 // --- Mutable UI state ---
 // Sticky-Ctrl state + the C0 mapping table + the toolbar button wiring all
 // live in the engine's keyboard.bindMobileToolbar; mount() binds it against
-// the required #key-toolbar and keeps the controller so the input handler
+// the built .key-toolbar element and keeps the controller so the input handler
 // can route typed text through its applyStickyCtrl.
 let toolbarCtrl!: keyboard.MobileToolbarController;
 let fontsLoaded = false;
@@ -132,37 +121,100 @@ function pick(root: ParentNode, selector: string): HTMLElement {
 }
 
 function send(bytes: string): void {
-  // Suppress backspace (DEL) when the predicted cursor is at column 0
-  // — there's nothing left to delete. This mimics the natural brake
-  // that iOS's textarea provided (stops key-repeat when empty).
-  if (bytes === "\x7f" && predict.get().col === 0 && predict.get().active) {
+  // Suppress a lone Backspace (DEL) ONLY at the true origin (row 0, col 0):
+  // there's nothing left to delete on an empty line, and this preserves the
+  // brake iOS's textarea provided (stops held-Backspace key-repeat when empty).
+  // The row check matters: predict.applyInput models a col-0 DEL on a WRAPPED
+  // continuation row (row > 0) by wrapping to the end of the previous row, so a
+  // continuation-row backspace must cross that wrap and reach the server rather
+  // than being braked here (braking it would make backspace silently stick
+  // mid-line on a wrapped command line).
+  const p = predict.get();
+  if (bytes === "\x7f" && p.col === 0 && p.row === 0 && p.active) {
     return;
   }
   const buf = encoder.encode(bytes);
-  predict.applyInput(buf);
+  // sendBinary buffers while disconnected (resume layer) and returns false ONLY when the
+  // 1 MiB outbox is full -- the engine has already surfaced that via onOutboxFull ->
+  // status.closed(). Advancing the prediction for a dropped byte would paint a phantom
+  // char that never reaches the server, so only advance on accepted input.
   if (!connection.sendBinary(buf)) {
-    /* connection not ready — drop silently */
+    return;
   }
+  predict.applyInput(buf);
 }
 
-function resetInputPlaceholder(): void {
-  input.value = INPUT_PLACEHOLDER;
-  // Cursor at the end so the next typed char appends after the
-  // placeholder rather than before.
-  try {
-    input.setSelectionRange(INPUT_PLACEHOLDER.length, INPUT_PLACEHOLDER.length);
-  } catch {
-    // Ignore browsers that throw on setSelectionRange against a hidden
-    // input (some older WebKit builds).
+// Normalize iOS's NBSP-for-space quirk, apply sticky-Ctrl, then send.
+function sendTyped(text: string): void {
+  send(toolbarCtrl.applyStickyCtrl(text.replace(/\u00A0/g, " ")));
+}
+
+// Read the current predicted-cursor state and push it to the renderer.
+// Shared by render.init's onCursorMove (server cursor moved) and
+// predict.subscribe (prediction changed) so both push identically.
+function pushPredictedCursor(): void {
+  const p = predict.get();
+  render.setPredictedCursor(p.row, p.col, p.active);
+}
+
+// Clipboard helpers. navigator.clipboard is UNDEFINED outside a secure context
+// (plain-HTTP on a non-loopback host — a supported web-terminal-server
+// deployment), where a property access such as navigator.clipboard.writeText
+// throws a SYNCHRONOUS TypeError before any .then/.catch can guard it. Feature-
+// detect first so Copy/Paste surface a "Clipboard unavailable" toast instead of
+// throwing out of the handler (on Ctrl+Shift+C an uncaught throw would also skip
+// preventDefault and let the browser's native devtools shortcut fire).
+function copyToClipboard(text: string): void {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- navigator.clipboard is undefined outside secure contexts (plain-HTTP host)
+  if (!navigator.clipboard) {
+    status.toast("Clipboard unavailable");
+    return;
   }
+  navigator.clipboard
+    .writeText(text)
+    .then(() => {
+      status.toast("Copied");
+    })
+    .catch(() => {
+      status.toast("Copy failed");
+    });
+}
+
+function pasteFromClipboard(): void {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- navigator.clipboard is undefined outside secure contexts (plain-HTTP host)
+  if (!navigator.clipboard) {
+    status.toast("Clipboard unavailable");
+    return;
+  }
+  navigator.clipboard
+    .readText()
+    .then((text) => {
+      send(bracketTextForPaste(prepareTextForTerminal(text)));
+    })
+    .catch(() => {
+      status.toast("Paste blocked");
+    });
 }
 
 // Keydown handler — attached to the textarea (the single keyboard target,
-// desktop and touch alike); #term-output is display-only and never focused.
+// desktop and touch alike); .term-output is display-only and never focused.
 function handleKeydown(ev: KeyboardEvent): void {
   // While composing (IME), let the browser pump composition events;
   // keydown bytes during composition would duplicate the composed text.
   if (composition.isComposing()) {
+    return;
+  }
+
+  // When the context menu is open, Escape dismisses it WITHOUT also sending an
+  // ESC byte to the PTY -- matching the no-side-effect outside-click dismiss
+  // (the document-level handler frames this as "parity"). This textarea keydown
+  // fires before that document-level handler bubbles, so without this guard
+  // mapKeyboardEvent would send ESC to the shell first (e.g. dropping vim out of
+  // insert mode) while the menu also closes. The document-level handler still
+  // covers the case where focus is on a menu button rather than the textarea.
+  if (ev.key === "Escape" && ctxMenu.classList.contains("visible")) {
+    ev.preventDefault();
+    hideCtxMenu();
     return;
   }
 
@@ -173,22 +225,13 @@ function handleKeydown(ev: KeyboardEvent): void {
     if (ev.code === "KeyC") {
       const sel = window.getSelection()?.toString();
       if (sel) {
-        void navigator.clipboard.writeText(sel).catch(() => {
-          /* ignore */
-        });
+        copyToClipboard(sel);
       }
       ev.preventDefault();
       return;
     }
     if (ev.code === "KeyV") {
-      navigator.clipboard
-        .readText()
-        .then((text) => {
-          send(bracketTextForPaste(prepareTextForTerminal(text)));
-        })
-        .catch(() => {
-          /* ignore */
-        });
+      pasteFromClipboard();
       ev.preventDefault();
       return;
     }
@@ -237,8 +280,17 @@ function maybeSendFirstResize(): void {
 }
 
 function hideCtxMenu(): void {
+  // If focus is inside the menu (a keyboard user activated an item or pressed
+  // Escape on a focused button), return focus to the terminal input -- otherwise
+  // removing the focused button drops focus to <body> and the keyboard user can no
+  // longer type. On a pointer/outside-click dismiss focus is not in the menu, so
+  // this is a no-op and does not steal focus.
+  const refocus = ctxMenu.contains(document.activeElement);
   ctxMenu.classList.remove("visible");
-  ctxMenu.innerHTML = "";
+  ctxMenu.replaceChildren();
+  if (refocus) {
+    focusTerminal();
+  }
 }
 
 function showCtxMenu(x: number, y: number): void {
@@ -249,9 +301,7 @@ function showCtxMenu(x: number, y: number): void {
     const copyBtn = document.createElement("button");
     copyBtn.textContent = "Copy";
     copyBtn.addEventListener("click", () => {
-      void navigator.clipboard.writeText(sel).catch(() => {
-        /* ignore */
-      });
+      copyToClipboard(sel);
       hideCtxMenu();
     });
     ctxMenu.appendChild(copyBtn);
@@ -272,14 +322,7 @@ function showCtxMenu(x: number, y: number): void {
     const pasteBtn = document.createElement("button");
     pasteBtn.textContent = "Paste";
     pasteBtn.addEventListener("click", () => {
-      navigator.clipboard
-        .readText()
-        .then((text) => {
-          send(bracketTextForPaste(prepareTextForTerminal(text)));
-        })
-        .catch(() => {
-          /* ignore */
-        });
+      pasteFromClipboard();
       hideCtxMenu();
     });
     ctxMenu.appendChild(pasteBtn);
@@ -317,7 +360,7 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
   termWrap = pick(root, ".term");
   outputEl = pick(root, ".term-output");
   input = pick(root, ".term-input") as HTMLTextAreaElement;
-  compositionViewEl = pick(root, ".composition-view");
+  const compositionViewEl = pick(root, ".composition-view");
   ctxMenu = pick(root, ".ctx-menu");
   const banner = pick(root, ".conn-banner");
   const toolbar = pick(root, ".key-toolbar");
@@ -331,23 +374,47 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
   // may show reconnect state from here on) and fades out the consumer's
   // loading overlay if one was passed.
   let ready = false;
+  let firstFrameRendered = false;
+  let overlayDismissed = false;
+  // Fade out and remove the consumer-owned loading overlay (if one was passed).
+  // Extracted from markReady() so status.ts can also drive it via its give-up
+  // signal: on a socket that never connects no first screen frame ever arrives,
+  // so markReady never runs and nothing else would remove the opaque
+  // z-index:200 overlay -- it would occlude the "Offline" banner forever.
+  // status fires its onGiveUp on EVERY post-limit unloaded close against an
+  // unbounded reconnect loop, so the overlayDismissed one-shot guard makes the
+  // fade/remove and its transitionend listener + fallback timer register exactly
+  // once; later calls early-return rather than piling listeners and timers onto
+  // the (soon-detached) overlay node.
+  function dismissLoadingOverlay(): void {
+    const ld = opts.loading;
+    if (!ld || overlayDismissed) {
+      return;
+    }
+    overlayDismissed = true;
+    ld.classList.add("fade");
+    const removeOverlay = (): void => {
+      ld.remove();
+    };
+    // transitionend fires on the consumer-owned fade, but their overlay CSS may have
+    // no opacity transition (or it can be interrupted): then transitionend never fires
+    // and the now opacity:0 overlay -- still inset:0 / z-index:200 with no
+    // pointer-events:none in the reference scaffold -- keeps swallowing every tap and
+    // click over the terminal. Remove on a bounded fallback too.
+    ld.addEventListener("transitionend", removeOverlay, { once: true });
+    window.setTimeout(removeOverlay, 1500);
+  }
   function markReady(): void {
     if (ready) {
       return;
     }
     ready = true;
     status.setLoaded();
-    const ld = opts.loading;
-    if (ld) {
-      ld.classList.add("fade");
-      ld.addEventListener("transitionend", () => {
-        ld.remove();
-      });
-    }
+    dismissLoadingOverlay();
   }
 
   // --- Initialize layers ---
-  status.init({ banner });
+  status.init({ banner, onGiveUp: dismissLoadingOverlay });
 
   render.init({
     output: outputEl,
@@ -359,17 +426,13 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
     // server cursor.
     onCursorMove: () => {
       composition.positionCompositionView();
-      const p = predict.get();
-      render.setPredictedCursor(p.row, p.col, p.active);
+      pushPredictedCursor();
     },
   });
   render.updateFontMetrics();
 
   // predict redraws on every change to its predicted-cursor state.
-  predict.subscribe(() => {
-    const p = predict.get();
-    render.setPredictedCursor(p.row, p.col, p.active);
-  });
+  predict.subscribe(pushPredictedCursor);
 
   composition.init({
     textarea: input,
@@ -395,6 +458,7 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
     onMessage(msg) {
       if (msg.type === "screen") {
         render.handleScreen(msg);
+        firstFrameRendered = true;
         if (fontsLoaded) {
           markReady();
         }
@@ -411,7 +475,7 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
       status.open();
       // Do NOT call render.resetScreen() here. resetScreen flips the
       // firstScreen flag, which causes the next screen frame to wipe
-      // the entire #term-output DOM (including all scrollback above
+      // the entire .term-output DOM (including all scrollback above
       // the live viewport). On reconnect (e.g. iPad screen dim/wake)
       // that destroys history the user could otherwise scroll up to.
       // The server forces a full repaint via builder.Reset() on resume,
@@ -448,7 +512,7 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
   });
 
   // --- Input handling ---
-  resetInputPlaceholder();
+  resetToPlaceholder(input);
 
   input.addEventListener("input", (e: Event) => {
     // While IME composition is in progress, the textarea fires `input`
@@ -462,19 +526,15 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
     const ev = e as InputEvent;
     const inputType = ev.inputType;
 
-    if (inputType === "deleteContentBackward") {
-      // Handled by keydown — just re-pad the placeholder so iOS
+    if (
+      inputType === "deleteContentBackward" ||
+      inputType === "deleteContentForward" ||
+      inputType === "deleteWordBackward" ||
+      inputType === "deleteWordForward"
+    ) {
+      // Deletion is handled by keydown — just re-pad the placeholder so iOS
       // key-repeat keeps firing (it needs content to delete).
-      resetInputPlaceholder();
-      return;
-    } else if (inputType === "deleteContentForward") {
-      resetInputPlaceholder();
-      return;
-    } else if (inputType === "deleteWordBackward") {
-      resetInputPlaceholder();
-      return;
-    } else if (inputType === "deleteWordForward") {
-      resetInputPlaceholder();
+      resetToPlaceholder(input);
       return;
     } else if (typeof ev.data === "string" && ev.data.length > 0) {
       // insertText / insertFromPaste / insertReplacementText etc. The
@@ -486,21 +546,29 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
       // space byte. (Native paste is bracketed in composition.ts's paste
       // handler before this fires; the insertFromPaste data here is a
       // fallback for browsers that don't raise a separate paste event.)
-      send(toolbarCtrl.applyStickyCtrl(ev.data.replace(/\u00A0/g, " ")));
+      if (inputType === "insertFromPaste") {
+        // Paste arriving through `input` without a preceding `paste` event
+        // (composition.ts's onPaste handles + preventDefaults the normal
+        // case). Bracket + sanitize it exactly like the Ctrl+Shift+V,
+        // context-menu Paste, and composition.onPaste paths so embedded
+        // newlines / control bytes arrive as an inert bracketed paste
+        // instead of executing as typed shell commands (paste-jacking).
+        send(bracketTextForPaste(prepareTextForTerminal(ev.data)));
+      } else {
+        sendTyped(ev.data);
+      }
     } else {
       // Fallback: anything in the textarea past the placeholder is new
       // content. Covers browsers that don't populate inputType / data
       // (older WebKit).
       const v = input.value;
       if (v.length > INPUT_PLACEHOLDER.length && v.startsWith(INPUT_PLACEHOLDER)) {
-        send(
-          toolbarCtrl.applyStickyCtrl(v.slice(INPUT_PLACEHOLDER.length).replace(/\u00A0/g, " ")),
-        );
+        sendTyped(v.slice(INPUT_PLACEHOLDER.length));
       } else if (v !== INPUT_PLACEHOLDER && v.length > 0) {
-        send(toolbarCtrl.applyStickyCtrl(v.replace(/\u00A0/g, " ")));
+        sendTyped(v);
       }
     }
-    resetInputPlaceholder();
+    resetToPlaceholder(input);
   });
 
   // Focus state on the terminal element, for CSS targeting (e.g. dimming
@@ -512,16 +580,16 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
     // Restore the placeholder so the held-Backspace iOS path stays
     // primed for the next focus. Also clears any leftover screen-reader
     // text (xterm.js convention).
-    resetInputPlaceholder();
+    resetToPlaceholder(input);
     termWrap.classList.remove("focus");
   });
 
   // The textarea is the single keyboard target (desktop and touch alike);
-  // #term-output is display-only and never focused.
+  // .term-output is display-only and never focused.
   input.addEventListener("keydown", handleKeydown);
 
   // --- Focus strategy ---
-  // One element, one job. #term-output is display + native selection only
+  // One element, one job. .term-output is display + native selection only
   // and is NEVER focused; the textarea owns the keyboard, the local typing
   // buffer, and IME. Because the editable element is never the scroll
   // content, the first touch-drag scrolls instead of placing a caret and a
@@ -557,6 +625,11 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
       if (e.pointerType !== "touch") {
         return; // mouse/trackpad handled by the click listener below
       }
+      // A tap on a terminal link is opened by the click listener below; don't
+      // also focus the textarea (which pops the iOS soft keyboard) on the way.
+      if ((e.target as HTMLElement).closest(".term-link")) {
+        return;
+      }
       const dx = Math.abs(e.clientX - pointerDownX);
       const dy = Math.abs(e.clientY - pointerDownY);
       if (dx > TAP_MOVEMENT_PX || dy > TAP_MOVEMENT_PX) {
@@ -568,15 +641,17 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
       }
       // Synchronous focus inside pointerup keeps us inside iOS's
       // user-gesture window even when the streaming flush queue is busy.
-      input.focus({ preventScroll: true });
+      focusTerminal();
     },
     { passive: true },
   );
   termWrap.addEventListener("click", (e) => {
-    // Terminal links: URLs detected by render.ts's linkifySpans are wrapped
-    // in <a class="term-link" target="_blank">. In a contenteditable element
-    // the browser treats link clicks as cursor-placement, not navigation.
-    // Intercept and open explicitly.
+    // Terminal links: URLs rendered by the engine are wrapped in
+    // <a class="term-link" target="_blank" rel="noopener noreferrer">. The
+    // output is display-only (never contenteditable -- see the input-model
+    // contract), so intercept the click to open with explicit
+    // noopener/noreferrer and to keep the focus handler below from running
+    // on a link tap.
     const link = (e.target as HTMLElement).closest<HTMLAnchorElement>(".term-link");
     if (link) {
       e.preventDefault();
@@ -623,15 +698,34 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
 
   // Only wait for the Regular weight — it determines cell size.
   // Bold/Italic load lazily when first used; style pop is barely noticeable.
-  const regularFont = document.fonts.load(fontReady).then(() => {
-    /* discard result */
-  });
-  void regularFont.then(() => {
+  // A missing/slow font, or a malformed `fontReady` (FontFaceSet.load can throw
+  // synchronously on a bad shorthand), must NOT leave the terminal permanently
+  // unsized: degrade to fallback-font metrics so the first resize still fires
+  // and the loading overlay still dismisses.
+  const onFontSettled = (): void => {
     fontsLoaded = true;
+    if (firstFrameRendered) {
+      markReady();
+    }
     requestAnimationFrame(() => {
       maybeSendFirstResize();
     });
-  });
+  };
+  try {
+    void document.fonts
+      .load(fontReady)
+      .then(onFontSettled)
+      .catch((err: unknown) => {
+        console.warn(
+          `web-terminal-ui: web font ${fontReady} failed to load; using fallback metrics`,
+          err,
+        );
+        onFontSettled();
+      });
+  } catch (err) {
+    console.warn(`web-terminal-ui: invalid fontReady ${fontReady}; using fallback metrics`, err);
+    onFontSettled();
+  }
 
   // Connect immediately — the WS open triggers maybeSendFirstResize.
   render.updateFontMetrics();
@@ -751,6 +845,15 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
 
   document.addEventListener("click", () => {
     hideCtxMenu();
+  });
+
+  // Escape dismisses the context menu (keyboard parity with the outside-click
+  // dismiss; the menu can be opened via the keyboard Menu key, which fires
+  // `contextmenu`). Without this an AT/keyboard user has no keyboard way to close it.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && ctxMenu.classList.contains("visible")) {
+      hideCtxMenu();
+    }
   });
 
   // --- Mobile key toolbar ---
