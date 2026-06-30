@@ -27,13 +27,8 @@
 // for the same reason.
 
 import { keyboard } from "@cplieger/web-terminal-engine";
+import { resetToPlaceholder } from "./input-placeholder.js";
 const { bracketTextForPaste, prepareTextForTerminal } = keyboard;
-
-// Single-character invisible placeholder used by app.ts to keep the
-// iOS soft keyboard's held-Backspace auto-repeat firing. Composition
-// finalisation must restore the placeholder (and not empty the
-// textarea) for the same reason.
-const INPUT_PLACEHOLDER = "\u00A0";
 
 let textarea: HTMLTextAreaElement;
 let compositionView: HTMLElement;
@@ -43,7 +38,6 @@ let send: (bytes: string) => void;
 let composing = false;
 let sendingComposition = false;
 let compositionStart = 0;
-let compositionEnd = 0;
 let compositionSuffix = "";
 
 export function init(opts: {
@@ -75,7 +69,7 @@ function onStart(): void {
   const start = textarea.selectionStart;
   const end = textarea.selectionEnd;
   compositionStart = Math.min(start, end);
-  compositionEnd = Math.max(start, end);
+  const compositionEnd = Math.max(start, end);
   compositionSuffix = textarea.value.substring(compositionEnd);
   compositionView.textContent = "";
   compositionView.classList.add("active");
@@ -88,12 +82,6 @@ function onUpdate(ev: CompositionEvent): void {
   // clipped at the start. Pattern from xterm.js.
   compositionView.textContent = `\u200E${ev.data}\u200E`;
   positionCompositionView();
-  // Schedule a microtask to refresh the end position after the
-  // textarea selection settles.
-  setTimeout(() => {
-    const end = textarea.selectionEnd;
-    compositionEnd = Math.max(compositionStart, end);
-  }, 0);
 }
 
 function onEnd(): void {
@@ -119,7 +107,7 @@ function onEnd(): void {
     if (composed.length > 0) {
       send(composed);
     }
-    resetTextareaToPlaceholder();
+    resetToPlaceholder(textarea);
   }, 0);
 }
 
@@ -140,17 +128,7 @@ function onPaste(ev: ClipboardEvent): void {
   // Restore the placeholder so the subsequent `input` event (some
   // browsers fire it after paste) and held-Backspace auto-repeat keep
   // working.
-  resetTextareaToPlaceholder();
-}
-
-function resetTextareaToPlaceholder(): void {
-  textarea.value = INPUT_PLACEHOLDER;
-  try {
-    textarea.setSelectionRange(INPUT_PLACEHOLDER.length, INPUT_PLACEHOLDER.length);
-  } catch {
-    // Some older WebKit builds throw on setSelectionRange against a
-    // visually-hidden textarea; ignore.
-  }
+  resetToPlaceholder(textarea);
 }
 
 /** Position the composition view (and the helper textarea, which

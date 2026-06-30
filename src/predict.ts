@@ -48,6 +48,8 @@ export function setDimensions(c: number, r: number): void {
   if (r > 0) {
     rows = r;
   }
+  const prevCol = predCol;
+  const prevRow = predRow;
   // Clamp predicted position to new bounds so a resize mid-typing
   // doesn't leave predCol/predRow past the edge.
   if (predCol >= cols) {
@@ -55,6 +57,12 @@ export function setDimensions(c: number, r: number): void {
   }
   if (predRow >= rows) {
     predRow = rows - 1;
+  }
+  // Notify subscribers when the clamp moved the predicted cursor, so the
+  // renderer's overlay doesn't show a stale (possibly off-screen) position
+  // until the next server frame arrives.
+  if (predCol !== prevCol || predRow !== prevRow) {
+    onChange?.();
   }
 }
 
@@ -66,9 +74,7 @@ export function reset(): void {
   predActive = false;
   predPendingWrap = false;
   predFrozen = false;
-  if (onChange) {
-    onChange();
-  }
+  onChange?.();
 }
 
 /** Reset prediction to the server's reported cursor and re-arm.
@@ -81,9 +87,7 @@ export function onScreenFrame(serverRow: number, serverCol: number, cursorHidden
   predPendingWrap = false;
   predFrozen = cursorHidden ?? false;
   predActive = !predFrozen;
-  if (onChange) {
-    onChange();
-  }
+  onChange?.();
 }
 
 /** Apply locally-typed input bytes to the predicted cursor. Bails out
@@ -100,9 +104,7 @@ export function applyInput(bytes: Uint8Array): void {
     if (b === 0x1b) {
       // ESC — start of an escape sequence. Don't try to model it.
       predActive = false;
-      if (onChange) {
-        onChange();
-      }
+      onChange?.();
       return;
     }
     if (b === 0x08 || b === 0x7f) {
@@ -137,9 +139,7 @@ export function applyInput(bytes: Uint8Array): void {
     if (b < 0x20) {
       // Other C0 — probably interpreted by the application; bail.
       predActive = false;
-      if (onChange) {
-        onChange();
-      }
+      onChange?.();
       return;
     }
     // Printable ASCII or UTF-8 lead byte. Detect the codepoint length
@@ -169,9 +169,7 @@ export function applyInput(bytes: Uint8Array): void {
       predCol++;
     }
   }
-  if (onChange) {
-    onChange();
-  }
+  onChange?.();
 }
 
 /** Current predicted cursor state. `active` is false when prediction

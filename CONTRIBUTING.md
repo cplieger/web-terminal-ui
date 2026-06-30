@@ -30,11 +30,16 @@ lifecycle; this package owns the input model and chrome.
   `compositionend` is the Chromium-correctness workaround.
 - `predict.ts` — predictive local-echo mini-VT. Advances a predicted cursor
   optimistically and **bails (suspends) on any byte it cannot model** — wrong
-  predictions are worse than missing ones. This is the one module with unit
-  tests (`predict.test.ts`).
+  predictions are worse than missing ones. It carries unit and property-based
+  tests (`predict.test.ts`, `predict.property.test.ts`); the other UI modules
+  now have unit tests too.
 - `viewport.ts` — coalesces iOS keyboard transitions, resizes, font-load
   reflows, and `ResizeObserver` fires into one transition→settle lifecycle.
 - `status.ts` — the connection-state banner and the transient toast.
+- `input-placeholder.ts` — the invisible NBSP placeholder constant
+  (`INPUT_PLACEHOLDER`) and its `resetToPlaceholder()` helper, shared by
+  `mount.ts` and `composition.ts` so the iOS held-Backspace key-repeat
+  workaround stays in lockstep across both.
 
 The public API is whatever `src/index.ts` re-exports — currently `mount` plus
 its `MountOptions` / `TerminalUI` types. Keep the README's API section in sync.

@@ -30,4 +30,5 @@
   --ease-exit: cubic-bezier(0.4, 0, 1, 1);
   --blur: blur(8px);
   --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
 }

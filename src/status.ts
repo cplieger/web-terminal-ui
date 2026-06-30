@@ -1,19 +1,30 @@
-// Connection-state banner. Shows "Reconnecting…" / "Offline" / "Slow
-// connection" feedback so users on flaky links understand why typing
-// is unresponsive. Hidden by default; appears only when the
-// connection state diverges from "open" for more than a brief window
-// (debounced to avoid flicker on healthy networks).
+// Connection-state banner. Shows "Reconnecting…" / "Offline" / "Server
+// restarted" feedback so users on flaky links understand why typing is
+// unresponsive. Hidden by default; appears only when the connection
+// state diverges from "open" for more than a brief window (debounced to
+// avoid flicker on healthy networks). A "slow connection" indicator is
+// intentionally not implemented (see the state machine below).
 //
-// State machine:
-//   open      → no banner.
-//   closed    → "Reconnecting…" after CONNECTING_GRACE_MS, "Offline"
-//               after several backoff failures.
-//   reconnecting (during a connect retry) → "Reconnecting…".
-//   slow      → "Slow connection" overlaid on top of "open" when the
-//               server's pingstat reports a capped RTO. (Not wired
-//               yet; placeholder for a future ping-RTT feedback path.)
+// State machine (matches the `State` union below):
+//   open         → no banner.
+//   connecting   → "Reconnecting…" (initial connect, before first open).
+//   reconnecting → "Reconnecting…" (after a close, during retry);
+//                  escalates to offline after >3 consecutive failures.
+//   offline      → "Offline".
+//   restarted    → "Server restarted — recent input may have been lost".
+// A "slow connection" indicator is intentionally not implemented: it would
+// need an RTT signal the engine does not currently expose to consumers.
 
 const CONNECTING_GRACE_MS = 600;
+
+// Consecutive failed *initial* connection attempts (before the first screen
+// frame, i.e. while `loaded` is still false) after which the "Offline" banner
+// is allowed to render anyway. Below this we stay silent and defer to the
+// consumer's loading overlay, so a merely-slow first connect raises no false
+// alarm; this many failures in a row means the connection genuinely isn't
+// coming up and an indefinite silent "Loading…" would be worse than "Offline".
+// Aligned with the post-load escalation threshold (consecutiveFailures > 3).
+const INITIAL_FAILURE_LIMIT = 4;
 
 type State = "open" | "connecting" | "reconnecting" | "offline" | "restarted";
 
@@ -26,6 +37,13 @@ let consecutiveFailures = 0;
 // reconnect/offline banner so the two don't stack — this replaces the old
 // `document.getElementById("loading")` probe.
 let loaded = false;
+// Optional callback supplied by init(): invoked once the initial-connect
+// failure limit is reached while still !loaded, so mount can fade its opaque
+// loading overlay and let the "Offline" banner underneath become visible.
+// mount always supplies this (its dismissLoadingOverlay self-guards when no
+// overlay was passed), so onGiveUp is null only when init() is called without
+// the callback (e.g. the status unit tests).
+let onGiveUp: (() => void) | null = null;
 
 /** Mark the connection as open. Hides the banner. */
 export function open(): void {
@@ -51,8 +69,20 @@ export function reconnecting(): void {
 /** Mark the connection as closed; shows banner after grace period. */
 export function closed(): void {
   consecutiveFailures++;
-  if (!loaded) {
+  // Before the first frame, stay suppressed (the loading overlay owns the
+  // screen) UNTIL we've failed to connect INITIAL_FAILURE_LIMIT times in a
+  // row — at that point the connection clearly isn't coming up, so let the
+  // "Offline" banner through rather than leave a silent "Loading…" forever.
+  if (!loaded && consecutiveFailures < INITIAL_FAILURE_LIMIT) {
     return;
+  }
+  // Past the initial-failure limit while the loading overlay is still up: tell
+  // mount to fade it so the "Offline" banner below becomes visible rather than
+  // staying occluded behind the opaque overlay (which markReady would otherwise
+  // never remove on a never-connecting socket). Idempotent, so firing on each
+  // subsequent !loaded close is safe.
+  if (!loaded) {
+    onGiveUp?.();
   }
   setState(consecutiveFailures > 3 ? "offline" : "reconnecting", CONNECTING_GRACE_MS);
 }
@@ -116,15 +146,17 @@ function dismissToast(): void {
   if (!banner) {
     return;
   }
-  // Only clear if still showing a toast (not overridden by connection state).
-  if (state === "open" && banner.dataset["state"] === "toast") {
-    banner.classList.remove("visible");
-    banner.textContent = "";
+  // Restore the live connection state. applyState() hides the banner when
+  // "open" (identical to the old clear) and re-renders "Offline"/"Reconnecting…"
+  // when a toast was shown over a non-open status, so the status is never stranded.
+  if (banner.dataset["state"] === "toast") {
+    applyState();
   }
 }
 
-export function init(opts: { banner: HTMLElement }): void {
+export function init(opts: { banner: HTMLElement; onGiveUp?: () => void }): void {
   banner = opts.banner;
+  onGiveUp = opts.onGiveUp ?? null;
   applyState();
 
   // Hover-pause: stop the auto-dismiss timer while the user hovers
@@ -158,6 +190,17 @@ export function init(opts: { banner: HTMLElement }): void {
 
 function applyState(): void {
   if (!banner) {
+    return;
+  }
+  // Stay fully suppressed until the initial load is over (matches the
+  // `loaded` guard in reconnecting()/closed()): the loading overlay, when
+  // present, owns the screen until then and a bare page has nothing to show.
+  // Exception: once INITIAL_FAILURE_LIMIT consecutive initial connects have
+  // failed, let "Offline" through even while !loaded so a never-connecting
+  // page doesn't sit on a silent "Loading…" indefinitely.
+  if (!loaded && !(state === "offline" && consecutiveFailures >= INITIAL_FAILURE_LIMIT)) {
+    banner.classList.remove("visible");
+    banner.textContent = "";
     return;
   }
   switch (state) {
