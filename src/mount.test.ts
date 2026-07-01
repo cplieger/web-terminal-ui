@@ -396,3 +396,46 @@ describe("mount: a never-connecting initial load fades the loading overlay so 'O
     }
   });
 });
+
+describe("mount: a touch tap keeps focus on the textarea so the iOS soft keyboard stays open", () => {
+  // The tap focuses the hidden textarea in `pointerup`; iOS then fires a
+  // synthetic `mousedown` whose default action would blur it (the display-only
+  // .term-output / .term are non-focusable), dismissing the just-opened
+  // keyboard. mount() cancels that synthetic mousedown's default for touch.
+  function pointer(type: string, pointerType: string, x: number, y: number): Event {
+    const ev = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "pointerType", { value: pointerType, configurable: true });
+    Object.defineProperty(ev, "clientX", { value: x, configurable: true });
+    Object.defineProperty(ev, "clientY", { value: y, configurable: true });
+    return ev;
+  }
+
+  it("prevents the synthetic mousedown default after a touch tap (textarea stays focused)", () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    mount(root);
+    const term = root.querySelector(".term") as HTMLElement;
+
+    term.dispatchEvent(pointer("pointerdown", "touch", 5, 5));
+    term.dispatchEvent(pointer("pointerup", "touch", 5, 5));
+
+    const md = new Event("mousedown", { bubbles: true, cancelable: true });
+    term.dispatchEvent(md);
+    // Default prevented => WebKit does not run its focus-move, so the textarea
+    // focused in pointerup is not blurred and the keyboard is not dismissed.
+    expect(md.defaultPrevented).toBe(true);
+  });
+
+  it("leaves a real mouse mousedown default intact so desktop drag-to-select still works", () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    mount(root);
+    const term = root.querySelector(".term") as HTMLElement;
+
+    term.dispatchEvent(pointer("pointerdown", "mouse", 5, 5));
+
+    const md = new Event("mousedown", { bubbles: true, cancelable: true });
+    term.dispatchEvent(md);
+    expect(md.defaultPrevented).toBe(false);
+  });
+});

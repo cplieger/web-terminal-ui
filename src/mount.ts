@@ -645,6 +645,25 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
     },
     { passive: true },
   );
+  // After a touch tap, iOS/WebKit dispatches a synthetic `mousedown` (following
+  // the `pointerup` above). Its default action moves focus to the nearest
+  // focusable ancestor of the tap point — but the input-model contract keeps
+  // `.term-output` and `.term` deliberately non-focusable (display-only) and the
+  // hidden textarea is `pointer-events: none`, so the tap never lands on a
+  // focusable node. With nothing focusable under the tap, that default blurs the
+  // textarea we just focused in `pointerup`, so iOS immediately dismisses the
+  // soft keyboard the tap had only just opened — the "keyboard flashes open then
+  // instantly closes" symptom on touch. Cancelling the synthetic mousedown's
+  // default keeps focus on the textarea, so the keyboard stays up. This is the
+  // xterm.js focus-preservation pattern, scoped to touch: a real mouse mousedown
+  // must keep its default so desktop drag-to-select text still works, and iOS
+  // text selection is long-press-driven (not this tap mousedown), so it is
+  // unaffected. Not passive — preventDefault must take effect.
+  termWrap.addEventListener("mousedown", (e) => {
+    if (lastPointerType === "touch") {
+      e.preventDefault();
+    }
+  });
   termWrap.addEventListener("click", (e) => {
     // Terminal links: URLs rendered by the engine are wrapped in
     // <a class="term-link" target="_blank" rel="noopener noreferrer">. The
