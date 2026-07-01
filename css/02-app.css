@@ -57,15 +57,19 @@
 }
 
 .term-input {
-  /* Keep the input INSIDE the viewport (not at left:-9999px) — iOS
-   * Safari is increasingly strict about not opening the virtual
-   * keyboard for off-screen inputs, especially during heavy DOM
-   * mutations like a streaming agent turn. A 1×1 fully-transparent
-   * pinned-bottom input is "visible enough" for iOS without being
-   * tappable or perceptible to the user. opacity:0 + size:1px hides
-   * it visually; pointer-events:none makes sure stray taps don't
-   * land on it (programmatic focus() still works). */
-  position: fixed;
+  /* The hidden keyboard target. position:absolute (NOT fixed) so it lives in
+     the terminal's scroll/content coordinate space alongside .composition-view
+     and .pred-cursor: composition.positionCompositionView() moves it to the
+     cursor row, and because .term is pinned to the visual viewport (viewport.ts)
+     the textarea always sits at the VISIBLE cursor, above the keyboard, which is
+     where iOS wants the focused input so it does not scroll the page. As
+     position:fixed it was placed at the cursor's content offset in viewport
+     space, so once output had scrolled it landed off-screen / behind the
+     keyboard, and focusing it made iOS scroll the page up to reveal it (the
+     content jump). Kept on-screen and 1x1 / opacity:0 so iOS still opens the
+     keyboard for it; pointer-events:none so taps fall through to the scroll
+     surface (programmatic focus() still works). */
+  position: absolute;
   inset-block-end: 0;
   inset-inline-start: 0;
   width: 1px;
