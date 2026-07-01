@@ -437,6 +437,7 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
   composition.init({
     textarea: input,
     compositionView: compositionViewEl,
+    scrollEl: termWrap,
     getCursorPx: render.getCursorPx,
     send,
   });
