@@ -4,17 +4,20 @@ import * as composition from "./composition.js";
 
 let textarea: HTMLTextAreaElement;
 let view: HTMLElement;
+let scrollEl: HTMLElement;
 let send: Mock<(bytes: string) => void>;
 
 beforeEach(() => {
   vi.useFakeTimers();
   textarea = document.createElement("textarea");
   view = document.createElement("div");
-  document.body.replaceChildren(textarea, view);
+  scrollEl = document.createElement("div");
+  document.body.replaceChildren(textarea, view, scrollEl);
   send = vi.fn<(bytes: string) => void>();
   composition.init({
     textarea,
     compositionView: view,
+    scrollEl,
     getCursorPx: () => ({ left: 0, top: 0, cellH: 16 }),
     send,
   });
@@ -76,5 +79,32 @@ describe("composition: mid-line composition strips the trailing suffix", () => {
     textarea.dispatchEvent(new CompositionEvent("compositionend"));
     vi.advanceTimersByTime(0);
     expect(send).toHaveBeenCalledWith("\u65B0");
+  });
+});
+
+describe("composition: positionCompositionView anchors the fixed textarea in viewport space", () => {
+  it("subtracts the scroll offset for the textarea but leaves the composition view in content space", () => {
+    // Cursor deep in the scrollback (content-space top 5000) with the container
+    // scrolled near the bottom. happy-dom does no layout, so pin scrollTop/Left.
+    Object.defineProperty(scrollEl, "scrollTop", { value: 4800, configurable: true });
+    Object.defineProperty(scrollEl, "scrollLeft", { value: 0, configurable: true });
+    composition.init({
+      textarea,
+      compositionView: view,
+      scrollEl,
+      getCursorPx: () => ({ left: 40, top: 5000, cellH: 16 }),
+      send,
+    });
+
+    composition.positionCompositionView();
+
+    // The composition view is position:absolute inside the scroll container, so
+    // it scrolls with the content: content-space coords place it at the cursor.
+    expect(view.style.top).toBe("5000px");
+    // The textarea is position:fixed, so its content-space offset is converted
+    // to viewport space (5000 - 4800 = 200). Pre-fix it was left at 5000px,
+    // far below the viewport, which made iOS scroll the page up on focus.
+    expect(textarea.style.top).toBe("200px");
+    expect(textarea.style.left).toBe("40px");
   });
 });

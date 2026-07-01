@@ -32,6 +32,7 @@ const { bracketTextForPaste, prepareTextForTerminal } = keyboard;
 
 let textarea: HTMLTextAreaElement;
 let compositionView: HTMLElement;
+let scrollEl: HTMLElement;
 let getCursorPx: () => { left: number; top: number; cellH: number };
 let send: (bytes: string) => void;
 
@@ -43,11 +44,13 @@ let compositionSuffix = "";
 export function init(opts: {
   textarea: HTMLTextAreaElement;
   compositionView: HTMLElement;
+  scrollEl: HTMLElement;
   getCursorPx: () => { left: number; top: number; cellH: number };
   send: (bytes: string) => void;
 }): void {
   textarea = opts.textarea;
   compositionView = opts.compositionView;
+  scrollEl = opts.scrollEl;
   getCursorPx = opts.getCursorPx;
   send = opts.send;
 
@@ -137,13 +140,25 @@ function onPaste(ev: ClipboardEvent): void {
  *  the focused textarea is on screen at a sane location. */
 export function positionCompositionView(): void {
   const { left, top, cellH } = getCursorPx();
+  // getCursorPx() returns the cursor position in the scroll container's CONTENT
+  // coordinate space (measured from the top of all rows, scrollback included).
+  // The composition view is position:absolute inside that scroll container, so
+  // it scrolls with the content — content coordinates place it at the visible
+  // cursor directly.
   compositionView.style.left = `${left}px`;
   compositionView.style.top = `${top}px`;
   compositionView.style.height = `${cellH}px`;
   compositionView.style.lineHeight = `${cellH}px`;
-  // Textarea piggy-backs on the cursor position so iOS scroll-into-
-  // view targets the cursor area instead of jumping to top-left.
-  textarea.style.left = `${left}px`;
-  textarea.style.top = `${top}px`;
+  // The textarea is position:fixed (viewport space) so iOS reliably opens the
+  // soft keyboard for it. A fixed element does NOT scroll with the content, so
+  // the content-space cursor offset must be converted to viewport space by
+  // subtracting the scroll offset. Without this, once a screenful of output has
+  // scrolled the cursor's content offset well below the viewport, the fixed
+  // textarea lands far off-screen; focusing it makes iOS scroll the page up to
+  // pull the focused input into view, pushing the terminal output and prompt
+  // behind the keyboard until the user scrolls back. Anchoring the textarea at
+  // the VISIBLE cursor keeps it on-screen so iOS has no reason to scroll.
+  textarea.style.left = `${left - scrollEl.scrollLeft}px`;
+  textarea.style.top = `${top - scrollEl.scrollTop}px`;
   textarea.style.height = `${cellH}px`;
 }
