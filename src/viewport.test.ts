@@ -86,7 +86,7 @@ describe("viewport: visualViewport keyboard inset", () => {
     document.documentElement.style.removeProperty("--vv-top");
   });
 
-  it("lifts the term wrap and publishes --kb-inset/--vv-top when the keyboard shrinks the viewport", () => {
+  it("pins the term wrap to the visual viewport and publishes --kb-inset/--vv-top", () => {
     const vv = {
       height: window.innerHeight - 200,
       offsetTop: 30,
@@ -97,12 +97,16 @@ describe("viewport: visualViewport keyboard inset", () => {
     const tw = document.createElement("div");
     document.body.replaceChildren(tw);
     viewport.init({ termWrap: tw, onSettled: vi.fn() });
-    expect(tw.style.bottom).toBe("200px");
-    expect(document.documentElement.style.getPropertyValue("--kb-inset")).toBe("200px");
+    // .term is pinned to the visual viewport: top = offsetTop (30); the bottom
+    // inset is the gap from the layout bottom to the keyboard top
+    // (innerHeight - offsetTop - vv.height = innerHeight - 30 - (innerHeight - 200) = 170).
+    expect(tw.style.top).toBe("30px");
+    expect(tw.style.bottom).toBe("170px");
+    expect(document.documentElement.style.getPropertyValue("--kb-inset")).toBe("170px");
     expect(document.documentElement.style.getPropertyValue("--vv-top")).toBe("30px");
   });
 
-  it("clears the bottom inset and zeroes --kb-inset when the keyboard closes (inset === 0)", () => {
+  it("clears the top/bottom insets and zeroes --kb-inset when the keyboard closes", () => {
     const vv = {
       height: window.innerHeight,
       offsetTop: 0,
@@ -113,6 +117,7 @@ describe("viewport: visualViewport keyboard inset", () => {
     const tw = document.createElement("div");
     document.body.replaceChildren(tw);
     viewport.init({ termWrap: tw, onSettled: vi.fn() });
+    expect(tw.style.top).toBe("");
     expect(tw.style.bottom).toBe("");
     expect(document.documentElement.style.getPropertyValue("--kb-inset")).toBe("0px");
   });

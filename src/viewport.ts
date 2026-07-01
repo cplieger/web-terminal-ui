@@ -61,15 +61,28 @@ export function init(opts: {
   if (window.visualViewport) {
     const vv = window.visualViewport;
     const onChange = (): void => {
-      const inset = Math.max(0, Math.round(window.innerHeight - vv.height));
-      termWrap.style.bottom = inset > 0 ? `${inset}px` : "";
-      // Expose viewport geometry as CSS vars so fixed chrome stays in view:
-      // --kb-inset lifts the bottom banner above the keyboard; --vv-top lets
-      // the top toolbar counter iOS shifting content up to reveal the
-      // bottom-pinned input (otherwise the toolbar scrolls off the top).
+      // Pin the terminal's fixed box to the exact region the VISUAL viewport
+      // occupies inside the layout viewport. On iOS the soft keyboard shrinks
+      // (and can offset) the visual viewport WITHOUT resizing the layout
+      // viewport — interactive-widget=resizes-content is not honored on iOS
+      // Safari — so a `position: fixed; inset: 0` terminal keeps the full-screen
+      // height (keyboard overlaying the bottom) while iOS scrolls the focused
+      // input into view and shifts the fixed box up, sliding the output and
+      // prompt behind the keyboard (the "content jumps up, hidden until I
+      // scroll" symptom). Driving top AND bottom from visualViewport keeps the
+      // terminal exactly over the visible area in every browser, so nothing is
+      // left behind the keyboard for iOS to scroll to.
+      const offsetTop = Math.max(0, Math.round(vv.offsetTop));
+      const bottomInset = Math.max(0, Math.round(window.innerHeight - vv.offsetTop - vv.height));
+      termWrap.style.top = offsetTop > 0 ? `${offsetTop}px` : "";
+      termWrap.style.bottom = bottomInset > 0 ? `${bottomInset}px` : "";
+      // Expose the same geometry as CSS vars for the sibling fixed chrome:
+      // --kb-inset lifts the bottom banner above the keyboard; --vv-top lets the
+      // top key toolbar follow the visual viewport's offset (otherwise it
+      // scrolls off the top when iOS shifts the layout up).
       const root = document.documentElement.style;
-      root.setProperty("--kb-inset", `${inset}px`);
-      root.setProperty("--vv-top", `${Math.max(0, Math.round(vv.offsetTop))}px`);
+      root.setProperty("--kb-inset", `${bottomInset}px`);
+      root.setProperty("--vv-top", `${offsetTop}px`);
       startTransition();
     };
     vv.addEventListener("resize", onChange);
