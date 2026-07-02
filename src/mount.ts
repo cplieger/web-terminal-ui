@@ -469,6 +469,11 @@ export function mount(root: HTMLElement, opts: MountOptions = {}): TerminalUI {
         document.title = msg.title;
       } else if (msg.type === "modes") {
         render.updateReverseVideo();
+      } else if (msg.type === "clipboard") {
+        // An app copied via OSC 52; mirror it to the system clipboard. This is
+        // an async push (not a user gesture), so Safari/Firefox may reject
+        // writeText — copyToClipboard surfaces that as a "Copy failed" toast.
+        copyToClipboard(msg.text);
       }
     },
     onOpen() {
