@@ -23,7 +23,13 @@ export function presetSingle(): TerminalFeature<unknown>[] {
   // contextMenu offers Copy/Paste through the clipboard feature (ctx.use), so it
   // holds the same clipboard value the array includes.
   const clip = clipboard();
-  return [contextMenu({ clipboard: clip }), clip, scrollToBottom(), predictiveEcho(), connectionBanner()];
+  return [
+    contextMenu({ clipboard: clip }),
+    clip,
+    scrollToBottom(),
+    predictiveEcho(),
+    connectionBanner(),
+  ];
 }
 
 /** Touch-first UI: presetSingle plus the on-screen key toolbar. */

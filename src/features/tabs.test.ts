@@ -64,7 +64,9 @@ let listBody: unknown[];
 const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
   if (method === "POST") {
-    return Promise.resolve(jsonResponse({ id: "s-new", title: "", createdAt: "3", status: "idle" }, 201));
+    return Promise.resolve(
+      jsonResponse({ id: "s-new", title: "", createdAt: "3", status: "idle" }, 201),
+    );
   }
   if (method === "DELETE") {
     return Promise.resolve(jsonResponse(null, 204));
@@ -122,7 +124,7 @@ describe("tabs feature", () => {
     setSession.mockClear();
     bind.mockClear();
 
-    (root.querySelectorAll<HTMLElement>(".wt-tab")[1])?.click();
+    root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
 
     expect(setSession).toHaveBeenCalledWith("s2");
     expect(bind).toHaveBeenCalledTimes(1);
