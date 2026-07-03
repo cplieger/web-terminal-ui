@@ -16,9 +16,9 @@
 </style>
 </head>
 <body>
-<!-- mount() builds the entire terminal UI inside this single root element.
-     The loading overlay is a sibling (not a child of the root) so mount never
-     clears it; mount fades it out once the first frame renders. -->
+<!-- createTerminal() builds the entire terminal UI inside this single root
+     element. The loading overlay is a sibling (not a child of the root) so it is
+     never cleared; it is faded out once the first frame renders. -->
 <div id="terminal"></div>
 <div id="loading"><div class="spin"></div>Loading…</div>
 <!-- Deployment-specific: the importmap resolves the bare package specifiers to
@@ -27,13 +27,15 @@
 {
   "imports": {
     "@cplieger/web-terminal-engine": "/vendor/cplieger-web-terminal-engine/index.js",
-    "@cplieger/web-terminal-ui": "/vendor/cplieger-web-terminal-ui/index.js"
+    "@cplieger/web-terminal-ui": "/vendor/cplieger-web-terminal-ui/index.js",
+    "@cplieger/web-terminal-ui/presets": "/vendor/cplieger-web-terminal-ui/presets.js"
   }
 }
 </script>
 <script type="module">
-  import { mount } from "@cplieger/web-terminal-ui";
-  mount(document.getElementById("terminal"), { loading: document.getElementById("loading") });
+  import { createTerminal } from "@cplieger/web-terminal-ui";
+  import { presetTabbed } from "@cplieger/web-terminal-ui/presets";
+  createTerminal(document.getElementById("terminal"), { features: presetTabbed(), loading: document.getElementById("loading") });
 </script>
 </body>
 </html>

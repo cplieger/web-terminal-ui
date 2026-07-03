@@ -11,18 +11,25 @@ The reference touch-first browser UI for
 that turns the engine's render/scroll/connection/keyboard modules into a
 usable terminal on a phone as well as a desktop.
 
-One `mount(root)` call builds the entire terminal UI inside a single container
-element you provide and owns everything above the raw terminal:
+One `createTerminal(root, { features })` call builds the entire terminal UI
+inside a single container element you provide. A small always-present kernel
+(the display output, the hidden keyboard textarea, IME, engine wiring, the
+sanitizing input funnel, connection-state, and named layout regions) composes
+with opt-in feature modules that own everything above the raw terminal:
 
 - a **display-only** terminal output (native text selection survives redraws)
-- a hidden `<textarea>` that owns the keyboard, the local typing buffer, and IME
+  and a hidden `<textarea>` that owns the keyboard and IME (the kernel)
+- **tabs**: multiple independent terminals with a desktop strip, a mobile
+  bottom switcher, and a modal overview sheet
+- an **activity monitor** that drives per-tab status dots (working / idle /
+  needs-input / exited) from the server's status stream
 - a **mobile key toolbar** (Tab / Esc / arrows / Enter / sticky-Ctrl) and a
   scroll-to-bottom control
-- a **viewport-clamped context menu** (Copy / Select All / Paste)
-- **predictive local echo** so the cursor moves on keypress even on a slow link
-- **IME / composition** handling (CJK, dictation, autocorrect)
-- **viewport + keyboard-inset** handling for the iOS soft keyboard, rotation,
-  and font-load reflows
+- a **context menu** (Copy / Select All / Paste), reachable by right-click and
+  by long-press on touch
+- **predictive local echo**, **IME / composition** (CJK, dictation,
+  autocorrect), and **viewport + keyboard-inset** handling for the iOS soft
+  keyboard, rotation, and font-load reflows
 - a connection-status banner and a copy toast
 
 It is published as TypeScript source (no build step) to npm and JSR, alongside
@@ -43,8 +50,9 @@ pins the engine version explicitly.
 
 Serve the bundled CSS (`css/` concatenated per `css/MANIFEST` into the
 `style.css` your page links) plus a minimal HTML page that has one empty
-container element for the terminal, then call `mount(root)` from your entry
-module:
+container element for the terminal, then call `createTerminal(root, { features })`
+from your entry module. Feature bundles (presets) live at the `./presets`
+sub-path:
 
 ```html
 <div id="terminal"></div>
@@ -53,45 +61,62 @@ module:
   {
     "imports": {
       "@cplieger/web-terminal-engine": "/vendor/cplieger-web-terminal-engine/index.js",
-      "@cplieger/web-terminal-ui": "/vendor/cplieger-web-terminal-ui/index.js"
+      "@cplieger/web-terminal-ui": "/vendor/cplieger-web-terminal-ui/index.js",
+      "@cplieger/web-terminal-ui/presets": "/vendor/cplieger-web-terminal-ui/presets.js"
     }
   }
 </script>
 <script type="module">
-  import { mount } from "@cplieger/web-terminal-ui";
-  mount(document.getElementById("terminal"), {
+  import { createTerminal } from "@cplieger/web-terminal-ui";
+  import { presetTabbed } from "@cplieger/web-terminal-ui/presets";
+  createTerminal(document.getElementById("terminal"), {
+    features: presetTabbed(),
     loading: document.getElementById("loading"),
   });
   // or, for a server that exposes the WebSocket elsewhere / a custom font:
-  // mount(root, { wsPath: "/api/shell/ws", fontReady: '14px "MyMono"' });
+  // createTerminal(root, { features: presetTabbed(), wsPath: "/api/shell/ws", fontReady: '14px "MyMono"' });
 </script>
 ```
 
-`mount(root, opts?)` builds the entire terminal subtree (the display output,
-the hidden keyboard textarea, the mobile key toolbar, the status banner, and
-the context menu) inside `root` itself — there is no element-id contract for
-the host page to reproduce. Call it exactly once; the module state is
-single-instance per page. `scaffold/index.html` is a complete reference page to
-copy and adapt.
+`createTerminal(root, opts?)` builds the entire terminal subtree (the kernel
+plus every feature's chrome) inside `root` itself — there is no element-id
+contract for the host page to reproduce. Call it exactly once; the engine's
+render/connection/scroll modules are single-instance per page (tabs multiplex
+sessions over the one kernel). `scaffold/index.html` is a complete reference page
+to copy and adapt.
+
+Three presets are provided (import from `@cplieger/web-terminal-ui/presets`); each
+is a plain feature-array factory, so you can spread and edit it, or hand-pick
+individual features instead:
+
+- `presetSingle()` — single-pane desktop UI (context menu, clipboard,
+  scroll-to-bottom, predictive echo, connection banner).
+- `presetTouch()` — `presetSingle()` plus the mobile key toolbar.
+- `presetTabbed()` — the full reference UI: `presetTouch()` plus tabs, the
+  activity monitor, and animations. Requires a server that speaks the session
+  API (`/api/sessions`, the status SSE, and `/ws?session=`), such as
+  `web-terminal-server` or `vibecli`.
 
 ### Options
 
-| Option      | Default                    | Purpose                                                                                                                                                            |
-| ----------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `wsPath`    | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                    |
-| `fontReady` | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                        |
-| `loading`   | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); mount fades it out and removes it once the first frame renders. |
+| Option      | Default                    | Purpose                                                                                                                                                      |
+| ----------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `features`  | _(none — bare kernel)_     | The feature list. Omitted or empty builds only the terminal (no chrome). Use a preset from `./presets` or a hand-picked array.                               |
+| `wsPath`    | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                              |
+| `fontReady` | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                  |
+| `loading`   | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders. |
 
-`mount()` returns a small handle: `{ focus() }` re-focuses the terminal input
-(and opens the soft keyboard on touch).
+`createTerminal()` returns a handle: `focus()` re-focuses the terminal input
+(and opens the soft keyboard on touch), and `destroy()` tears every feature down
+and releases the kernel.
 
 ## What ships
 
-| Path                     | Purpose                                                               |
-| ------------------------ | --------------------------------------------------------------------- |
-| `src/*.ts`               | The UI modules (`mount`, IME, predictive echo, viewport, status).     |
-| `css/*.css` + `MANIFEST` | The default theme + layout; concatenate in MANIFEST order.            |
-| `scaffold/index.html`    | A reference HTML page: `<head>` + one empty root element + importmap. |
+| Path                     | Purpose                                                                                                         |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `src/**/*.ts`            | The UI modules: the kernel (`kernel/`), opt-in features (`features/`), presets, IME, predictive echo, viewport. |
+| `css/*.css` + `MANIFEST` | The default theme + layout; concatenate in MANIFEST order.                                                      |
+| `scaffold/index.html`    | A reference HTML page: `<head>` + one empty root element + importmap.                                           |
 
 ## Related projects
 

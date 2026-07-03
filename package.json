@@ -2,7 +2,7 @@
   "name": "@cplieger/web-terminal-ui",
   "version": "0.1.0",
   "type": "module",
-  "description": "Reference touch-first browser UI for @cplieger/web-terminal-engine: textarea input model, mobile key toolbar, context menu, IME, predictive echo, viewport/keyboard-inset handling, and CSS. One mount() call.",
+  "description": "Reference touch-first browser UI for @cplieger/web-terminal-engine: a composable kernel + feature modules (tabs, activity monitor, mobile toolbar, context menu, IME, predictive echo, viewport handling) and CSS. One createTerminal() call.",
   "license": "GPL-3.0-or-later",
   "exports": {
     ".": "./src/index.ts",
