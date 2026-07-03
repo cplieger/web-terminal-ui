@@ -233,7 +233,7 @@
 }
 
 .wt-tab-label {
-  max-width: 14ch;
+  max-width: 20ch;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -262,11 +262,19 @@
   border-radius: var(--radius-inner);
 }
 
-/* Shift the terminal down so the fixed tab bar does not overlap the first
-   rows. The tab bar is ~36px tall; the terminal padding-top absorbs it. */
-.wt-tab-bar ~ .term,
-:has(> .wt-tab-bar) .term {
-  padding-top: 40px;
+/* Push the terminal surface below the fixed tab strip so it does not overlap
+   the first rows. The tabs feature marks the surface (.wt-with-topbar) and keeps
+   the measured strip height in --wt-tabbar-h. The surface is position:fixed
+   inset:0, so a top offset is what clears it. Desktop only: the strip is hidden
+   on a coarse pointer, where the switcher docks to the bottom instead, so the
+   surface stays full-height there. (The prior `.wt-tab-bar ~ .term` /
+   `:has(> .wt-tab-bar) .term` rule never matched: the bar lives inside a
+   display:contents region, so it is neither a DOM sibling nor an ancestor of
+   .term.) */
+@media (pointer: fine) {
+  .term.wt-with-topbar {
+    top: var(--wt-tabbar-h, 40px);
+  }
 }
 
 /* ===== Activity dots (activityMonitor via tabs) =====
@@ -278,36 +286,59 @@
   height: 9px;
   border-radius: 50%;
   flex: none;
-  background: color-mix(in oklch, var(--text) 40%, transparent);
-}
-
-.wt-status-dot[data-status="working"] {
-  background: oklch(75% 0.15 90deg);
-  animation: wt-pulse 1.2s ease-in-out infinite;
+  /* Default / idle (a new session with no turn yet): a hollow grey dot, so
+     "nothing has happened" reads as an outline rather than a filled state.
+     The fill (solid vs hollow) is the non-hue cue that separates the idle state
+     from the filled done/working/input states (WCAG 1.4.1). */
+  background: transparent;
+  border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
 }
 
 .wt-status-dot[data-status="idle"] {
-  background: color-mix(in oklch, var(--text) 40%, transparent);
+  background: transparent;
+  border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
 }
 
+/* Agent working: solid pulsing purple, matching Kiro IDE's "thinking" color
+   (#a78bfa). Motion is the primary non-hue cue. Server-side this is driven by
+   the OSC 9;4 progress signal, so it tracks agent activity, not the user typing
+   at the prompt. */
+.wt-status-dot[data-status="working"] {
+  background: #a78bfa;
+  border-color: #a78bfa;
+  animation: wt-pulse 1.2s ease-in-out infinite;
+}
+
+/* Agent done / ready: solid green, matching Kiro IDE's "Ready" (#22c55e), no
+   motion. The filled dot distinguishes it from the hollow idle without hue. */
+.wt-status-dot[data-status="done"] {
+  background: #22c55e;
+  border-color: #22c55e;
+}
+
+/* User action required (permission / approval): solid amber matching Kiro IDE's
+   "waiting-approval" (#fbbf24), plus a ring so it reads as "needs you" via shape
+   as well as hue. It persists until you act on or switch into the tab. */
 .wt-status-dot[data-status="input"] {
-  background: oklch(70% 0.18 25deg);
-  /* A ring so needs-input reads distinctly without relying on hue alone. */
-  box-shadow: 0 0 0 2px oklch(70% 0.18 25deg / 40%);
+  background: #fbbf24;
+  border-color: #fbbf24;
+  box-shadow: 0 0 0 2px oklch(85% 0.16 85deg / 40%);
 }
 
+/* Exited: a dim hollow dot, static; distinct from idle by its lower opacity. */
 .wt-status-dot[data-status="exited"] {
   background: transparent;
-  border: 1px solid color-mix(in oklch, var(--text) 40%, transparent);
+  border: 1.5px solid color-mix(in oklch, var(--text) 30%, transparent);
+  opacity: 0.5;
 }
 
-/* Reduced-motion (or animations feature off): drop the pulse, keep the color. */
 @keyframes wt-pulse {
   50% {
     opacity: 0.4;
   }
 }
 
+/* Reduced-motion (or the animations feature off): drop the pulse, keep color. */
 @media (prefers-reduced-motion: reduce) {
   .wt-status-dot[data-status="working"] {
     animation: none;

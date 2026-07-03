@@ -32,7 +32,16 @@ interface SessionInfo {
 
 interface Tab {
   id: string;
+  /** The raw server title (the OSC 0/2 window title the process set), possibly
+   *  empty before the process sets one. The displayed label is derived from it
+   *  with a numbered fallback and de-duplication (see relabelAll). */
   title: string;
+  /** A stable per-session number for the "Tab N" fallback when the process has
+   *  set no title. Monotonic across the page so a tab's number never changes
+   *  under it when a sibling closes. */
+  num: number;
+  /** The computed, de-duplicated label actually shown in the chrome. */
+  display: string;
   createdAt: string;
   store: LineStore;
   el: HTMLElement;
@@ -152,8 +161,25 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       bar.className = "wt-tab-bar";
       bar.setAttribute("role", "tablist");
       slot.appendChild(bar);
+      // The "+" button is the last flex item INSIDE the strip. Appending it to
+      // the slot (a sibling of the fixed .wt-tab-bar) flowed it out of the strip
+      // to the root, so it never appeared; inside the flex bar it renders at the
+      // end of the tabs (addTabChrome inserts each tab before it).
       const newBtn = fromHTML(NEW_HTML);
-      slot.appendChild(newBtn);
+      bar.appendChild(newBtn);
+
+      // Push the terminal surface below the fixed strip on desktop so the bar
+      // does not overlap the first rows. The surface is position:fixed inset:0,
+      // so a top offset (gated to a fine pointer in CSS, since the strip is
+      // hidden on a coarse pointer where the switcher docks to the bottom
+      // instead) is what clears it. A ResizeObserver keeps the offset in step
+      // with the real strip height rather than a hard-coded guess.
+      const surface = ctx.surface();
+      surface.classList.add("wt-with-topbar");
+      const barResize = new ResizeObserver(() => {
+        surface.style.setProperty("--wt-tabbar-h", `${String(bar.offsetHeight)}px`);
+      });
+      barResize.observe(bar);
 
       // --- Mobile bottom-switcher (bottom-switcher region) ---
       const switcher = fromHTML(SWITCHER_HTML);
@@ -190,6 +216,44 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let overviewOpen = false;
       let lastFocus: HTMLElement | null = null;
       let hintShown = false;
+      let tabSeq = 0; // monotonic source for the "Tab N" fallback number
+
+      // labelFor is a tab's base label before de-duplication: the server title
+      // (the OSC 0/2 window title the process set, e.g. kiro-cli's
+      // "kiro: <first message>" when chat.terminalTitle is on) when present,
+      // else a stable "Tab N". This is the fix for every tab reading "terminal":
+      // a real title flows through, and untitled tabs are numbered, not generic.
+      function labelFor(tab: Tab): string {
+        return tab.title.trim() || `Tab ${String(tab.num)}`;
+      }
+
+      // relabelAll recomputes every tab's display label with de-duplication:
+      // when two tabs resolve to the same base label (fresh vibecli tabs share
+      // the cwd-derived title until their first message gives each a distinct
+      // one), the second and later get a " (k)" suffix in creation order, so the
+      // strip never shows two identical labels.
+      function relabelAll(): void {
+        const counts = new Map<string, number>();
+        for (const t of tabList) {
+          const base = labelFor(t);
+          counts.set(base, (counts.get(base) ?? 0) + 1);
+        }
+        const seen = new Map<string, number>();
+        for (const t of tabList) {
+          const base = labelFor(t);
+          let display = base;
+          if ((counts.get(base) ?? 0) > 1) {
+            const k = (seen.get(base) ?? 0) + 1;
+            seen.set(base, k);
+            if (k > 1) {
+              display = `${base} (${String(k)})`;
+            }
+          }
+          t.display = display;
+          t.label.textContent = display;
+          t.aria.setLabel(display);
+        }
+      }
 
       function focusInput(): void {
         ctx.surface().querySelector<HTMLElement>(".term-input")?.focus({ preventScroll: true });
@@ -210,7 +274,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       function syncMobile(): void {
         const idx = tabList.findIndex((t) => t.id === activeId);
         const active = idx >= 0 ? tabList[idx] : undefined;
-        swLabel.textContent = active ? active.title : "";
+        swLabel.textContent = active ? active.display : "";
         swDot.dataset["status"] = active?.dot.dataset["status"] ?? "idle";
         swPos.textContent =
           tabList.length > 1 ? `${String(idx + 1)} / ${String(tabList.length)}` : "";
@@ -240,7 +304,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           const rselect = pick(row, ".wt-sheet-select");
           const rclose = pick(row, ".wt-sheet-close");
           rdot.dataset["status"] = t.dot.dataset["status"] ?? "idle";
-          rlabel.textContent = t.title;
+          rlabel.textContent = t.display;
           if (t.id === activeId) {
             row.classList.add("wt-sheet-row-active");
             rselect.setAttribute("aria-current", "true");
@@ -261,6 +325,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       // syncChrome refreshes every surface after any state change. Idempotent.
       function syncChrome(): void {
+        relabelAll();
         paintActive();
         syncMobile();
         if (overviewOpen) {
@@ -303,16 +368,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!label || !dot || !close) {
           throw new Error("web-terminal-ui: tab chrome missing parts");
         }
-        const title = info.title || "terminal";
-        label.textContent = title;
         dot.dataset["status"] = info.status || "idle";
         const aria = tablist.registerTab(el);
-        aria.setLabel(title);
-        bar.appendChild(el);
+        // Insert before the "+" button so it stays the last item in the strip.
+        bar.insertBefore(el, newBtn);
 
         const tab: Tab = {
           id: info.id,
-          title,
+          title: info.title,
+          num: ++tabSeq,
+          display: "",
           createdAt: info.createdAt,
           store: new LineStore(),
           el,
@@ -322,6 +387,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           scrollTop: 0,
           following: true,
         };
+        // Set an initial label immediately (relabelAll refines it with de-dup
+        // once the tab is in tabList and syncChrome runs).
+        tab.display = labelFor(tab);
+        label.textContent = tab.display;
+        aria.setLabel(tab.display);
         el.addEventListener("click", (e) => {
           if ((e.target as HTMLElement).closest(".wt-tab-close")) {
             return; // handled by the close button
@@ -496,10 +566,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         t.dot.dataset["status"] = status || "idle";
-        if (title && title !== t.title) {
+        // Record the raw server title; the displayed label (fallback + de-dup)
+        // is recomputed by relabelAll via syncChrome, which the callers run
+        // right after applyStatus.
+        if (title !== undefined) {
           t.title = title;
-          t.label.textContent = title;
-          t.aria.setLabel(title);
         }
       }
 
@@ -658,6 +729,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           if (pollTimer !== null) {
             clearInterval(pollTimer);
           }
+          barResize.disconnect();
+          surface.classList.remove("wt-with-topbar");
+          surface.style.removeProperty("--wt-tabbar-h");
           clearCatchup();
           closeOverview();
           for (const t of tabList) {

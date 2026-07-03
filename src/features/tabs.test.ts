@@ -189,6 +189,52 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s-new");
   });
 
+  it("renders the + button inside the tab strip, after the tabs", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const bar = root.querySelector(".wt-tab-bar");
+    const newBtn = root.querySelector(".wt-tab-new");
+    expect(newBtn).toBeTruthy();
+    // Inside the flex strip (not a sibling of the fixed bar, which flowed it out
+    // of view), and the last item so it sits after the tabs.
+    expect(bar?.contains(newBtn ?? null)).toBe(true);
+    expect(bar?.lastElementChild).toBe(newBtn);
+  });
+
+  it("labels tabs from the server title and numbers untitled ones", async () => {
+    listBody = [
+      { id: "s1", title: "kiro: fix bug", createdAt: "1", status: "idle" },
+      { id: "s2", title: "", createdAt: "2", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
+    expect(labels[0]).toBe("kiro: fix bug");
+    // An untitled session gets a numbered fallback, never the old "terminal".
+    expect(labels[1]).toBe("Tab 2");
+  });
+
+  it("de-duplicates identical tab titles with a numeric suffix", async () => {
+    listBody = [
+      { id: "s1", title: "kiro: workspace", createdAt: "1", status: "idle" },
+      { id: "s2", title: "kiro: workspace", createdAt: "2", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
+    expect(labels[0]).toBe("kiro: workspace");
+    expect(labels[1]).toBe("kiro: workspace (2)");
+  });
+
   it("creates one session when the list is empty", async () => {
     listBody = [];
     const root = document.createElement("div");
