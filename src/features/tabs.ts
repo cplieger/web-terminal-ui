@@ -95,6 +95,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
   return {
     name: "tabs",
+    // tabs owns session selection: it resolves the first session id from
+    // GET/POST /api/sessions during setup and drives the first connect via
+    // ctx.notifySwitch. This tells the kernel not to open a bare /ws at startup
+    // (which a SessionManager would 404 for lack of ?session=).
+    managesSessions: true,
     async setup(ctx: TerminalContext) {
       const tablist = ctx.tablist();
       const monitor = opts.activityMonitor ? ctx.use(opts.activityMonitor) : undefined;
