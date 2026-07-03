@@ -219,6 +219,9 @@
   align-items: center;
   gap: var(--sp-1);
   padding: var(--sp-1) var(--sp-2);
+  /* A transparent border is reserved on every tab so toggling the inactive
+     outline (below) never shifts the strip's layout. */
+  border: 1px solid transparent;
   border-radius: var(--radius-inner);
   color: color-mix(in oklch, var(--text) 70%, transparent);
   font-family: var(--font-ui);
@@ -226,6 +229,17 @@
   cursor: pointer;
   white-space: nowrap;
   user-select: none;
+}
+
+/* Inactive tabs read as outlined chips (so adjacent tabs stay visually
+   separated) and take a subtle fill on hover. */
+.wt-tab:not(.wt-tab-active) {
+  border-color: var(--border);
+}
+
+.wt-tab:not(.wt-tab-active):hover {
+  background: var(--text-active);
+  color: var(--text);
 }
 
 .wt-tab-active {
@@ -239,12 +253,14 @@
   text-overflow: ellipsis;
 }
 
-/* The tab close (×) and the add-tab (+) button share one look: a centered,
-   muted square glyph button that shows a box on hover like an active tab. Same
-   size and color so they read as a matched pair (and the + centers vertically
-   in the strip via the shared flex box + the bar's align-items: center). */
-.wt-tab-close,
-.wt-tab-new {
+/* A little breathing room after the activity dot, before the label. */
+.wt-tab-dot {
+  margin-right: 2px;
+}
+
+/* The tab close (×): a centered, muted square glyph button with a box on hover.
+   font: inherit so the glyph uses the UI font and centers cleanly in its box. */
+.wt-tab-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -255,13 +271,72 @@
   border: none;
   border-radius: var(--radius-inner);
   color: color-mix(in oklch, var(--text) 60%, transparent);
+  font: inherit;
   font-size: 1rem;
   line-height: 1;
   cursor: pointer;
 }
 
-.wt-tab-close:hover,
+.wt-tab-close:hover {
+  background: var(--text-active);
+  color: var(--text);
+}
+
+/* On an inactive tab the close appears only on hover, kept in the layout via
+   visibility so the tab width never jumps; on the active tab it is always shown. */
+.wt-tab:not(.wt-tab-active) .wt-tab-close {
+  visibility: hidden;
+}
+
+.wt-tab:not(.wt-tab-active):hover .wt-tab-close {
+  visibility: visible;
+}
+
+/* The add-tab (+) button: its hover box matches an active tab's box (it
+   stretches to the strip height and uses the same active-tab fill), it centers
+   its glyph, and a left margin keeps its hover box clear of the last tab's. */
+.wt-tab-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  min-width: 1.875rem;
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-1);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-inner);
+  color: color-mix(in oklch, var(--text) 60%, transparent);
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
 .wt-tab-new:hover {
+  background: color-mix(in oklch, var(--text) 10%, var(--surface));
+  color: var(--text);
+}
+
+/* Close-all: a right-anchored text button (pushed to the far end of the strip). */
+.wt-tab-closeall {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  margin-left: auto;
+  padding: 0 var(--sp-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-inner);
+  color: color-mix(in oklch, var(--text) 60%, transparent);
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.wt-tab-closeall:hover {
   background: var(--text-active);
   color: var(--text);
 }
@@ -363,7 +438,8 @@
 
 .wt-animate .wt-tab,
 .wt-animate .wt-tab-close,
-.wt-animate .wt-tab-new {
+.wt-animate .wt-tab-new,
+.wt-animate .wt-tab-closeall {
   transition:
     background-color var(--dur-micro) var(--ease-standard),
     color var(--dur-micro) var(--ease-standard);

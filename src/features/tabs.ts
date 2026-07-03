@@ -91,6 +91,8 @@ const TAB_HTML = `
 
 const NEW_HTML = `<button type="button" class="wt-tab-new" aria-label="New terminal">+</button>`;
 
+const CLOSEALL_HTML = `<button type="button" class="wt-tab-closeall" aria-label="Close all terminals">Close all</button>`;
+
 // Mobile bottom-switcher: the active tab (dot + label + position) as a tap/swipe
 // surface, plus a >=44px overview control that carries the aggregate badge.
 const SWITCHER_HTML = `
@@ -172,6 +174,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // end of the tabs (addTabChrome inserts each tab before it).
       const newBtn = fromHTML(NEW_HTML);
       bar.appendChild(newBtn);
+      // A right-anchored "Close all" button (CSS margin-left: auto pushes it to
+      // the far end of the strip). Desktop only, since it lives inside the bar,
+      // which is hidden on a coarse pointer.
+      const closeAllBtn = fromHTML(CLOSEALL_HTML);
+      bar.appendChild(closeAllBtn);
 
       // Push the terminal surface below the fixed strip on desktop so the bar
       // does not overlap the first rows. The surface is position:fixed inset:0,
@@ -222,6 +229,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let lastFocus: HTMLElement | null = null;
       let hintShown = false;
       let tabSeq = 0; // monotonic source for the "Tab N" fallback number
+      // On a touch device, focusing the hidden input opens the virtual keyboard.
+      // A switch triggered by tapping/swiping the tab UI must not do that (it is
+      // disruptive), so the input is focused on a switch only with a fine
+      // pointer; on touch the user taps the terminal itself to open the keyboard.
+      const coarse = window.matchMedia("(pointer: coarse)").matches;
 
       // labelFor is a tab's base label before de-duplication. Preference order:
       // the title derived from the user's first submitted line (best for a chat
@@ -475,6 +487,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           e.stopPropagation();
           void close_(tab.id);
         });
+        // Middle-click closes the tab (#8). Suppress the middle-click default on
+        // mousedown so the browser's autoscroll/paste affordance does not fire.
+        el.addEventListener("mousedown", (e) => {
+          if (e.button === 1) {
+            e.preventDefault();
+          }
+        });
+        el.addEventListener("auxclick", (e) => {
+          if (e.button === 1) {
+            e.preventDefault();
+            void close_(tab.id);
+          }
+        });
         return tab;
       }
 
@@ -513,7 +538,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
         });
         ctx.announce(`Switched to ${next.display}`);
-        focusInput();
+        if (!coarse) {
+          focusInput(); // desktop only; on touch this would pop the keyboard (#7)
+        }
       }
 
       // armCatchup shows the "catching up" cue only if the resume delta has not
@@ -606,6 +633,28 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         await dropTab(id, true);
       }
 
+      // closeAll closes every tab (killing each process) and leaves one fresh
+      // terminal. Destructive - each tab is a running agent - so it confirms.
+      async function closeAll(): Promise<void> {
+        if (tabList.length === 0) {
+          return;
+        }
+        if (!window.confirm(`Close all ${String(tabList.length)} terminals?`)) {
+          return;
+        }
+        const victims = [...tabList];
+        tabList.length = 0;
+        activeId = null;
+        for (const t of victims) {
+          t.aria.remove();
+          t.el.remove();
+          ctx.dropSession(t.id);
+          await apiClose(t.id);
+        }
+        syncChrome();
+        await create(); // there is always at least one terminal open
+      }
+
       // One-time "swipe to switch" hint on first multi-tab state, mobile only.
       function maybeSwipeHint(): void {
         if (hintShown || tabList.length < 2) {
@@ -694,6 +743,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const offInput = ctx.registerInputObserver(deriveTitleFromInput);
       newBtn.addEventListener("click", () => {
         void create();
+      });
+      closeAllBtn.addEventListener("click", () => {
+        void closeAll();
       });
       overviewBtn.addEventListener("click", () => {
         openOverview();
@@ -819,6 +871,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           tabList.length = 0;
           bar.remove();
           newBtn.remove();
+          closeAllBtn.remove();
           switcher.remove();
           sheet.remove();
           scrim.remove();

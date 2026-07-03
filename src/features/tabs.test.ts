@@ -197,11 +197,67 @@ describe("tabs feature", () => {
 
     const bar = root.querySelector(".wt-tab-bar");
     const newBtn = root.querySelector(".wt-tab-new");
+    const closeAll = root.querySelector(".wt-tab-closeall");
     expect(newBtn).toBeTruthy();
     // Inside the flex strip (not a sibling of the fixed bar, which flowed it out
-    // of view), and the last item so it sits after the tabs.
+    // of view), after the tabs, with the close-all button anchored last.
     expect(bar?.contains(newBtn ?? null)).toBe(true);
-    expect(bar?.lastElementChild).toBe(newBtn);
+    expect(newBtn?.previousElementSibling?.classList.contains("wt-tab")).toBe(true);
+    expect(bar?.lastElementChild).toBe(closeAll);
+  });
+
+  it("closes a tab on middle-click", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    fetchMock.mockClear();
+    // Middle-click (button 1) the second tab.
+    root
+      .querySelectorAll<HTMLElement>(".wt-tab")[1]
+      ?.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+
+    expect(root.querySelectorAll(".wt-tab").length).toBe(1);
+    const deleted = fetchMock.mock.calls.some(
+      (c) => (c[1]?.method ?? "GET") === "DELETE" && String(c[0]).endsWith("/s2"),
+    );
+    expect(deleted).toBe(true);
+  });
+
+  it("closes every tab and opens a fresh one via close-all (confirmed)", async () => {
+    vi.stubGlobal("confirm", () => true);
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    fetchMock.mockClear();
+    root.querySelector<HTMLElement>(".wt-tab-closeall")?.click();
+    // Both existing sessions are DELETEd and one fresh session is POSTed.
+    await until(
+      () =>
+        fetchMock.mock.calls.filter((c) => (c[1]?.method ?? "GET") === "DELETE").length === 2 &&
+        fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") === "POST"),
+    );
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    expect(root.querySelectorAll(".wt-tab").length).toBe(1);
+  });
+
+  it("does not close tabs when close-all is not confirmed", async () => {
+    vi.stubGlobal("confirm", () => false);
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    fetchMock.mockClear();
+    root.querySelector<HTMLElement>(".wt-tab-closeall")?.click();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(root.querySelectorAll(".wt-tab").length).toBe(2);
+    const deleted = fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") === "DELETE");
+    expect(deleted).toBe(false);
   });
 
   it("labels tabs from the server title and numbers untitled ones", async () => {
