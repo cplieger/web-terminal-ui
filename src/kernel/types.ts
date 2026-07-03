@@ -227,6 +227,15 @@ export interface TerminalFeature<Api = void> {
    *  Readonly so a feature is covariant in Api (a TerminalFeature<X> is a
    *  TerminalFeature<unknown>); the kernel sets it through a narrow cast. */
   readonly api?: Api;
+  /** True if this feature owns session selection and drives the first
+   *  connection itself (via ctx.notifySwitch once it has resolved a session id).
+   *  The kernel reads this synchronously from the feature list and, when any
+   *  feature sets it, SKIPS its own startup connect: connecting to the bare
+   *  wsPath before a session exists would hit a session-gated /ws (the
+   *  SessionManager 404s a /ws with no ?session=) and churn the reconnect
+   *  backoff until the feature set a session. `tabs` sets this; single-terminal
+   *  presets leave it unset so the kernel connects to the bare wsPath as before. */
+  readonly managesSessions?: boolean;
 }
 
 /** What a feature's setup returns: its optional typed API, a teardown, and an

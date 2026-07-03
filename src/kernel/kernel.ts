@@ -637,7 +637,16 @@ export function createTerminal(
   // --- Connect + focus ---
   render.updateFontMetrics();
   composition.positionCompositionView();
-  connection.connect();
+  // A session-managing feature (tabs) drives the first connect itself once it
+  // has resolved a session id (ctx.notifySwitch -> connection.setSession, which
+  // adds ?session=<id>). Connecting here first would open a bare /ws that a
+  // SessionManager 404s (no ?session=), flashing a disconnect banner and
+  // churning the reconnect backoff until the feature sets a session. So skip the
+  // startup connect when managed; the single-terminal presets leave it to us.
+  const sessionManaged = featureList.some((f) => f.managesSessions === true);
+  if (!sessionManaged) {
+    connection.connect();
+  }
   focusTerminal();
 
   return {

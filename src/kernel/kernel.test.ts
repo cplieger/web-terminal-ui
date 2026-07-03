@@ -13,6 +13,7 @@ import type { TerminalFeature } from "./types.js";
 
 const sendBinary = vi.fn<(buf: Uint8Array) => boolean>(() => true);
 const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
+const connect = vi.fn();
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -37,11 +38,13 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
     scroll: { init: vi.fn(), scrollToBottom: vi.fn(), isUserScrolledUp: vi.fn(() => false) },
     connection: {
       init: connectionInit,
-      connect: vi.fn(),
+      connect,
       sendBinary,
       sendResize: vi.fn(),
       reconnectNow: vi.fn(),
       disconnect: vi.fn(),
+      setSession: vi.fn(),
+      forgetSession: vi.fn(),
     },
   };
 });
@@ -55,6 +58,7 @@ beforeEach(async () => {
   vi.resetModules();
   sendBinary.mockClear();
   connectionInit.mockClear();
+  connect.mockClear();
   document.body.replaceChildren();
   ({ createTerminal } = await import("./kernel.js"));
 });
@@ -119,6 +123,30 @@ describe("bare kernel builds a working terminal with no chrome", () => {
     term.destroy();
     expect(root.querySelector(".term-output")).toBeNull();
     expect(root.childElementCount).toBe(0);
+  });
+});
+
+describe("startup connect gating (session-managed vs single-terminal)", () => {
+  it("connects at startup for the single-terminal case (no session-managing feature)", () => {
+    const root = rootIn();
+    createTerminal(root, { features: [] });
+    // No feature owns sessions, so the kernel opens the bare /ws itself.
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT connect at startup when a feature manages sessions", () => {
+    const root = rootIn();
+    const sessionOwner: TerminalFeature = {
+      name: "session-owner",
+      managesSessions: true,
+      setup() {
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(root, { features: [sessionOwner] });
+    // The feature drives the first connect (via ctx.notifySwitch) once it has a
+    // session id; a bare /ws here would 404 against a SessionManager.
+    expect(connect).not.toHaveBeenCalled();
   });
 });
 
