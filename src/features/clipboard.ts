@@ -10,19 +10,12 @@ export interface ClipboardApi {
   copy(text: string): void;
   /** Read the system clipboard and paste it through the sanitizing funnel. */
   paste(): void;
-  /** True on iOS/iPadOS, where the native long-press callout owns paste (so
-   *  contextMenu omits its Paste button there). */
-  readonly isIOS: boolean;
 }
 
 export function clipboard(): TerminalFeature<ClipboardApi> {
   return {
     name: "clipboard",
     setup(ctx) {
-      const isIOS =
-        /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-
       function copy(text: string): void {
         // navigator.clipboard is undefined outside a secure context (plain-HTTP
         // non-loopback host, a supported web-terminal-server deployment), where a
@@ -93,7 +86,7 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
       document.addEventListener("copy", onCopy);
 
       return {
-        api: { copy, paste, isIOS },
+        api: { copy, paste },
         teardown() {
           offKey();
           offClip();
