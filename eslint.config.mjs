@@ -1,6 +1,6 @@
 // Strict typed-linting config for @cplieger/web-terminal-ui.
 //
-// The shared, fleet-synced ruleset lives in eslint.config.base.mjs (synced
+// The shared, org-synced ruleset lives in eslint.config.base.mjs (synced
 // from cplieger/ci). Do NOT edit the base here — the next sync would clobber
 // it. This file imports the base and layers the one repo-specific delta on
 // top: the base is vendored as a bare `eslint.config.base.mjs` (a `.mjs` that
