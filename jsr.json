@@ -2,7 +2,8 @@
   "name": "@cplieger/web-terminal-ui",
   "version": "0.1.0",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./presets": "./src/presets.ts"
   },
   "imports": {
     "@cplieger/web-terminal-engine": "jsr:@cplieger/web-terminal-engine@^1.4.0"
