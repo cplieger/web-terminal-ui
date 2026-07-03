@@ -18,6 +18,10 @@ import type { ClipboardApi } from "./clipboard.js";
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_MOVE_PX = 10;
 const EDGE_MARGIN = 8;
+// When the menu can't fit below the anchor (a long-press near the bottom edge or
+// above the keyboard), it opens above the point. This gap lifts it clear of the
+// fingertip so the touch does not cover the menu items.
+const MENU_GAP = 16;
 
 export interface ContextMenuOptions {
   /** The clipboard feature value, so the menu can offer Copy/Paste through its
@@ -91,16 +95,33 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         if (menu.childElementCount === 0) {
           return; // nothing to offer
         }
-        // Make visible (so it has measurable size) then clamp inside the
-        // viewport. position:fixed => x/y are viewport coordinates.
+        // Make visible (so it has measurable size), then place it within the
+        // VISIBLE viewport. position:fixed => x/y are viewport coordinates; the
+        // visual viewport (when present) is the area above the on-screen
+        // keyboard, so clamping to it keeps the menu off the keyboard too.
         menu.classList.add("visible");
+        const vv = window.visualViewport;
+        const viewLeft = vv ? vv.offsetLeft : 0;
+        const viewTop = vv ? vv.offsetTop : 0;
+        const viewWidth = vv ? vv.width : window.innerWidth;
+        const viewHeight = vv ? vv.height : window.innerHeight;
+        const menuW = menu.offsetWidth;
+        const menuH = menu.offsetHeight;
         const left = Math.max(
-          EDGE_MARGIN,
-          Math.min(x, window.innerWidth - menu.offsetWidth - EDGE_MARGIN),
+          viewLeft + EDGE_MARGIN,
+          Math.min(x, viewLeft + viewWidth - menuW - EDGE_MARGIN),
         );
-        const top = Math.max(
-          EDGE_MARGIN,
-          Math.min(y, window.innerHeight - menu.offsetHeight - EDGE_MARGIN),
+        // Open just below the point; but if that would overflow the visible
+        // bottom (a long-press near the bottom edge, where the user naturally
+        // taps), flip above the finger so the menu is neither clipped off-screen
+        // nor hidden under the fingertip.
+        let top = y;
+        if (y + menuH + EDGE_MARGIN > viewTop + viewHeight) {
+          top = y - menuH - MENU_GAP;
+        }
+        top = Math.max(
+          viewTop + EDGE_MARGIN,
+          Math.min(top, viewTop + viewHeight - menuH - EDGE_MARGIN),
         );
         menu.style.left = `${String(left)}px`;
         menu.style.top = `${String(top)}px`;
