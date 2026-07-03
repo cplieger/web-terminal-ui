@@ -64,6 +64,21 @@ export function isComposing(): boolean {
   return composing || sendingComposition;
 }
 
+/** Abort any in-flight composition without sending, and clear the textarea.
+ *  The kernel calls this on a tab switch (detach): committing half-composed IME
+ *  text to either the outgoing or the incoming session is wrong, so we discard
+ *  it (design 5.1, "end any composition ... or cancel"). Clearing
+ *  sendingComposition also neutralizes a just-fired compositionend whose
+ *  deferred send is still pending on the microtask/timeout queue, so it cannot
+ *  land on whoever is active after the switch. */
+export function cancelComposition(): void {
+  composing = false;
+  sendingComposition = false;
+  compositionView.textContent = "";
+  compositionView.classList.remove("active");
+  resetToPlaceholder(textarea);
+}
+
 function onStart(): void {
   composing = true;
   const start = textarea.selectionStart;

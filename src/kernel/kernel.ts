@@ -568,6 +568,18 @@ export function createTerminal(
       },
       tablist: () => tablistController,
       notifySwitch(session) {
+        // Detach (design 5.1): make input safe before the socket is re-pointed.
+        // End any in-flight IME composition and clear the textarea so
+        // half-composed text is not delivered to either session, and let every
+        // feature disarm latched input state (mobileToolbar's sticky-Ctrl) so it
+        // cannot fire against the incoming session. This all runs before
+        // setSession, and the switch is synchronous, so input is inert between
+        // detach here and the onSwitch attach below.
+        composition.cancelComposition();
+        resetToPlaceholder(input);
+        for (const { instance } of instances) {
+          instance.onDetach?.();
+        }
         activeSession = session;
         // Reconnect the terminal WS to this session using its per-tab resume
         // state; the renderer was already pointed at its store by tabs.

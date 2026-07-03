@@ -63,6 +63,14 @@ export function mobileToolbar(): TerminalFeature {
       });
 
       return {
+        onDetach() {
+          // A tab switch disarms a latched sticky-Ctrl so a pending Ctrl does
+          // not fire against the incoming session (e.g. an accidental Ctrl+C to
+          // the wrong agent, design 5.1 / ui-ux review D).
+          if (ctrl.isCtrlArmed()) {
+            ctrl.setCtrlArmed(false);
+          }
+        },
         teardown() {
           offTransform();
           ctrl.dispose();

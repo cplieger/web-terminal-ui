@@ -67,6 +67,35 @@ describe("composition: composition lifecycle", () => {
   });
 });
 
+describe("composition: cancelComposition (tab-switch detach, design 5.1)", () => {
+  it("aborts an in-flight composition without sending and clears the view", () => {
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    textarea.value = "\u4F60\u597D";
+    view.textContent = "\u4F60\u597D";
+    view.classList.add("active");
+    expect(composition.isComposing()).toBe(true);
+
+    composition.cancelComposition();
+
+    expect(composition.isComposing()).toBe(false);
+    expect(view.classList.contains("active")).toBe(false);
+    expect(view.textContent).toBe("");
+    vi.advanceTimersByTime(0);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("neutralizes a just-ended composition whose deferred send is still pending", () => {
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    textarea.value = "\u4F60\u597D";
+    textarea.dispatchEvent(new CompositionEvent("compositionend"));
+    // The deferred send is queued but has not run yet; a switch lands here.
+    composition.cancelComposition();
+    vi.advanceTimersByTime(0);
+    // The composed text must not be delivered to whoever is active after the switch.
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
 describe("composition: mid-line composition strips the trailing suffix", () => {
   it("sends only the composed segment when text follows the composition point", () => {
     textarea.value = "abXY";

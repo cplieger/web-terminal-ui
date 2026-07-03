@@ -9,11 +9,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as KernelModule from "./kernel.js";
-import type { TerminalFeature } from "./types.js";
+import type { TerminalContext, TerminalFeature } from "./types.js";
 
 const sendBinary = vi.fn<(buf: Uint8Array) => boolean>(() => true);
 const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
 const connect = vi.fn();
+const setSession = vi.fn<(id: string) => void>();
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -43,7 +44,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       sendResize: vi.fn(),
       reconnectNow: vi.fn(),
       disconnect: vi.fn(),
-      setSession: vi.fn(),
+      setSession,
       forgetSession: vi.fn(),
     },
   };
@@ -59,6 +60,7 @@ beforeEach(async () => {
   sendBinary.mockClear();
   connectionInit.mockClear();
   connect.mockClear();
+  setSession.mockClear();
   document.body.replaceChildren();
   ({ createTerminal } = await import("./kernel.js"));
 });
@@ -147,6 +149,47 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
     // The feature drives the first connect (via ctx.notifySwitch) once it has a
     // session id; a bare /ws here would 404 against a SessionManager.
     expect(connect).not.toHaveBeenCalled();
+  });
+});
+
+describe("switch detach (design 5.1 switch safety)", () => {
+  it("cancels IME composition, and runs onDetach before setSession and before onSwitch", async () => {
+    const composition = await import("../composition.js");
+    const root = rootIn();
+    const order: string[] = [];
+    let ctx: TerminalContext | undefined;
+    const spy: TerminalFeature = {
+      name: "spy",
+      setup(c) {
+        ctx = c;
+        return {
+          teardown: () => undefined,
+          onDetach: () => {
+            order.push("detach");
+            // Detach must precede the socket re-point, or latched input could
+            // fire against the incoming session.
+            expect(setSession).not.toHaveBeenCalled();
+          },
+          onSwitch: () => order.push("switch"),
+        };
+      },
+    };
+    createTerminal(root, { features: [spy] });
+    await tick(); // setupFeatures runs in the background; let it capture ctx
+
+    // Start an IME composition on the kernel's textarea, then switch.
+    const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new CompositionEvent("compositionstart"));
+    expect(composition.isComposing()).toBe(true);
+
+    setSession.mockClear();
+    ctx?.notifySwitch({ id: "s9" });
+
+    // Composition was cancelled on detach, so nothing leaks to the new session.
+    expect(composition.isComposing()).toBe(false);
+    // Ordering: every onDetach, then setSession, then every onSwitch.
+    expect(order).toEqual(["detach", "switch"]);
+    expect(setSession).toHaveBeenCalledWith("s9");
   });
 });
 
