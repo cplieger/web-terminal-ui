@@ -270,38 +270,47 @@
 }
 
 /* ===== Activity dots (activityMonitor via tabs) =====
-   Four-state, distinguishable without color (shape + color), per section 12. */
-.wt-tab-dot {
-  width: 8px;
-  height: 8px;
+   Four-state, distinguishable without color (shape + motion, not hue alone),
+   per section 12 / WCAG 1.4.1. The one .wt-status-dot vocabulary is shared by
+   the desktop strip, the mobile switcher, and the overview sheet rows. */
+.wt-status-dot {
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   flex: none;
   background: color-mix(in oklch, var(--text) 40%, transparent);
 }
 
-.wt-tab-dot[data-status="working"] {
+.wt-status-dot[data-status="working"] {
   background: oklch(75% 0.15 90deg);
   animation: wt-pulse 1.2s ease-in-out infinite;
 }
 
-.wt-tab-dot[data-status="idle"] {
+.wt-status-dot[data-status="idle"] {
   background: color-mix(in oklch, var(--text) 40%, transparent);
 }
 
-.wt-tab-dot[data-status="input"] {
+.wt-status-dot[data-status="input"] {
   background: oklch(70% 0.18 25deg);
   /* A ring so needs-input reads distinctly without relying on hue alone. */
   box-shadow: 0 0 0 2px oklch(70% 0.18 25deg / 40%);
 }
 
-.wt-tab-dot[data-status="exited"] {
+.wt-status-dot[data-status="exited"] {
   background: transparent;
   border: 1px solid color-mix(in oklch, var(--text) 40%, transparent);
 }
 
+/* Reduced-motion (or animations feature off): drop the pulse, keep the color. */
 @keyframes wt-pulse {
   50% {
     opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wt-status-dot[data-status="working"] {
+    animation: none;
   }
 }
 
@@ -319,4 +328,263 @@
 
 .wt-animate .wt-tab {
   transition: background-color var(--dur-micro) var(--ease-standard);
+}
+
+/* ===== Mobile bottom-switcher (tabs feature, section 12) =====
+   The switcher is the mobile tab surface: it shows the active tab and a
+   position indicator as a tap/swipe target, plus a >=44px overview control that
+   carries the aggregate needs-input badge. Hidden on a fine pointer, where the
+   top strip is used instead; the top strip is correspondingly hidden on a
+   coarse pointer so tabs live in the thumb zone. */
+.wt-switcher {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .wt-tab-bar,
+  .wt-tab-new {
+    display: none;
+  }
+
+  .wt-switcher {
+    position: fixed;
+    left: 0;
+    right: 0;
+    /* Lift above the soft keyboard rather than hiding, so the switch surface
+       stays reachable in the terminal's primary working state (section 12). */
+    bottom: calc(var(--safe-bottom, 0px) + var(--kb-inset, 0px));
+    display: flex;
+    align-items: stretch;
+    gap: var(--sp-1);
+    padding: var(--sp-1);
+    background: var(--surface);
+    backdrop-filter: var(--blur);
+    border-top: 1px solid var(--border);
+    z-index: 25;
+  }
+}
+
+.wt-switcher-current {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--touch-target);
+  padding: 0 var(--sp-2);
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: var(--radius-inner);
+  font-family: var(--font-ui);
+  font-size: 0.875rem;
+  cursor: pointer;
+  overflow: hidden;
+  /* Read horizontal swipe here; let vertical scrolling pass through. */
+  touch-action: pan-y;
+}
+
+.wt-switcher-current:active {
+  background: var(--text-active);
+}
+
+.wt-switcher-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.wt-switcher-pos {
+  flex: none;
+  color: color-mix(in oklch, var(--text) 60%, transparent);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8125rem;
+}
+
+.wt-switcher-overview {
+  position: relative;
+  flex: none;
+  padding: 0 var(--sp-3);
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+}
+
+.wt-switcher-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Aggregate needs-input attention: a background tab is blocked on you. Shape +
+   color (a ring plus a corner glyph), never hue alone (WCAG 1.4.1). */
+.wt-switcher-overview[data-attention="input"] {
+  border-color: oklch(70% 0.18 25deg);
+  box-shadow: 0 0 0 2px oklch(70% 0.18 25deg / 35%);
+}
+
+.wt-switcher-overview[data-attention="input"]::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: oklch(70% 0.18 25deg);
+}
+
+/* ===== Overview sheet (tabs feature, section 12) =====
+   A modal, focus-trapped bottom sheet listing every tab; distinct from the
+   non-modal overlay (context menu). Opened from the switcher; mobile-only in
+   practice (the switcher that opens it is hidden on a fine pointer). */
+.wt-sheet-scrim {
+  position: fixed;
+  inset: 0;
+  background: oklch(0% 0 0deg / 50%);
+  z-index: 45;
+  display: none;
+}
+
+.wt-sheet-scrim.visible {
+  display: block;
+}
+
+.wt-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  padding-bottom: calc(var(--sp-3) + var(--safe-bottom, 0px));
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  z-index: 46;
+  overflow-y: auto;
+}
+
+.wt-sheet[hidden] {
+  display: none;
+}
+
+.wt-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.wt-sheet-title {
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.wt-sheet-new {
+  flex: none;
+  padding: 0 var(--sp-3);
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  border: 1px solid var(--border);
+}
+
+.wt-sheet-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wt-sheet-row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-1);
+}
+
+.wt-sheet-select {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--touch-target);
+  padding: 0 var(--sp-2);
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: var(--radius-inner);
+  font-family: var(--font-ui);
+  font-size: 0.875rem;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.wt-sheet-row-active .wt-sheet-select {
+  background: color-mix(in oklch, var(--text) 10%, var(--surface));
+}
+
+.wt-sheet-select:active {
+  background: var(--text-active);
+}
+
+.wt-sheet-row-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wt-sheet-close {
+  flex: none;
+  border: 1px solid var(--border);
+  font-size: 1rem;
+}
+
+/* ===== Catching-up cue (tabs feature, sections 12/13) =====
+   A switched-into tab's cached screen is stale until its resume delta lands, so
+   it must not read as live. This unobtrusive cue shows only if the delta has not
+   arrived shortly after the switch, and clears on the first screen frame. */
+.wt-catchup {
+  position: fixed;
+  top: calc(var(--safe-top, 0px) + var(--vv-top, 0px) + 44px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px var(--sp-2);
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: color-mix(in oklch, var(--text) 75%, transparent);
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  z-index: 24;
+  display: none;
+}
+
+.wt-catchup.visible {
+  display: block;
+}
+
+/* ===== Switch motion (animations feature) =====
+   A subtle content fade on switch, so the cache-first repaint reads as a change
+   rather than a flicker. Gated on .wt-animate (and prefers-reduced-motion is
+   respected because the animations feature does not set .wt-animate then). */
+.wt-animate .term.wt-switching .term-output {
+  animation: wt-switch-in var(--dur-standard) var(--ease-standard);
+}
+
+@keyframes wt-switch-in {
+  from {
+    opacity: 0.55;
+  }
 }

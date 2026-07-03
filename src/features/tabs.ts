@@ -1,24 +1,26 @@
 // tabs feature: multiple independent terminals over the one kernel (design
-// sections 5, 6, 22.5). It owns the session set (GET/POST/DELETE
+// sections 5, 6, 12, 22.5). It owns the session set (GET/POST/DELETE
 // /api/sessions), a per-tab LineStore switching cache, the reconnect-on-switch
-// swap, and the tab-bar chrome. The kernel drives one active session; switching
-// re-points the renderer at the next tab's cached store (ctx.render.bind) and
-// asks the kernel to reconnect the terminal WS to it (ctx.notifySwitch), so the
-// last-known screen paints instantly and the background delta arrives after.
-//
-// Scope note (first cut): the desktop tab bar, create/close/switch, the
-// per-tab cache, ARIA tablist wiring, and activityMonitor dots are implemented.
-// The mobile bottom-switcher + overview sheet (section 12), swipe-to-switch
-// (mouse-mode gated), and the section 5.1 IME-finalize-on-switch refinement are
-// tracked follow-ups; the switch itself is synchronous so the input funnel does
-// not interleave sends across sessions mid-switch.
+// swap, and the tab chrome on both form factors: the desktop top-bar strip and
+// the mobile bottom-switcher + modal overview sheet. The kernel drives one
+// active session; switching re-points the renderer at the next tab's cached
+// store (ctx.render.bind) and asks the kernel to reconnect the terminal WS to it
+// (ctx.notifySwitch), so the last-known screen paints instantly and the
+// background delta arrives after.
 
-import { LineStore } from "@cplieger/web-terminal-engine";
+import { LineStore, modes } from "@cplieger/web-terminal-engine";
 import type { TerminalContext, TerminalFeature, TabHandle } from "../kernel/types.js";
 import type { ActivityMonitorApi } from "./activity-monitor.js";
 import { fromHTML } from "./dom.js";
 
 const DEFAULT_API_BASE = "/api/sessions";
+// Swipe recognition on the mobile switcher bar: a mostly-horizontal drag past
+// this distance switches; a near-stationary release is a tap (opens overview).
+const SWIPE_MIN_PX = 40;
+// One-time "swipe to switch" hint, remembered across loads.
+const SWIPE_HINT_KEY = "wt-swipe-hint-seen";
+// Default cadence for the no-activityMonitor polling fallback.
+const DEFAULT_POLL_MS = 4000;
 
 /** One session's client-side wire shape (matches terminal.SessionInfo). */
 interface SessionInfo {
@@ -56,18 +58,58 @@ export interface TabsOptions {
   /** REST base for the session API (default "/api/sessions"). */
   apiBase?: string;
   /** The activityMonitor feature value, so tabs renders live status dots and
-   *  drops exited/removed tabs (ctx.use). Without it, dots stay neutral. */
+   *  drops exited/removed tabs (ctx.use). Without it, dots stay neutral and tabs
+   *  falls back to polling the session list (see pollMs). */
   activityMonitor?: TerminalFeature<ActivityMonitorApi>;
+  /** Poll interval in ms for the no-activityMonitor fallback: without the status
+   *  SSE, tabs re-lists GET /api/sessions on this cadence to refresh dots and
+   *  titles and drop reaped tabs (section 22.5). Ignored when activityMonitor is
+   *  present. Default 4000. */
+  pollMs?: number;
 }
 
 const TAB_HTML = `
 <div class="wt-tab">
-  <span class="wt-tab-dot" aria-hidden="true"></span>
+  <span class="wt-tab-dot wt-status-dot" aria-hidden="true"></span>
   <span class="wt-tab-label"></span>
   <button type="button" class="wt-tab-close" aria-label="Close terminal" tabindex="-1">\u00d7</button>
 </div>`;
 
 const NEW_HTML = `<button type="button" class="wt-tab-new" aria-label="New terminal">+</button>`;
+
+// Mobile bottom-switcher: the active tab (dot + label + position) as a tap/swipe
+// surface, plus a >=44px overview control that carries the aggregate badge.
+const SWITCHER_HTML = `
+<div class="wt-switcher" role="group" aria-label="Terminal tabs">
+  <button type="button" class="wt-switcher-current" aria-haspopup="dialog">
+    <span class="wt-switcher-dot wt-status-dot" aria-hidden="true"></span>
+    <span class="wt-switcher-label"></span>
+    <span class="wt-switcher-pos" aria-hidden="true"></span>
+  </button>
+  <button type="button" class="wt-switcher-overview wt-btn" aria-haspopup="dialog" aria-label="All terminals">
+    <span class="wt-switcher-count" aria-hidden="true"></span>
+  </button>
+</div>`;
+
+// Modal overview sheet (kernel `sheet` region): every tab with title + dot +
+// close, plus create. Starts hidden; opened from the switcher.
+const SHEET_HTML = `
+<div class="wt-sheet" role="dialog" aria-modal="true" aria-label="Terminals" hidden>
+  <div class="wt-sheet-header">
+    <span class="wt-sheet-title">Terminals</span>
+    <button type="button" class="wt-sheet-new wt-btn">+ New terminal</button>
+  </div>
+  <ul class="wt-sheet-list" role="list"></ul>
+</div>`;
+
+const SHEET_ROW_HTML = `
+<li class="wt-sheet-row">
+  <button type="button" class="wt-sheet-select">
+    <span class="wt-sheet-row-dot wt-status-dot" aria-hidden="true"></span>
+    <span class="wt-sheet-row-label"></span>
+  </button>
+  <button type="button" class="wt-sheet-close wt-btn" aria-label="Close terminal">\u00d7</button>
+</li>`;
 
 export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
@@ -104,6 +146,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const tablist = ctx.tablist();
       const monitor = opts.activityMonitor ? ctx.use(opts.activityMonitor) : undefined;
 
+      // --- Desktop tab strip (top-bar region) ---
       const slot = ctx.region("top-bar", "tabs");
       const bar = document.createElement("div");
       bar.className = "wt-tab-bar";
@@ -112,19 +155,144 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const newBtn = fromHTML(NEW_HTML);
       slot.appendChild(newBtn);
 
+      // --- Mobile bottom-switcher (bottom-switcher region) ---
+      const switcher = fromHTML(SWITCHER_HTML);
+      const swCurrent = pick(switcher, ".wt-switcher-current");
+      const swDot = pick(switcher, ".wt-switcher-dot");
+      const swLabel = pick(switcher, ".wt-switcher-label");
+      const swPos = pick(switcher, ".wt-switcher-pos");
+      const overviewBtn = pick(switcher, ".wt-switcher-overview");
+      const swCount = pick(switcher, ".wt-switcher-count");
+      ctx.region("bottom-switcher", "switcher").appendChild(switcher);
+
+      // --- Overview sheet + scrim (sheet region) ---
+      const sheetSlot = ctx.region("sheet", "overview");
+      const scrim = document.createElement("div");
+      scrim.className = "wt-sheet-scrim";
+      const sheet = fromHTML(SHEET_HTML);
+      const sheetList = pick(sheet, ".wt-sheet-list");
+      const sheetNewBtn = pick(sheet, ".wt-sheet-new");
+      sheetSlot.append(scrim, sheet);
+
+      // Catching-up cue: a switched-into tab's cached screen is stale until its
+      // resume delta lands, so it must not read as live (sections 12/13). Shown
+      // only if the delta has not arrived shortly after a switch; cleared on the
+      // first screen frame.
+      const catchup = document.createElement("div");
+      catchup.className = "wt-catchup";
+      catchup.setAttribute("role", "status");
+      catchup.textContent = "Catching up\u2026";
+      ctx.region("banner", "catchup").appendChild(catchup);
+      let catchupTimer: ReturnType<typeof setTimeout> | null = null;
+
       const tabList: Tab[] = [];
       let activeId: string | null = null;
+      let overviewOpen = false;
+      let lastFocus: HTMLElement | null = null;
+      let hintShown = false;
 
       function focusInput(): void {
         ctx.surface().querySelector<HTMLElement>(".term-input")?.focus({ preventScroll: true });
       }
 
+      // paintActive updates the desktop strip's active state.
       function paintActive(): void {
         for (const t of tabList) {
           const on = t.id === activeId;
           t.el.classList.toggle("wt-tab-active", on);
           t.aria.setSelected(on);
         }
+      }
+
+      // syncMobile updates the bottom switcher: active label + position, the tab
+      // count, and the aggregate needs-input badge (so a background tab blocked
+      // on input is glanceable on mobile without opening the sheet, section 12).
+      function syncMobile(): void {
+        const idx = tabList.findIndex((t) => t.id === activeId);
+        const active = idx >= 0 ? tabList[idx] : undefined;
+        swLabel.textContent = active ? active.title : "";
+        swDot.dataset["status"] = active?.dot.dataset["status"] ?? "idle";
+        swPos.textContent =
+          tabList.length > 1 ? `${String(idx + 1)} / ${String(tabList.length)}` : "";
+        swCount.textContent = String(tabList.length);
+        const bgInput = tabList.some(
+          (t) => t.id !== activeId && t.dot.dataset["status"] === "input",
+        );
+        if (bgInput) {
+          overviewBtn.dataset["attention"] = "input";
+          overviewBtn.setAttribute(
+            "aria-label",
+            "All terminals; a background terminal needs input",
+          );
+        } else {
+          delete overviewBtn.dataset["attention"];
+          overviewBtn.setAttribute("aria-label", "All terminals");
+        }
+      }
+
+      // renderOverview rebuilds the sheet's tab rows from the current tabList.
+      function renderOverview(): void {
+        sheetList.replaceChildren();
+        for (const t of tabList) {
+          const row = fromHTML(SHEET_ROW_HTML);
+          const rdot = pick(row, ".wt-sheet-row-dot");
+          const rlabel = pick(row, ".wt-sheet-row-label");
+          const rselect = pick(row, ".wt-sheet-select");
+          const rclose = pick(row, ".wt-sheet-close");
+          rdot.dataset["status"] = t.dot.dataset["status"] ?? "idle";
+          rlabel.textContent = t.title;
+          if (t.id === activeId) {
+            row.classList.add("wt-sheet-row-active");
+            rselect.setAttribute("aria-current", "true");
+          }
+          rselect.addEventListener("click", () => {
+            // Close first so focus restores off the sheet, then switch (which
+            // focuses the terminal) so focus lands in the terminal, not the bar.
+            closeOverview();
+            switchTo(t.id);
+          });
+          rclose.addEventListener("click", (e) => {
+            e.stopPropagation();
+            void close_(t.id);
+          });
+          sheetList.appendChild(row);
+        }
+      }
+
+      // syncChrome refreshes every surface after any state change. Idempotent.
+      function syncChrome(): void {
+        paintActive();
+        syncMobile();
+        if (overviewOpen) {
+          renderOverview();
+        }
+        maybeSwipeHint();
+      }
+
+      function openOverview(): void {
+        if (overviewOpen) {
+          return;
+        }
+        overviewOpen = true;
+        lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        renderOverview();
+        scrim.classList.add("visible");
+        sheet.hidden = false;
+        sheet.classList.add("visible");
+        sheet.querySelector<HTMLElement>("button")?.focus();
+        ctx.announce("Terminals list opened");
+      }
+
+      function closeOverview(): void {
+        if (!overviewOpen) {
+          return;
+        }
+        overviewOpen = false;
+        scrim.classList.remove("visible");
+        sheet.classList.remove("visible");
+        sheet.hidden = true;
+        lastFocus?.focus();
+        lastFocus = null;
       }
 
       function addTabChrome(info: SessionInfo): Tab {
@@ -188,7 +356,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         activeId = next.id;
         ctx.render.bind(next.store);
         ctx.notifySwitch({ id: next.id });
-        paintActive();
+        armCatchup();
+        flashSwitch();
+        syncChrome();
         // Restore scroll memory best-effort after the async rebuild; a
         // following tab sticks to the bottom on its own.
         const savedTop = next.scrollTop;
@@ -202,6 +372,53 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         focusInput();
       }
 
+      // armCatchup shows the "catching up" cue only if the resume delta has not
+      // landed shortly after a switch; clearCatchup hides it when a screen frame
+      // arrives (subscribed below).
+      function armCatchup(): void {
+        if (catchupTimer !== null) {
+          clearTimeout(catchupTimer);
+        }
+        catchup.classList.remove("visible");
+        catchupTimer = setTimeout(() => {
+          catchupTimer = null;
+          catchup.classList.add("visible");
+        }, 150);
+      }
+      function clearCatchup(): void {
+        if (catchupTimer !== null) {
+          clearTimeout(catchupTimer);
+          catchupTimer = null;
+        }
+        catchup.classList.remove("visible");
+      }
+      // flashSwitch adds a class the animations feature keys a brief content fade
+      // off (a no-op when animations are absent or reduced-motion is set).
+      function flashSwitch(): void {
+        const surface = ctx.surface();
+        surface.classList.add("wt-switching");
+        setTimeout(() => {
+          surface.classList.remove("wt-switching");
+        }, 300);
+      }
+
+      // The first screen frame after a switch is the resume delta landing.
+      ctx.on("wire:screen", () => {
+        clearCatchup();
+      });
+
+      // switchRelative moves delta tabs from the active one (swipe left = next).
+      function switchRelative(delta: number): void {
+        const idx = tabList.findIndex((t) => t.id === activeId);
+        if (idx < 0) {
+          return;
+        }
+        const next = tabList[idx + delta];
+        if (next) {
+          switchTo(next.id);
+        }
+      }
+
       async function create(): Promise<void> {
         const info = await apiCreate();
         const tab = addTabChrome(info);
@@ -209,7 +426,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         switchTo(tab.id);
       }
 
-      async function close_(id: string): Promise<void> {
+      // dropTab removes a tab's chrome + cache and re-homes the active session.
+      // remote=true also DELETEs the server session (a user close); remote=false
+      // is a local drop for a session the server already ended (an SSE removed
+      // event or a poll that no longer lists it), so no redundant DELETE is sent.
+      async function dropTab(id: string, remote: boolean): Promise<void> {
         const idx = tabList.findIndex((t) => t.id === id);
         if (idx < 0) {
           return;
@@ -221,7 +442,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         tab.aria.remove();
         tab.el.remove();
         ctx.dropSession(id);
-        await apiClose(id);
+        syncChrome(); // reflect the drop immediately (count, position, sheet)
+        if (remote) {
+          await apiClose(id);
+        }
         if (activeId === id) {
           // Switch to a neighbor, or spawn a fresh session if this was the last.
           const neighbor = tabList[idx] ?? tabList[idx - 1];
@@ -234,30 +458,169 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // Live status from the activity monitor: update dots + titles, drop
-      // exited/removed tabs.
-      let offStatus: (() => void) | undefined;
-      if (monitor) {
-        offStatus = monitor.onStatus((s) => {
-          const t = tabList.find((tab) => tab.id === s.id);
-          if (!t) {
-            return;
-          }
-          if (s.removed) {
-            void close_(s.id);
-            return;
-          }
-          t.dot.dataset["status"] = s.status;
-          if (s.title && s.title !== t.title) {
-            t.title = s.title;
-            t.label.textContent = s.title;
-            t.aria.setLabel(s.title);
-          }
-        });
+      async function close_(id: string): Promise<void> {
+        await dropTab(id, true);
       }
 
+      // One-time "swipe to switch" hint on first multi-tab state, mobile only.
+      function maybeSwipeHint(): void {
+        if (hintShown || tabList.length < 2) {
+          return;
+        }
+        hintShown = true;
+        if (!window.matchMedia("(pointer: coarse)").matches) {
+          return; // desktop: swipe is irrelevant
+        }
+        let seen = false;
+        try {
+          seen = localStorage.getItem(SWIPE_HINT_KEY) === "1";
+        } catch {
+          /* storage unavailable; show once per session via hintShown */
+        }
+        if (seen) {
+          return;
+        }
+        try {
+          localStorage.setItem(SWIPE_HINT_KEY, "1");
+        } catch {
+          /* ignore */
+        }
+        ctx.toast("Swipe the bar to switch terminals");
+      }
+
+      // applyStatus updates one tab's dot + title from a status record (shared by
+      // the SSE monitor and the polling fallback).
+      function applyStatus(id: string, status: string, title: string | undefined): void {
+        const t = tabList.find((tab) => tab.id === id);
+        if (!t) {
+          return;
+        }
+        t.dot.dataset["status"] = status || "idle";
+        if (title && title !== t.title) {
+          t.title = title;
+          t.label.textContent = title;
+          t.aria.setLabel(title);
+        }
+      }
+
+      // Live status: the activity monitor (SSE push) when present, else a poll of
+      // GET /api/sessions. Either way, dots + titles update and vanished sessions
+      // drop; the poll additionally learns of a background exit the SSE would
+      // have pushed (section 22.5).
+      let offStatus: (() => void) | undefined;
+      let pollTimer: ReturnType<typeof setInterval> | null = null;
+      if (monitor) {
+        offStatus = monitor.onStatus((s) => {
+          if (s.removed) {
+            void dropTab(s.id, false); // already gone server-side; no DELETE
+            return;
+          }
+          applyStatus(s.id, s.status, s.title);
+          syncChrome();
+        });
+      } else {
+        const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
+        const pollOnce = async (): Promise<void> => {
+          let list: SessionInfo[];
+          try {
+            list = await apiList();
+          } catch {
+            return; // transient; try again next tick
+          }
+          const seen = new Set(list.map((s) => s.id));
+          for (const info of list) {
+            applyStatus(info.id, info.status, info.title);
+          }
+          // A tab the server no longer lists was reaped/closed elsewhere: drop it
+          // locally (no DELETE — it is already gone).
+          const gone = tabList.filter((t) => !seen.has(t.id)).map((t) => t.id);
+          for (const id of gone) {
+            await dropTab(id, false);
+          }
+          syncChrome();
+        };
+        pollTimer = setInterval(() => {
+          void pollOnce();
+        }, pollMs);
+      }
+
+      // --- Event wiring ---
       newBtn.addEventListener("click", () => {
         void create();
+      });
+      overviewBtn.addEventListener("click", () => {
+        openOverview();
+      });
+      sheetNewBtn.addEventListener("click", () => {
+        closeOverview();
+        void create();
+      });
+      scrim.addEventListener("click", () => {
+        closeOverview();
+      });
+      sheet.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeOverview();
+          return;
+        }
+        if (e.key !== "Tab") {
+          return;
+        }
+        const focusables = Array.from(sheet.querySelectorAll<HTMLElement>("button")).filter(
+          (el) => !el.hasAttribute("disabled"),
+        );
+        const firstEl = focusables[0];
+        const lastEl = focusables[focusables.length - 1];
+        if (!firstEl || !lastEl) {
+          return;
+        }
+        if (e.shiftKey && document.activeElement === firstEl) {
+          e.preventDefault();
+          lastEl.focus();
+        } else if (!e.shiftKey && document.activeElement === lastEl) {
+          e.preventDefault();
+          firstEl.focus();
+        }
+      });
+
+      // Swipe/tap on the switcher bar: a horizontal swipe switches (gated off
+      // under mouse tracking, since mouse-mode apps capture drags); a tap opens
+      // the overview. click also covers keyboard/mouse activation.
+      let downX = 0;
+      let downY = 0;
+      let swiped = false;
+      swCurrent.addEventListener(
+        "pointerdown",
+        (e) => {
+          downX = e.clientX;
+          downY = e.clientY;
+          swiped = false;
+        },
+        { passive: true },
+      );
+      swCurrent.addEventListener(
+        "pointerup",
+        (e) => {
+          const dx = e.clientX - downX;
+          const dy = e.clientY - downY;
+          if (
+            Math.abs(dx) >= SWIPE_MIN_PX &&
+            Math.abs(dx) > Math.abs(dy) * 1.5 &&
+            modes.getMouseMode() === 0
+          ) {
+            swiped = true;
+            switchRelative(dx < 0 ? 1 : -1);
+          }
+        },
+        { passive: true },
+      );
+      swCurrent.addEventListener("click", () => {
+        if (swiped) {
+          swiped = false; // consumed by the swipe; do not also open the overview
+          return;
+        }
+        openOverview();
       });
 
       // Initial population: list existing sessions, or create the first one.
@@ -279,7 +642,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         activeId = first.id;
         ctx.render.bind(first.store);
         ctx.notifySwitch({ id: first.id });
-        paintActive();
+        syncChrome();
         focusInput();
       }
 
@@ -292,6 +655,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         },
         teardown() {
           offStatus?.();
+          if (pollTimer !== null) {
+            clearInterval(pollTimer);
+          }
+          clearCatchup();
+          closeOverview();
           for (const t of tabList) {
             t.aria.remove();
             t.el.remove();
@@ -299,8 +667,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           tabList.length = 0;
           bar.remove();
           newBtn.remove();
+          switcher.remove();
+          sheet.remove();
+          scrim.remove();
+          catchup.remove();
         },
       };
     },
   };
+}
+
+// pick returns a required descendant element or throws (static chrome only).
+function pick(root: ParentNode, selector: string): HTMLElement {
+  const el = root.querySelector<HTMLElement>(selector);
+  if (!el) {
+    throw new Error(`web-terminal-ui: tabs chrome missing ${selector}`);
+  }
+  return el;
 }
