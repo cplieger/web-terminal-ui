@@ -204,6 +204,7 @@
   left: 0;
   right: 0;
   display: flex;
+  align-items: center;
   gap: 2px;
   padding: var(--sp-1);
   background: var(--surface);
@@ -238,28 +239,31 @@
   text-overflow: ellipsis;
 }
 
-.wt-tab-close {
-  background: transparent;
-  border: none;
-  color: inherit;
-  cursor: pointer;
-  padding: 0 var(--sp-1);
-  border-radius: var(--radius-inner);
-  opacity: 0.6;
-}
-
-.wt-tab-close:hover {
-  opacity: 1;
-}
-
+/* The tab close (×) and the add-tab (+) button share one look: a centered,
+   muted square glyph button that shows a box on hover like an active tab. Same
+   size and color so they read as a matched pair (and the + centers vertically
+   in the strip via the shared flex box + the bar's align-items: center). */
+.wt-tab-close,
 .wt-tab-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.375rem;
+  height: 1.375rem;
+  padding: 0;
   background: transparent;
   border: none;
-  color: var(--text);
-  cursor: pointer;
-  font-size: 1.1rem;
-  padding: 0 var(--sp-2);
   border-radius: var(--radius-inner);
+  color: color-mix(in oklch, var(--text) 60%, transparent);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wt-tab-close:hover,
+.wt-tab-new:hover {
+  background: var(--text-active);
+  color: var(--text);
 }
 
 /* Push the terminal surface below the fixed tab strip so it does not overlap
@@ -357,8 +361,12 @@
     display var(--dur-standard) allow-discrete;
 }
 
-.wt-animate .wt-tab {
-  transition: background-color var(--dur-micro) var(--ease-standard);
+.wt-animate .wt-tab,
+.wt-animate .wt-tab-close,
+.wt-animate .wt-tab-new {
+  transition:
+    background-color var(--dur-micro) var(--ease-standard),
+    color var(--dur-micro) var(--ease-standard);
 }
 
 /* ===== Mobile bottom-switcher (tabs feature, section 12) =====

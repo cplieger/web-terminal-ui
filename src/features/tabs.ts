@@ -50,6 +50,11 @@ interface Tab {
   aria: TabHandle;
   scrollTop: number;
   following: boolean;
+  /** A title derived from the first line the user submitted into this tab, used
+   *  in preference to the process window title (kiro-cli's OSC 0 title is only
+   *  the cwd for a live session, so it never reflects the conversation).
+   *  Undefined until the first non-empty, non-slash submission. */
+  derived?: string;
 }
 
 export interface TabsApi {
@@ -218,20 +223,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let hintShown = false;
       let tabSeq = 0; // monotonic source for the "Tab N" fallback number
 
-      // labelFor is a tab's base label before de-duplication: the server title
-      // (the OSC 0/2 window title the process set, e.g. kiro-cli's
-      // "kiro: <first message>" when chat.terminalTitle is on) when present,
-      // else a stable "Tab N". This is the fix for every tab reading "terminal":
-      // a real title flows through, and untitled tabs are numbered, not generic.
+      // labelFor is a tab's base label before de-duplication. Preference order:
+      // the title derived from the user's first submitted line (best for a chat
+      // like kiro-cli, whose OSC 0 title only ever reflects the cwd for a live
+      // session), then the process window title (OSC 0/2, e.g. a shell's), then
+      // a stable "Tab N". This fixes both the generic "terminal" label and the
+      // static "kiro: /workspace" one: a tab now names itself from what you type.
       function labelFor(tab: Tab): string {
-        return tab.title.trim() || `Tab ${String(tab.num)}`;
+        // derived is only ever set to a non-empty value, so ?? and || agree on
+        // it; the || on the (possibly empty) window title falls through to "Tab N".
+        return (tab.derived?.trim() ?? tab.title.trim()) || `Tab ${String(tab.num)}`;
       }
 
       // relabelAll recomputes every tab's display label with de-duplication:
-      // when two tabs resolve to the same base label (fresh vibecli tabs share
-      // the cwd-derived title until their first message gives each a distinct
-      // one), the second and later get a " (k)" suffix in creation order, so the
-      // strip never shows two identical labels.
+      // when two tabs resolve to the same base label (e.g. two tabs whose first
+      // submitted line was identical, or two shells with the same window title),
+      // the second and later get a " (k)" suffix in creation order, so the strip
+      // never shows two identical labels.
       function relabelAll(): void {
         const counts = new Map<string, number>();
         for (const t of tabList) {
@@ -252,6 +260,71 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           t.display = display;
           t.label.textContent = display;
           t.aria.setLabel(display);
+        }
+      }
+
+      // --- Title derivation from the user's first submitted line ---
+      // kiro-cli's OSC 0 title is only the cwd for a live session (it reloads its
+      // session title just when the session id changes, not per turn), so the
+      // useful, updating title for a chat is the user's first message. The kernel
+      // routes input to the active session, so an input observer's bytes belong
+      // to activeId. A tiny line editor tracks the current input line (handling
+      // backspace and skipping the escape sequences arrow keys and bracketed
+      // paste emit) and locks the tab's title on the first non-empty, non-slash
+      // submission. Best-effort: an odd editing sequence just yields no derived
+      // title, falling back to the window title or "Tab N".
+      const MAX_DERIVED = 60;
+      let lineBytes: number[] = [];
+      let escState = 0; // 0 normal, 1 saw ESC, 2 in CSI, 3 in SS3 (one more byte)
+      function resetInputLine(): void {
+        lineBytes = [];
+        escState = 0;
+      }
+      function deriveTitleFromInput(bytes: Uint8Array): void {
+        const t = tabList.find((x) => x.id === activeId);
+        if (!t || t.derived !== undefined) {
+          return; // no active tab, or its first submission is already captured
+        }
+        for (const b of bytes) {
+          if (escState === 1) {
+            escState = b === 0x5b ? 2 : b === 0x4f ? 3 : 0; // ESC [ = CSI, ESC O = SS3
+            continue;
+          }
+          if (escState === 2) {
+            if (b >= 0x40 && b <= 0x7e) {
+              escState = 0; // CSI final byte
+            }
+            continue;
+          }
+          if (escState === 3) {
+            escState = 0; // SS3 final byte
+            continue;
+          }
+          if (b === 0x1b) {
+            escState = 1; // ESC: start of an escape sequence
+          } else if (b === 0x0d || b === 0x0a) {
+            const line = new TextDecoder().decode(new Uint8Array(lineBytes)).trim();
+            lineBytes = [];
+            if (line && !line.startsWith("/")) {
+              t.derived = line.slice(0, MAX_DERIVED);
+              syncChrome();
+              return;
+            }
+          } else if (b === 0x7f || b === 0x08) {
+            // Backspace: drop one codepoint (pop UTF-8 continuation bytes + lead).
+            while (lineBytes.length > 0) {
+              const last = lineBytes[lineBytes.length - 1];
+              if (last === undefined || (last & 0xc0) !== 0x80) {
+                break;
+              }
+              lineBytes.pop();
+            }
+            lineBytes.pop();
+          } else if (b === 0x03) {
+            lineBytes = []; // Ctrl-C: cancel the current line
+          } else if (b >= 0x20) {
+            lineBytes.push(b); // printable ASCII or a UTF-8 byte
+          }
         }
       }
 
@@ -424,6 +497,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // rebuild viewport-first, so the last-known screen paints with no
         // round-trip. Then let the kernel reconnect the WS to it (resume delta).
         activeId = next.id;
+        resetInputLine(); // a partial line typed in the old tab does not carry over
         ctx.render.bind(next.store);
         ctx.notifySwitch({ id: next.id });
         armCatchup();
@@ -438,7 +512,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             surface.scrollTop = savedTop;
           }
         });
-        ctx.announce(`Switched to ${next.title}`);
+        ctx.announce(`Switched to ${next.display}`);
         focusInput();
       }
 
@@ -616,6 +690,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // --- Event wiring ---
+      // Derive each tab's title from the first line the user submits into it.
+      const offInput = ctx.registerInputObserver(deriveTitleFromInput);
       newBtn.addEventListener("click", () => {
         void create();
       });
@@ -722,10 +798,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           create,
           close: close_,
           switchTo,
-          list: () => tabList.map((t) => ({ id: t.id, title: t.title, active: t.id === activeId })),
+          list: () =>
+            tabList.map((t) => ({ id: t.id, title: t.display, active: t.id === activeId })),
         },
         teardown() {
           offStatus?.();
+          offInput();
           if (pollTimer !== null) {
             clearInterval(pollTimer);
           }
