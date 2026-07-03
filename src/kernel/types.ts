@@ -195,11 +195,19 @@ export interface TerminalContext {
   /** The kernel's tablist/tabpanel ARIA controller (used by tabs). */
   tablist(): TablistController;
 
-  /** Announce a completed tab switch. tabs performs the reconnect swap then
-   *  calls this; the kernel invokes every feature's onSwitch (ordered, before
-   *  input resumes) and then emits session:switch for pure observers (section
-   *  22.4). Updates the active session the SessionView reports. */
+  /** Switch the live terminal to a session. tabs binds the renderer to the
+   *  session's cached store (ctx.render.bind) first, then calls this; the kernel
+   *  reconnects the terminal WS to that session (connection.setSession, using
+   *  its per-tab resume state), invokes every feature's onSwitch (ordered,
+   *  before input resumes), and emits session:switch for pure observers
+   *  (sections 5, 22.4). Updates the active session the SessionView reports.
+   *  This is how tabs drives the reconnect-on-switch swap without touching the
+   *  raw connection layer (section 22.9). */
   notifySwitch(session: SessionRef): void;
+  /** Drop a session's per-tab resume state (on tab close), so its outbox and
+   *  byte counters are released. The kernel routes this to the connection
+   *  layer; features never touch it directly. */
+  dropSession(id: string): void;
 
   /** Observe feature errors (a feature's runtime callback threw). */
   onError(fn: (feature: string, err: unknown) => void): Unsubscribe;

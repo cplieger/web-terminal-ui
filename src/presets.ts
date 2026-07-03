@@ -13,6 +13,9 @@ import { scrollToBottom } from "./features/scroll-to-bottom.js";
 import { predictiveEcho } from "./features/predictive-echo.js";
 import { connectionBanner } from "./features/connection-banner.js";
 import { mobileToolbar } from "./features/mobile-toolbar.js";
+import { tabs } from "./features/tabs.js";
+import { activityMonitor } from "./features/activity-monitor.js";
+import { animations } from "./features/animations.js";
 
 /** Single-pane desktop UI: context menu, clipboard, scroll-to-bottom, predictive
  *  echo, and the connection banner. No mobile toolbar, no tabs. */
@@ -26,4 +29,12 @@ export function presetSingle(): TerminalFeature<unknown>[] {
 /** Touch-first UI: presetSingle plus the on-screen key toolbar. */
 export function presetTouch(): TerminalFeature<unknown>[] {
   return [...presetSingle(), mobileToolbar()];
+}
+
+/** Full reference UI: presetTouch plus tabs, the activity monitor, and
+ *  animations. activityMonitor is ordered before tabs because tabs reads its
+ *  API via ctx.use during setup (to wire status dots). */
+export function presetTabbed(): TerminalFeature<unknown>[] {
+  const monitor = activityMonitor();
+  return [...presetTouch(), monitor, tabs({ activityMonitor: monitor }), animations()];
 }
