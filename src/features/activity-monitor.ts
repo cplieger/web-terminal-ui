@@ -20,7 +20,9 @@ export interface ActivityMonitorApi {
   current(id: string): SessionStatus | undefined;
 }
 
-export function activityMonitor(opts: { eventsPath?: string } = {}): TerminalFeature<ActivityMonitorApi> {
+export function activityMonitor(
+  opts: { eventsPath?: string } = {},
+): TerminalFeature<ActivityMonitorApi> {
   return {
     name: "activityMonitor",
     setup() {

@@ -63,7 +63,10 @@ function pick(root: ParentNode, selector: string): HTMLElement {
   return el;
 }
 
-export function createTerminal(root: HTMLElement, opts: CreateTerminalOptions = {}): TerminalHandle {
+export function createTerminal(
+  root: HTMLElement,
+  opts: CreateTerminalOptions = {},
+): TerminalHandle {
   const wsPath = opts.wsPath ?? DEFAULT_WS_PATH;
   const fontReady = opts.fontReady ?? DEFAULT_FONT_READY;
   const featureList = opts.features ?? [];

@@ -283,8 +283,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           create,
           close: close_,
           switchTo,
-          list: () =>
-            tabList.map((t) => ({ id: t.id, title: t.title, active: t.id === activeId })),
+          list: () => tabList.map((t) => ({ id: t.id, title: t.title, active: t.id === activeId })),
         },
         teardown() {
           offStatus?.();
