@@ -144,6 +144,11 @@ export interface TerminalContext {
   /** Mount chrome into a named kernel region; DOM order in a region equals
    *  visual order. Returns a live element the feature appends into. */
   region(name: RegionName, slot?: RegionSlot): HTMLElement;
+  /** The terminal scroll surface, for features that attach surface-level
+   *  gestures (contextMenu right-click / long-press, the tabs swipe) or scope a
+   *  selection to the output. Read-only use; features own only their region
+   *  chrome (section 22.9, single-operator trust). */
+  surface(): HTMLElement;
 
   /** The single sanitizing, session-routed input path: bracket, strip control
    *  bytes, normalize NBSP, apply the col-0 backspace brake. Features never
@@ -210,8 +215,10 @@ export interface TerminalFeature<Api = void> {
   setup(ctx: TerminalContext): FeatureInstance<Api> | Promise<FeatureInstance<Api>>;
   /** Populated by the kernel after setup with the instance's api, so a consumer
    *  holding the feature value can read it (e.g. `tabs.api?.create()`). Read
-   *  it lazily; it is undefined until the kernel has run this feature's setup. */
-  api?: Api;
+   *  it lazily; it is undefined until the kernel has run this feature's setup.
+   *  Readonly so a feature is covariant in Api (a TerminalFeature<X> is a
+   *  TerminalFeature<unknown>); the kernel sets it through a narrow cast. */
+  readonly api?: Api;
 }
 
 /** What a feature's setup returns: its optional typed API, a teardown, and an

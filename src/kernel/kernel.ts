@@ -504,6 +504,7 @@ export function createTerminal(root: HTMLElement, opts: CreateTerminalOptions = 
   function makeContext(featureName: string): TerminalContext {
     return {
       region: (name, slot) => regions.region(name, slot),
+      surface: () => termWrap,
       send: sendBytes,
       paste,
       registerInputTransform(fn) {
@@ -604,9 +605,9 @@ export function createTerminal(root: HTMLElement, opts: CreateTerminalOptions = 
       try {
         const instance = await feature.setup(makeContext(feature.name));
         instances.push({ feature, instance });
-        // Populate the feature value's api (consumer pattern: tabs.api?.create())
-        // and the ctx.use lookup map.
-        feature.api = instance.api;
+        // Populate the feature value's readonly api (consumer pattern:
+        // tabs.api?.create()) via a narrow cast, and the ctx.use lookup map.
+        (feature as { api?: unknown }).api = instance.api;
         apiMap.set(feature, instance.api);
       } catch (err) {
         // Fail fast: roll back the already-set-up features in reverse and
