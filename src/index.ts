@@ -30,8 +30,3 @@ export type {
   TabHandle,
   Unsubscribe,
 } from "./kernel/types.js";
-
-// The legacy single-instance entry. Retained for consumers still on mount(root)
-// until they migrate to createTerminal; removed in the final v3 cutover.
-export { mount } from "./mount.js";
-export type { MountOptions, TerminalUI } from "./mount.js";
