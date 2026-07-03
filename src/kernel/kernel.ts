@@ -566,12 +566,18 @@ export function createTerminal(root: HTMLElement, opts: CreateTerminalOptions = 
       tablist: () => tablistController,
       notifySwitch(session) {
         activeSession = session;
+        // Reconnect the terminal WS to this session using its per-tab resume
+        // state; the renderer was already pointed at its store by tabs.
+        connection.setSession(session.id);
         for (const { instance } of instances) {
           if (instance.onSwitch) {
             instance.onSwitch(session);
           }
         }
         bus.emit("session:switch", session);
+      },
+      dropSession(id) {
+        connection.forgetSession(id);
       },
       onError(fn) {
         errorHandlers.add(fn);
