@@ -13,7 +13,7 @@
 // Single-instance per page: the module holds the one terminal's DOM refs and
 // state, matching a terminal-per-page model. Call mount() exactly once.
 
-import { render, keyboard, scroll, connection } from "@cplieger/web-terminal-engine";
+import { render, keyboard, scroll, connection, modes } from "@cplieger/web-terminal-engine";
 import * as viewport from "./viewport.js";
 import * as composition from "./composition.js";
 import * as status from "./status.js";
@@ -237,7 +237,7 @@ function handleKeydown(ev: KeyboardEvent): void {
     }
   }
 
-  const result = mapKeyboardEvent(ev);
+  const result = mapKeyboardEvent(ev, modes);
   switch (result.kind) {
     case "send":
       ev.preventDefault();
