@@ -125,6 +125,36 @@ describe("contextMenu Paste (iOS paste fix)", () => {
     expect(pasteButton(root)).toBeTruthy();
   });
 
+  it("opens above the finger when the anchor is near the bottom (not clipped/under the touch)", async () => {
+    const root = rootIn();
+    const clip = fakeClipboard();
+    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    await tick();
+
+    const menu = root.querySelector<HTMLElement>(".wt-ctx-menu");
+    expect(menu).toBeTruthy();
+    if (!menu) {
+      return;
+    }
+    // happy-dom has no layout, so give the menu a measurable size.
+    Object.defineProperty(menu, "offsetHeight", { configurable: true, value: 200 });
+    Object.defineProperty(menu, "offsetWidth", { configurable: true, value: 160 });
+
+    const vv = window.visualViewport;
+    const viewTop = vv ? vv.offsetTop : 0;
+    const viewBottom = viewTop + (vv ? vv.height : window.innerHeight);
+    const y = viewBottom - 20; // a long-press near the bottom edge
+
+    root
+      .querySelector<HTMLElement>(".term")
+      ?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: y }));
+
+    const top = parseFloat(menu.style.top);
+    expect(top).toBeLessThan(y); // opened above the tap
+    expect(top + 200).toBeLessThanOrEqual(y); // its bottom edge is above the finger
+    expect(top).toBeGreaterThanOrEqual(viewTop); // still on-screen
+  });
+
   it("omits Paste when no clipboard feature is present", async () => {
     const root = rootIn();
     term = createTerminal(root, { features: [contextMenu()] });
