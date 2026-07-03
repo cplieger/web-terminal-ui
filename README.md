@@ -134,6 +134,12 @@ Consumers that ship this UI:
 - [`vibekit`](https://github.com/cplieger/vibekit)
 - [`vibecli`](https://github.com/cplieger/vibecli)
 
+## Disclaimer
+
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
+
+This project was built with AI-assisted tooling using [Claude Opus](https://www.anthropic.com/claude) and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
+
 ## License
 
 GPL-3.0-or-later. See `LICENSE`.
