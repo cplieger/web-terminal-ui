@@ -245,8 +245,16 @@ export interface FeatureInstance<Api = void> {
   readonly api?: Api;
   /** Remove this feature's DOM and listeners. Run in reverse order on destroy. */
   teardown(): void;
-  /** Called by the kernel on a tab switch, for features that must re-point
-   *  before input resumes (session:switch on the bus is for pure observers). */
+  /** Called by the kernel at the START of a tab switch (detach), before the
+   *  connection is re-pointed at the incoming session, for features holding
+   *  latched input state that must not fire against the next session: the mobile
+   *  toolbar disarms its one-shot sticky-Ctrl here so a pending Ctrl cannot
+   *  become an accidental Ctrl+C to the wrong agent (design 5.1). Runs for every
+   *  feature before any onSwitch. */
+  onDetach?(): void;
+  /** Called by the kernel on a tab switch (attach), after the connection is
+   *  re-pointed, for features that must re-point before input resumes
+   *  (session:switch on the bus is for pure observers). */
   onSwitch?(session: SessionRef): void;
 }
 
