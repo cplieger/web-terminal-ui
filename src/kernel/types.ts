@@ -267,6 +267,3 @@ export interface TerminalHandle {
    *  release the kernel's DOM and engine wiring. */
   destroy(): void;
 }
-
-/** Re-export the LineStore type for features (tabs) that hold per-tab caches. */
-export type { LineStore };

@@ -5,8 +5,12 @@
   "description": "Reference touch-first browser UI for @cplieger/web-terminal-engine: textarea input model, mobile key toolbar, context menu, IME, predictive echo, viewport/keyboard-inset handling, and CSS. One mount() call.",
   "license": "GPL-3.0-or-later",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./presets": "./src/presets.ts"
   },
+  "sideEffects": [
+    "**/*.css"
+  ],
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsgo -p tsconfig.json",
