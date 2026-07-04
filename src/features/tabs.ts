@@ -54,6 +54,10 @@ interface SessionInfo {
   title: string;
   createdAt: string;
   status: string;
+  /** Sticky: true once the session has emitted a genuine activity signal
+   *  (OSC 9;4 progress, or a classified OSC 9 notification). Gates whether the
+   *  per-tab activity dot is shown; see paintStatusDot / baseLabel. */
+  reportsActivity?: boolean;
 }
 
 interface Tab {
@@ -72,10 +76,18 @@ interface Tab {
   aria: TabHandle;
   scrollTop: number;
   following: boolean;
-  /** A title derived from the first line the user submitted into this tab, used
-   *  in preference to the process window title (kiro-cli's OSC 0 title is only
-   *  the cwd for a live session, so it never reflects the conversation).
-   *  Undefined until the first non-empty, non-slash submission. */
+  /** Sticky: true once this session emitted a genuine activity signal (OSC 9;4).
+   *  Its activity dot is shown only while true; a session that never reports
+   *  activity (a plain shell) keeps a clean, dot-less tab. Fed from the server's
+   *  reportsActivity via applyStatus. */
+  reports: boolean;
+  /** A fallback title derived from the LAST non-empty line the user submitted
+   *  into this tab (updated on every Enter). Used only when the process sets no
+   *  window title of its own: the OSC 0/2 title (`title` above) takes precedence
+   *  when present and keeps updating, and this is what the tab reads as when it
+   *  does not — a plain shell with no PROMPT_COMMAND title, or kiro-cli with its
+   *  cwd-only title disabled. Undefined until the first non-empty submission; see
+   *  baseLabel. */
   derived?: string;
 }
 
@@ -291,14 +303,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       });
       swReserve.observe(swBar);
 
-      // Activity dots are opt-in: shown only when a status source
-      // (activityMonitor) is wired, so a generic bash/sh terminal gets clean,
-      // label-only tabs. CSS hides .wt-status-dot unless its container carries
-      // .wt-status; the agent consumer (vibecli) provides the monitor.
-      if (monitor) {
-        bar.classList.add("wt-status");
-        switcher.classList.add("wt-status");
-      }
+      // Activity dots are revealed PER TAB, not chrome-wide: each dot stays
+      // hidden (CSS: .wt-status-dot { display: none }) until its session reports
+      // activity (OSC 9;4 progress or a classified OSC 9 notification), at which
+      // point paintStatusDot adds .wt-reports to reveal it (see applyStatus /
+      // syncMobile / updateRow). A program that emits no OSC 9 signal (a plain
+      // bash/sh) keeps clean, label-only tabs; an agent's tabs light up. The
+      // monitor (below) is the live source; without it the poll fallback feeds
+      // the same reportsActivity flag.
 
       // Catching-up cue: a switched-into tab's cached screen is stale until its
       // resume delta lands, so it must not read as live (sections 12/13). Shown
@@ -354,19 +366,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
       // baseLabel is a tab's label before de-duplication. Preference order: the
-      // title derived from the user's first submitted line (best for a chat like
-      // kiro-cli, whose OSC 0 title only ever reflects the cwd for a live
-      // session), then the process window title (OSC 0/2, e.g. a shell's), then a
-      // plain "New tab". fallback=true marks that last case so relabelAll leaves
+      // process window title (OSC 0/2, e.g. a shell's PROMPT_COMMAND title),
+      // which takes precedence whenever the program sets one and keeps updating
+      // as it changes (the status SSE re-pushes it); then a fallback derived from
+      // the last line the user submitted, for a program that sets no title (a
+      // bare shell, or kiro-cli with its cwd-only title disabled); then a plain
+      // "New tab". fallback=true marks that last case so relabelAll leaves
       // untitled tabs as "New tab" with no numeric suffix.
       function baseLabel(tab: Tab): { text: string; fallback: boolean } {
-        const real = tab.derived?.trim() ?? tab.title.trim();
+        const real = tab.title.trim() || (tab.derived?.trim() ?? "");
         return real ? { text: real, fallback: false } : { text: "New tab", fallback: true };
       }
 
       // relabelAll recomputes every tab's display label with de-duplication:
-      // when two tabs resolve to the same base label (e.g. two tabs whose first
-      // submitted line was identical, or two shells with the same window title),
+      // when two tabs resolve to the same base label (e.g. two shells with the
+      // same window title, or two tabs whose last submitted line was identical),
       // the second and later get a " (k)" suffix in creation order, so the strip
       // never shows two identical labels.
       function relabelAll(): void {
@@ -396,16 +410,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // --- Title derivation from the user's first submitted line ---
-      // kiro-cli's OSC 0 title is only the cwd for a live session (it reloads its
-      // session title just when the session id changes, not per turn), so the
-      // useful, updating title for a chat is the user's first message. The kernel
-      // routes input to the active session, so an input observer's bytes belong
-      // to activeId. A tiny line editor tracks the current input line (handling
-      // backspace and skipping the escape sequences arrow keys and bracketed
-      // paste emit) and locks the tab's title on the first non-empty, non-slash
-      // submission. Best-effort: an odd editing sequence just yields no derived
-      // title, falling back to the window title or "Tab N".
+      // --- Fallback title derivation from the user's submitted lines ---
+      // Used only when the process sets no OSC window title of its own (baseLabel
+      // prefers tab.title). A shell without a PROMPT_COMMAND title, or kiro-cli
+      // with its cwd-only title disabled, sets none — so the useful fallback is
+      // the last line the user submitted. The kernel routes input to the active
+      // session, so an input observer's bytes belong to activeId. A tiny line
+      // editor tracks the current input line (handling backspace and skipping
+      // the escape sequences arrow keys and bracketed paste emit) and updates the
+      // tab's derived title on every non-empty submission. Best-effort: an odd
+      // editing sequence just yields no derived title (the tab then reads "New
+      // tab" until the next submission).
       const MAX_DERIVED = 60;
       let lineBytes: number[] = [];
       let escState = 0; // 0 normal, 1 saw ESC, 2 in CSI, 3 in SS3 (one more byte)
@@ -415,8 +430,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
       function deriveTitleFromInput(bytes: Uint8Array): void {
         const t = tabList.find((x) => x.id === activeId);
-        if (!t || t.derived !== undefined) {
-          return; // no active tab, or its first submission is already captured
+        if (!t) {
+          return; // no active tab
         }
         for (const b of bytes) {
           if (escState === 1) {
@@ -438,10 +453,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           } else if (b === 0x0d || b === 0x0a) {
             const line = new TextDecoder().decode(new Uint8Array(lineBytes)).trim();
             lineBytes = [];
-            if (line && !line.startsWith("/")) {
+            // Every non-empty submitted line updates the fallback title (the
+            // last one wins); a leading "/" counts, since it is a valid shell
+            // command path.
+            if (line) {
               t.derived = line.slice(0, MAX_DERIVED);
               syncChrome();
-              return;
             }
           } else if (b === 0x7f || b === 0x08) {
             // Backspace: drop one codepoint (pop UTF-8 continuation bytes + lead).
@@ -482,7 +499,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const idx = tabList.findIndex((t) => t.id === activeId);
         const active = idx >= 0 ? tabList[idx] : undefined;
         swLabel.textContent = active ? active.display : "";
-        swDot.dataset["status"] = active?.dot.dataset["status"] ?? "idle";
+        paintStatusDot(swDot, active?.dot.dataset["status"] ?? "idle", active?.reports ?? false);
         const bgInput = tabList.some(
           (t) => t.id !== activeId && t.dot.dataset["status"] === "input",
         );
@@ -512,7 +529,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
       // updateRow refreshes a reused row's live bits (status dot + label).
       function updateRow(row: HTMLElement, t: Tab): void {
-        pick(row, ".wt-switcher-row-dot").dataset["status"] = t.dot.dataset["status"] ?? "idle";
+        paintStatusDot(
+          pick(row, ".wt-switcher-row-dot"),
+          t.dot.dataset["status"] ?? "idle",
+          t.reports,
+        );
         pick(row, ".wt-switcher-row-label").textContent = t.display;
       }
       // animateRowIn / animateRowOut give a listed tab an enter / leave motion:
@@ -813,7 +834,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!label || !dot || !close) {
           throw new Error("web-terminal-ui: tab chrome missing parts");
         }
-        dot.dataset["status"] = info.status || "idle";
+        paintStatusDot(dot, info.status, info.reportsActivity ?? false);
         const aria = tablist.registerTab(el);
         // Insert before the "+" button so it stays the last item in the strip.
         bar.insertBefore(el, newBtn);
@@ -839,6 +860,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           aria,
           scrollTop: 0,
           following: true,
+          reports: info.reportsActivity ?? false,
         };
         // Set an initial label immediately (relabelAll refines it with de-dup
         // once the tab is in tabList and syncChrome runs).
@@ -1017,6 +1039,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // The first screen frame after a switch is the resume delta landing.
       ctx.on("wire:screen", () => {
         clearCatchup();
+      });
+
+      // Live window-title updates for the active session: the engine sends a
+      // TITLE frame on the live socket whenever the process changes its OSC 0/2
+      // title, which the kernel republishes as wire:title. baseLabel prefers the
+      // OSC title, so applying it here updates the active tab's label at once
+      // rather than waiting for the next status-SSE/poll sweep (background tabs,
+      // which have no live socket, still refresh their title from that sweep).
+      ctx.on("wire:title", ({ session, title }) => {
+        const t = tabList.find((x) => x.id === session);
+        if (t && title !== t.title) {
+          t.title = title;
+          syncChrome();
+        }
       });
 
       // switchRelative moves delta tabs from the active one (swipe left = next).
@@ -1334,14 +1370,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ctx.toast("Swipe to switch terminals");
       }
 
-      // applyStatus updates one tab's dot + title from a status record (shared by
-      // the SSE monitor and the polling fallback).
-      function applyStatus(id: string, status: string, title: string | undefined): void {
+      // applyStatus updates one tab's dot (status + reveal) + title from a status
+      // record (shared by the SSE monitor and the polling fallback). reports is
+      // the server's sticky reportsActivity flag; it gates the dot's visibility.
+      function applyStatus(
+        id: string,
+        status: string,
+        title: string | undefined,
+        reports: boolean,
+      ): void {
         const t = tabList.find((tab) => tab.id === id);
         if (!t) {
           return;
         }
-        t.dot.dataset["status"] = status || "idle";
+        t.reports = reports;
+        paintStatusDot(t.dot, status, reports);
         // Record the raw server title; the displayed label (fallback + de-dup)
         // is recomputed by relabelAll via syncChrome, which the callers run
         // right after applyStatus.
@@ -1363,8 +1406,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             return;
           }
           // Adopt a session created in another browser so all clients converge.
-          adoptSession({ id: s.id, title: s.title, createdAt: s.createdAt, status: s.status });
-          applyStatus(s.id, s.status, s.title);
+          adoptSession({
+            id: s.id,
+            title: s.title,
+            createdAt: s.createdAt,
+            status: s.status,
+            reportsActivity: s.reportsActivity ?? false,
+          });
+          applyStatus(s.id, s.status, s.title, s.reportsActivity ?? false);
           syncChrome();
         });
       } else {
@@ -1379,7 +1428,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           const seen = new Set(list.map((s) => s.id));
           for (const info of list) {
             adoptSession(info); // add sessions created elsewhere (no local tab)
-            applyStatus(info.id, info.status, info.title);
+            applyStatus(info.id, info.status, info.title, info.reportsActivity ?? false);
           }
           // A tab the server no longer lists was reaped/closed elsewhere: drop it
           // locally (no DELETE — it is already gone).
@@ -1926,6 +1975,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       };
     },
   };
+}
+
+// paintStatusDot applies a status dot's two orthogonal bits: data-status drives
+// its appearance (idle / working / done / input / exited via CSS), and the
+// .wt-reports class controls its visibility — the dot is hidden by default and
+// shown only once the session has reported activity (OSC 9;4 progress or a
+// classified OSC 9 notification), so a plain shell's tabs stay clean and
+// label-only while an agent's light up.
+function paintStatusDot(el: HTMLElement, status: string, reports: boolean): void {
+  el.dataset["status"] = status || "idle";
+  el.classList.toggle("wt-reports", reports);
 }
 
 // pick returns a required descendant element or throws (static chrome only).
