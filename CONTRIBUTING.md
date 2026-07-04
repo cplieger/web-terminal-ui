@@ -17,14 +17,13 @@ The package is a thin UI layer over the engine. The engine owns the VT screen
 buffer, the wire protocol, rendering, scrolling, and the WebSocket/resume
 lifecycle; this package owns the input model and chrome.
 
-- `mount.ts` — the entry. Builds the terminal subtree inside the host-provided
-  root element, picks its DOM refs by class, initializes the engine layers
-  (`render` / `scroll` / `connection`) and the local modules, and wires every
-  listener: textarea input + keydown, tap-to-focus
-  (pointerup-based to stay inside iOS's user-gesture window), the context menu,
-  the mobile key toolbar, sticky-Ctrl, font-load + viewport resize, and the
-  visibility/pageshow/online reconnect hooks. `mount(root, opts)` is the only public
-  export.
+- `kernel/kernel.ts` — the entry (`createTerminal`). Builds the kernel subtree
+  plus each listed feature's chrome inside the host root, initializes the engine
+  layers (`render` / `scroll` / `connection`), and wires every listener: textarea
+  input + keydown, tap-to-focus (pointerup-based to stay inside iOS's user-gesture
+  window), and the visibility/pageshow/online reconnect hooks. `createTerminal(root, opts)`
+  is the only public export; features live in `features/` and bundles in
+  `presets.ts`.
 - `composition.ts` — IME / composition (`compositionstart/update/end` + native
   `paste`). Mirrors xterm.js's CompositionHelper; the deferred read at
   `compositionend` is the Chromium-correctness workaround.
@@ -35,14 +34,14 @@ lifecycle; this package owns the input model and chrome.
   now have unit tests too.
 - `viewport.ts` — coalesces iOS keyboard transitions, resizes, font-load
   reflows, and `ResizeObserver` fires into one transition→settle lifecycle.
-- `status.ts` — the connection-state banner and the transient toast.
 - `input-placeholder.ts` — the invisible NBSP placeholder constant
   (`INPUT_PLACEHOLDER`) and its `resetToPlaceholder()` helper, shared by
-  `mount.ts` and `composition.ts` so the iOS held-Backspace key-repeat
+  the kernel and `composition.ts` so the iOS held-Backspace key-repeat
   workaround stays in lockstep across both.
 
-The public API is whatever `src/index.ts` re-exports — currently `mount` plus
-its `MountOptions` / `TerminalUI` types. Keep the README's API section in sync.
+The public API is whatever `src/index.ts` re-exports, currently `createTerminal`
+plus its `CreateTerminalOptions` / `TerminalHandle` / `TerminalFeature` /
+`TerminalContext` types (presets from `./presets`). Keep the README's API section in sync.
 
 ### The input-model contract (protect this)
 

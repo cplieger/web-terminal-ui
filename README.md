@@ -105,6 +105,7 @@ individual features instead:
 | `wsPath`    | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                              |
 | `fontReady` | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                  |
 | `loading`   | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders. |
+| `theme`     | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`. The library ships neutral defaults. |
 
 `createTerminal()` returns a handle: `focus()` re-focuses the terminal input
 (and opens the soft keyboard on touch), and `destroy()` tears every feature down
