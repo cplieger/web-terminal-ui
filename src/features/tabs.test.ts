@@ -48,6 +48,31 @@ function fakeMonitor(): {
   };
 }
 
+// A fake activityMonitor that delivers a status snapshot synchronously when
+// tabs subscribes (onStatus), mimicking the server pushing the existing
+// sessions on SSE open before the initial GET /api/sessions resolves. This is
+// the ordering that used to duplicate every session (the list loop re-added the
+// already-adopted tabs).
+function snapshotMonitor(snapshot: readonly SessionStatus[]): TerminalFeature<ActivityMonitorApi> {
+  return {
+    name: "activityMonitor",
+    setup() {
+      return {
+        api: {
+          onStatus(cb) {
+            for (const s of snapshot) {
+              cb(s);
+            }
+            return () => undefined;
+          },
+          current: () => undefined,
+        },
+        teardown: () => undefined,
+      };
+    },
+  };
+}
+
 const setSession = vi.fn<(id: string) => void>();
 const forgetSession = vi.fn<(id: string) => void>();
 const bind = vi.fn();
@@ -112,7 +137,7 @@ const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
   if (method === "DELETE") {
     return Promise.resolve(jsonResponse(null, 204));
   }
-  return Promise.resolve(jsonResponse(listBody));
+  return Promise.resolve(jsonResponse(listBody, 200));
 });
 
 beforeEach(async () => {
@@ -189,7 +214,7 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s-new");
   });
 
-  it("renders the + button inside the tab strip, after the tabs", async () => {
+  it("renders the + button as the last item inside the tab strip", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, { features: [tabs()] });
@@ -197,13 +222,13 @@ describe("tabs feature", () => {
 
     const bar = root.querySelector(".wt-tab-bar");
     const newBtn = root.querySelector(".wt-tab-new");
-    const closeAll = root.querySelector(".wt-tab-closeall");
     expect(newBtn).toBeTruthy();
-    // Inside the flex strip (not a sibling of the fixed bar, which flowed it out
-    // of view), after the tabs, with the close-all button anchored last.
+    // The close-all bar button is gone (it moved to the right-click menu); the +
+    // is the last flex item in the strip, right after the tabs.
+    expect(root.querySelector(".wt-tab-closeall")).toBeNull();
     expect(bar?.contains(newBtn ?? null)).toBe(true);
+    expect(bar?.lastElementChild).toBe(newBtn);
     expect(newBtn?.previousElementSibling?.classList.contains("wt-tab")).toBe(true);
-    expect(bar?.lastElementChild).toBe(closeAll);
   });
 
   it("closes a tab on middle-click", async () => {
@@ -226,7 +251,165 @@ describe("tabs feature", () => {
     expect(deleted).toBe(true);
   });
 
-  it("closes every tab and opens a fresh one via close-all (confirmed)", async () => {
+  it("does not duplicate tabs when the status snapshot arrives before the initial list", async () => {
+    // The SSE snapshot adopts s1+s2 as tabs.setup subscribes, before the awaited
+    // GET /api/sessions (which also lists s1+s2) resolves. The list loop must
+    // dedup against the adopted tabs: a straight push doubled every session
+    // (4 tabs from 2) and painted two active (both copies of the active id).
+    const monitor = snapshotMonitor([
+      { id: "s1", status: "idle", title: "one", createdAt: "1" },
+      { id: "s2", status: "idle", title: "two", createdAt: "2" },
+    ]);
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [monitor, tabs({ activityMonitor: monitor })] });
+    await until(() => root.querySelectorAll(".wt-tab").length >= 2);
+    // Give the initial list loop a turn to (wrongly) add duplicates.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(root.querySelectorAll(".wt-tab").length).toBe(2);
+    expect(root.querySelectorAll(".wt-tab.wt-tab-active").length).toBe(1);
+  });
+
+  it("replaces the sole tab on close (spawns first, then drops) without emptying the strip", async () => {
+    listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+
+    fetchMock.mockClear();
+    // Close the only tab (middle-click). A fresh session is POSTed and the old
+    // one DELETEd; the strip keeps exactly one tab (the replacement) throughout.
+    root
+      .querySelector<HTMLElement>(".wt-tab")
+      ?.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    await until(() => fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") === "POST"));
+    await until(() =>
+      fetchMock.mock.calls.some(
+        (c) => (c[1]?.method ?? "GET") === "DELETE" && String(c[0]).endsWith("/s1"),
+      ),
+    );
+
+    expect(root.querySelectorAll(".wt-tab").length).toBe(1);
+    expect(root.querySelector(".wt-tab.wt-tab-active")).toBeTruthy();
+    // The replacement is the fresh session, not the closed one.
+    expect(root.querySelector(".wt-tab-label")?.textContent).toBe("New tab");
+  });
+
+  // --- Right-click tab context menu (round-4) ---
+  // openTabMenu right-clicks a tab and returns the menu's buttons (the "button"
+  // tag overload types these as HTMLButtonElement, so .disabled/.click() work).
+  function openTabMenu(root: HTMLElement, index: number): HTMLButtonElement[] {
+    const tab = root.querySelectorAll<HTMLElement>(".wt-tab")[index];
+    tab?.dispatchEvent(new MouseEvent("contextmenu", { clientX: 10, clientY: 10, bubbles: true }));
+    const menu = root.querySelector(".wt-tab-menu");
+    return menu ? [...menu.querySelectorAll("button")] : [];
+  }
+  function menuItem(items: HTMLButtonElement[], label: string): HTMLButtonElement | undefined {
+    return items.find((b) => b.textContent === label);
+  }
+  function wasDeleted(id: string): boolean {
+    return fetchMock.mock.calls.some(
+      (c) => (c[1]?.method ?? "GET") === "DELETE" && String(c[0]).endsWith(`/${id}`),
+    );
+  }
+
+  it("opens a right-click context menu on a tab with the five close actions", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const menu = root.querySelector(".wt-tab-menu");
+    expect(menu?.classList.contains("visible")).toBe(false);
+
+    const items = openTabMenu(root, 0);
+    expect(menu?.classList.contains("visible")).toBe(true);
+    expect(items.map((b) => b.textContent)).toEqual([
+      "Close",
+      "Close others",
+      "Close to the right",
+      "Close to the left",
+      "Close all",
+    ]);
+    // On the first of two tabs, "Close to the left" is disabled; the rest enabled.
+    expect(menuItem(items, "Close to the left")?.disabled).toBe(true);
+    expect(menuItem(items, "Close to the right")?.disabled).toBe(false);
+    expect(menuItem(items, "Close others")?.disabled).toBe(false);
+  });
+
+  it("disables 'Close to the right' on the last tab", async () => {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    const items = openTabMenu(root, 2);
+    expect(menuItem(items, "Close to the right")?.disabled).toBe(true);
+    expect(menuItem(items, "Close to the left")?.disabled).toBe(false);
+  });
+
+  it("closes all other tabs from the context menu (Close others)", async () => {
+    vi.stubGlobal("confirm", () => true);
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    fetchMock.mockClear();
+    // Right-click the middle tab (s2) and choose "Close others".
+    menuItem(openTabMenu(root, 1), "Close others")?.click();
+    // The closes are async (sequential DELETEs); wait for both to land.
+    await until(
+      () => fetchMock.mock.calls.filter((c) => (c[1]?.method ?? "GET") === "DELETE").length === 2,
+    );
+
+    expect(wasDeleted("s1")).toBe(true);
+    expect(wasDeleted("s3")).toBe(true);
+    expect(wasDeleted("s2")).toBe(false);
+    expect(root.querySelectorAll(".wt-tab").length).toBe(1);
+    // s2 is the survivor and becomes active.
+    expect(root.querySelector(".wt-tab-label")?.textContent).toBe("two");
+  });
+
+  it("closes tabs to the right from the context menu", async () => {
+    vi.stubGlobal("confirm", () => true);
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    fetchMock.mockClear();
+    // Right-click the first tab and choose "Close to the right" (closes s2, s3).
+    menuItem(openTabMenu(root, 0), "Close to the right")?.click();
+    // The closes are async (sequential DELETEs); wait for both to land.
+    await until(
+      () => fetchMock.mock.calls.filter((c) => (c[1]?.method ?? "GET") === "DELETE").length === 2,
+    );
+
+    expect(wasDeleted("s2")).toBe(true);
+    expect(wasDeleted("s3")).toBe(true);
+    expect(wasDeleted("s1")).toBe(false);
+    expect(root.querySelectorAll(".wt-tab").length).toBe(1);
+  });
+
+  it("closes every tab and opens a fresh one via 'Close all' (confirmed)", async () => {
     vi.stubGlobal("confirm", () => true);
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -234,7 +417,7 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
-    root.querySelector<HTMLElement>(".wt-tab-closeall")?.click();
+    menuItem(openTabMenu(root, 0), "Close all")?.click();
     // Both existing sessions are DELETEd and one fresh session is POSTed.
     await until(
       () =>
@@ -245,7 +428,7 @@ describe("tabs feature", () => {
     expect(root.querySelectorAll(".wt-tab").length).toBe(1);
   });
 
-  it("does not close tabs when close-all is not confirmed", async () => {
+  it("does not close tabs when 'Close all' is cancelled", async () => {
     vi.stubGlobal("confirm", () => false);
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -253,14 +436,13 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
-    root.querySelector<HTMLElement>(".wt-tab-closeall")?.click();
+    menuItem(openTabMenu(root, 0), "Close all")?.click();
     await new Promise((r) => setTimeout(r, 10));
     expect(root.querySelectorAll(".wt-tab").length).toBe(2);
-    const deleted = fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") === "DELETE");
-    expect(deleted).toBe(false);
+    expect(fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") === "DELETE")).toBe(false);
   });
 
-  it("labels tabs from the server title and numbers untitled ones", async () => {
+  it("labels tabs from the server title and shows 'New tab' for untitled ones", async () => {
     listBody = [
       { id: "s1", title: "kiro: fix bug", createdAt: "1", status: "idle" },
       { id: "s2", title: "", createdAt: "2", status: "idle" },
@@ -272,8 +454,23 @@ describe("tabs feature", () => {
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
     expect(labels[0]).toBe("kiro: fix bug");
-    // An untitled session gets a numbered fallback, never the old "terminal".
-    expect(labels[1]).toBe("Tab 2");
+    // An untitled session reads "New tab" (no "Tab N" number).
+    expect(labels[1]).toBe("New tab");
+  });
+
+  it("shows 'New tab' for every untitled tab, with no numeric suffix", async () => {
+    listBody = [
+      { id: "s1", title: "", createdAt: "1", status: "idle" },
+      { id: "s2", title: "", createdAt: "2", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
+    // Fallback labels are not de-duplicated, so both stay plain "New tab".
+    expect(labels).toEqual(["New tab", "New tab"]);
   });
 
   it("de-duplicates identical tab titles with a numeric suffix", async () => {
@@ -304,46 +501,76 @@ describe("tabs feature", () => {
     expect(posted).toBe(true);
   });
 
-  it("renders the mobile switcher reflecting the active tab, position, and count", async () => {
+  it("renders the mobile bar reflecting the active tab, with a close button and no position counter", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, { features: [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     expect(root.querySelector(".wt-switcher-label")?.textContent).toBe("one");
-    expect(root.querySelector(".wt-switcher-pos")?.textContent).toBe("1 / 2");
-    expect(root.querySelector(".wt-switcher-count")?.textContent).toBe("2");
+    // The n/m counter is gone (the list rotates, so an absolute position number
+    // is meaningless); the active row instead carries the standard close (x)
+    // that every other row has.
+    expect(root.querySelector(".wt-switcher-pos")).toBeNull();
+    expect(root.querySelector(".wt-switcher-current-close")).toBeTruthy();
+    // The mobile "+" is present; the keyboard button stays hidden without a
+    // keyboardToggle wired (the separate overview button + count are gone).
+    expect(root.querySelector(".wt-switcher-new")).toBeTruthy();
+    expect(root.querySelector<HTMLElement>(".wt-switcher-kb")?.hidden).toBe(true);
   });
 
-  it("opens the overview sheet, and a row selects the tab then closes the sheet", async () => {
+  it("expands the bar to list the other tabs; a row selects it and collapses", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, { features: [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
-    const sheet = root.querySelector<HTMLElement>(".wt-sheet");
-    expect(sheet?.hidden).toBe(true);
+    const switcher = root.querySelector(".wt-switcher");
+    expect(switcher?.classList.contains("wt-switcher-expanded")).toBe(false);
 
-    root.querySelector<HTMLElement>(".wt-switcher-overview")?.click();
-    expect(sheet?.hidden).toBe(false);
-    expect(root.querySelectorAll(".wt-sheet-row").length).toBe(2);
+    // Tapping the active surface expands the bar to list the OTHER tabs (s2);
+    // the active tab (s1) stays in the bar row, so only one row is listed.
+    root.querySelector<HTMLElement>(".wt-switcher-current")?.click();
+    expect(switcher?.classList.contains("wt-switcher-expanded")).toBe(true);
+    expect(root.querySelectorAll(".wt-switcher-row").length).toBe(1);
 
     setSession.mockClear();
-    // Select the second row.
-    root.querySelectorAll<HTMLElement>(".wt-sheet-row .wt-sheet-select")[1]?.click();
+    root.querySelector<HTMLElement>(".wt-switcher-row .wt-switcher-row-select")?.click();
     expect(setSession).toHaveBeenCalledWith("s2");
-    expect(sheet?.hidden).toBe(true); // selection closed the sheet
+    // Selecting a tab collapses the list.
+    expect(switcher?.classList.contains("wt-switcher-expanded")).toBe(false);
   });
 
-  it("closes a tab from a sheet row (DELETE)", async () => {
+  it("orders the expanded list circularly starting after the active tab", async () => {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+      { id: "s4", title: "four", createdAt: "4", status: "idle" },
+    ];
+    const feature = tabs();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [feature] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 4);
+
+    // Make s2 active, then open the list: it should read as the circular queue
+    // that follows s2 -> three, four, one (s1 wraps to the end).
+    feature.api?.switchTo("s2");
+    root.querySelector<HTMLElement>(".wt-switcher-current")?.click();
+    const labels = [...root.querySelectorAll(".wt-switcher-row-label")].map((e) => e.textContent);
+    expect(labels).toEqual(["three", "four", "one"]);
+  });
+
+  it("closes a tab from an expanded list row (DELETE)", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, { features: [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
-    root.querySelector<HTMLElement>(".wt-switcher-overview")?.click();
+    root.querySelector<HTMLElement>(".wt-switcher-current")?.click(); // expand
     fetchMock.mockClear();
-    root.querySelectorAll<HTMLElement>(".wt-sheet-row .wt-sheet-close")[1]?.click();
+    root.querySelector<HTMLElement>(".wt-switcher-row .wt-switcher-row-close")?.click();
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
 
     const deleted = fetchMock.mock.calls.some(
@@ -352,18 +579,18 @@ describe("tabs feature", () => {
     expect(deleted).toBe(true);
   });
 
-  it("closes the sheet on Escape", async () => {
+  it("collapses the expanded list on a second tap", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, { features: [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
-    const sheet = root.querySelector<HTMLElement>(".wt-sheet");
-    root.querySelector<HTMLElement>(".wt-switcher-overview")?.click();
-    expect(sheet?.hidden).toBe(false);
-
-    sheet?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    expect(sheet?.hidden).toBe(true);
+    const switcher = root.querySelector(".wt-switcher");
+    const current = root.querySelector<HTMLElement>(".wt-switcher-current");
+    current?.click(); // expand
+    expect(switcher?.classList.contains("wt-switcher-expanded")).toBe(true);
+    current?.click(); // a second tap toggles it closed
+    expect(switcher?.classList.contains("wt-switcher-expanded")).toBe(false);
   });
 
   it("switches tabs on a horizontal swipe of the switcher bar", async () => {
@@ -380,7 +607,7 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s2");
   });
 
-  it("surfaces a background needs-input on the overview badge", async () => {
+  it("surfaces a background needs-input on the active bar surface", async () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -389,16 +616,18 @@ describe("tabs feature", () => {
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
-    const overview = root.querySelector<HTMLElement>(".wt-switcher-overview");
-    expect(overview?.dataset["attention"]).toBeUndefined();
+    // The needs-input cue now rides the active surface (the separate overview
+    // button is gone); tapping/swiping it opens the overview to resolve it.
+    const current = root.querySelector<HTMLElement>(".wt-switcher-current");
+    expect(current?.dataset["attention"]).toBeUndefined();
 
     // s2 is a background tab (s1 is active) and needs input.
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
-    expect(overview?.dataset["attention"]).toBe("input");
+    expect(current?.dataset["attention"]).toBe("input");
 
     // It clears once that tab reports a non-input status.
     monitor.emit({ id: "s2", status: "idle", title: "two", createdAt: "2" });
-    expect(overview?.dataset["attention"]).toBeUndefined();
+    expect(current?.dataset["attention"]).toBeUndefined();
   });
 
   it("arms the catching-up cue after a switch (until a screen frame lands)", async () => {

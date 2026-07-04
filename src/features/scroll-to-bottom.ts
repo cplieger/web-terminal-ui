@@ -20,18 +20,34 @@ export function scrollToBottom(): TerminalFeature {
       const btn = fromHTML(BUTTON_HTML);
       slot.appendChild(btn);
 
+      // Jump to the bottom. With motion allowed, smooth-scroll the surface so
+      // the jump is animated rather than an instant teleport; the engine's
+      // scroll controller re-derives its follow state from the scroll position
+      // (its listener sees the animation land at the bottom), so following
+      // re-engages with no programmatic flag, consistent with the engine's
+      // position-only model. Under prefers-reduced-motion, fall back to the
+      // engine's instant scrollToBottom (which re-engages following synchronously).
+      const jump = (): void => {
+        const reduce =
+          typeof window.matchMedia === "function" &&
+          window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (reduce) {
+          ctx.scroll.scrollToBottom();
+          return;
+        }
+        const surface = ctx.surface();
+        surface.scrollTo({ top: surface.scrollHeight, behavior: "smooth" });
+      };
+
       // pointerdown (like the toolbar keys) so touch devices show press
       // feedback; preventDefault keeps focus on the terminal. click is kept for
-      // keyboard activation. scrollToBottom is idempotent, so the pair is safe.
+      // keyboard activation. jump is idempotent, so the pair is safe.
       const onDown = (e: PointerEvent): void => {
         e.preventDefault();
-        ctx.scroll.scrollToBottom();
-      };
-      const onClick = (): void => {
-        ctx.scroll.scrollToBottom();
+        jump();
       };
       btn.addEventListener("pointerdown", onDown);
-      btn.addEventListener("click", onClick);
+      btn.addEventListener("click", jump);
 
       // Visible only while scrolled up; the region reflects it via a class.
       const off = ctx.on("scroll:state", ({ scrolledUp }) => {

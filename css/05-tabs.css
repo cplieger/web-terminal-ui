@@ -1,0 +1,310 @@
+/* ===== Tabs: desktop strip + activity vocabulary (tabs feature) =====
+   The desktop top-bar tab strip, its per-tab chrome (label, close, add, the
+   right-click menu), the surface offset that clears the fixed strip, and the
+   shared activity-dot status vocabulary. The mobile tab chrome (switcher bar,
+   overview sheet, external key grid) lives in 06-mobile.css; all motion lives in
+   07-animations.css. */
+
+.wt-region-top-bar {
+  /* On desktop the tab strip docks to the top; the region is transparent, so
+     the bar element below owns its own fixed placement. */
+  display: contents;
+}
+
+.wt-tab-bar {
+  position: fixed;
+  bottom: var(--safe-bottom);
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  /* Breathing room around the tab area (a roomier bottom bar). */
+  padding: var(--sp-2);
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  z-index: 15;
+}
+
+.wt-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  /* Browser-style tabs: 140px when there is room, shrinking toward a 90px floor
+     as the strip fills; past the floor the bar scrolls horizontally
+     (.wt-tab-bar has overflow-x: auto). box-sizing keeps the basis a true total. */
+  box-sizing: border-box;
+  flex: 0 1 140px;
+  min-width: 90px;
+  padding: var(--sp-2) var(--sp-2);
+  /* A transparent border is reserved on every tab so toggling the inactive
+     outline (below) never shifts the strip's layout. */
+  border: 1px solid transparent;
+  border-radius: var(--radius-inner);
+  color: color-mix(in oklch, var(--text) 70%, transparent);
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* Inactive tabs read as outlined chips (so adjacent tabs stay visually
+   separated) and take a subtle fill on hover. */
+.wt-tab:not(.wt-tab-active) {
+  border-color: var(--border);
+}
+
+.wt-tab:not(.wt-tab-active):hover {
+  background: var(--tab-hover-bg);
+  color: var(--tab-active-fg);
+}
+
+/* The active tab reads clearly above the inactive chips: a stronger fill.
+   Themeable (vibecli tints these purple). */
+.wt-tab-active {
+  background: var(--tab-active-bg);
+  color: var(--tab-active-fg);
+}
+
+/* The label flexes to fill the fixed-width tab and truncates with an ellipsis
+   (min-width: 0 lets a flex item shrink below its content width). */
+.wt-tab-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A little breathing room after the activity dot, before the label. */
+.wt-tab-dot {
+  margin-right: 2px;
+}
+
+/* The tab close (x): a centered, muted square icon button with a box on hover.
+   Its glyph is an inline SVG (styled below), so flex-centering the button
+   centers it exactly. */
+.wt-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 1.375rem;
+  height: 1.375rem;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-inner);
+  color: color-mix(in oklch, var(--text) 60%, transparent);
+  cursor: pointer;
+}
+
+.wt-tab-close:hover {
+  background: var(--text-active);
+  color: var(--text);
+}
+
+/* On an inactive tab the close appears only on hover, kept in the layout via
+   visibility so the tab width never jumps; on the active tab it is always shown. */
+.wt-tab:not(.wt-tab-active) .wt-tab-close {
+  visibility: hidden;
+}
+
+.wt-tab:not(.wt-tab-active):hover .wt-tab-close {
+  visibility: visible;
+}
+
+/* The add-tab (+) button: its hover box matches an active tab's fill and
+   stretches to the strip height; the 2px strip gap (not a custom margin) spaces
+   it from the last tab. Its glyph is an inline SVG. */
+.wt-tab-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  /* Square box that matches the tab height (a stretched flex item ignores
+     aspect-ratio against its SVG's intrinsic width, so size it explicitly). The
+     tab height is the close-button (1.375rem) + vertical padding (2×sp-2) +
+     border. */
+  width: calc(1.375rem + 2 * var(--sp-2) + 2px);
+  height: calc(1.375rem + 2 * var(--sp-2) + 2px);
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-inner);
+  color: color-mix(in oklch, var(--text) 60%, transparent);
+  cursor: pointer;
+}
+
+.wt-tab-new:hover {
+  background: var(--tab-active-bg);
+  color: var(--tab-active-fg);
+}
+
+/* The +/x icons are inline SVG so they center exactly in their flex-centered
+   button and stay symmetric regardless of the UI font (fixes the off-center
+   glyph and the lopsided "+"). The + is a touch larger and bolder than the x. */
+.wt-tab-close svg,
+.wt-tab-new svg {
+  stroke: currentcolor;
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.wt-tab-close svg {
+  width: 13px;
+  height: 13px;
+}
+
+.wt-tab-new svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* The tab being dragged (reorder) dims while it moves. */
+.wt-tab-dragging {
+  opacity: 0.5;
+}
+
+/* Tab context menu (tabs feature, desktop right-click): Close / Close others /
+   Close to the right / Close to the left / Close all. Replaces the old bar
+   "Close all" button. Mirrors .wt-ctx-menu (a fixed surface popover, clamped
+   into the viewport by the feature); disabled items are dimmed and inert. */
+.wt-tab-menu {
+  position: fixed;
+  display: none;
+  flex-direction: column;
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--sp-1);
+  z-index: 30;
+}
+
+.wt-tab-menu.visible {
+  display: flex;
+}
+
+.wt-tab-menu button {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: var(--radius-inner);
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.wt-tab-menu button:not(:disabled):hover {
+  background: var(--text-active);
+}
+
+.wt-tab-menu button:disabled {
+  color: color-mix(in oklch, var(--text) 35%, transparent);
+  cursor: default;
+}
+
+/* Pull the terminal surface up off the fixed BOTTOM tab strip so it does not
+   overlap the last rows (a mirror of the old top offset). The tabs feature
+   marks the surface (.wt-with-tabbar) and keeps the measured strip height in
+   --wt-tabbar-h; the surface is position:fixed inset:0, so a bottom offset
+   clears it. Desktop only: on a coarse pointer the strip is hidden and the
+   mobile switcher's inset is applied through viewport.ts (--wt-reserve-bottom)
+   instead. */
+@media (pointer: fine) {
+  .term.wt-with-tabbar {
+    bottom: var(--wt-tabbar-h, 44px);
+  }
+}
+
+/* ===== Activity dots (activityMonitor via tabs) =====
+   Four-state, distinguishable without color (shape + motion, not hue alone),
+   per section 12 / WCAG 1.4.1. The one .wt-status-dot vocabulary is shared by
+   the desktop strip, the mobile switcher, and the overview sheet rows.
+
+   Opt-in: the dot is hidden unless its container carries .wt-status, which the
+   tabs feature adds only when a status source (activityMonitor) is wired. A
+   generic bash/sh terminal has no activity concept, so its tabs read as clean
+   labels; the agent consumer (vibecli) supplies the monitor and gets the dots.
+   The element stays in the DOM either way (JS sets data-status regardless), so
+   revealing it is a pure CSS switch. */
+.wt-status-dot {
+  display: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  /* Default / idle (a new session with no turn yet): a hollow grey dot, so
+     "nothing has happened" reads as an outline rather than a filled state.
+     The fill (solid vs hollow) is the non-hue cue that separates the idle state
+     from the filled done/working/input states (WCAG 1.4.1). */
+  background: transparent;
+  border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
+}
+
+/* A status source is wired (the tabs feature marked the chrome .wt-status): show
+   the dots. Without this class the whole activity vocabulary stays invisible. */
+.wt-status .wt-status-dot {
+  display: block;
+}
+
+.wt-status-dot[data-status="idle"] {
+  background: transparent;
+  border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
+}
+
+/* Agent working: solid pulsing white. (Was purple to match Kiro IDE's thinking
+   colour, but that collides with the purple active-tab fill; white reads clearly
+   on every tab state.) Motion is the primary non-hue cue. Server-side this is
+   driven by the OSC 9;4 progress signal, so it tracks agent activity, not the
+   user typing at the prompt. */
+.wt-status-dot[data-status="working"] {
+  background: #fff;
+  border-color: #fff;
+  animation: wt-pulse 1.2s ease-in-out infinite;
+}
+
+/* Agent done / ready: solid green, matching Kiro IDE's "Ready" (#22c55e), no
+   motion. The filled dot distinguishes it from the hollow idle without hue. */
+.wt-status-dot[data-status="done"] {
+  background: #22c55e;
+  border-color: #22c55e;
+}
+
+/* User action required (permission / approval): solid amber matching Kiro IDE's
+   "waiting-approval" (#fbbf24), plus a ring so it reads as "needs you" via shape
+   as well as hue. It persists until you act on or switch into the tab. */
+.wt-status-dot[data-status="input"] {
+  background: #fbbf24;
+  border-color: #fbbf24;
+  box-shadow: 0 0 0 2px oklch(85% 0.16 85deg / 40%);
+}
+
+/* Exited: a dim hollow dot, static; distinct from idle by its lower opacity. */
+.wt-status-dot[data-status="exited"] {
+  background: transparent;
+  border: 1.5px solid color-mix(in oklch, var(--text) 30%, transparent);
+  opacity: 0.5;
+}
+
+@keyframes wt-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* Reduced-motion (or the animations feature off): drop the pulse, keep color. */
+@media (prefers-reduced-motion: reduce) {
+  .wt-status-dot[data-status="working"] {
+    animation: none;
+  }
+}

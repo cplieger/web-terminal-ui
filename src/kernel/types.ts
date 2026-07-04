@@ -272,6 +272,14 @@ export interface CreateTerminalOptions {
   fontReady?: string;
   /** Optional pre-JS loading overlay the kernel fades out on first paint. */
   loading?: HTMLElement;
+  /** Theme overrides: CSS custom properties set on the terminal root so a
+   *  consumer recolors the UI (accent, tab hover/active) without shipping CSS.
+   *  Keys must be CSS custom-property names (start with "--"); values are any
+   *  CSS value. The library ships the defaults (css/00-tokens.css) — the
+   *  "template"; these are the consumer's "settings" and override them for this
+   *  instance. Known tokens: --accent, --tab-hover-bg, --tab-active-bg,
+   *  --tab-active-fg. */
+  theme?: Readonly<Record<string, string>>;
 }
 
 /** The handle createTerminal returns. Feature APIs are not materialized here

@@ -10,6 +10,15 @@
      above the viewport), so native scroll anchoring is safe to leave on
      and keeps the read position steady on the rare insert-above. */
   overflow-anchor: auto;
+  /* .term is the scroll container, so the touch-action intersection for a
+     touch on the output stops here (the html/body pan-x pan-y does not reach
+     inside a nested scroller). Declare it here too: native one/two-finger
+     scroll is allowed, double-tap-zoom is blocked (snappy taps, no 300ms
+     delay), and — critically — this does NOT affect native long-press text
+     selection (touch-action governs scroll/zoom, not selection). Avoid the
+     `manipulation` alias: it breaks pointercancel-on-scroll in Safari
+     (WebKit bug 240917), which the switcher-bar gesture relies on. */
+  touch-action: pan-x pan-y;
   font-family: var(--font-mono);
   font-size: 14px;
   line-height: 17px;
@@ -94,8 +103,22 @@
      textarea owns input, the keyboard, and IME. Keeping the editable
      element off the scroll content is what lets the first touch-drag
      scroll instead of placing a caret (bug 6), and not re-rendering it
-     as an editable keeps a selection alive across redraws (bug 1). */
+     as an editable keeps a selection alive across redraws (bug 1).
+
+     The two selection properties below are load-bearing on touch: the
+     browser's native long-press-to-select-a-word + OS copy/paste callout
+     (iOS Safari and Android Chrome) is our selection UX, so we opt IN
+     explicitly and must never let an ancestor override them. `user-select`
+     is spec'd as non-inherited but WebKit/Chromium treat it as inherited,
+     so a stray `user-select: none` on html/body/.term would silently kill
+     selection here; keep it `text` (modern Safari honors the unprefixed
+     form, so no `-webkit-` pair is needed). `-webkit-touch-callout: default`
+     keeps the iOS callout (a page-level `none` suppresses it) and has no
+     standard equivalent. No JS may `preventDefault` a touch/pointer/
+     contextmenu over this element or the native selection dies (see the
+     kernel focus handling + contextMenu feature). */
   user-select: text;
+  -webkit-touch-callout: default;
 }
 
 /* IME composition view: floating overlay positioned at the cursor
@@ -417,70 +440,6 @@
   display: none;
 }
 
-/* Desktop: scroll-to-bottom is still genuinely useful for jumping back
-   after scrolling up to read history, so it surfaces here as a
-   bottom-center pill with a label. .key-toolbar.scrolled-up is
-   toggled by app.ts, same as on touch. The display+opacity transition
-   uses allow-discrete so the fade-out plays cleanly when the user
-   clicks (scroll-to-bottom clears .scrolled-up, reverting display:none
-   after the opacity has gone to 0). */
-.kb-scroll-bottom {
-  position: fixed;
-  left: 50%;
-  bottom: calc(var(--safe-bottom, 0px) + var(--sp-3));
-  transform: translateX(-50%);
-  display: none;
-  opacity: 0;
-  align-items: center;
-  gap: var(--sp-1);
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--surface);
-  backdrop-filter: var(--blur);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font: inherit;
-  font-size: 0.875rem;
-  font-weight: 500;
-  cursor: pointer;
-  z-index: 10;
-  transition:
-    opacity var(--dur-standard) var(--ease-standard),
-    background-color var(--dur-micro) var(--ease-standard),
-    display var(--dur-standard) allow-discrete;
-}
-
-.kb-scroll-bottom::after {
-  content: "Scroll to bottom";
-}
-
-.kb-scroll-bottom svg {
-  width: var(--icon);
-  height: var(--icon);
-  stroke: currentcolor;
-  fill: none;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.kb-scroll-bottom:hover {
-  background: color-mix(in oklch, var(--text) 8%, var(--surface));
-}
-
-.kb-scroll-bottom:active {
-  background: var(--text-active);
-}
-
-.key-toolbar.scrolled-up .kb-scroll-bottom {
-  display: inline-flex;
-  opacity: 1;
-
-  @starting-style {
-    opacity: 0;
-  }
-}
-
 @media (pointer: coarse) {
   .key-toolbar {
     position: fixed;
@@ -516,11 +475,6 @@
     height: var(--pill-outer);
   }
 
-  /* Collapsed + scrolled up: 2 buttons tall (+2px border). */
-  .key-toolbar.collapsed.scrolled-up {
-    height: calc(2 * var(--touch-target) + var(--sp-1) + 2 * var(--sp-1) + 2px);
-  }
-
   /* Grid placement: toggle at col 5 row 1 (top-right). */
   .kb-toggle {
     grid-area: 1 / 5;
@@ -549,55 +503,6 @@
   }
   .kb-r2c4 {
     grid-area: 2 / 4;
-  }
-
-  /* Scroll-bottom: col 5 row 2 (below toggle). Resets the desktop
-     FAB-specific properties (fixed position, pill padding, surface
-     background, label) so the button collapses back to a grid-area
-     icon-only key. */
-  .key-toolbar .kb-scroll-bottom {
-    position: static;
-    transform: none;
-    bottom: auto;
-    left: auto;
-    grid-area: 2 / 5;
-    display: none;
-    opacity: 0;
-    padding: 0;
-    background: transparent;
-    backdrop-filter: none;
-    border: none;
-    border-radius: var(--radius-inner);
-    font-size: inherit;
-    /* Touch override drops the desktop label (::after content: "")
-       so only the SVG remains. The base rule sets align-items:center
-       but inherits justify-content:flex-start, which would push the
-       lone icon to the left edge of the touch-target-sized cell —
-       same unequal-padding issue as the toolbar toggle. Center it. */
-    justify-content: center;
-    transition:
-      opacity var(--dur-standard) var(--ease-standard),
-      display var(--dur-standard) allow-discrete;
-  }
-
-  .kb-scroll-bottom::after {
-    /* No label on touch. Remove the box entirely (not just its text) so
-       it isn't an empty flex item — combined with the base rule's
-       gap:var(--sp-1) it would shove the lone icon half a gap off-centre. */
-    content: "";
-    display: none;
-  }
-  .kb-scroll-bottom:hover {
-    background: transparent;
-  }
-
-  .key-toolbar.scrolled-up .kb-scroll-bottom {
-    display: flex;
-    opacity: 1;
-
-    @starting-style {
-      opacity: 0;
-    }
   }
 
   /* Keys fade in/out during open/close. The container's width/height
@@ -691,7 +596,6 @@
 
   /* No-transition on first render */
   .key-toolbar.no-transition,
-  .key-toolbar.no-transition .kb-scroll-bottom,
   .key-toolbar.no-transition .kb-toggle .icon-hamburger,
   .key-toolbar.no-transition .kb-toggle .icon-close {
     transition: none;

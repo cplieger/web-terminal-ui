@@ -1,0 +1,102 @@
+/* ===== Animations (animations feature) =====
+   Every bit of motion in the UI lives here, gated on the root .wt-animate class
+   that the animations feature sets only when the OS is not in reduced-motion.
+   Without the feature (or under prefers-reduced-motion) the UI is instant: base
+   rules in 03-06 carry the resting state, and these rules add the transitions
+   and keyframes on top. Keeping motion in one file is the design-system seam for
+   "does this UI animate, and how". */
+
+/* Fade transient surfaces in/out (display allow-discrete plays the fade before
+   the discrete display:none on hide). */
+.wt-animate .wt-toast,
+.wt-animate .wt-conn-banner,
+.wt-animate .wt-scroll-bottom,
+.wt-animate .wt-ctx-menu,
+.wt-animate .wt-tab-menu {
+  transition:
+    opacity var(--dur-standard) var(--ease-standard),
+    display var(--dur-standard) allow-discrete;
+}
+
+/* Tab chrome micro-transitions (hover/active color shifts). */
+.wt-animate .wt-tab,
+.wt-animate .wt-tab-close,
+.wt-animate .wt-tab-new {
+  transition:
+    background-color var(--dur-micro) var(--ease-standard),
+    color var(--dur-micro) var(--ease-standard);
+}
+
+/* New tab enters with a fade + scale-in. Only runtime-added tabs get
+   .wt-tab-enter (the tabs feature's `started` gate). A closing tab is removed
+   immediately with no exit animation, so the strip reflows in one frame (a
+   delayed exit made the "+" teleport and put a last-tab replacement in the wrong
+   slot). scale() is a transform, so the enter never shifts the "+". */
+.wt-animate .wt-tab-enter {
+  animation: wt-tab-in var(--dur-enter) var(--ease-enter);
+}
+
+@keyframes wt-tab-in {
+  from {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+}
+
+/* Tab list expand/collapse: the mobile bar grows upward to reveal the other
+   tabs and shrinks back. max-height and the vertical padding animate together (0
+   to the expanded values and back), so the whole tray opens/closes as one motion
+   — animating only max-height let the padding snap away instantly at the start
+   of a collapse (a choppy, two-step close). The tabs feature clears the rows
+   after the collapse. */
+.wt-animate .wt-switcher-list {
+  transition:
+    max-height var(--dur-enter) var(--ease-standard),
+    padding var(--dur-enter) var(--ease-standard);
+}
+
+/* When the tab list expands, the keyboard button collapses to zero width and
+   fades (the key grid is closed in JS); the active row flex-grows into the freed
+   space in lockstep as the button's width animates. */
+.wt-animate .wt-switcher-kb {
+  transition:
+    width var(--dur-enter) var(--ease-standard),
+    margin var(--dur-enter) var(--ease-standard),
+    opacity var(--dur-standard) var(--ease-standard);
+}
+
+/* Switch motion: a subtle content fade on switch, so the cache-first repaint
+   reads as a change rather than a flicker. A swipe additionally slides the
+   content in from the swipe's direction (next from the right, prev from the
+   left, WS5). */
+.wt-animate .term.wt-switching .term-output {
+  animation: wt-switch-in var(--dur-standard) var(--ease-standard);
+}
+
+.wt-animate .term.wt-switching-next .term-output {
+  animation: wt-switch-next var(--dur-standard) var(--ease-standard);
+}
+
+.wt-animate .term.wt-switching-prev .term-output {
+  animation: wt-switch-prev var(--dur-standard) var(--ease-standard);
+}
+
+@keyframes wt-switch-in {
+  from {
+    opacity: 0.55;
+  }
+}
+
+@keyframes wt-switch-next {
+  from {
+    opacity: 0.3;
+    transform: translateX(18%);
+  }
+}
+
+@keyframes wt-switch-prev {
+  from {
+    opacity: 0.3;
+    transform: translateX(-18%);
+  }
+}
