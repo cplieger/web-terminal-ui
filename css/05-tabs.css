@@ -231,12 +231,13 @@
    per section 12 / WCAG 1.4.1. The one .wt-status-dot vocabulary is shared by
    the desktop strip, the mobile switcher, and the overview sheet rows.
 
-   Opt-in: the dot is hidden unless its container carries .wt-status, which the
-   tabs feature adds only when a status source (activityMonitor) is wired. A
-   generic bash/sh terminal has no activity concept, so its tabs read as clean
-   labels; the agent consumer (vibecli) supplies the monitor and gets the dots.
-   The element stays in the DOM either way (JS sets data-status regardless), so
-   revealing it is a pure CSS switch. */
+   Revealed PER TAB: the dot is hidden until its own session reports activity
+   (OSC 9;4 progress, or a classified OSC 9 notification), at which point the
+   tabs feature adds .wt-reports to that dot (paintStatusDot). A program that
+   emits no OSC 9 signal (a plain bash/sh) has no activity concept, so its tabs
+   stay clean, label-only; a progress-reporting agent (kiro-cli, Claude Code)
+   lights up. The element stays in the DOM either way (JS sets data-status
+   regardless), so revealing it is a pure CSS switch. */
 .wt-status-dot {
   display: none;
   width: 9px;
@@ -251,9 +252,10 @@
   border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
 }
 
-/* A status source is wired (the tabs feature marked the chrome .wt-status): show
-   the dots. Without this class the whole activity vocabulary stays invisible. */
-.wt-status .wt-status-dot {
+/* Reveal a dot only once its session has reported activity (the tabs feature
+   adds .wt-reports per dot; see paintStatusDot). Without it the dot — and the
+   whole activity vocabulary for that tab — stays invisible. */
+.wt-status-dot.wt-reports {
   display: block;
 }
 

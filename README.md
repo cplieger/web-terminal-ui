@@ -85,17 +85,23 @@ render/connection/scroll modules are single-instance per page (tabs multiplex
 sessions over the one kernel). `scaffold/index.html` is a complete reference page
 to copy and adapt.
 
-Three presets are provided (import from `@cplieger/web-terminal-ui/presets`); each
+Four presets are provided (import from `@cplieger/web-terminal-ui/presets`); each
 is a plain feature-array factory, so you can spread and edit it, or hand-pick
 individual features instead:
 
 - `presetSingle()` — single-pane desktop UI (context menu, clipboard,
   scroll-to-bottom, predictive echo, connection banner).
 - `presetTouch()` — `presetSingle()` plus the mobile key toolbar.
-- `presetTabbed()` — the full reference UI: `presetTouch()` plus tabs, the
-  activity monitor, and animations. Requires a server that speaks the session
-  API (`/api/sessions`, the status SSE, and `/ws?session=`), such as
-  `web-terminal-server` or `vibecli`.
+- `presetTabbed()` — the generic tabbed UI: `presetTouch()` plus tabs and
+  animations. Tabs are label-only (no activity dots); each tab's title follows
+  the process window title (OSC 0/2) when the program sets one and keeps it
+  updated, otherwise the last command submitted. Requires a server that speaks
+  the session API (`/api/sessions` and `/ws?session=`), such as
+  `web-terminal-server`.
+- `presetAgentTabbed()` — `presetTabbed()` plus the activity monitor, so each
+  tab carries a live status dot (idle / working / done / needs-input) from the
+  server's status SSE. Same title behavior as `presetTabbed`. For an agent shell
+  such as `vibecli`.
 
 ### Options
 
