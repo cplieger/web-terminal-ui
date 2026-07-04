@@ -10,7 +10,7 @@ const TEXT: Partial<Record<ConnState, string>> = {
   connecting: "Reconnecting\u2026",
   reconnecting: "Reconnecting\u2026",
   offline: "Offline",
-  restarted: "Server restarted \u2014 recent input may have been lost",
+  restarted: "Server restarted; recent input may be lost",
 };
 
 export function connectionBanner(): TerminalFeature {

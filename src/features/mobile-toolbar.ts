@@ -11,6 +11,31 @@ import { fromHTML } from "./dom.js";
 
 const { bindMobileToolbar } = keyboard;
 
+/** mobileToolbar's public API, so a peer feature (tabs) can drive the key grid
+ *  from a button it owns instead of the toolbar's own toggle. */
+export interface MobileToolbarApi {
+  /** Show/hide the key grid (flips the toolbar's collapsed state). */
+  toggle(): void;
+  /** Whether the key grid is currently open. */
+  isOpen(): boolean;
+  /** Whether sticky-Ctrl is currently armed (a pending Ctrl press). */
+  isCtrlArmed(): boolean;
+  /** Subscribe to sticky-Ctrl arm/disarm; returns an unsubscribe. Lets a peer
+   *  (the tab bar's keyboard button) surface the pending modifier even while the
+   *  key grid — and its own Ctrl button — is closed. */
+  onCtrlArmedChange(fn: (armed: boolean) => void): () => void;
+}
+
+/** Options for the mobileToolbar feature. */
+export interface MobileToolbarOptions {
+  /** When true, the toolbar hides its own top-right toggle button and positions
+   *  the key grid to open above the mobile tab bar. The grid is then driven
+   *  externally through the returned API (tabs renders a keyboard button in the
+   *  switcher bar and calls toggle()). The tabbed presets set this; presetTouch
+   *  leaves it off and keeps the self-contained top-right toggle. */
+  externalToggle?: boolean;
+}
+
 // The key grid, without the scroll-to-bottom button (that is the scrollToBottom
 // feature, composed into the same region's "scroll" slot).
 const TOOLBAR_HTML = `
@@ -26,19 +51,33 @@ const TOOLBAR_HTML = `
   <button type="button" id="kb-right" class="kb-key kb-r2c4" aria-label="Right"><svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg></button>
 </div>`;
 
-export function mobileToolbar(): TerminalFeature {
+export function mobileToolbar(opts: MobileToolbarOptions = {}): TerminalFeature<MobileToolbarApi> {
   return {
     name: "mobileToolbar",
     setup(ctx) {
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
       const toolbar = fromHTML(TOOLBAR_HTML);
+      // Externally-driven mode (the tabbed presets): the toolbar hides its own
+      // toggle and opens the grid above the mobile tab bar; tabs drives it via
+      // the returned API. The class gates both behaviors in CSS.
+      if (opts.externalToggle) {
+        toolbar.classList.add("wt-toolbar-external");
+      }
       ctx.region("bottom-inset-end", "keys").appendChild(toolbar);
 
+      // Fan sticky-Ctrl arm/disarm out to subscribers (the tab bar's keyboard
+      // button mirrors it, so a pending Ctrl is visible with the grid closed).
+      const armedListeners = new Set<(armed: boolean) => void>();
       const ctrl = bindMobileToolbar({
         toolbar,
         send: (bytes) => {
           ctx.send(encoder.encode(bytes));
+        },
+        onCtrlChange: (armed) => {
+          for (const fn of [...armedListeners]) {
+            fn(armed);
+          }
         },
       });
 
@@ -63,6 +102,24 @@ export function mobileToolbar(): TerminalFeature {
       });
 
       return {
+        // Expose grid open/close so a peer (tabs) can drive it from the tab bar.
+        // Toggling the same `.collapsed` class the engine's own kb-toggle flips
+        // keeps a single source of truth for the grid's visibility.
+        api: {
+          toggle() {
+            toolbar.classList.toggle("collapsed");
+          },
+          isOpen() {
+            return !toolbar.classList.contains("collapsed");
+          },
+          isCtrlArmed() {
+            return ctrl.isCtrlArmed();
+          },
+          onCtrlArmedChange(fn) {
+            armedListeners.add(fn);
+            return () => armedListeners.delete(fn);
+          },
+        },
         onDetach() {
           // A tab switch disarms a latched sticky-Ctrl so a pending Ctrl does
           // not fire against the incoming session (e.g. an accidental Ctrl+C to
@@ -73,6 +130,7 @@ export function mobileToolbar(): TerminalFeature {
         },
         teardown() {
           offTransform();
+          armedListeners.clear();
           ctrl.dispose();
           toolbar.remove();
         },

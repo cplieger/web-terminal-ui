@@ -1,0 +1,82 @@
+/* ===== web-terminal-ui design system: primitives =====
+   The v3 kernel builds named layout regions (wt-region-*) as siblings of the
+   terminal surface (.term, styled in 02-app.css); features mount chrome into
+   region slots. The regions are transparent groupings (display: contents) so
+   each feature's element floats over the fixed-inset terminal, and an absent
+   feature contributes nothing.
+
+   The stylesheet is layered by concern and concatenated in css/MANIFEST order:
+   tokens (00) -> reset (01) -> terminal core + legacy key toolbar (02) -> these
+   shared primitives (03) -> per-feature chrome (04 feedback, 05 tabs, 06 mobile)
+   -> animations (07, where every .wt-animate-gated transition/keyframe lives, so
+   motion is opt-in from one place). Cascade order is the file order here.
+
+   Primitives are the building blocks every feature reuses: the transparent
+   layout regions, the 44px touch button, and the toast surface. */
+
+.wt-region,
+.wt-slot {
+  display: contents;
+}
+
+/* ===== Shared button primitive (44px touch target) ===== */
+.wt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--touch-target);
+  min-height: var(--touch-target);
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: var(--radius-inner);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+}
+
+.wt-btn:active {
+  background: var(--text-active);
+}
+
+.wt-btn svg {
+  width: var(--icon);
+  height: var(--icon);
+  stroke: currentcolor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ===== Toast (kernel shared primitive) =====
+   Top-centre on every form factor (both desktop and the tabbed mobile UI dock a
+   bar at the bottom, so a bottom toast would collide with it; top-centre is
+   clear and the same everywhere). The vv-top/safe-top offset keeps it below the
+   notch and follows iOS's visual-viewport shift. */
+.wt-toast {
+  position: fixed;
+  top: calc(var(--safe-top, 0px) + var(--vv-top, 0px) + var(--sp-3));
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 2 * var(--sp-3));
+  padding: var(--sp-1) var(--sp-3);
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  border: 1px solid oklch(70% 0.1 160deg / 30%);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-align: center;
+  z-index: 40;
+  display: none;
+  opacity: 0;
+}
+
+.wt-toast.visible {
+  display: block;
+  opacity: 1;
+}

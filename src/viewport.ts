@@ -74,8 +74,23 @@ export function init(opts: {
       // left behind the keyboard for iOS to scroll to.
       const offsetTop = Math.max(0, Math.round(vv.offsetTop));
       const bottomInset = Math.max(0, Math.round(window.innerHeight - vv.offsetTop - vv.height));
+      // Reserved bottom chrome (a bottom tab bar) the content must clear, on top
+      // of the keyboard inset. A feature sets --wt-reserve-bottom (px) on the
+      // root, 0 when none; viewport owns the terminal's fixed-box geometry, so it
+      // folds the reserve into the bottom offset here. The reserve excludes the
+      // keyboard (it is measured with the keyboard closed), so adding it to
+      // bottomInset does not double-count.
+      const reserve = Math.max(
+        0,
+        Math.round(
+          parseFloat(
+            getComputedStyle(document.documentElement).getPropertyValue("--wt-reserve-bottom"),
+          ) || 0,
+        ),
+      );
+      const bottom = bottomInset + reserve;
       termWrap.style.top = offsetTop > 0 ? `${offsetTop}px` : "";
-      termWrap.style.bottom = bottomInset > 0 ? `${bottomInset}px` : "";
+      termWrap.style.bottom = bottom > 0 ? `${bottom}px` : "";
       // Expose the same geometry as CSS vars for the sibling fixed chrome:
       // --kb-inset lifts the bottom banner above the keyboard; --vv-top lets the
       // top key toolbar follow the visual viewport's offset (otherwise it

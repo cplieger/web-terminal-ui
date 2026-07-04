@@ -44,6 +44,11 @@ const DEFAULT_WS_PATH = "/ws";
 const DEFAULT_FONT_READY = '14px "MonaspiceNe NFM"';
 const TOAST_MS = 3000;
 const TAP_MOVEMENT_PX = 10;
+// A touch that focuses the input (opens the soft keyboard) must be a genuine
+// tap: short and low-movement. A longer hold is a long-press, which belongs to
+// native text selection / the context menu — so tap-to-focus bows out above
+// this duration and never steals a long-press or a selection.
+const TAP_MAX_MS = 500;
 
 // Kernel-owned core subtree: the display-only output, the hidden textarea (the
 // single keyboard target), and the IME composition view. No chrome; features
@@ -73,6 +78,18 @@ export function createTerminal(
   const encoder = new TextEncoder();
   const kernelAbort = new AbortController();
   const { signal } = kernelAbort;
+
+  // Apply consumer theme overrides as CSS custom properties on the root, so the
+  // whole terminal subtree inherits them. The library ships the token defaults
+  // (css/00-tokens.css); these override them for this instance. Only custom
+  // properties (leading "--") are set.
+  if (opts.theme) {
+    for (const [key, value] of Object.entries(opts.theme)) {
+      if (key.startsWith("--")) {
+        root.style.setProperty(key, value);
+      }
+    }
+  }
 
   // --- Build the core subtree ---
   const tpl = document.createElement("template");
@@ -157,6 +174,16 @@ export function createTerminal(
 
   // --- Active session (SessionView + onSwitch fan-out) ---
   let activeSession: SessionRef | null = null;
+  // Whether the first connection has been kicked off. The wake-reconnect
+  // handlers (visibilitychange/pageshow/online) must not open a socket before
+  // it has: a session-managing feature (tabs) drives the first connect via
+  // notifySwitch once it resolves a session id, and connecting to the bare
+  // wsPath before then hits a session-gated endpoint (the SessionManager 404s a
+  // /ws with no ?session=). pageshow fires on the initial load, so without this
+  // gate a slow session list lets pageshow's reconnectNow open a bare /ws that
+  // 404s (seen in Firefox, where the list loses the race). Flips true on the
+  // startup connect (unmanaged) or the first setSession (managed).
+  let connectionInitiated = false;
 
   // --- Loading lifecycle ---
   let ready = false;
@@ -368,9 +395,16 @@ export function createTerminal(
   );
 
   // --- Focus strategy (the touch focus dance; see the input-model contract) ---
+  // On touch, the terminal output is the native text-selection surface, so this
+  // handler deliberately does the MINIMUM: it opens the keyboard on a clean tap
+  // and otherwise gets out of the browser's way. It never preventDefaults a
+  // touch and never clears a selection — a long-press to select a word, the OS
+  // copy/paste callout, and drag-to-scroll are all left to the platform (the
+  // research consensus: over text, allow the default and emit nothing).
   let lastPointerType = "mouse";
   let pointerDownX = 0;
   let pointerDownY = 0;
+  let pointerDownTime = 0;
   function focusTerminal(): void {
     input.focus({ preventScroll: true });
   }
@@ -380,6 +414,7 @@ export function createTerminal(
       lastPointerType = e.pointerType;
       pointerDownX = e.clientX;
       pointerDownY = e.clientY;
+      pointerDownTime = e.timeStamp;
     },
     { passive: true, signal },
   );
@@ -394,13 +429,29 @@ export function createTerminal(
       }
       const dx = Math.abs(e.clientX - pointerDownX);
       const dy = Math.abs(e.clientY - pointerDownY);
+      // A drag (scroll / selection-extend) or a long-press (native word-select /
+      // context menu) is not a tap-to-focus: bow out and let the browser own it.
       if (dx > TAP_MOVEMENT_PX || dy > TAP_MOVEMENT_PX) {
         return;
       }
-      const sel = window.getSelection();
-      if (sel && sel.toString().length > 0) {
+      if (e.timeStamp - pointerDownTime > TAP_MAX_MS) {
         return;
       }
+      // A clean tap while text is selected means "done selecting": clear the
+      // selection (and dismiss the OS callout with it). This is our deselect —
+      // iOS otherwise leaves the selection stuck, because the synthetic mousedown
+      // we preventDefault to preserve the keyboard also suppresses the platform's
+      // own tap-to-deselect. Do NOT also focus: a deselect tap should not pop the
+      // keyboard; the next clean tap (nothing selected) opens it. The long-press
+      // that MADE the selection is filtered out above by the duration/movement
+      // guards, so only a deliberate later tap reaches here.
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) {
+        sel.removeAllRanges();
+        return;
+      }
+      // A clean tap with nothing selected focuses the input, synchronously (an
+      // async focus would not raise the iOS soft keyboard).
       focusTerminal();
     },
     { passive: true, signal },
@@ -477,7 +528,9 @@ export function createTerminal(
     "visibilitychange",
     () => {
       if (document.visibilityState === "visible") {
-        connection.reconnectNow();
+        if (connectionInitiated) {
+          connection.reconnectNow();
+        }
         focusTerminal();
       }
     },
@@ -486,7 +539,9 @@ export function createTerminal(
   window.addEventListener(
     "pageshow",
     () => {
-      connection.reconnectNow();
+      if (connectionInitiated) {
+        connection.reconnectNow();
+      }
       focusTerminal();
     },
     { signal },
@@ -494,7 +549,9 @@ export function createTerminal(
   window.addEventListener(
     "online",
     () => {
-      connection.reconnectNow();
+      if (connectionInitiated) {
+        connection.reconnectNow();
+      }
     },
     { signal },
   );
@@ -584,6 +641,9 @@ export function createTerminal(
         // Reconnect the terminal WS to this session using its per-tab resume
         // state; the renderer was already pointed at its store by tabs.
         connection.setSession(session.id);
+        // The managed first connect has happened (session id is now on the WS
+        // URL); wake-reconnect handlers may fire from here on.
+        connectionInitiated = true;
         for (const { instance } of instances) {
           if (instance.onSwitch) {
             instance.onSwitch(session);
@@ -658,6 +718,7 @@ export function createTerminal(
   const sessionManaged = featureList.some((f) => f.managesSessions === true);
   if (!sessionManaged) {
     connection.connect();
+    connectionInitiated = true;
   }
   focusTerminal();
 

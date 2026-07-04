@@ -167,4 +167,100 @@ describe("contextMenu Paste (iOS paste fix)", () => {
     expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
     expect(pasteButton(root)).toBeUndefined();
   });
+
+  it("does not open on a touch long-press while text is selected (native selection owns it)", async () => {
+    const root = rootIn();
+    const clip = fakeClipboard();
+    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    await tick();
+    // Simulate a native word-selection made during the hold.
+    const spy = vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      toString: () => "selected",
+    } as unknown as Selection);
+
+    const surface = root.querySelector<HTMLElement>(".term");
+    const ev = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
+    Object.defineProperty(ev, "touches", { value: [{ clientX: 30, clientY: 40 }] });
+    surface?.dispatchEvent(ev);
+    await new Promise((r) => setTimeout(r, 600));
+
+    // The OS callout owns a selection long-press; our menu stays out of the way.
+    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("opens the paste menu on an Android touch long-press (contextmenu) over empty space, suppressing the native menu", async () => {
+    const root = rootIn();
+    const clip = fakeClipboard();
+    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    await tick();
+
+    const surface = root.querySelector<HTMLElement>(".term");
+    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
+    Object.defineProperty(pd, "pointerType", { value: "touch" });
+    surface?.dispatchEvent(pd);
+    // Android fires contextmenu on long-press. Over empty space (no selection)
+    // it is the paste path: show our menu and preventDefault so Android's own
+    // menu doesn't also appear (the "both menus" bug).
+    const ev = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    });
+    surface?.dispatchEvent(ev);
+
+    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
+    expect(pasteButton(root)).toBeTruthy();
+    expect(ev.defaultPrevented).toBe(true);
+  });
+
+  it("defers to native selection on an Android touch contextmenu when text is selected", async () => {
+    const root = rootIn();
+    const clip = fakeClipboard();
+    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    await tick();
+    const spy = vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      toString: () => "selected",
+    } as unknown as Selection);
+
+    const surface = root.querySelector<HTMLElement>(".term");
+    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
+    Object.defineProperty(pd, "pointerType", { value: "touch" });
+    surface?.dispatchEvent(pd);
+    const ev = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    });
+    surface?.dispatchEvent(ev);
+
+    // A selection means the native callout / selection toolbar owns Copy; our
+    // menu stays out of the way and we leave the event alone.
+    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
+    expect(ev.defaultPrevented).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("keeps the menu open across the release click after a touch long-press", async () => {
+    const root = rootIn();
+    const clip = fakeClipboard();
+    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    await tick();
+
+    const surface = root.querySelector<HTMLElement>(".term");
+    const ev = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
+    Object.defineProperty(ev, "touches", { value: [{ clientX: 30, clientY: 40 }] });
+    surface?.dispatchEvent(ev);
+    await new Promise((r) => setTimeout(r, 600));
+    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
+
+    // The long-press emits a trailing click on release; it must NOT dismiss the
+    // just-opened menu (the open-then-close-on-release race).
+    document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
+  });
 });

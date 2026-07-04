@@ -54,6 +54,16 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
       // Desktop clipboard shortcuts, handled before the kernel's key mapping so
       // they take the browser selection/clipboard rather than server-bound bytes.
       const offKey = ctx.registerKeydown((ev) => {
+        // Plain Ctrl+V: let the browser's NATIVE paste event flow into the
+        // hidden textarea (the kernel's insertFromPaste path sends it through the
+        // sanitizing funnel). Consuming the key WITHOUT preventDefault stops the
+        // kernel mapping Ctrl+V to \x16 while leaving the native paste intact — so
+        // no navigator.clipboard.readText(), hence no Firefox clipboard-read
+        // popup. (Cmd+V on macOS already pastes natively and never reached the
+        // \x16 mapping.)
+        if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey && ev.code === "KeyV") {
+          return true; // do NOT preventDefault — the browser pastes natively
+        }
         if (ev.ctrlKey && ev.shiftKey && !ev.altKey && !ev.metaKey) {
           if (ev.code === "KeyC") {
             const sel = window.getSelection()?.toString();

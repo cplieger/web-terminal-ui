@@ -7,13 +7,25 @@
   --border: oklch(100% 0 0deg / 15%);
   --text: oklch(90% 0.005 280deg);
   --text-active: color-mix(in oklch, var(--text) 15%, transparent);
+  /* ===== Themeable tokens (the consumer-configurable "template") =====
+     These default to the neutral built-in look; a consumer recolors the UI by
+     overriding them via createTerminal's `theme` option (which sets them on the
+     terminal root) or its own CSS. vibecli sets a purple palette. Everything
+     above is the fixed design palette; everything here is the public theme API. */
+  --accent: #a78bfa; /* accent action colour (mobile "+", toggled key button) */
+  --tab-hover-bg: var(--text-active); /* hovered inactive tab / pressed controls */
+  --tab-active-bg: color-mix(in oklch, var(--text) 22%, var(--surface)); /* active tab fill */
+  --tab-active-fg: var(--text); /* active tab text */
   --radius: 0.75rem;
   --radius-inner: 0.5rem;
   --touch-target: 2.75rem; /* 44px — Apple HIG minimum */
   --pill-outer: calc(
     var(--touch-target) + 2 * var(--sp-1) + 2px
   ); /* touch-target + 2×padding + 2×border */
-
+  /* Mobile bottom bar height (a 44px control + the bar's 2×sp-2 padding + its
+     1px top border). Bottom-anchored chrome (banner, toast, scroll-to-bottom,
+     key grid) lifts by this so it clears the bar. */
+  --wt-switcher-h: calc(var(--touch-target) + 2 * var(--sp-2) + 1px);
   --icon: 1.125rem; /* 18px */
   --icon-desktop: 1rem; /* 16px */
   --sp-1: 0.25rem;
