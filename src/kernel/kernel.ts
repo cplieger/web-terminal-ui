@@ -156,6 +156,17 @@ export function createTerminal(
     if (!connection.sendBinary(out)) {
       return;
     }
+    // Classic-terminal behavior (GNOME/xterm): user input re-engages follow and
+    // snaps to the bottom, so typing while scrolled up jumps to the input line.
+    // Instant (not the jump-button's smooth scroll), so it isn't janky per
+    // keystroke. This is the ONLY thing that scrolls a held view down — program
+    // output never does (the scroll controller's follow/hold job is unchanged),
+    // so scrolling up to read while output streams is preserved. A no-op on the
+    // alt screen (no scrollback) and when already following. NOTE: every caller
+    // of sendBytes today is genuine user input (typed keys, paste, mobile
+    // toolbar); if mouse tracking is ever wired through ctx.send, its motion
+    // bytes must NOT come through here or the view would snap on every move.
+    scroll.scrollToBottom();
     for (const obs of inputObservers) {
       obs(out);
     }
