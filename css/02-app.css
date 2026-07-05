@@ -247,11 +247,24 @@
   }
 }
 
-/* Clickable URLs */
+/* Clickable URLs. OSC 8 hyperlinks (base .term-link) underline on HOVER only:
+   an application can attach one OSC 8 link to a whole padded/bordered region —
+   e.g. a markdown link whose URL wraps inside a table cell, where the terminal
+   keeps the link open across the cell padding, the borders and the empty
+   adjacent column — so a persistent underline would bleed across the whole cell
+   and, on wrap, the full row. Hover-only matches iTerm2 / VTE / kitty. The app's
+   own text colour (which the engine renders) keeps the link discoverable at rest.
+   Auto-detected bare URLs (.term-autolink) are tightly scoped to the URL text and
+   never bleed, so they keep a subtle persistent underline. (The engine also only
+   anchors runs with real link text, so the underline hugs the text either way.) */
 .term-link {
   color: inherit;
-  text-decoration: underline dotted;
+  text-decoration: none;
   cursor: pointer;
+}
+
+.term-autolink {
+  text-decoration: underline dotted;
 }
 
 .term-link:hover {
