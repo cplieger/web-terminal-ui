@@ -41,7 +41,7 @@
   box-sizing: border-box;
   flex: 0 1 300px;
   min-width: 100px;
-  padding: var(--sp-2) var(--sp-2);
+  padding: var(--sp-2);
   /* A transparent border is reserved on every tab so toggling the inactive
      outline (below) never shifts the strip's layout. */
   border: 1px solid transparent;
@@ -54,21 +54,28 @@
   user-select: none;
 }
 
-/* Inactive tabs read as outlined chips (so adjacent tabs stay visually
-   separated) and take a subtle fill on hover. */
+/* Inactive tabs read as outlined chips with a subtle dark fill (so adjacent tabs
+   stay separated from the bar and from each other) and lift on hover. */
 .wt-tab:not(.wt-tab-active) {
   border-color: var(--border);
+  background: var(--tab-bg);
 }
 
 .wt-tab:not(.wt-tab-active):hover {
-  background: var(--tab-hover-bg);
+  /* A solid lift over the chip. --tab-hover-bg is a translucent wash meant for a
+     transparent-rest control; replacing the --tab-bg chip with it would read as
+     "more transparent", not "lighter", so bake the same 15% --text lift into the
+     chip colour instead. */
+  background: color-mix(in oklch, var(--tab-bg), var(--text) 15%);
   color: var(--tab-active-fg);
 }
 
-/* The active tab reads clearly above the inactive chips: a stronger fill.
-   Themeable (vibecli tints these purple). */
+/* The active tab reads clearly above the inactive chips: a stronger fill plus an
+   accent-coloured edge (inactive chips carry a faint white --border; the active
+   one gets the accent equivalent). Themeable via --accent (vibecli -> purple). */
 .wt-tab-active {
   background: var(--tab-active-bg);
+  border-color: var(--tab-active-border);
   color: var(--tab-active-fg);
 }
 
@@ -100,7 +107,11 @@
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--radius-inner);
+  /* --radius-sm (not --radius-inner): this is a small 24px box, where the
+     inner radius reads as a third of the side and looks far rounder than the
+     larger tab / "+" / menu controls. --radius-sm keeps the hover box in
+     proportion with them. */
+  border-radius: var(--radius-sm);
   color: color-mix(in oklch, var(--text) 60%, transparent);
   cursor: pointer;
 }
@@ -148,13 +159,17 @@
   background: transparent;
   border: none;
   border-radius: var(--radius-inner);
-  color: color-mix(in oklch, var(--text) 60%, transparent);
+  /* The "+" is the primary action, so carry it in the accent colour (a light
+     blue by default; consumer-themed) — matching the mobile switcher's "+"
+     (.wt-switcher-new) rather than the muted grey the close / tab controls use. */
+  color: var(--accent);
   cursor: pointer;
 }
 
 .wt-tab-new:hover {
+  /* Keep the accent glyph on hover (no colour override) so the "+" stays the
+     accent colour like the mobile "+"; hover only adds the fill. */
   background: var(--tab-active-bg);
-  color: var(--tab-active-fg);
 }
 
 /* The +/x icons are inline SVG so they center exactly in their flex-centered

@@ -60,7 +60,11 @@
   padding: 0 var(--sp-2);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  /* A touch more room than the desktop strip's --sp-1: vertical touch rows read
+     better with a bit more separation, and this equals the bar's --sp-2 bottom
+     padding so the active-tab -> first-row seam matches the inter-row gap (see
+     the expanded-list padding-top: 0 below). */
+  gap: var(--sp-2);
   max-height: 0;
   overflow: hidden;
   /* max-height caps the whole box (incl. the expanded padding) so an interactive
@@ -75,7 +79,9 @@
      clear of the soft keyboard. */
   max-height: 50dvh;
   overflow-y: auto;
-  padding-top: var(--sp-1);
+  /* No top padding: the bar's --sp-2 bottom padding already sits between the
+     active tab and the first row, so the seam equals the --sp-2 inter-row gap. */
+  padding-top: 0;
   padding-bottom: var(--sp-1);
 }
 
@@ -108,7 +114,7 @@
      fill/foreground the desktop strip uses (themeable; purple in vibecli). */
   background: var(--tab-active-bg);
   color: var(--tab-active-fg);
-  border: none;
+  border: 1px solid var(--tab-active-border);
   border-radius: var(--radius-inner);
   font-family: var(--font-ui);
   font-size: 0.875rem;
@@ -344,9 +350,9 @@
   min-height: var(--touch-target);
   /* Right padding reserves room for the close (x) overlaid inside the box. */
   padding: 0 var(--touch-target) 0 var(--sp-2);
-  background: transparent;
+  background: var(--tab-bg);
   color: var(--text);
-  border: none;
+  border: 1px solid var(--border);
   border-radius: var(--radius-inner);
   font-family: var(--font-ui);
   font-size: 0.875rem;
@@ -357,15 +363,16 @@
 
 @media (hover: hover) {
   .wt-switcher-row-select:hover {
-    background: var(--tab-hover-bg);
+    background: color-mix(in oklch, var(--tab-bg), var(--text) 15%);
   }
 }
 
-/* Press / touch-hold feedback on a listed (inactive) tab: the same subtle fill
-   the "+" button uses (--tab-hover-bg), NOT the stronger active-tab fill, so an
-   inactive row never looks like the active one. */
+/* Press / touch-hold feedback on a listed (inactive) tab: a solid lift over the
+   chip (the same 15% --text lift the desktop tabs use), not the translucent
+   --tab-hover-bg wash that would erase the chip fill. The active tab is set apart
+   by its accent border, so a lit inactive row is never mistaken for it. */
 .wt-switcher-row-select:active {
-  background: var(--tab-hover-bg);
+  background: color-mix(in oklch, var(--tab-bg), var(--text) 15%);
 }
 
 .wt-switcher-row-label {
