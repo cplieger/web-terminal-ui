@@ -173,6 +173,13 @@
    button collapses to zero width and fades out (the key grid is closed too, in
    JS), and the active row flex-grows to fill the freed space. */
 .wt-switcher-kb {
+  /* Rigid 44px box like the "+" and switch buttons (flex: none), so a long
+     active-tab title that overflows the bar is absorbed entirely by the
+     ellipsizing active-tab field, not shared with this button. It is otherwise
+     the only bar control with flex-shrink, so it squished (≈28px, non-square) on
+     long-title tabs while staying square on short ones. The `width` below still
+     drives the expand-collapse animation; flex: none honours it. */
+  flex: none;
   width: var(--touch-target);
   /* Override .wt-btn's min-width (the 44px tap floor). min-width is NOT
      transitioned, so on collapse it would revert to 44px instantly and clamp the
