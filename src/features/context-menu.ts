@@ -53,6 +53,28 @@ export interface ContextMenuOptions {
   clipboard?: TerminalFeature<ClipboardApi>;
 }
 
+/** iPhone/iPad/iPod, including iPadOS Safari's default "desktop mode" (which
+ *  reports platform MacIntel but with a touch screen). On these, a long-press on
+ *  text fires `contextmenu` slightly BEFORE the native word-selection registers,
+ *  so hasNativeSelection() is still false at that instant and the Android
+ *  empty-space branch would wrongly open our menu and preventDefault the native
+ *  selection. Deferring on any Apple touch device lets iOS/iPadOS run its own
+ *  text selection + drag handles (bug: an iPad long-press opened the custom menu
+ *  instead of native selection, leaving Select All the only way to select). */
+function isAppleTouchDevice(): boolean {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+  const ua = navigator.userAgent || "";
+  const platform = navigator.platform || "";
+  if (/iP(hone|ad|od)/.test(ua) || /iP(hone|ad|od)/.test(platform)) {
+    return true;
+  }
+  // iPadOS 13+ Safari defaults to desktop mode: platform "MacIntel" but a touch
+  // screen (maxTouchPoints > 1). A real trackpad Mac reports maxTouchPoints 0.
+  return platform === "MacIntel" && navigator.maxTouchPoints > 1;
+}
+
 export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
   return {
     name: "contextMenu",
@@ -68,6 +90,9 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
       // desktop right-click AND on Android long-press, so its handler branches
       // on this to tell them apart.
       let lastPointerType = "mouse";
+      // Computed once: on an Apple touch device, defer a touch contextmenu to
+      // native text selection (see isAppleTouchDevice).
+      const appleTouch = isAppleTouchDevice();
       // Timestamp until which a document click is swallowed (see SWALLOW_MS).
       let swallowUntil = 0;
       // A native selection was made during the current touch press (tracked via
@@ -219,6 +244,13 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         }
         if (hasNativeSelection()) {
           return; // native selection toolbar owns Copy over text
+        }
+        if (appleTouch) {
+          // iOS/iPadOS fires contextmenu a beat before the native word-select
+          // registers, so hasNativeSelection() can still be false here. Defer
+          // anyway so the platform's own selection wins instead of our
+          // empty-space menu (which would preventDefault and suppress it).
+          return;
         }
         e.preventDefault();
         clearLongPress();

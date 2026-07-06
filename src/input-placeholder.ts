@@ -1,5 +1,5 @@
 // Single source of truth for the hidden-textarea placeholder shared by
-// mount.ts and composition.ts.
+// kernel.ts and composition.ts.
 //
 // A single-character placeholder is kept in the hidden textarea so iOS soft
 // keyboards have something to "delete" when the user holds Backspace. iOS only
@@ -11,7 +11,7 @@
 // announcement of the input state stays empty-ish rather than "space".
 //
 // The constant AND the reset routine must stay in lockstep across the two
-// modules (mount.ts seeds + re-pads it; composition.ts restores it on
+// modules (kernel.ts seeds + re-pads it; composition.ts restores it on
 // compositionend / paste) or the iOS held-Backspace key-repeat silently breaks
 // with no compile error — which is why they live here in one place.
 export const INPUT_PLACEHOLDER = "\u00A0";

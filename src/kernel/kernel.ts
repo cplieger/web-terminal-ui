@@ -248,6 +248,7 @@ export function createTerminal(
     compositionView: compositionViewEl,
     getCursorPx: render.getCursorPx,
     send: sendText,
+    paste,
   });
 
   scroll.init({
@@ -281,7 +282,13 @@ export function createTerminal(
       } else if (msg.type === "scroll") {
         render.handleScroll(msg);
       } else if (msg.type === "title") {
-        document.title = msg.title;
+        // Match the app's own title policy (tabs.ts wire:title / applyStatus,
+        // which ignore a blank OSC 0/2 title): a shell clears its window title
+        // when it redraws its prompt after idling, so hold the last-good browser
+        // title instead of flickering blank.
+        if (msg.title.trim() !== "") {
+          document.title = msg.title;
+        }
         bus.emit("wire:title", { session: activeSession?.id ?? "", title: msg.title });
       } else if (msg.type === "modes") {
         render.updateReverseVideo();
@@ -412,6 +419,17 @@ export function createTerminal(
   // touch and never clears a selection — a long-press to select a word, the OS
   // copy/paste callout, and drag-to-scroll are all left to the platform (the
   // research consensus: over text, allow the default and emit nothing).
+  // A fine pointer (mouse / trackpad) is available: a desktop, or a tablet with
+  // a trackpad / Magic Keyboard. Such a device has a hardware keyboard, so there
+  // is no soft keyboard to protect — focus should be eager and land in one tap.
+  // The bare-touch guards below bow out of focusing (to avoid popping the soft
+  // keyboard or stealing a selection); they are relaxed when a fine pointer
+  // exists. This is keyed off `any-pointer: fine` rather than the event's
+  // pointerType because iPadOS reports a COARSE primary pointer even with a
+  // trackpad attached, and its trackpad taps arrive inconsistently as "mouse" or
+  // "touch" — so pointerType alone made the terminal take several taps to focus.
+  const hasFinePointer = (): boolean =>
+    typeof window.matchMedia === "function" && window.matchMedia("(any-pointer: fine)").matches;
   let lastPointerType = "mouse";
   let pointerDownX = 0;
   let pointerDownY = 0;
@@ -459,6 +477,14 @@ export function createTerminal(
       const sel = window.getSelection();
       if (sel && !sel.isCollapsed) {
         sel.removeAllRanges();
+        // On a bare touchscreen a deselect tap must NOT also focus: that would
+        // pop the soft keyboard right after a copy. But with a fine pointer
+        // (a hardware keyboard is present) there is no soft keyboard to pop, so
+        // focus in the same tap rather than forcing the user to tap again — this
+        // is a large part of the "2-3 taps to focus" on an iPad + Magic Keyboard.
+        if (hasFinePointer()) {
+          focusTerminal();
+        }
         return;
       }
       // A clean tap with nothing selected focuses the input, synchronously (an
@@ -471,8 +497,11 @@ export function createTerminal(
     "mousedown",
     (e) => {
       // Cancel the synthetic mousedown after a touch tap so iOS keeps the
-      // keyboard up (xterm.js focus-preservation pattern, scoped to touch).
-      if (lastPointerType === "touch") {
+      // keyboard up (xterm.js focus-preservation pattern, scoped to touch). Skip
+      // it when a fine pointer is present (iPad + trackpad / Magic Keyboard):
+      // there is no soft keyboard to protect, and suppressing the mousedown was
+      // defeating the native focus, so the terminal needed several taps to focus.
+      if (lastPointerType === "touch" && !hasFinePointer()) {
         e.preventDefault();
       }
     },
@@ -487,7 +516,7 @@ export function createTerminal(
         window.open(link.href, "_blank", "noopener,noreferrer");
         return;
       }
-      if (lastPointerType === "touch") {
+      if (lastPointerType === "touch" && !hasFinePointer()) {
         return;
       }
       const sel = window.getSelection();
@@ -502,6 +531,7 @@ export function createTerminal(
   // --- Viewport ---
   viewport.init({
     termWrap,
+    suppressKeyboardInset: hasFinePointer,
     onSettled() {
       render.updateFontMetrics();
       if (fontsLoaded) {
@@ -636,6 +666,12 @@ export function createTerminal(
       },
       tablist: () => tablistController,
       notifySwitch(session) {
+        // A feature's un-cancelled async (tabs bootstrap/create()/pollOnce()) can
+        // resolve after destroy() and call this; ignore it so a torn-down terminal
+        // never re-points or reopens the socket (connection.setSession below).
+        if (isDestroyed()) {
+          return;
+        }
         // Detach (design 5.1): make input safe before the socket is re-pointed.
         // End any in-flight IME composition and clear the textarea so
         // half-composed text is not delivered to either session, and let every
@@ -674,6 +710,12 @@ export function createTerminal(
 
   // --- Feature lifecycle ---
   let destroyed = false;
+  // Live read of `destroyed` for the post-await re-check in setupFeatures():
+  // a plain `if (destroyed)` there is narrowed to always-false by TS CFA
+  // (it cannot model destroy() firing during the await), tripping
+  // @typescript-eslint/no-unnecessary-condition. A call defeats the stale
+  // narrowing with identical runtime behavior.
+  const isDestroyed = (): boolean => destroyed;
   function teardownFeatures(): void {
     for (let i = instances.length - 1; i >= 0; i--) {
       const entry = instances[i];
@@ -696,6 +738,19 @@ export function createTerminal(
       }
       try {
         const instance = await feature.setup(makeContext(feature.name));
+        // destroy() may have run during the await above; teardownFeatures() has already
+        // swept `instances`, and destroy() is one-shot, so a straight push here would
+        // leave this instance's listeners/timers/observers (tabs' SSE + poll + window/
+        // document listeners + ResizeObservers) alive forever. Tear it down instead of
+        // registering it.
+        if (isDestroyed()) {
+          try {
+            instance.teardown();
+          } catch (err) {
+            reportError(feature.name, err);
+          }
+          return;
+        }
         instances.push({ feature, instance });
         // Populate the feature value's readonly api (consumer pattern:
         // tabs.api?.create()) via a narrow cast, and the ctx.use lookup map.
@@ -714,12 +769,6 @@ export function createTerminal(
       }
     }
   }
-  // Features set up in the background; first paint is never gated on them.
-  void setupFeatures();
-
-  // --- Connect + focus ---
-  render.updateFontMetrics();
-  composition.positionCompositionView();
   // A session-managing feature (tabs) drives the first connect itself once it
   // has resolved a session id (ctx.notifySwitch -> connection.setSession, which
   // adds ?session=<id>). Connecting here first would open a bare /ws that a
@@ -727,6 +776,23 @@ export function createTerminal(
   // churning the reconnect backoff until the feature sets a session. So skip the
   // startup connect when managed; the single-terminal presets leave it to us.
   const sessionManaged = featureList.some((f) => f.managesSessions === true);
+
+  // Features set up in the background; first paint is never gated on them.
+  void setupFeatures().then(() => {
+    // A session-managing feature that finished setup WITHOUT initiating a
+    // connection means its bootstrap failed (no session could be listed or
+    // spawned) or its setup threw. markReady (needs a screen frame) and onGiveUp
+    // (needs the connect to be attempted and fail) then never fire, so the
+    // loading overlay would stay up forever, hiding the retry chrome the feature
+    // keeps alive (tabs' "+"). Dismiss it so the page shows its real state.
+    if (sessionManaged && !connectionInitiated && !destroyed) {
+      dismissLoadingOverlay();
+    }
+  });
+
+  // --- Connect + focus ---
+  render.updateFontMetrics();
+  composition.positionCompositionView();
   if (!sessionManaged) {
     connection.connect();
     connectionInitiated = true;
@@ -742,6 +808,12 @@ export function createTerminal(
       destroyed = true;
       teardownFeatures();
       kernelAbort.abort();
+      viewport.teardown();
+      // Reset the composition singleton (kernel-driven, no feature teardown): a
+      // destroy() mid-IME-composition otherwise leaves module-level `composing`
+      // stuck true, so a remounted terminal swallows every keydown until an IME
+      // cycle resets it; also neutralizes a pending compositionend setTimeout.
+      composition.teardown();
       connection.disconnect();
       connState.destroy();
       if (toastTimer !== null) {

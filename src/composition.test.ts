@@ -1,10 +1,14 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
 import * as composition from "./composition.js";
+import { keyboard } from "@cplieger/web-terminal-engine";
+
+const { bracketTextForPaste, prepareTextForTerminal } = keyboard;
 
 let textarea: HTMLTextAreaElement;
 let view: HTMLElement;
 let send: Mock<(bytes: string) => void>;
+let paste: Mock<(text: string) => void>;
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -12,11 +16,18 @@ beforeEach(() => {
   view = document.createElement("div");
   document.body.replaceChildren(textarea, view);
   send = vi.fn<(bytes: string) => void>();
+  // Mirror the kernel's single paste funnel: composition delegates to paste(),
+  // so the funnel (bracket + newline-normalize) is applied here and forwarded to
+  // send, keeping the paste-jacking assertions on `send` meaningful.
+  paste = vi.fn<(text: string) => void>((text) => {
+    send(bracketTextForPaste(prepareTextForTerminal(text)));
+  });
   composition.init({
     textarea,
     compositionView: view,
     getCursorPx: () => ({ left: 0, top: 0, cellH: 16 }),
     send,
+    paste,
   });
 });
 afterEach(() => {
@@ -119,6 +130,7 @@ describe("composition: positionCompositionView anchors the textarea at the conte
       compositionView: view,
       getCursorPx: () => ({ left: 40, top: 5000, cellH: 16 }),
       send,
+      paste,
     });
 
     composition.positionCompositionView();

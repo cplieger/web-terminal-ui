@@ -39,6 +39,19 @@ const PREVIEW_DRAG_RATIO = 0.1;
 const PREVIEW_PEEK_MAX = 10;
 // One-time "swipe to switch" hint, remembered across loads.
 const SWIPE_HINT_KEY = "wt-swipe-hint-seen";
+// localStorage key for the last active session id, so a page reload reopens the
+// tab the user left on rather than always defaulting to the oldest one.
+const ACTIVE_TAB_KEY = "wt-active-session";
+// The mobile bottom-switcher (a single full-width active-tab chip + swipe) is
+// used ONLY on a narrow coarse-pointer device (a phone). A wide touchscreen (an
+// iPad) and every fine-pointer device (a desktop, or an iPad with a trackpad /
+// Magic Keyboard) get the multi-tab top strip instead — the switcher's
+// single-giant-tab layout wastes a big screen (an iPad was getting the phone
+// UI). MUST stay in lockstep with the identical media query in css/06-mobile.css
+// (.wt-switcher shown / .wt-tab-bar hidden) and its complement in css/05-tabs.css
+// (the desktop-strip terminal clearance). Width chosen to sit above every phone
+// portrait width and below iPad portrait (768).
+const SWITCHER_MEDIA = "(pointer: coarse) and (max-width: 600px)";
 // Default cadence for the no-activityMonitor polling fallback.
 const DEFAULT_POLL_MS = 4000;
 // Tab context-menu viewport clamp (mirrors context-menu.ts): keep this margin
@@ -52,6 +65,10 @@ const TAB_MENU_GAP = 16;
 interface SessionInfo {
   id: string;
   title: string;
+  /** The raw client-set title (the value pushed via PUT .../title), before the
+   *  server's OSC fallback baked into `title`. A consumer that treats the
+   *  program's OSC window title as unreliable (an agent shell) reads this. */
+  clientTitle?: string | undefined;
   createdAt: string;
   status: string;
   /** Sticky: true once the session has emitted a genuine activity signal
@@ -89,6 +106,12 @@ interface Tab {
    *  cwd-only title disabled. Undefined until the first non-empty submission; see
    *  baseLabel. */
   derived?: string;
+  /** The persisted client title reported by the server (its `clientTitle` wire
+   *  field): the last derived title pushed via PUT .../title, surviving reloads.
+   *  In `preferInputTitle` mode this is the reload-recovery source (the live
+   *  `derived` is lost on reload, and `title` is the unreliable OSC value there).
+   *  In the default mode it is the lowest-priority fallback after title/derived. */
+  clientTitle?: string | undefined;
 }
 
 export interface TabsApi {
@@ -120,18 +143,87 @@ export interface TabsOptions {
    *  toolbar should be built with { externalToggle: true } so its own top-right
    *  toggle is hidden and the grid opens above the bar. */
   keyboardToggle?: TerminalFeature<MobileToolbarApi>;
+  /** Prefer the input-derived title over the process OSC 0/2 title. Default
+   *  false (OSC-first: a program that sets its own window title wins, else the
+   *  last submitted line). Set true for an agent shell whose program emits a
+   *  non-empty but useless OSC title (kiro-cli under vibecli): the label then
+   *  follows the latest submitted line (live) or the persisted client title (on
+   *  reload), and the unreliable OSC title is ignored entirely. presetAgentTabbed
+   *  enables this. */
+  preferInputTitle?: boolean;
 }
 
-// The +/x glyphs are inline SVG (not font glyphs) so they center exactly in
-// their hover box and stay symmetric regardless of the UI font's metrics.
+// The +/x/keyboard glyphs are inline SVG (not font glyphs) so they center
+// exactly in their flex-centered buttons and stay symmetric regardless of the UI
+// font's metrics. Each is defined ONCE here and shared by every chip site and
+// control below (rather than duplicated across the desktop and mobile markup).
+const CLOSE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18"/></svg>`;
+const NEW_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`;
+const KB_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M15 15 9.5 9.5M9.5 13V9.5H13"/></svg>`;
+// Two-arrows "switch" glyph for the mobile switcher's dedicated open/close
+// button (a latest-wins background-tab notification dot rides on it — see
+// switchButtonHTML). Same viewBox + stroke=currentcolor treatment as the others.
+const SWITCH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h13M14 6l3 3-3 3M20 15H7M10 12l-3 3 3 3"/></svg>`;
+
+// chipContent is the ONE builder for a tab chip's content — a status dot, a
+// label, and a close (x) — shared by all three chip sites: the desktop strip
+// (.wt-tab), the mobile active row (.wt-switcher-current), and each expanded
+// mobile list row (.wt-switcher-row). Each site passes its OWN class set (never
+// renamed) so every existing selector — and thus all CSS and all tests — still
+// matches. The one structural difference is WHERE the close sits: the desktop
+// chip nests it flat inside .wt-tab, while the two mobile chips place it as a
+// sibling of the select/swipe button (a button can't nest in a button). So the
+// builder returns two fragments — the dot+label pair and the close — that each
+// site drops into its own structure.
+function chipContent(v: { dot: string; label: string; close: string; closeAttr?: string }): {
+  dotLabel: string;
+  close: string;
+} {
+  return {
+    dotLabel:
+      `<span class="${v.dot} wt-status-dot" aria-hidden="true"></span>` +
+      `<span class="${v.label}"></span>`,
+    close: `<button type="button" class="${v.close}" aria-label="Close terminal"${v.closeAttr ?? ""}>${CLOSE_SVG}</button>`,
+  };
+}
+
+// The ONE "+" (new-terminal) and keyboard button factories, shared by the
+// desktop strip and the mobile switcher — only the class set differs. These
+// build the markup; element construction + event wiring live in makeNewButton /
+// makeKbButton (in setup), which close over create() and the key-grid toggle.
+function newButtonHTML(cls: string): string {
+  return `<button type="button" class="${cls}" aria-label="New terminal">${NEW_SVG}</button>`;
+}
+function kbButtonHTML(cls: string): string {
+  return `<button type="button" class="${cls}" aria-label="Keyboard keys" aria-expanded="false" hidden>${KB_SVG}</button>`;
+}
+// The mobile switcher's dedicated open/close button. It toggles the tab list and
+// carries a latest-wins notification dot (a child span) — amber when a background
+// terminal needs input, green when a background turn finished — cleared when the
+// list opens. Only the mobile switcher builds it (element construction + event
+// wiring live in makeSwitchButton in setup); the desktop strip already shows
+// every tab's own status dot, so it needs no aggregate cue.
+function switchButtonHTML(cls: string): string {
+  return (
+    `<button type="button" class="${cls}" aria-label="Open tab switcher">${SWITCH_SVG}` +
+    `<span class="wt-status-dot wt-switcher-switch-dot" aria-hidden="true"></span></button>`
+  );
+}
+
+// Desktop strip chip: dot + label + close all flat inside .wt-tab (the whole
+// chip is the click/switch target; the close is a nested button). tabindex="-1"
+// keeps the close out of the tab order.
+const TAB_CHIP = chipContent({
+  dot: "wt-tab-dot",
+  label: "wt-tab-label",
+  close: "wt-tab-close",
+  closeAttr: ' tabindex="-1"',
+});
 const TAB_HTML = `
 <div class="wt-tab">
-  <span class="wt-tab-dot wt-status-dot" aria-hidden="true"></span>
-  <span class="wt-tab-label"></span>
-  <button type="button" class="wt-tab-close" aria-label="Close terminal" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18"/></svg></button>
+  ${TAB_CHIP.dotLabel}
+  ${TAB_CHIP.close}
 </div>`;
-
-const NEW_HTML = `<button type="button" class="wt-tab-new" aria-label="New terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>`;
 
 // Mobile bottom bar. One element, two parts stacked in a column: the always-
 // visible bar row (active tab as a tap/swipe surface + keyboard + "+") on top,
@@ -147,23 +239,24 @@ const NEW_HTML = `<button type="button" class="wt-tab-new" aria-label="New termi
 //     (.wt-switcher-current with dot + label) plus a close (x) overlaid at the
 //     right, mirroring the listed rows. No "n / m" counter: the list below is a
 //     rotating circular queue, so an absolute position number is meaningless.
-//   - .wt-switcher-kb: opens the key grid above the bar (only wired + shown when
-//     a keyboardToggle feature is provided).
-//   - .wt-switcher-new: the accent "+" that spawns a terminal.
+//   - The keyboard button (.wt-switcher-kb, opens the key grid above the bar,
+//     only wired + shown when a keyboardToggle feature is provided) and the
+//     accent "+" (.wt-switcher-new, spawns a terminal) are appended to the bar
+//     row from the shared factories in setup (see makeKbButton / makeNewButton).
+const CURRENT_CHIP = chipContent({
+  dot: "wt-switcher-dot",
+  label: "wt-switcher-label",
+  close: "wt-switcher-current-close wt-btn",
+});
 const SWITCHER_HTML = `
 <div class="wt-switcher" role="group" aria-label="Terminal tabs">
   <div class="wt-switcher-bar">
     <div class="wt-switcher-current-wrap">
       <button type="button" class="wt-switcher-current" aria-haspopup="true" aria-expanded="false">
-        <span class="wt-switcher-current-inner">
-          <span class="wt-switcher-dot wt-status-dot" aria-hidden="true"></span>
-          <span class="wt-switcher-label"></span>
-        </span>
+        <span class="wt-switcher-current-inner">${CURRENT_CHIP.dotLabel}</span>
       </button>
-      <button type="button" class="wt-switcher-current-close wt-btn" aria-label="Close terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18"/></svg></button>
+      ${CURRENT_CHIP.close}
     </div>
-    <button type="button" class="wt-switcher-kb wt-btn" aria-label="Keyboard keys" aria-expanded="false" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M15 15 9.5 9.5M9.5 13V9.5H13"/></svg></button>
-    <button type="button" class="wt-switcher-new wt-btn wt-switcher-new-btn" aria-label="New terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>
   <ul class="wt-switcher-list" role="list"></ul>
 </div>`;
@@ -171,34 +264,114 @@ const SWITCHER_HTML = `
 // One row per OTHER tab in the expanded list: a stretched select target (dot +
 // label) with the close (x) laid inside it at the right (two buttons can't nest,
 // so the x is a sibling overlapping the select's reserved right padding).
+const ROW_CHIP = chipContent({
+  dot: "wt-switcher-row-dot",
+  label: "wt-switcher-row-label",
+  close: "wt-switcher-row-close wt-btn",
+});
 const SWITCHER_ROW_HTML = `
 <li class="wt-switcher-row">
-  <button type="button" class="wt-switcher-row-select">
-    <span class="wt-switcher-row-dot wt-status-dot" aria-hidden="true"></span>
-    <span class="wt-switcher-row-label"></span>
-  </button>
-  <button type="button" class="wt-switcher-row-close wt-btn" aria-label="Close terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18"/></svg></button>
+  <button type="button" class="wt-switcher-row-select">${ROW_CHIP.dotLabel}</button>
+  ${ROW_CHIP.close}
 </li>`;
+
+// looksLikeHardwareKey reports whether a keydown could only have come from a
+// PHYSICAL keyboard on a touch device. There is no web API that directly says "a
+// hardware keyboard is attached" (navigator.keyboard is layout/lock only and
+// unsupported on iOS Safari; navigator.virtualKeyboard is Chromium-only), so we
+// infer it: the iOS on-screen keyboard has no modifier keys and no
+// arrows/Escape/Tab/nav/function keys, so any of these means real hardware. Used
+// to latch a "physical keyboard present" flag that also covers a keyboard-only
+// Smart Keyboard Folio (which, unlike a Magic Keyboard, adds no trackpad and so
+// does not match `any-pointer: fine`).
+function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) {
+    return true;
+  }
+  switch (ev.key) {
+    case "ArrowUp":
+    case "ArrowDown":
+    case "ArrowLeft":
+    case "ArrowRight":
+    case "Escape":
+    case "Tab":
+    case "Home":
+    case "End":
+    case "PageUp":
+    case "PageDown":
+      return true;
+    default:
+      return /^F\d{1,2}$/.test(ev.key); // F1–F12
+  }
+}
 
 export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
+  const preferInputTitle = opts.preferInputTitle ?? false;
+  // fetch has no default timeout; a stalled-but-open server would otherwise leave a
+  // boot apiList/apiCreate await pending forever, so setup() never resolves and the
+  // kernel's post-setup overlay-dismiss never fires (permanent loading overlay). Bound
+  // every session-REST call; on expiry the existing catch paths recover.
+  const SESSION_API_TIMEOUT_MS = 15000;
 
   async function apiList(): Promise<SessionInfo[]> {
-    const r = await fetch(apiBase, { headers: { Accept: "application/json" } });
+    const r = await fetch(apiBase, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
+    });
     if (!r.ok) {
       throw new Error(`web-terminal-ui: session list failed (${String(r.status)})`);
     }
-    return (await r.json()) as SessionInfo[];
+    const data: unknown = await r.json();
+    // A 200 with a non-array body -- a proxy error object, or a Go server
+    // marshaling a nil session slice as JSON `null` -- must not reach the
+    // bootstrap's `sessions.length` / `for...of` (or the poll's `list.map`)
+    // uncaught: it would throw out of setup(), trip the kernel's 'terminal
+    // has no chrome' teardown, and (managesSessions skipped the startup
+    // connect) leave connectionInitiated false -> a permanently dead
+    // terminal. Reject a non-array so the callers' existing catch paths
+    // recover (bootstrap -> [], poll -> skip the tick).
+    if (!Array.isArray(data)) {
+      throw new Error("web-terminal-ui: session list returned a non-array body");
+    }
+    return data as SessionInfo[];
   }
   async function apiCreate(): Promise<SessionInfo> {
-    const r = await fetch(apiBase, { method: "POST" });
+    const r = await fetch(apiBase, {
+      method: "POST",
+      signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
+    });
     if (!r.ok) {
       throw new Error(`web-terminal-ui: session create failed (${String(r.status)})`);
     }
     return (await r.json()) as SessionInfo;
   }
   async function apiClose(id: string): Promise<void> {
-    await fetch(`${apiBase}/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const r = await fetch(`${apiBase}/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
+    });
+    if (!r.ok) {
+      throw new Error(`web-terminal-ui: session close failed (${String(r.status)})`);
+    }
+  }
+  // Persist the input-derived tab title server-side so it survives a page reload
+  // and shows on other devices. The engine stores it as the session's fallback
+  // title and uses it only when the program emits no OSC title (the vibecli case:
+  // kiro-cli emits no usable OSC title, so the latest user message is the label).
+  // Best-effort and fire-and-forget: a failure never disrupts the terminal — the
+  // locally-derived title still displays, it just is not persisted this time.
+  async function apiSetTitle(id: string, title: string): Promise<void> {
+    try {
+      await fetch(`${apiBase}/${encodeURIComponent(id)}/title`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
+      });
+    } catch {
+      /* best-effort persistence; ignore network/timeout errors */
+    }
   }
 
   return {
@@ -212,6 +385,71 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const tablist = ctx.tablist();
       const monitor = opts.activityMonitor ? ctx.use(opts.activityMonitor) : undefined;
 
+      // The keyboard buttons wired to the key grid — the mobile switcher's and
+      // the desktop strip's — built + wired by the ONE makeKbButton factory;
+      // closeKeyGrid and the sticky-Ctrl armed reflect update every one.
+      const kbButtons: HTMLElement[] = [];
+      // makeNewButton / makeKbButton are the shared control factories (goals 2 &
+      // 3): one "+" and one keyboard-button implementation, each built + wired
+      // once and reused for the desktop strip and the mobile switcher. The "+"
+      // spawns a terminal; the keyboard button toggles the key grid (via the
+      // keyboardToggle feature, read lazily so feature ordering does not matter)
+      // and reflects its open state on every keyboard button.
+      function makeNewButton(cls: string): HTMLElement {
+        const btn = fromHTML(newButtonHTML(cls));
+        // Keep the hidden terminal textarea focused: a bar button needs no focus
+        // of its own, and letting the tap shift focus makes iOS/iPadOS consume
+        // the FIRST tap to blur the input (so "+" only fired create on the second
+        // tap — the reported double-tap). preventDefault on pointerdown fires the
+        // action on the first tap; switchTo then re-focuses the input for the new
+        // tab on a physical-keyboard device.
+        btn.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+        });
+        btn.addEventListener("click", () => {
+          void create();
+        });
+        return btn;
+      }
+      function makeKbButton(cls: string): HTMLElement {
+        const btn = fromHTML(kbButtonHTML(cls));
+        // First-tap focus retention (see makeNewButton): keep the terminal
+        // textarea focused so the toggle fires on the first tap on iOS/iPadOS.
+        btn.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+        });
+        btn.addEventListener("click", () => {
+          const kb = opts.keyboardToggle ? ctx.use(opts.keyboardToggle) : undefined;
+          if (!kb) {
+            return;
+          }
+          kb.toggle();
+          const open = kb.isOpen();
+          for (const b of kbButtons) {
+            b.setAttribute("aria-expanded", String(open));
+            b.classList.toggle("wt-active", open);
+          }
+        });
+        kbButtons.push(btn);
+        return btn;
+      }
+      // makeSwitchButton builds the mobile switcher's dedicated open/close
+      // button (its notification dot is painted by paintSwitchDot). Like the
+      // other bar buttons it preventDefaults pointerdown for first-tap focus
+      // retention (keeps the terminal textarea focused so it fires on the first
+      // tap on iOS/iPadOS); its click toggles the list (toggleSwitcher opens when
+      // collapsed, closes when expanded).
+      function makeSwitchButton(): HTMLElement {
+        const btn = fromHTML(switchButtonHTML("wt-switcher-switch wt-btn"));
+        btn.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+        });
+        btn.addEventListener("click", () => {
+          toggleSwitcher();
+        });
+        return btn;
+      }
+
       // --- Desktop tab strip (top-bar region) ---
       const slot = ctx.region("top-bar", "tabs");
       const bar = document.createElement("div");
@@ -222,8 +460,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // the slot (a sibling of the fixed .wt-tab-bar) flowed it out of the strip
       // to the root, so it never appeared; inside the flex bar it renders at the
       // end of the tabs (addTabChrome inserts each tab before it).
-      const newBtn = fromHTML(NEW_HTML);
+      const newBtn = makeNewButton("wt-tab-new");
       bar.appendChild(newBtn);
+      // Desktop-strip keyboard button, built + wired by the SAME factory as the
+      // mobile switcher's. A SIBLING of the strip (appended to the region slot,
+      // not into .wt-tab-bar) so it never affects the strip's child order; CSS
+      // shows it only on a wide touchscreen (where the strip, not the switcher,
+      // is used) and hides it on a fine-pointer desktop. Un-hidden below only
+      // when a keyboardToggle feature is wired.
+      const deskKb = makeKbButton("wt-tab-kb wt-btn");
+      slot.appendChild(deskKb);
 
       // Pull the terminal surface up off the fixed BOTTOM strip on desktop so
       // the bar does not overlap the last rows. The surface is position:fixed
@@ -261,24 +507,55 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // swipe: the content (dot + label) and the close (x). Moving both keeps the
       // whole active-tab chip sliding as one, rather than the close staying put.
       const swipeEls = [swInner, swClose];
-      const swKb = pick(switcher, ".wt-switcher-kb");
-      const swNew = pick(switcher, ".wt-switcher-new");
+      // The mobile "+", keyboard, and switcher buttons: built + wired by the
+      // SAME shared factories as the desktop strip's, then appended to the bar
+      // row so the order stays current-wrap | keyboard | switch | "+". Unifying
+      // the controls means one implementation placed per layout rather than
+      // duplicated markup. The switch button sits BETWEEN the keyboard and "+":
+      // it toggles the list and carries the moved background-tab attention cue.
+      const swKb = makeKbButton("wt-switcher-kb wt-btn");
+      const swSwitch = makeSwitchButton();
+      const swSwitchDot = pick(swSwitch, ".wt-switcher-switch-dot");
+      const swNew = makeNewButton("wt-switcher-new wt-btn wt-switcher-new-btn");
+      swBar.append(swKb, swSwitch, swNew);
+      // Latest-wins notification state for the switch button's dot: overwritten
+      // by each qualifying background-tab event (applyStatus) and cleared when
+      // the list opens (expandSwitcher). "" = no pending cue; the dot is hidden.
+      let switchNotify: "" | "input" | "done" = "";
+      function paintSwitchDot(): void {
+        // Reuse the per-tab status-dot colours (single source, css/05-tabs.css
+        // .wt-status-dot[data-status="input"|"done"]) instead of re-declaring
+        // them: the dot has the .wt-status-dot class, so data-status colours it
+        // exactly like the tabs' own dots.
+        if (switchNotify === "") {
+          delete swSwitchDot.dataset["status"];
+        } else {
+          swSwitchDot.dataset["status"] = switchNotify;
+        }
+      }
       ctx.region("bottom-switcher", "switcher").appendChild(switcher);
-      // The keyboard button opens the key grid; show it only when a toolbar is
+      // The keyboard buttons open the key grid; show them only when a toolbar is
       // wired to drive. Read the toolbar's API lazily at tap time (ctx.use), so
       // feature ordering does not matter.
       let offArmed: (() => void) | undefined;
       if (opts.keyboardToggle) {
-        swKb.hidden = false;
-        // Mirror sticky-Ctrl on the keyboard button: when a Ctrl press is armed,
-        // invert the button (like the armed Ctrl key) so the pending modifier is
-        // visible with the grid closed — the toolbar sets up before tabs, so its
-        // API is available now (see the preset ordering note). Also clears on the
-        // auto-disarm after a Ctrl byte and on a tab switch (onDetach disarms).
+        // Un-hide every keyboard button; the mobile one then shows in the
+        // switcher bar, the desktop one is CSS-gated to a wide touchscreen.
+        for (const b of kbButtons) {
+          b.hidden = false;
+        }
+        // Mirror sticky-Ctrl on every keyboard button: when a Ctrl press is
+        // armed, invert the button (like the armed Ctrl key) so the pending
+        // modifier is visible with the grid closed — the toolbar sets up before
+        // tabs, so its API is available now (see the preset ordering note). Also
+        // clears on the auto-disarm after a Ctrl byte and on a tab switch
+        // (onDetach disarms).
         const kbApi = ctx.use(opts.keyboardToggle);
         if (kbApi) {
           const reflectArmed = (armed: boolean): void => {
-            swKb.classList.toggle("wt-armed", armed);
+            for (const b of kbButtons) {
+              b.classList.toggle("wt-armed", armed);
+            }
           };
           reflectArmed(kbApi.isCtrlArmed());
           offArmed = kbApi.onCtrlArmedChange(reflectArmed);
@@ -333,6 +610,24 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       ctx.region("overlay", "tab-menu").appendChild(tabMenu);
 
       const tabList: Tab[] = [];
+      // Ids the user closed within CLOSE_TOMBSTONE_MS, so a stale server listing
+      // (the SSE re-open snapshot, or the poll's GET /api/sessions) that predates
+      // the server reaping the session does not re-adopt (flash back) the closed
+      // tab. TTL-cleared in adoptSession.
+      const recentlyClosed = new Map<string, number>();
+      const CLOSE_TOMBSTONE_MS = 15000;
+      function tombstone(id: string): void {
+        const now = Date.now();
+        // Sweep entries whose window already elapsed (adoptSession treats them as
+        // untombstoned anyway) so the map cannot grow without bound over a long
+        // session of opens/closes; then record this close.
+        for (const [k, t] of recentlyClosed) {
+          if (now - t >= CLOSE_TOMBSTONE_MS) {
+            recentlyClosed.delete(k);
+          }
+        }
+        recentlyClosed.set(id, now);
+      }
       // The expanded mobile list's row elements, keyed by tab id. Rows are
       // reused across re-renders (reconcile, not rebuild) so a swipe can FLIP the
       // same elements from their old slots to their new ones (the rotation).
@@ -355,11 +650,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let creatingTab = false;
       let collapseClearTimer: ReturnType<typeof setTimeout> | null = null;
       let hintShown = false;
-      // On a touch device, focusing the hidden input opens the virtual keyboard.
-      // A switch triggered by tapping/swiping the tab UI must not do that (it is
-      // disruptive), so the input is focused on a switch only with a fine
-      // pointer; on touch the user taps the terminal itself to open the keyboard.
-      const coarse = window.matchMedia("(pointer: coarse)").matches;
+      // Whether to focus the input on a tab switch. On a device with a physical
+      // keyboard this is what you want (switch, then type immediately); on a
+      // keyboard-less touchscreen it must NOT happen, or every switch pops the
+      // virtual keyboard. No web API reports a hardware keyboard directly, so we
+      // combine two proxies: (1) a fine pointer (a Magic Keyboard carries a
+      // trackpad, so an iPad with one matches, as does every desktop; a bare
+      // phone / keyboard-less tablet does not) — read live, since a keyboard can
+      // be attached/detached; and (2) sawHardwareKey, latched once we observe a
+      // keydown only a hardware keyboard emits (covers a trackpad-less keyboard
+      // folio). See looksLikeHardwareKey and the keydown observer below.
+      let sawHardwareKey = false;
+      const hasFinePointer = (): boolean =>
+        typeof window.matchMedia === "function" && window.matchMedia("(any-pointer: fine)").matches;
+      const physicalKeyboardLikely = (): boolean => sawHardwareKey || hasFinePointer();
       // Motion opt-out (checked live: the OS setting can change). Gates the
       // interactive swipe/rotation animations, mirroring the CSS .wt-animate gate.
       const prefersReduce = (): boolean =>
@@ -374,7 +678,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // "New tab". fallback=true marks that last case so relabelAll leaves
       // untitled tabs as "New tab" with no numeric suffix.
       function baseLabel(tab: Tab): { text: string; fallback: boolean } {
-        const real = tab.title.trim() || (tab.derived?.trim() ?? "");
+        // preferInputTitle (agent shell with an unreliable OSC title): show the
+        // live submitted line, then the persisted client title on reload — the
+        // process OSC `title` is ignored. Default: OSC title first, then the live
+        // derived line, then the persisted client title (the latter two are the
+        // "latest user message" fallback when the program sets no OSC title).
+        const derived = tab.derived?.trim() ?? "";
+        const persisted = tab.clientTitle?.trim() ?? "";
+        const real = preferInputTitle
+          ? derived || persisted
+          : tab.title.trim() || derived || persisted;
         return real ? { text: real, fallback: false } : { text: "New tab", fallback: true };
       }
 
@@ -421,12 +734,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // tab's derived title on every non-empty submission. Best-effort: an odd
       // editing sequence just yields no derived title (the tab then reads "New
       // tab" until the next submission).
-      const MAX_DERIVED = 60;
+      // A generous storage bound for the fallback (input-derived) title. The tab
+      // label truncates it visually with max-width + ellipsis in EVERY view — the
+      // desktop strip, the mobile active bar, and the mobile list — so this is
+      // only a guard against storing a huge paste, not a display cut. (It was a
+      // hard 60 that cut the label mid-word regardless of how much fit.)
+      const MAX_DERIVED = 512;
       let lineBytes: number[] = [];
       let escState = 0; // 0 normal, 1 saw ESC, 2 in CSI, 3 in SS3 (one more byte)
+      let csiParams = ""; // accumulated CSI parameter bytes, to spot paste guards
+      let inPaste = false; // inside a bracketed paste (ESC[200~ … ESC[201~)
       function resetInputLine(): void {
         lineBytes = [];
         escState = 0;
+        csiParams = "";
+        inPaste = false;
       }
       function deriveTitleFromInput(bytes: Uint8Array): void {
         const t = tabList.find((x) => x.id === activeId);
@@ -440,7 +762,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
           if (escState === 2) {
             if (b >= 0x40 && b <= 0x7e) {
+              // CSI final byte. Recognize the bracketed-paste guards ESC[200~
+              // (start) and ESC[201~ (end) so embedded newlines in a pasted,
+              // often multi-line, message are not read as line submissions.
+              if (b === 0x7e) {
+                if (csiParams === "200") {
+                  inPaste = true;
+                } else if (csiParams === "201") {
+                  inPaste = false;
+                }
+              }
+              csiParams = "";
               escState = 0; // CSI final byte
+            } else if (b >= 0x30 && b <= 0x3f) {
+              csiParams += String.fromCharCode(b); // parameter byte (digits, ; ? etc.)
             }
             continue;
           }
@@ -451,6 +786,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           if (b === 0x1b) {
             escState = 1; // ESC: start of an escape sequence
           } else if (b === 0x0d || b === 0x0a) {
+            if (inPaste) {
+              // A newline INSIDE a bracketed paste is pasted content, not a
+              // submit: fold it to a single space so the whole paste stays one
+              // logical line and the title reflects its START (a multi-line
+              // paste previously left only its LAST line as the title).
+              if (lineBytes.length > 0 && lineBytes[lineBytes.length - 1] !== 0x20) {
+                lineBytes.push(0x20);
+              }
+              continue;
+            }
             const line = new TextDecoder().decode(new Uint8Array(lineBytes)).trim();
             lineBytes = [];
             // Every non-empty submitted line updates the fallback title (the
@@ -458,6 +803,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             // command path.
             if (line) {
               t.derived = line.slice(0, MAX_DERIVED);
+              // Persist it server-side (engine PUT .../title) so a reload and
+              // other devices recover this "latest message" label; the engine
+              // uses it only when the program emits no OSC title.
+              void apiSetTitle(t.id, t.derived);
               syncChrome();
             }
           } else if (b === 0x7f || b === 0x08) {
@@ -500,16 +849,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const active = idx >= 0 ? tabList[idx] : undefined;
         swLabel.textContent = active ? active.display : "";
         paintStatusDot(swDot, active?.dot.dataset["status"] ?? "idle", active?.reports ?? false);
-        const bgInput = tabList.some(
-          (t) => t.id !== activeId && t.dot.dataset["status"] === "input",
-        );
-        if (bgInput) {
-          swCurrent.dataset["attention"] = "input";
-          swCurrent.setAttribute("aria-label", "Terminals; a background terminal needs input");
-        } else {
-          delete swCurrent.dataset["attention"];
-          swCurrent.removeAttribute("aria-label");
-        }
+        // The aggregate background-notification cue rides the dedicated switch
+        // button's dot (paintSwitchDot), not the active surface (it did not fit
+        // there).
       }
 
       // buildRow creates one expanded-list row for a tab and wires its handlers
@@ -757,8 +1099,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (kb?.isOpen()) {
           kb.toggle();
         }
-        swKb.setAttribute("aria-expanded", "false");
-        swKb.classList.remove("wt-active");
+        for (const b of kbButtons) {
+          b.setAttribute("aria-expanded", "false");
+          b.classList.remove("wt-active");
+        }
       }
 
       // setExpandedState applies the resting expanded/collapsed state: the class
@@ -804,6 +1148,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (expanded || tabList.length < 2) {
           return;
         }
+        // Opening the list acknowledges any pending background-tab notification:
+        // the user is now looking at the tabs, so clear the switch button's dot.
+        switchNotify = "";
+        paintSwitchDot();
         renderSwitcherList();
         setExpandedState(true);
         ctx.announce("Terminal list expanded");
@@ -851,6 +1199,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const tab: Tab = {
           id: info.id,
           title: info.title,
+          clientTitle: info.clientTitle,
           display: "",
           createdAt: info.createdAt,
           store: new LineStore(),
@@ -968,6 +1317,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // rebuild viewport-first, so the last-known screen paints with no
         // round-trip. Then let the kernel reconnect the WS to it (resume delta).
         activeId = next.id;
+        try {
+          localStorage.setItem(ACTIVE_TAB_KEY, next.id);
+        } catch {
+          /* storage unavailable (private mode / disabled) — non-fatal */
+        }
         resetInputLine(); // a partial line typed in the old tab does not carry over
         ctx.render.bind(next.store);
         ctx.notifySwitch({ id: next.id });
@@ -979,18 +1333,32 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         syncChrome(); // reconciles the expanded list into the new order
         reelReconcile = false;
         playReel?.(); // FLIP the rows so the reorder reads as a rotation, not a reload
-        // Restore scroll memory best-effort after the async rebuild; a
-        // following tab sticks to the bottom on its own.
+        // Restore scroll memory best-effort after the async rebuild. The engine
+        // scroll controller's follow flag is GLOBAL (one per kernel) and still
+        // reflects the tab we just left, so binding a following tab right after
+        // being scrolled up in another tab left the controller in "holding":
+        // the renderer's post-flush stickToBottom() no-op'd and the cached
+        // screen rendered above the viewport (a black gap until a touch scrolled
+        // it and re-engaged follow — the "content pops down when I wiggle it"
+        // symptom). Re-assert here: scrollToBottom() snaps down AND re-engages
+        // follow (so the resume delta then pins correctly); a scrolled-up tab
+        // restores its saved read position instead.
         const savedTop = next.scrollTop;
         const following = next.following;
         requestAnimationFrame(() => {
-          if (!following) {
+          if (following) {
+            ctx.scroll.scrollToBottom();
+          } else {
             surface.scrollTop = savedTop;
           }
         });
         ctx.announce(`Switched to ${next.display}`);
-        if (!coarse) {
-          focusInput(); // desktop only; on touch this would pop the keyboard (#7)
+        if (physicalKeyboardLikely()) {
+          // A physical keyboard is (likely) present, so focus the input on
+          // switch — switch and type immediately (the iPad + Magic Keyboard
+          // ask). On a keyboard-less touchscreen this is skipped, or every
+          // switch would pop the virtual keyboard (#7).
+          focusInput();
         }
       }
 
@@ -1049,7 +1417,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // which have no live socket, still refresh their title from that sweep).
       ctx.on("wire:title", ({ session, title }) => {
         const t = tabList.find((x) => x.id === session);
-        if (t && title !== t.title) {
+        // Ignore a blank title (an OSC 0/2 clear the process may emit when it
+        // redraws its prompt after idling): keep the last good label until a real
+        // replacement arrives, rather than reverting to "New tab". A non-blank
+        // change updates the label at once.
+        if (t && title.trim() !== "" && title !== t.title) {
           t.title = title;
           syncChrome();
         }
@@ -1113,7 +1485,32 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (tabList.find((t) => t.id === info.id)) {
           return;
         }
+        const closedAt = recentlyClosed.get(info.id);
+        if (closedAt !== undefined) {
+          if (Date.now() - closedAt < CLOSE_TOMBSTONE_MS) {
+            return; // just closed here; ignore a stale listing until the server reaps it
+          }
+          recentlyClosed.delete(info.id);
+        }
         tabList.push(addTabChrome(info));
+      }
+
+      // Activate the first tab when nothing is active. The bootstrap normally
+      // activates a tab, but if the initial apiList AND apiCreate both fail at
+      // load its `if (startTab)` activation is skipped, leaving activeId null
+      // and connectionInitiated false -- so the kernel never opens the terminal
+      // WS and its wake handlers no-op. When the server recovers, the status
+      // stream / poll adopt the existing sessions below; without this they would
+      // render inert (blank, never connecting) until the user taps a tab. This
+      // is the sibling of the '+'-retry recovery the bootstrap already handles.
+      function ensureActive(): void {
+        if (activeId !== null) {
+          return;
+        }
+        const first = tabList[0];
+        if (first) {
+          switchTo(first.id);
+        }
       }
 
       async function create(): Promise<void> {
@@ -1174,6 +1571,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!tab) {
           return;
         }
+        // Tombstone this id briefly so a stale status snapshot/poll that predates
+        // the server reaping it cannot re-adopt the just-closed tab.
+        tombstone(id);
         tab.aria.remove();
         // Remove immediately (no exit animation): a lingering element made the
         // "+" teleport after a delay, and made a last-tab replacement appear in
@@ -1192,7 +1592,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         syncChrome(); // reflect the drop immediately (count, position)
         if (remote) {
-          await apiClose(id);
+          try {
+            await apiClose(id);
+          } catch {
+            ctx.toast("Couldn't close the terminal on the server");
+          }
         }
         if (activeId === id) {
           // Switch to a neighbor, or spawn a fresh session if this was the last.
@@ -1230,6 +1634,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           if (idx >= 0) {
             tabList.splice(idx, 1);
           }
+          // Tombstone briefly so a stale status snapshot/poll that predates the
+          // server reaping these sessions cannot re-adopt (flash back) a just-
+          // closed tab -- mirrors the single-close path in dropTab (h-f2).
+          tombstone(t.id);
           t.aria.remove();
           t.el.remove();
           ctx.dropSession(t.id);
@@ -1248,7 +1656,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           syncChrome();
         }
         for (const t of victims) {
-          await apiClose(t.id);
+          try {
+            await apiClose(t.id);
+          } catch {
+            ctx.toast("Couldn't close a terminal on the server");
+          }
         }
         if (tabList.length === 0) {
           await create(); // there is always at least one terminal open
@@ -1350,8 +1762,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         hintShown = true;
-        if (!window.matchMedia("(pointer: coarse)").matches) {
-          return; // desktop: swipe is irrelevant
+        if (!window.matchMedia(SWITCHER_MEDIA).matches) {
+          return; // only the mobile switcher layout has a swipe-to-switch bar
         }
         let seen = false;
         try {
@@ -1377,6 +1789,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         id: string,
         status: string,
         title: string | undefined,
+        clientTitle: string | undefined,
         reports: boolean,
       ): void {
         const t = tabList.find((tab) => tab.id === id);
@@ -1385,11 +1798,33 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         t.reports = reports;
         paintStatusDot(t.dot, status, reports);
+        // Latest-wins background-tab notification for the switch button's dot: a
+        // background tab (not the active one) reaching "input" (needs you) or
+        // "done" (turn finished) raises the cue in that colour; each qualifying
+        // event overwrites the prior one, and expandSwitcher clears it when the
+        // list opens. The active surface keeps its own needs-input cue (see
+        // syncMobile); this is the moved + upgraded, glanceable version on the
+        // dedicated button.
+        if (id !== activeId && (status === "input" || status === "done")) {
+          switchNotify = status;
+          paintSwitchDot();
+        }
         // Record the raw server title; the displayed label (fallback + de-dup)
         // is recomputed by relabelAll via syncChrome, which the callers run
-        // right after applyStatus.
-        if (title !== undefined) {
+        // right after applyStatus. Ignore a BLANK title: a status sweep (or the
+        // process clearing its OSC 0/2 window title) reports an empty string,
+        // and overwriting a good label with it dropped an idle tab back to "New
+        // tab". Hold the last known title until a genuine (non-blank) one
+        // arrives; the derived-from-input fallback is likewise sticky.
+        if (title !== undefined && title.trim() !== "") {
           t.title = title;
+        }
+        // The persisted client title is authoritative from the server (set via
+        // PUT .../title); apply it as-is, including "" for a fresh session, so the
+        // preferInputTitle label recovers it on reload. No blank-guard: unlike the
+        // OSC title it does not flicker (it changes only on an explicit push).
+        if (clientTitle !== undefined) {
+          t.clientTitle = clientTitle;
         }
       }
 
@@ -1409,34 +1844,56 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           adoptSession({
             id: s.id,
             title: s.title,
+            clientTitle: undefined,
             createdAt: s.createdAt,
             status: s.status,
             reportsActivity: s.reportsActivity ?? false,
           });
-          applyStatus(s.id, s.status, s.title, s.reportsActivity ?? false);
+          applyStatus(s.id, s.status, s.title, undefined, s.reportsActivity ?? false);
+          ensureActive();
           syncChrome();
         });
       } else {
         const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
+        // Guard against overlapping runs: a server slower than pollMs (but
+        // within the 15s API timeout) would otherwise let setInterval start
+        // a second pollOnce while the first is still awaiting, racing tabList
+        // mutation. Skip the tick instead.
+        let polling = false;
         const pollOnce = async (): Promise<void> => {
-          let list: SessionInfo[];
+          if (polling) {
+            return;
+          }
+          polling = true;
           try {
-            list = await apiList();
-          } catch {
-            return; // transient; try again next tick
+            let list: SessionInfo[];
+            try {
+              list = await apiList();
+            } catch {
+              return; // transient; try again next tick
+            }
+            const seen = new Set(list.map((s) => s.id));
+            for (const info of list) {
+              adoptSession(info); // add sessions created elsewhere (no local tab)
+              applyStatus(
+                info.id,
+                info.status,
+                info.title,
+                info.clientTitle,
+                info.reportsActivity ?? false,
+              );
+            }
+            // A tab the server no longer lists was reaped/closed elsewhere: drop it
+            // locally (no DELETE — it is already gone).
+            const gone = tabList.filter((t) => !seen.has(t.id)).map((t) => t.id);
+            for (const id of gone) {
+              await dropTab(id, false);
+            }
+            ensureActive();
+            syncChrome();
+          } finally {
+            polling = false;
           }
-          const seen = new Set(list.map((s) => s.id));
-          for (const info of list) {
-            adoptSession(info); // add sessions created elsewhere (no local tab)
-            applyStatus(info.id, info.status, info.title, info.reportsActivity ?? false);
-          }
-          // A tab the server no longer lists was reaped/closed elsewhere: drop it
-          // locally (no DELETE — it is already gone).
-          const gone = tabList.filter((t) => !seen.has(t.id)).map((t) => t.id);
-          for (const id of gone) {
-            await dropTab(id, false);
-          }
-          syncChrome();
         };
         pollTimer = setInterval(() => {
           void pollOnce();
@@ -1446,8 +1903,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // --- Event wiring ---
       // Derive each tab's title from the first line the user submits into it.
       const offInput = ctx.registerInputObserver(deriveTitleFromInput);
-      newBtn.addEventListener("click", () => {
-        void create();
+      // Observe (never consume) keydowns to detect a physical keyboard: a
+      // hardware-only key latches sawHardwareKey, which upgrades focus-on-switch
+      // for a keyboard folio with no trackpad (no fine pointer to key off).
+      const offHwKey = ctx.registerKeydown((ev) => {
+        if (!sawHardwareKey && looksLikeHardwareKey(ev)) {
+          sawHardwareKey = true;
+        }
+        return false;
       });
       // Live reorder while dragging a tab over the strip (dragend commits it).
       bar.addEventListener("dragover", (e) => {
@@ -1459,23 +1922,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           e.dataTransfer.dropEffect = "move";
         }
         bar.insertBefore(draggingEl, dragTargetBefore(e.clientX) ?? newBtn);
-      });
-      // Keyboard button: open/close the key grid above the bar. The toolbar API
-      // is read lazily (ctx.use) so feature ordering does not matter; the button
-      // is hidden unless a keyboardToggle was provided (set above).
-      swKb.addEventListener("click", () => {
-        const kb = opts.keyboardToggle ? ctx.use(opts.keyboardToggle) : undefined;
-        if (!kb) {
-          return;
-        }
-        kb.toggle();
-        const open = kb.isOpen();
-        swKb.setAttribute("aria-expanded", String(open));
-        swKb.classList.toggle("wt-active", open);
-      });
-      // Mobile "+": spawn a terminal (mirrors the desktop strip's newBtn).
-      swNew.addEventListener("click", () => {
-        void create();
       });
       // Active-row close (x): closes the current tab (mirrors a listed row's x).
       // stopPropagation so it is not read as a tap/swipe on the row surface.
@@ -1520,6 +1966,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // the dismissing tap. Taps inside the switcher or the key grid are left to
       // their own controls; when nothing is open the tap falls through untouched.
       const onDocTapDismiss = (e: PointerEvent): void => {
+        // A swipe gesture on the switcher owns the pointer; its own end logic
+        // (endHorizontal/endVertical, via the window-level endOnUp) resolves the
+        // outcome. Stand down here so this capture-phase handler's stopPropagation
+        // cannot swallow that window-bubble pointerup -- which, when setPointerCapture
+        // failed and the finger released outside the switcher, would strand gActive=true
+        // and brick all future swipes until reload.
+        if (gActive) {
+          return;
+        }
         const kb = opts.keyboardToggle ? ctx.use(opts.keyboardToggle) : undefined;
         const gridOpen = kb?.isOpen() ?? false;
         if (!expanded && !gridOpen) {
@@ -1704,7 +2159,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         switcher.classList.add("wt-switcher-expanded");
         swList.style.transition = "none";
         swList.style.overflowY = "hidden";
-        gTargetMax = Math.min(swList.scrollHeight, Math.round(window.innerHeight * 0.5));
+        // Bound the interactive drag against the VISUAL viewport (the region above the soft
+        // keyboard), matching the switcher's kb-inset bottom anchor, so the list can't grow
+        // past the visible area with the keyboard open.
+        const visH = window.visualViewport?.height ?? window.innerHeight;
+        gTargetMax = Math.min(swList.scrollHeight, Math.round(visH * 0.5));
         gStartMax = expanded ? gTargetMax : 0;
         swList.style.maxHeight = `${String(gStartMax)}px`;
       }
@@ -1901,7 +2360,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         sessions = [];
       }
       if (sessions.length === 0) {
-        sessions = [await apiCreate()];
+        try {
+          sessions = [await apiCreate()];
+        } catch {
+          // Do not let the initial spawn propagate out of setup(): the kernel
+          // would tear down every feature ("terminal has no chrome") and, since
+          // managesSessions skipped the startup connect, connectionInitiated
+          // stays false so the wake handlers (visibilitychange/pageshow/online)
+          // all no-op -- a permanently dead terminal with no recovery. Match the
+          // runtime create() path: toast and leave the chrome up so "+" can retry.
+          ctx.toast("Couldn't open a terminal");
+          sessions = [];
+        }
       }
       // Adopt (dedup) rather than blindly push. The status SSE pushes a snapshot
       // of the existing sessions on open, and tabs subscribes (monitor.onStatus)
@@ -1914,12 +2384,30 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
       // From here on, tabs added at runtime (create / adopt) animate in.
       started = true;
-      // Activate the first (oldest) session.
-      const first = tabList[0];
-      if (first) {
-        activeId = first.id;
-        ctx.render.bind(first.store);
-        ctx.notifySwitch({ id: first.id });
+      // Activate the previously-active session if it still exists, else the
+      // first (oldest). Session ids are stable server-side, so a page reload
+      // reconnects to the tab the user left on instead of always the oldest.
+      let startTab = tabList[0];
+      try {
+        const savedId = localStorage.getItem(ACTIVE_TAB_KEY);
+        if (savedId !== null && savedId !== "") {
+          const saved = tabList.find((x) => x.id === savedId);
+          if (saved) {
+            startTab = saved;
+          }
+        }
+      } catch {
+        /* storage unavailable — fall back to the oldest tab */
+      }
+      if (startTab) {
+        activeId = startTab.id;
+        try {
+          localStorage.setItem(ACTIVE_TAB_KEY, startTab.id);
+        } catch {
+          /* storage unavailable — non-fatal */
+        }
+        ctx.render.bind(startTab.store);
+        ctx.notifySwitch({ id: startTab.id });
         syncChrome();
         focusInput();
       }
@@ -1935,6 +2423,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         teardown() {
           offStatus?.();
           offInput();
+          offHwKey();
           offArmed?.();
           offMenuKey();
           document.removeEventListener("click", onDocClickMenu);
@@ -1968,6 +2457,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           rowEls.clear();
           bar.remove();
           newBtn.remove();
+          deskKb.remove();
           tabMenu.remove();
           switcher.remove();
           catchup.remove();

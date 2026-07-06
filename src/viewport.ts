@@ -24,6 +24,15 @@ let onSettled: ((wasAtBottom: boolean) => void) | null = null;
 let inTransition = false;
 let wasAtBottomAtStart = true;
 let settleTimer: ReturnType<typeof setTimeout> | null = null;
+// When true, ignore the visualViewport keyboard geometry entirely (a hardware
+// keyboard/trackpad is present, so the soft keyboard never opens). Set at init
+// from the kernel's hasFinePointer; see the onChange note below.
+let suppressKeyboardInset: () => boolean = () => false;
+// Removals for every listener/observer init() attaches, so teardown() can
+// release them on kernel destroy(). Without it the window/visualViewport/
+// screen.orientation listeners and the ResizeObserver survive destroy() and a
+// re-created terminal double-binds them.
+let cleanup: (() => void)[] = [];
 
 function startTransition(): void {
   // Capture pre-transition scroll state at the *start* of the transition,
@@ -51,9 +60,14 @@ function startTransition(): void {
 export function init(opts: {
   termWrap: HTMLElement;
   onSettled: (wasAtBottom: boolean) => void;
+  /** Ignore the visualViewport keyboard geometry (a hardware-keyboard device
+   *  has no soft keyboard to accommodate); only reserved bottom chrome insets
+   *  the terminal. The kernel passes its hasFinePointer here. */
+  suppressKeyboardInset?: () => boolean;
 }): void {
   termWrap = opts.termWrap;
   onSettled = opts.onSettled;
+  suppressKeyboardInset = opts.suppressKeyboardInset ?? (() => false);
 
   // iOS soft keyboard. interactive-widget=resizes-content makes the
   // layout viewport shrink; we still apply a manual bottom inset as
@@ -72,15 +86,26 @@ export function init(opts: {
       // scroll" symptom). Driving top AND bottom from visualViewport keeps the
       // terminal exactly over the visible area in every browser, so nothing is
       // left behind the keyboard for iOS to scroll to.
-      const offsetTop = Math.max(0, Math.round(vv.offsetTop));
-      const bottomInset = Math.max(0, Math.round(window.innerHeight - vv.offsetTop - vv.height));
+      // suppressKeyboardInset (set at init from the kernel's hasFinePointer): on
+      // a device with a hardware keyboard/trackpad (a desktop, or an iPad with a
+      // Magic Keyboard) the on-screen keyboard never opens, so there is no
+      // keyboard geometry to accommodate. iPadOS has been seen to briefly report
+      // a keyboard-sized visualViewport shrink with no keyboard shown, which this
+      // handler then pinned as a bottom inset and left stuck (the terminal "moved
+      // up ~50%", black below, surviving tab switches because nothing recomputes
+      // it — only a reload cleared it). Ignore the keyboard geometry there and
+      // keep the terminal full-height; only the reserved bottom chrome applies.
+      const offsetTop = suppressKeyboardInset() ? 0 : Math.max(0, Math.round(vv.offsetTop));
+      const bottomInset = suppressKeyboardInset()
+        ? 0
+        : Math.max(0, Math.round(window.innerHeight - vv.offsetTop - vv.height));
       // Reserved bottom chrome (a bottom tab bar) the content must clear, on top
       // of the keyboard inset. A feature sets --wt-reserve-bottom (px) on the
       // root, 0 when none; viewport owns the terminal's fixed-box geometry, so it
       // folds the reserve into the bottom offset here. The reserve excludes the
       // keyboard (it is measured with the keyboard closed), so adding it to
       // bottomInset does not double-count.
-      const reserve = Math.max(
+      const rawReserve = Math.max(
         0,
         Math.round(
           parseFloat(
@@ -88,6 +113,12 @@ export function init(opts: {
           ) || 0,
         ),
       );
+      // Sanity cap: the reserve is bottom chrome (a tab bar), tens of px. A value
+      // near half the screen is a bad measurement — e.g. the switcher bar
+      // measured while a phantom keyboard inset had lifted it — that would
+      // otherwise strand the lower half of the terminal black. Never let it
+      // exceed a third of the viewport height.
+      const reserve = Math.min(rawReserve, Math.round(window.innerHeight / 3));
       const bottom = bottomInset + reserve;
       termWrap.style.top = offsetTop > 0 ? `${offsetTop}px` : "";
       termWrap.style.bottom = bottom > 0 ? `${bottom}px` : "";
@@ -102,6 +133,20 @@ export function init(opts: {
     };
     vv.addEventListener("resize", onChange);
     vv.addEventListener("scroll", onChange);
+    // Self-heal a stuck inset (see the fine-pointer note above): recompute when
+    // the window regains focus or is restored from the bfcache, so a one-off bad
+    // visualViewport reading that got pinned clears on the next natural
+    // interaction instead of surviving until a full page reload.
+    window.addEventListener("focus", onChange);
+    window.addEventListener("pageshow", onChange);
+    cleanup.push(() => {
+      window.removeEventListener("focus", onChange);
+      window.removeEventListener("pageshow", onChange);
+    });
+    cleanup.push(() => {
+      vv.removeEventListener("resize", onChange);
+      vv.removeEventListener("scroll", onChange);
+    });
     onChange();
   }
 
@@ -109,6 +154,10 @@ export function init(opts: {
   const ro = new ResizeObserver(startTransition);
   ro.observe(termWrap);
   window.addEventListener("resize", startTransition);
+  cleanup.push(() => {
+    ro.disconnect();
+    window.removeEventListener("resize", startTransition);
+  });
 
   // Orientation change on mobile. iOS Safari often emits the
   // window.resize event late or not at all on rotation while
@@ -120,7 +169,35 @@ export function init(opts: {
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime guard for older Safari without screen.orientation
   if (orientation) {
     orientation.addEventListener("change", startTransition);
+    cleanup.push(() => {
+      orientation.removeEventListener("change", startTransition);
+    });
   } else if ("onorientationchange" in window) {
     window.addEventListener("orientationchange", startTransition);
+    cleanup.push(() => {
+      window.removeEventListener("orientationchange", startTransition);
+    });
   }
+}
+
+// Release every listener/observer init() attached and stop the settle timer.
+// The kernel calls this from destroy() so a create->destroy->create remount
+// does not leave stale global listeners double-bound.
+export function teardown(): void {
+  for (const fn of cleanup) {
+    fn();
+  }
+  cleanup = [];
+  if (settleTimer !== null) {
+    clearTimeout(settleTimer);
+    settleTimer = null;
+  }
+  // Clear the global root CSS vars onChange published, so a destroy without
+  // a remount (which would recompute them) leaves no stale inset on :root.
+  const rootStyle = document.documentElement.style;
+  rootStyle.removeProperty("--kb-inset");
+  rootStyle.removeProperty("--vv-top");
+  inTransition = false;
+  onSettled = null;
+  suppressKeyboardInset = () => false;
 }

@@ -4,13 +4,14 @@
 // lists (convenient, full UI); a consumer wanting a minimal footprint imports
 // individual features instead.
 //
-// The tabbed presets (presetTabbed / presetAgentTabbed) are now identical: both
-// include the activity monitor, because the per-tab activity dot reveals itself
-// only when a session reports activity (OSC 9;4 progress), so a plain shell
-// simply never shows one. The generic-vs-agent distinction is now purely
-// server-side — an agent server sets a status classifier that maps OSC 9
-// notifications to done/needs-input. presetAgentTabbed is kept as an alias for
-// its consumers (vibecli).
+// The tabbed presets (presetTabbed / presetAgentTabbed) share the same feature
+// set (both include the activity monitor, whose per-tab dot reveals itself only
+// on OSC 9;4 progress, so a plain shell never shows one). They differ in the
+// title source: presetAgentTabbed sets preferInputTitle (the agent's program
+// emits a useless OSC title, so the label follows the latest submitted line),
+// while presetTabbed is OSC-first. The generic-vs-agent STATUS distinction stays
+// server-side — an agent server sets a classifier mapping OSC 9 notifications to
+// done/needs-input.
 
 import type { TerminalFeature } from "./kernel/types.js";
 import { clipboard } from "./features/clipboard.js";
@@ -50,14 +51,14 @@ export function presetTouch(): TerminalFeature<unknown>[] {
 // per tab only when a session reports activity (OSC 9;4), so the monitor is
 // always included — a plain shell just never reveals a dot. The toolbar and
 // monitor are ordered before tabs because tabs reads their APIs via ctx.use.
-function buildTabbed(): TerminalFeature<unknown>[] {
+function buildTabbed(preferInputTitle: boolean): TerminalFeature<unknown>[] {
   const kb = mobileToolbar({ externalToggle: true });
   const monitor = activityMonitor();
   return [
     ...presetSingle(),
     kb,
     monitor,
-    tabs({ keyboardToggle: kb, activityMonitor: monitor }),
+    tabs({ keyboardToggle: kb, activityMonitor: monitor, preferInputTitle }),
     animations(),
   ];
 }
@@ -71,13 +72,15 @@ function buildTabbed(): TerminalFeature<unknown>[] {
  *  reports activity via OSC 9;4 progress (kiro-cli, Claude Code, …), so a plain
  *  bash/sh keeps clean, label-only tabs. */
 export function presetTabbed(): TerminalFeature<unknown>[] {
-  return buildTabbed();
+  return buildTabbed(false);
 }
 
-/** Alias of presetTabbed, kept for the agent-shell consumer (vibecli). The UI is
- *  identical — the generic-vs-agent distinction is now purely server-side: an
- *  agent server sets a status classifier (mapping OSC 9 notifications to
- *  done/needs-input), and each tab's dot reveals itself from OSC 9;4 either way. */
+/** Tabbed UI for an agent shell (vibecli). Same features as presetTabbed, but
+ *  with `preferInputTitle`: the agent's program (kiro-cli) emits a non-empty but
+ *  useless OSC 0/2 title, so each tab's label follows the latest submitted line
+ *  (persisted server-side and recovered on reload) and the OSC title is ignored.
+ *  The agent-vs-generic status distinction remains server-side (a status
+ *  classifier mapping OSC 9 notifications to done/needs-input). */
 export function presetAgentTabbed(): TerminalFeature<unknown>[] {
-  return buildTabbed();
+  return buildTabbed(true);
 }

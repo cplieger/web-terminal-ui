@@ -75,6 +75,7 @@
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
 }
 
@@ -91,8 +92,8 @@
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 1.375rem;
-  height: 1.375rem;
+  width: 1.5rem;
+  height: 1.5rem;
   padding: 0;
   background: transparent;
   border: none;
@@ -116,6 +117,16 @@
   visibility: visible;
 }
 
+/* Coarse pointer (an iPad using the strip): no hover fires, so an inactive tab's close
+   would be unreachable without first activating the tab. Reveal every tab's close there,
+   matching the always-visible mobile switcher closes. Kept in lockstep with the strip-shown
+   gate (pointer: coarse, width >= 601px). */
+@media (pointer: coarse) and (width >= 601px) {
+  .wt-tab:not(.wt-tab-active) .wt-tab-close {
+    visibility: visible;
+  }
+}
+
 /* The add-tab (+) button: its hover box matches an active tab's fill and
    stretches to the strip height; the 2px strip gap (not a custom margin) spaces
    it from the last tab. Its glyph is an inline SVG. */
@@ -126,10 +137,10 @@
   flex: none;
   /* Square box that matches the tab height (a stretched flex item ignores
      aspect-ratio against its SVG's intrinsic width, so size it explicitly). The
-     tab height is the close-button (1.375rem) + vertical padding (2×sp-2) +
+     tab height is the close-button (1.5rem) + vertical padding (2×sp-2) +
      border. */
-  width: calc(1.375rem + 2 * var(--sp-2) + 2px);
-  height: calc(1.375rem + 2 * var(--sp-2) + 2px);
+  width: calc(1.5rem + 2 * var(--sp-2) + 2px);
+  height: calc(1.5rem + 2 * var(--sp-2) + 2px);
   padding: 0;
   background: transparent;
   border: none;
@@ -163,6 +174,54 @@
 .wt-tab-new svg {
   width: 16px;
   height: 16px;
+}
+
+/* Desktop-strip keyboard button (tabs feature): opens the on-screen key grid on
+   a WIDE touchscreen (an iPad using the multi-tab strip), where there is no
+   mobile switcher to carry one. Built + wired by the SAME factory as the mobile
+   switcher's keyboard button (see makeKbButton in tabs.ts). Uses the shared
+   .wt-btn primitive for its 44px box + centered icon. Hidden on a fine-pointer
+   desktop (a real keyboard is present) and until a keyboardToggle feature is
+   wired ([hidden]); shown only on a coarse pointer at strip widths (the media
+   block below, kept in lockstep with SWITCHER_MEDIA in src/features/tabs.ts).
+   Fixed at the strip's bottom-right — above the fixed bottom strip, with a
+   matching-surface fill — so it caps the strip's right edge and never scrolls
+   with the tabs. */
+.wt-tab-kb {
+  display: none;
+  position: fixed;
+  right: var(--sp-2);
+  bottom: calc(var(--safe-bottom) + var(--sp-2));
+  z-index: 16;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+/* Grid open: filled so the toggled state reads at a glance (mirrors the
+   switcher keyboard button). */
+.wt-tab-kb.wt-active {
+  background: var(--tab-hover-bg);
+  color: var(--tab-active-fg);
+}
+
+/* Sticky-Ctrl armed: invert (matches the switcher keyboard button + the armed
+   Ctrl key) so a pending Ctrl is visible with the grid closed. */
+.wt-tab-kb.wt-armed {
+  background: var(--text);
+  color: var(--bg);
+}
+
+/* Show + reserve room only on a WIDE touchscreen (where the desktop strip is
+   used AND a keyboardToggle is wired, hence :not([hidden])): the strip gets
+   matching right padding so the tabs + "+" never scroll under the fixed button. */
+@media (pointer: coarse) and (width >= 601px) {
+  .wt-tab-kb:not([hidden]) {
+    display: inline-flex;
+  }
+
+  .wt-tab-bar {
+    padding-right: calc(var(--touch-target) + 2 * var(--sp-2));
+  }
 }
 
 /* The tab being dragged (reorder) dims while it moves. */
@@ -217,10 +276,12 @@
    overlap the last rows (a mirror of the old top offset). The tabs feature
    marks the surface (.wt-with-tabbar) and keeps the measured strip height in
    --wt-tabbar-h; the surface is position:fixed inset:0, so a bottom offset
-   clears it. Desktop only: on a coarse pointer the strip is hidden and the
-   mobile switcher's inset is applied through viewport.ts (--wt-reserve-bottom)
-   instead. */
-@media (pointer: fine) {
+   clears it. Applies whenever the desktop strip is shown — a fine pointer OR a
+   wide viewport (an iPad) — the complement of the narrow-coarse switcher gate in
+   css/06-mobile.css (kept in lockstep with SWITCHER_MEDIA in tabs.ts). On the
+   narrow-coarse phone the strip is hidden and the mobile switcher's inset is
+   applied through viewport.ts (--wt-reserve-bottom) instead. */
+@media (pointer: fine), (width >= 601px) {
   .term.wt-with-tabbar {
     bottom: var(--wt-tabbar-h, 44px);
   }
@@ -308,5 +369,9 @@
 @media (prefers-reduced-motion: reduce) {
   .wt-status-dot[data-status="working"] {
     animation: none;
+    /* The pulse is working's ONLY non-hue cue; with motion removed,
+       add a static shape cue (an inner hole -> a ring) so working differs
+       from done (a solid green disc) by shape, not hue alone (WCAG 1.4.1). */
+    box-shadow: inset 0 0 0 2px var(--bg);
   }
 }

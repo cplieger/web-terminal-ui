@@ -20,7 +20,6 @@ export function connectionBanner(): TerminalFeature {
       const slot = ctx.region("banner", "status");
       const banner = document.createElement("div");
       banner.className = "wt-conn-banner";
-      banner.setAttribute("role", "status");
       slot.appendChild(banner);
 
       let last: ConnState | null = null;

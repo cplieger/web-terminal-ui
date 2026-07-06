@@ -47,6 +47,16 @@ export function predictiveEcho(): TerminalFeature {
       });
 
       return {
+        // A tab switch (kernel notifySwitch -> onDetach) must drop the predicted
+        // cursor, so the outgoing session's ghost cursor does not paint on the
+        // incoming session's freshly-bound screen until its first server frame
+        // re-arms prediction. Mirrors composition.cancelComposition on the same
+        // detach: both local-echo paths reset on switch. predict.reset() hides the
+        // overlay (its onChange -> push -> setPredictedCursor(0,0,false)); the next
+        // wire:screen re-arms via onScreenFrame.
+        onDetach() {
+          predict.reset();
+        },
         teardown() {
           offTransform();
           offObserver();

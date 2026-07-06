@@ -38,7 +38,14 @@ export function activityMonitor(
             statuses.set(s.id, s);
           }
           for (const cb of [...subs]) {
-            cb(s);
+            try {
+              cb(s);
+            } catch (err) {
+              // Isolate a throwing subscriber so it neither skips the
+              // remaining subscribers nor propagates into the engine's
+              // SSE reader (mirrors the kernel bus's ctx.on wrapping).
+              console.error("web-terminal-ui: activityMonitor subscriber threw", err);
+            }
           }
         },
       });

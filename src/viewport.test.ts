@@ -81,6 +81,7 @@ describe("viewport: settle lifecycle", () => {
 
 describe("viewport: visualViewport keyboard inset", () => {
   afterEach(() => {
+    viewport.teardown();
     Reflect.deleteProperty(window, "visualViewport");
     document.documentElement.style.removeProperty("--kb-inset");
     document.documentElement.style.removeProperty("--vv-top");
@@ -120,5 +121,78 @@ describe("viewport: visualViewport keyboard inset", () => {
     expect(tw.style.top).toBe("");
     expect(tw.style.bottom).toBe("");
     expect(document.documentElement.style.getPropertyValue("--kb-inset")).toBe("0px");
+  });
+
+  it("ignores keyboard geometry when suppressKeyboardInset is set (hardware keyboard)", () => {
+    // A hardware-keyboard device (fine pointer) never opens the soft keyboard, so
+    // a visualViewport height shrink is not a keyboard to accommodate. iPadOS has
+    // been seen to report a phantom keyboard-sized shrink with no keyboard shown,
+    // which otherwise pinned a bottom inset and left the lower half of the screen
+    // black (the recurring "moved up ~50%" bug). The terminal must stay
+    // full-height: no top/bottom inset, --kb-inset/--vv-top zeroed.
+    const vv = {
+      height: window.innerHeight - 300, // a phantom "keyboard" shrink
+      offsetTop: 40,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    const tw = document.createElement("div");
+    document.body.replaceChildren(tw);
+    viewport.init({ termWrap: tw, onSettled: vi.fn(), suppressKeyboardInset: () => true });
+    expect(tw.style.top).toBe("");
+    expect(tw.style.bottom).toBe("");
+    expect(document.documentElement.style.getPropertyValue("--kb-inset")).toBe("0px");
+    expect(document.documentElement.style.getPropertyValue("--vv-top")).toBe("0px");
+  });
+});
+
+describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
+  const realInnerHeight = window.innerHeight;
+  beforeEach(() => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
+  });
+  afterEach(() => {
+    viewport.teardown();
+    Reflect.deleteProperty(window, "visualViewport");
+    document.documentElement.style.removeProperty("--wt-reserve-bottom");
+    document.documentElement.style.removeProperty("--kb-inset");
+    document.documentElement.style.removeProperty("--vv-top");
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: realInnerHeight });
+  });
+
+  it("folds a --wt-reserve-bottom value into the term-wrap bottom offset with the keyboard closed", () => {
+    const vv = {
+      height: 900,
+      offsetTop: 0,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    document.documentElement.style.setProperty("--wt-reserve-bottom", "48px");
+    const tw = document.createElement("div");
+    document.body.replaceChildren(tw);
+    viewport.init({ termWrap: tw, onSettled: vi.fn() });
+    // Keyboard closed (vv.height == innerHeight, offsetTop 0) so bottomInset is 0;
+    // the 48px reserve (< innerHeight/3 == 300) is the whole bottom offset.
+    expect(tw.style.bottom).toBe("48px");
+  });
+
+  it("caps a runaway reserve at a third of the viewport height (bad-measurement guard)", () => {
+    const vv = {
+      height: 900,
+      offsetTop: 0,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    // A reserve near/over the screen height (e.g. the switcher bar measured while a
+    // phantom keyboard inset had lifted it) must be clamped so it never strands the
+    // lower screen black. round(innerHeight / 3) == round(900 / 3) == 300.
+    document.documentElement.style.setProperty("--wt-reserve-bottom", "100000px");
+    const tw = document.createElement("div");
+    document.body.replaceChildren(tw);
+    viewport.init({ termWrap: tw, onSettled: vi.fn() });
+    expect(tw.style.bottom).toBe("300px");
   });
 });
