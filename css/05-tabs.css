@@ -32,12 +32,15 @@
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
-  /* Browser-style tabs: 140px when there is room, shrinking toward a 90px floor
-     as the strip fills; past the floor the bar scrolls horizontally
-     (.wt-tab-bar has overflow-x: auto). box-sizing keeps the basis a true total. */
+  /* Browser-style tabs: up to 300px per tab when there is room, shrinking toward
+     a 100px floor as the strip fills; past the floor the bar scrolls horizontally
+     (.wt-tab-bar has overflow-x: auto). flex-grow is 0, so the 300px basis is a
+     hard cap — every tab is the same size and never stretches past it, whatever
+     its title; the label truncates instead. box-sizing keeps the basis a true
+     total. */
   box-sizing: border-box;
-  flex: 0 1 140px;
-  min-width: 90px;
+  flex: 0 1 300px;
+  min-width: 100px;
   padding: var(--sp-2) var(--sp-2);
   /* A transparent border is reserved on every tab so toggling the inactive
      outline (below) never shifts the strip's layout. */
