@@ -60,7 +60,11 @@
   background: var(--surface);
   backdrop-filter: var(--blur);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  /* Match the tab "+" buttons (and every other .wt-btn), which round to
+     --radius-inner. Both are 44px boxes, so matching the corner radius makes
+     the FAB read as the same-sized button as the new-tab "+" beside/above it
+     rather than a rounder, different-looking control. */
+  border-radius: var(--radius-inner);
   color: color-mix(in oklch, var(--text) 70%, transparent);
   z-index: 10;
   display: none;
@@ -82,9 +86,14 @@
   background: var(--text-active);
 }
 
-/* Mobile + tabbed: lift above the switcher bar and the keyboard (WS3). */
+/* Mobile + tabbed: lift above the switcher bar and the keyboard (WS3), and pull
+   the right edge in to --sp-2 so the button sits directly above the switcher's
+   "+" (whose right edge is inset by the bar's --sp-2 padding). Both are 44px
+   border-box boxes, so matching the right inset lines them up in one vertical
+   column (they were 4px out: the FAB's base --sp-3 vs the "+"'s --sp-2). */
 @media (pointer: coarse) {
   .wt-tabbed .wt-scroll-bottom {
+    right: var(--sp-2);
     bottom: calc(
       var(--wt-switcher-h) + var(--safe-bottom, 0px) + var(--kb-inset, 0px) + var(--sp-2)
     );
