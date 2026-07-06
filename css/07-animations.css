@@ -1,18 +1,27 @@
 /* ===== Animations (animations feature) =====
-   Every bit of motion in the UI lives here, gated on the root .wt-animate class
-   that the animations feature sets only when the OS is not in reduced-motion.
-   Without the feature (or under prefers-reduced-motion) the UI is instant: base
-   rules in 03-06 carry the resting state, and these rules add the transitions
-   and keyframes on top. Keeping motion in one file is the design-system seam for
-   "does this UI animate, and how". */
+   Chrome-surface motion is centralized here, gated on the root .wt-animate class
+   that the animations feature sets only when the OS is not in reduced-motion:
+   base rules in 03-06 carry the resting state, and these rules add the
+   transitions and keyframes on top. A few pieces of motion are intentionally NOT
+   gated on .wt-animate and animate unconditionally: terminal-core motion (cursor
+   and SGR blink) and the mobile key toolbar open/close in 02-app.css, plus the
+   working-status-dot pulse in 05-tabs.css (motion is its only non-hue cue, per
+   WCAG 1.4.1). prefers-reduced-motion still defeats all of it via the reset in
+   01-reset.css. Keeping the chrome-surface motion in one file is the
+   design-system seam for "does this chrome animate, and how". */
 
-/* Fade transient surfaces in/out (display allow-discrete plays the fade before
-   the discrete display:none on hide). */
-.wt-animate .wt-toast,
-.wt-animate .wt-conn-banner,
-.wt-animate .wt-scroll-bottom,
-.wt-animate .wt-ctx-menu,
-.wt-animate .wt-tab-menu {
+/* Fade the toast OUT on hide (display allow-discrete holds display:block for
+   the fade, then flips to display:none). It appears INSTANTLY on show: a
+   transition out of display:none does not animate without a matching
+   @starting-style rule (none is defined in css/), so opacity snaps 0->1 on
+   show. Only the toast sets opacity in its base and
+   .visible rules, so only it can interpolate. The other transient surfaces
+   (connection banner, scroll-to-bottom, context menu, tab menu) toggle `display`
+   only and never set opacity, so they are intentionally not listed here: a
+   shared opacity transition would be inert while the `display allow-discrete`
+   half held them fully visible for --dur-standard before popping out on hide.
+   They show and hide instantly. */
+.wt-animate .wt-toast {
   transition:
     opacity var(--dur-standard) var(--ease-standard),
     display var(--dur-standard) allow-discrete;

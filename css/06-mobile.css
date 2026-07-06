@@ -1,17 +1,20 @@
 /* ===== Mobile tab chrome (tabs feature, section 12) =====
    The bottom bar (switcher) is the mobile tab surface, the externally-driven key
    grid docks above it, and the overview sheet lists every tab. The desktop strip
-   is hidden on a coarse pointer and these appear instead; all motion (bar number
-   fade, sheet slide) lives in 07-animations.css. */
+   is hidden only on a narrow coarse-pointer device (a phone) and these appear
+   instead; all motion (bar number fade, sheet slide) lives in 07-animations.css. */
 
-/* The switcher is hidden on a fine pointer, where the top strip is used instead;
-   the top strip is correspondingly hidden on a coarse pointer so tabs live in
-   the thumb zone. */
+/* The switcher is used only on a NARROW coarse-pointer device (a phone), where
+   the top strip is hidden so tabs live in the thumb zone. A wide touchscreen (an
+   iPad) and any fine-pointer device keep the multi-tab top strip — a single
+   giant tab wastes a big screen. This media query MUST stay in lockstep with
+   SWITCHER_MEDIA in src/features/tabs.ts and the complementary strip clearance
+   in css/05-tabs.css. */
 .wt-switcher {
   display: none;
 }
 
-@media (pointer: coarse) {
+@media (pointer: coarse) and (width <= 600px) {
   .wt-tab-bar,
   .wt-tab-new {
     display: none;
@@ -67,7 +70,10 @@
 }
 
 .wt-switcher-expanded .wt-switcher-list {
-  max-height: 50vh;
+  /* Cap against the DYNAMIC viewport so a shown mobile browser toolbar can't push the list
+     (and the bar above it) off the top; the switcher's own bottom: kb-inset already lifts it
+     clear of the soft keyboard. */
+  max-height: 50dvh;
   overflow-y: auto;
   padding-top: var(--sp-1);
   padding-bottom: var(--sp-1);
@@ -206,6 +212,41 @@
   pointer-events: none;
 }
 
+/* Tab-switcher button: toggles the list open/closed, sitting between the
+   keyboard and "+" buttons. position: relative anchors its notification dot,
+   absolutely placed in the top-right corner. Unlike the keyboard button it
+   stays visible while the list is expanded — it is the close control. */
+.wt-switcher-switch {
+  position: relative;
+  flex: none;
+}
+
+@media (hover: hover) {
+  .wt-switcher-switch:hover {
+    background: var(--tab-hover-bg);
+  }
+}
+
+/* Latest-wins background-tab notification dot on the switch button — the moved
+   attention cue. Amber = a background terminal needs input, green = a background
+   turn finished. Reuses the exact .wt-status-dot colours (05-tabs.css) so it
+   matches the per-tab dots. Hidden until the tabs feature sets data-status;
+   cleared when the list opens (expandSwitcher). */
+.wt-switcher-switch-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
+/* The dot carries the .wt-status-dot class, so its size, shape, and colour come
+   straight from the shared .wt-status-dot[data-status="input"|"done"] rules
+   (05-tabs.css) — the SAME dot colours every tab already uses, defined once.
+   .wt-status-dot is display:none by default; force it visible only while a
+   notification is set (data-status present). */
+.wt-switcher-switch-dot[data-status] {
+  display: block;
+}
+
 /* Mobile "+": the primary action, carried in the accent colour so it reads as
    permanent and prominent. Hover fill is gated to real hover pointers: on touch,
    :hover sticks after a tap (no pointer-leave), so the purple would linger — the
@@ -225,31 +266,12 @@
   background: var(--tab-hover-bg);
 }
 
-/* Aggregate needs-input attention now rides the active surface (the separate
-   overview button is gone): a background tab is blocked on you, and a tap /
-   swipe-up here opens the overview to resolve it. Shape + color (an inset ring
-   plus a corner glyph), never hue alone (WCAG 1.4.1). */
-.wt-switcher-current[data-attention="input"] {
-  box-shadow: inset 0 0 0 2px oklch(70% 0.18 25deg / 45%);
-}
-
-.wt-switcher-current[data-attention="input"]::after {
-  content: "";
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: oklch(70% 0.18 25deg);
-}
-
 /* ===== Externally-driven key grid (tabbed presets, WS3) =====
    In the tabbed presets the mobile toolbar hides its own toggle (the tab bar's
    keyboard button drives it) and the grid docks above the bar on the right, to
    the left of where scroll-to-bottom sits. It collapses to fully hidden, since
    there is no in-grid toggle to keep visible. */
-@media (pointer: coarse) {
+@media (pointer: coarse) and (width <= 600px) {
   .wt-toolbar-external .kb-toggle {
     display: none;
   }
@@ -259,6 +281,36 @@
     right: calc(var(--sp-3) + var(--touch-target) + var(--sp-2));
     bottom: calc(
       var(--wt-switcher-h) + var(--safe-bottom, 0px) + var(--kb-inset, 0px) + var(--sp-2)
+    );
+    grid-template-columns: repeat(4, var(--touch-target));
+  }
+
+  .key-toolbar.wt-toolbar-external.collapsed {
+    display: none;
+  }
+}
+
+/* Desktop tab strip on a WIDE touchscreen (an iPad): the mobile switcher is
+   gone, so the desktop strip carries its OWN keyboard button (.wt-tab-kb, built
+   by the same factory as the switcher's — see css/05-tabs.css + tabs.ts) to open
+   the key grid. So, exactly like switcher mode, the toolbar's own toggle is
+   hidden and the collapsed grid fully hidden — the tab-strip keyboard button is
+   the sole control (this replaces the old CSS-only workaround that un-hid the
+   toolbar's own toggle here). The grid still docks bottom-right ABOVE the strip:
+   above the tabs (never overlapping them, even when many are open and the strip
+   scrolls) and to the left of the scroll-to-bottom FAB (same right offset as
+   switcher mode). Complements the strip-shown breakpoint in css/05-tabs.css;
+   keep in lockstep with SWITCHER_MEDIA in src/features/tabs.ts. */
+@media (pointer: coarse) and (width >= 601px) {
+  .wt-toolbar-external .kb-toggle {
+    display: none;
+  }
+
+  .key-toolbar.wt-toolbar-external {
+    top: auto;
+    right: calc(var(--sp-3) + var(--touch-target) + var(--sp-2));
+    bottom: calc(
+      var(--wt-tabbar-h, 44px) + var(--safe-bottom, 0px) + var(--kb-inset, 0px) + var(--sp-2)
     );
     grid-template-columns: repeat(4, var(--touch-target));
   }

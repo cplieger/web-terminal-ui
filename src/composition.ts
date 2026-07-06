@@ -26,14 +26,13 @@
 // uses the textarea as its anchor; we move the textarea to the cursor
 // for the same reason.
 
-import { keyboard } from "@cplieger/web-terminal-engine";
 import { resetToPlaceholder } from "./input-placeholder.js";
-const { bracketTextForPaste, prepareTextForTerminal } = keyboard;
 
 let textarea: HTMLTextAreaElement;
 let compositionView: HTMLElement;
 let getCursorPx: () => { left: number; top: number; cellH: number };
 let send: (bytes: string) => void;
+let paste: (text: string) => void;
 
 let composing = false;
 let sendingComposition = false;
@@ -45,11 +44,15 @@ export function init(opts: {
   compositionView: HTMLElement;
   getCursorPx: () => { left: number; top: number; cellH: number };
   send: (bytes: string) => void;
+  /** The kernel's single bracketed-paste+normalize funnel; the native iOS-callout
+   *  paste routes through it rather than re-composing the funnel here. */
+  paste: (text: string) => void;
 }): void {
   textarea = opts.textarea;
   compositionView = opts.compositionView;
   getCursorPx = opts.getCursorPx;
   send = opts.send;
+  paste = opts.paste;
 
   textarea.addEventListener("compositionstart", onStart);
   textarea.addEventListener("compositionupdate", onUpdate);
@@ -77,6 +80,26 @@ export function cancelComposition(): void {
   compositionView.textContent = "";
   compositionView.classList.remove("active");
   resetToPlaceholder(textarea);
+}
+
+/** Release init()-attached listeners and drop the captured kernel closures on kernel
+ *  destroy(), so a destroy without a remount does not retain the old textarea + the
+ *  kernel send/paste closure graph. Mirrors viewport.teardown(). */
+export function teardown(): void {
+  cancelComposition(); // neutralize a pending finalizer + reset composing state
+  textarea.removeEventListener("compositionstart", onStart);
+  textarea.removeEventListener("compositionupdate", onUpdate);
+  textarea.removeEventListener("compositionend", onEnd);
+  textarea.removeEventListener("paste", onPaste);
+  // Drop references to the old kernel instance so its closure graph is GC-eligible
+  // (the detached textarea/compositionView are overwritten on the next init()).
+  send = () => {
+    /* no-op after teardown */
+  };
+  paste = () => {
+    /* no-op after teardown */
+  };
+  getCursorPx = () => ({ left: 0, top: 0, cellH: 0 });
 }
 
 function onStart(): void {
@@ -118,7 +141,9 @@ function onEnd(): void {
       suffixSnapshot.length > 0 && value.endsWith(suffixSnapshot)
         ? value.length - suffixSnapshot.length
         : value.length;
-    const composed = value.substring(startSnapshot, Math.max(startSnapshot, valueEnd));
+    const composed = value
+      .substring(startSnapshot, Math.max(startSnapshot, valueEnd))
+      .replace(/\u00A0/g, " ");
     if (composed.length > 0) {
       send(composed);
     }
@@ -139,7 +164,7 @@ function onPaste(ev: ClipboardEvent): void {
   }
   ev.preventDefault();
   ev.stopPropagation();
-  send(bracketTextForPaste(prepareTextForTerminal(raw)));
+  paste(raw);
   // Restore the placeholder so the subsequent `input` event (some
   // browsers fire it after paste) and held-Backspace auto-repeat keep
   // working.

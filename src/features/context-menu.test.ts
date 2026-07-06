@@ -78,6 +78,7 @@ beforeEach(async () => {
 afterEach(() => {
   term?.destroy();
   term = undefined;
+  vi.unstubAllGlobals();
 });
 
 function rootIn(): HTMLElement {
@@ -153,6 +154,44 @@ describe("contextMenu Paste (iOS paste fix)", () => {
     expect(top).toBeLessThan(y); // opened above the tap
     expect(top + 200).toBeLessThanOrEqual(y); // its bottom edge is above the finger
     expect(top).toBeGreaterThanOrEqual(viewTop); // still on-screen
+  });
+
+  it("stands aside on an iPad touch contextmenu so native selection wins", async () => {
+    // iPadOS Safari desktop mode reports platform MacIntel with a touch screen.
+    // On a text long-press it fires contextmenu a beat BEFORE the native
+    // selection registers, so hasNativeSelection() is still false here — the
+    // menu must defer anyway (return, no preventDefault) instead of opening its
+    // empty-space menu and suppressing the platform's own text selection.
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+      platform: "MacIntel",
+      maxTouchPoints: 5,
+    });
+    const root = rootIn();
+    const clip = fakeClipboard();
+    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    await tick();
+
+    const surface = root.querySelector<HTMLElement>(".term");
+    // A touch pointer puts the handler on the touch (not desktop) path.
+    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
+    Object.defineProperty(pd, "pointerType", { value: "touch" });
+    surface?.dispatchEvent(pd);
+
+    const cm = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 30,
+      clientY: 30,
+    });
+    surface?.dispatchEvent(cm);
+
+    // Deferred: the custom menu did NOT open and the event default was NOT
+    // prevented, so iOS/iPadOS runs its own text selection. (Without the
+    // isAppleTouchDevice guard, the empty-space branch would open the menu and
+    // preventDefault here.)
+    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
+    expect(cm.defaultPrevented).toBe(false);
   });
 
   it("omits Paste when no clipboard feature is present", async () => {

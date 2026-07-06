@@ -89,9 +89,15 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
         copy(text);
       });
 
-      // Native copy (e.g. Cmd/Ctrl+C on a selection) feedback toast.
+      // Native copy (e.g. Cmd/Ctrl+C on a selection) feedback toast, scoped to a
+      // selection inside the terminal surface so an embedding host's copies of
+      // its own (non-terminal) content do not raise a spurious "Copied".
+      const surface = ctx.surface();
       const onCopy = (): void => {
-        ctx.toast("Copied");
+        const node = window.getSelection()?.anchorNode ?? null;
+        if (node && surface.contains(node)) {
+          ctx.toast("Copied");
+        }
       };
       document.addEventListener("copy", onCopy);
 

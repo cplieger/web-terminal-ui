@@ -13,6 +13,7 @@ import type * as KernelModule from "./../kernel/kernel.js";
 import type * as TabsModule from "./tabs.js";
 import type { TerminalFeature } from "./../kernel/types.js";
 import type { ActivityMonitorApi } from "./activity-monitor.js";
+import type { MobileToolbarApi } from "./mobile-toolbar.js";
 
 // A fake activityMonitor feature: lets a test push status events into tabs
 // without the real SSE. tabs reads it via ctx.use, so passing the same feature
@@ -71,6 +72,34 @@ function snapshotMonitor(snapshot: readonly SessionStatus[]): TerminalFeature<Ac
       };
     },
   };
+}
+
+// A fake keyboardToggle feature (a MobileToolbarApi provider) so a test can
+// verify tabs renders + wires its keyboard buttons without the real toolbar.
+// Passed both in the features array (before tabs) and to tabs({ keyboardToggle })
+// so ctx.use wires them, mirroring the activityMonitor fakes above.
+function fakeKeyboardToggle(): {
+  feature: TerminalFeature<MobileToolbarApi>;
+  isOpen: () => boolean;
+} {
+  let open = false;
+  const feature: TerminalFeature<MobileToolbarApi> = {
+    name: "mobileToolbar",
+    setup() {
+      return {
+        api: {
+          toggle() {
+            open = !open;
+          },
+          isOpen: () => open,
+          isCtrlArmed: () => false,
+          onCtrlArmedChange: () => () => undefined,
+        },
+        teardown: () => undefined,
+      };
+    },
+  };
+  return { feature, isOpen: () => open };
 }
 
 const setSession = vi.fn<(id: string) => void>();
@@ -152,6 +181,7 @@ beforeEach(async () => {
   ];
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
+  localStorage.clear(); // isolate the persisted active-tab id between tests
   ({ createTerminal } = await import("./../kernel/kernel.js"));
   ({ tabs } = await import("./tabs.js"));
 });
@@ -181,6 +211,33 @@ describe("tabs feature", () => {
     expect(tabEls[1]?.classList.contains("wt-tab-active")).toBe(false);
     // The first (oldest) session is activated: renderer bound + WS connected.
     expect(bind).toHaveBeenCalled();
+    expect(setSession).toHaveBeenCalledWith("s1");
+  });
+
+  it("restores the previously-active tab on reload from localStorage", async () => {
+    // A prior session left s2 active; a reload must reopen s2, not the oldest s1.
+    localStorage.setItem("wt-active-session", "s2");
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const tabEls = root.querySelectorAll(".wt-tab");
+    expect(tabEls[1]?.classList.contains("wt-tab-active")).toBe(true);
+    expect(tabEls[0]?.classList.contains("wt-tab-active")).toBe(false);
+    expect(setSession).toHaveBeenCalledWith("s2");
+  });
+
+  it("falls back to the oldest tab when the saved active id no longer exists", async () => {
+    // The saved tab was closed before the reload; activate the oldest instead.
+    localStorage.setItem("wt-active-session", "s-gone");
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const tabEls = root.querySelectorAll(".wt-tab");
+    expect(tabEls[0]?.classList.contains("wt-tab-active")).toBe(true);
     expect(setSession).toHaveBeenCalledWith("s1");
   });
 
@@ -383,6 +440,45 @@ describe("tabs feature", () => {
     expect(root.querySelector(".wt-tab-label")?.textContent).toBe("two");
   });
 
+  it("preferInputTitle: shows the client title, ignoring the unreliable OSC title", async () => {
+    // An agent shell whose program emits a non-empty but useless OSC title: the
+    // label follows the persisted client title (the server clientTitle wire
+    // field), NOT the OSC `title`, so a reload recovers the latest submitted line.
+    listBody = [
+      {
+        id: "s1",
+        title: "crap-osc-title",
+        clientTitle: "hello world",
+        createdAt: "1",
+        status: "idle",
+      },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs({ preferInputTitle: true })] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    expect(root.querySelector(".wt-tab-label")?.textContent).toBe("hello world");
+  });
+
+  it("default title mode: the OSC title wins over the client title", async () => {
+    // Without preferInputTitle a program that sets its own OSC window title wins;
+    // the client title is only a fallback used when the OSC title is empty.
+    listBody = [
+      {
+        id: "s1",
+        title: "osc-title",
+        clientTitle: "typed line",
+        createdAt: "1",
+        status: "idle",
+      },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    expect(root.querySelector(".wt-tab-label")?.textContent).toBe("osc-title");
+  });
+
   it("closes tabs to the right from the context menu", async () => {
     vi.stubGlobal("confirm", () => true);
     listBody = [
@@ -562,6 +658,30 @@ describe("tabs feature", () => {
     expect(labels).toEqual(["three", "four", "one"]);
   });
 
+  it("keeps the last good title when a later status update reports a blank one", async () => {
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    // The process sets a window title.
+    monitor.emit({ id: "s1", status: "working", title: "kiro: building", createdAt: "1" });
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("kiro: building");
+
+    // A later sweep reports a BLANK title (the process cleared its OSC 0/2
+    // title, or an idle-session record has none). It must NOT revert the label
+    // to "New tab": the last good title is held until a real one replaces it.
+    monitor.emit({ id: "s1", status: "idle", title: "", createdAt: "1" });
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("kiro: building");
+
+    // A genuine new non-blank title still replaces it.
+    monitor.emit({ id: "s1", status: "idle", title: "kiro: tests", createdAt: "1" });
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("kiro: tests");
+  });
+
   it("closes a tab from an expanded list row (DELETE)", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -607,7 +727,7 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s2");
   });
 
-  it("surfaces a background needs-input on the active bar surface", async () => {
+  it("shows the switch-button dot for a background needs-input, greens on done (latest-wins)", async () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -616,18 +736,63 @@ describe("tabs feature", () => {
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
-    // The needs-input cue now rides the active surface (the separate overview
-    // button is gone); tapping/swiping it opens the overview to resolve it.
-    const current = root.querySelector<HTMLElement>(".wt-switcher-current");
-    expect(current?.dataset["attention"]).toBeUndefined();
+    const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    // No pending notification on the dedicated switch button initially.
+    expect(dot?.dataset["status"]).toBeUndefined();
 
-    // s2 is a background tab (s1 is active) and needs input.
+    // s2 is a background tab (s1 is active) that needs input -> amber cue.
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
-    expect(current?.dataset["attention"]).toBe("input");
+    expect(dot?.dataset["status"]).toBe("input");
 
-    // It clears once that tab reports a non-input status.
-    monitor.emit({ id: "s2", status: "idle", title: "two", createdAt: "2" });
-    expect(current?.dataset["attention"]).toBeUndefined();
+    // The same background tab then finishes a turn -> green cue (latest wins:
+    // the newer "done" overwrites the earlier "input").
+    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    expect(dot?.dataset["status"]).toBe("done");
+  });
+
+  it("clears the switch-button dot when the list opens (click the switch button)", async () => {
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    // A background tab raises the cue.
+    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    expect(dot?.dataset["status"]).toBe("input");
+
+    // Opening the switcher acknowledges it: the dot clears (reset happens only
+    // on open, not on close).
+    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
+    expect(root.querySelector(".wt-switcher")?.classList.contains("wt-switcher-expanded")).toBe(
+      true,
+    );
+    expect(dot?.dataset["status"]).toBeUndefined();
+  });
+
+  it("toggles the switcher list closed when the switch button is clicked while open", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const switcher = root.querySelector(".wt-switcher");
+    const btn = root.querySelector<HTMLElement>(".wt-switcher-switch");
+    // The switch button sits between the keyboard and "+" buttons in the bar.
+    const bar = root.querySelector(".wt-switcher-bar");
+    expect(bar?.contains(btn ?? null)).toBe(true);
+    expect(btn?.previousElementSibling?.classList.contains("wt-switcher-kb")).toBe(true);
+    expect(btn?.nextElementSibling?.classList.contains("wt-switcher-new")).toBe(true);
+
+    // First click opens the list.
+    btn?.click();
+    expect(switcher?.classList.contains("wt-switcher-expanded")).toBe(true);
+    // A second click (while open) closes it (toggle).
+    btn?.click();
+    expect(switcher?.classList.contains("wt-switcher-expanded")).toBe(false);
   });
 
   it("arms the catching-up cue after a switch (until a screen frame lands)", async () => {
@@ -670,5 +835,51 @@ describe("tabs feature", () => {
     expect(root.querySelectorAll(".wt-tab").length).toBe(1);
     const deleted = fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") === "DELETE");
     expect(deleted).toBe(false); // a reaped session is dropped locally, not DELETEd
+  });
+
+  it("carries a desktop-strip keyboard button, hidden without a keyboardToggle", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    // The desktop strip carries its own keyboard button (like the switcher's),
+    // a SIBLING of the strip so it never affects the strip's child order. It
+    // stays hidden until a keyboardToggle feature is wired, and never counts as
+    // a tab or the "+".
+    const deskKb = root.querySelector<HTMLElement>(".wt-tab-kb");
+    expect(deskKb).toBeTruthy();
+    expect(deskKb?.hidden).toBe(true);
+    expect(root.querySelector(".wt-tab-bar")?.contains(deskKb ?? null)).toBe(false);
+    expect(root.querySelector(".wt-tab-bar")?.lastElementChild).toBe(
+      root.querySelector(".wt-tab-new"),
+    );
+  });
+
+  it("wires the desktop + mobile keyboard buttons to the one shared grid toggle", async () => {
+    const kbt = fakeKeyboardToggle();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const deskKb = root.querySelector<HTMLElement>(".wt-tab-kb");
+    const mobKb = root.querySelector<HTMLElement>(".wt-switcher-kb");
+    // Both keyboard buttons come from the one factory and are un-hidden once a
+    // keyboardToggle is wired (CSS then gates the desktop one to a wide
+    // touchscreen and the mobile one to the switcher).
+    expect(deskKb?.hidden).toBe(false);
+    expect(mobKb?.hidden).toBe(false);
+
+    // Clicking the desktop keyboard button toggles the SAME grid and reflects
+    // the open state on BOTH buttons (one wiring, placed per layout).
+    deskKb?.click();
+    expect(kbt.isOpen()).toBe(true);
+    expect(deskKb?.getAttribute("aria-expanded")).toBe("true");
+    expect(mobKb?.getAttribute("aria-expanded")).toBe("true");
+    expect(deskKb?.classList.contains("wt-active")).toBe(true);
+    expect(mobKb?.classList.contains("wt-active")).toBe(true);
   });
 });

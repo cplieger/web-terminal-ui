@@ -121,3 +121,33 @@ describe("presetTouch composition", () => {
     expect(root.childElementCount).toBe(0);
   });
 });
+
+describe("presets: composition contracts", () => {
+  it("presetTabbed and presetAgentTabbed share the same feature set (they differ only in the title source: presetAgentTabbed sets preferInputTitle)", async () => {
+    const { presetTabbed, presetAgentTabbed } = await import("./presets.js");
+    expect(presetTabbed().map((f) => f.name)).toEqual(presetAgentTabbed().map((f) => f.name));
+  });
+
+  it("both tabbed presets include the activity monitor (the per-tab dot data source)", async () => {
+    const { presetTabbed, presetAgentTabbed } = await import("./presets.js");
+    expect(presetTabbed().map((f) => f.name)).toContain("activityMonitor");
+    expect(presetAgentTabbed().map((f) => f.name)).toContain("activityMonitor");
+  });
+
+  it("presetTouch is presetSingle plus the mobile toolbar, in order", async () => {
+    const { presetSingle, presetTouch } = await import("./presets.js");
+    const single = presetSingle().map((f) => f.name);
+    const touch = presetTouch().map((f) => f.name);
+    expect(touch.slice(0, single.length)).toEqual(single);
+    expect(touch).toContain("mobileToolbar");
+  });
+
+  it("presetTabbed composes tabs, the mobile toolbar, the activity monitor, and animations", async () => {
+    const { presetTabbed } = await import("./presets.js");
+    const names = presetTabbed().map((f) => f.name);
+    expect(names).toContain("tabs");
+    expect(names).toContain("mobileToolbar");
+    expect(names).toContain("activityMonitor");
+    expect(names).toContain("animations");
+  });
+});

@@ -265,3 +265,48 @@ describe("feature lifecycle", () => {
     expect(teardown).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () => {
+  it("snaps the viewport to the bottom after accepted input reaches the socket", async () => {
+    const { scroll } = await import("@cplieger/web-terminal-engine");
+    const root = rootIn();
+    createTerminal(root, { features: [] });
+    await tick();
+    const snap = vi.mocked(scroll.scrollToBottom);
+    snap.mockClear();
+    const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "a" }));
+    expect(snap).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT snap when an input transform drops the bytes", async () => {
+    const { scroll } = await import("@cplieger/web-terminal-engine");
+    const dropAll: TerminalFeature = {
+      name: "drop",
+      setup(ctx) {
+        return { teardown: ctx.registerInputTransform(() => new Uint8Array(0)) };
+      },
+    };
+    const root = rootIn();
+    createTerminal(root, { features: [dropAll] });
+    await tick();
+    const snap = vi.mocked(scroll.scrollToBottom);
+    snap.mockClear();
+    const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "x" }));
+    expect(snap).not.toHaveBeenCalled();
+  });
+
+  it("does NOT snap when sendBinary rejects the input", async () => {
+    const { scroll, connection } = await import("@cplieger/web-terminal-engine");
+    const root = rootIn();
+    createTerminal(root, { features: [] });
+    await tick();
+    const snap = vi.mocked(scroll.scrollToBottom);
+    snap.mockClear();
+    vi.mocked(connection.sendBinary).mockReturnValueOnce(false);
+    const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "a" }));
+    expect(snap).not.toHaveBeenCalled();
+  });
+});
