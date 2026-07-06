@@ -12,12 +12,19 @@
      overriding them via createTerminal's `theme` option (which sets them on the
      terminal root) or its own CSS. vibecli sets a purple palette. Everything
      above is the fixed design palette; everything here is the public theme API. */
-  --accent: #a78bfa; /* accent action colour (mobile "+", toggled key button) */
-  --tab-hover-bg: var(--text-active); /* hovered inactive tab / pressed controls */
+  --accent: oklch(72% 0.15 250deg); /* light blue; themed per consumer */
+  --tab-bg: oklch(30% 0 0deg / 90%); /* inactive-tab chip (translucent) */
+  --tab-hover-bg: var(--text-active); /* pressed controls / mobile switcher hovers */
   --tab-active-bg: color-mix(in oklch, var(--text) 22%, var(--surface)); /* active tab fill */
   --tab-active-fg: var(--text); /* active tab text */
+  --tab-active-border: color-mix(in oklch, var(--accent) 90%, transparent); /* accent edge */
   --radius: 0.75rem;
   --radius-inner: 0.5rem;
+  /* Small square icon buttons (e.g. the 24px tab-close x): at that size the
+     0.5rem inner radius is a third of the side and reads as far rounder than
+     the >=42px controls that also use --radius-inner. This third rung of the
+     0.75/0.5/0.25rem ladder keeps a small hover box's corners in proportion. */
+  --radius-sm: 0.25rem;
   --touch-target: 2.75rem; /* 44px — Apple HIG minimum */
   --pill-outer: calc(
     var(--touch-target) + 2 * var(--sp-1) + 2px
