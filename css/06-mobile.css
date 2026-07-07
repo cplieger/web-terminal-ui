@@ -77,7 +77,7 @@
   /* Cap against the DYNAMIC viewport so a shown mobile browser toolbar can't push the list
      (and the bar above it) off the top; the switcher's own bottom: kb-inset already lifts it
      clear of the soft keyboard. */
-  max-height: 50dvh;
+  max-height: var(--wt-list-h, 50dvh);
   overflow-y: auto;
   /* No top padding: the bar's --sp-2 bottom padding already sits between the
      active tab and the first row, so the seam equals the --sp-2 inter-row gap. */
@@ -227,11 +227,31 @@
 
 /* Tab-switcher button: toggles the list open/closed, sitting between the
    keyboard and "+" buttons. position: relative anchors its notification dot,
-   absolutely placed in the top-right corner. Unlike the keyboard button it
-   stays visible while the list is expanded — it is the close control. */
+   absolutely placed in the top-right corner. It only earns its place with ≥2
+   tabs (a single tab has nothing to switch to), so it is COLLAPSED to zero width
+   by default and revealed by .wt-switcher-multi (the tabs feature sets it on tab
+   count); the appear/collapse is animated in 07-animations.css and the active
+   chip shrinks/grows to fill the freed space in lockstep (flex layout). */
 .wt-switcher-switch {
   position: relative;
   flex: none;
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* Absorb the flex gap the zero-width button would otherwise leave between the
+     active row and the "+". */
+  margin-inline-start: calc(-1 * var(--sp-1));
+}
+
+/* Revealed once a second tab exists: full 44px box, interactive, no gap eat. */
+.wt-switcher-multi .wt-switcher-switch {
+  width: var(--touch-target);
+  opacity: 1;
+  pointer-events: auto;
+  margin-inline-start: 0;
 }
 
 @media (hover: hover) {

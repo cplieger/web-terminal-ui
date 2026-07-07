@@ -74,6 +74,17 @@
     opacity var(--dur-standard) var(--ease-standard);
 }
 
+/* The dedicated switch button appears when a second tab opens and collapses back
+   at one tab (.wt-switcher-multi, tabs feature). Animate its width + margin +
+   opacity so it slides in from zero width — the active-tab chip shrinks to make
+   room in lockstep (flex) — rather than popping. Mirrors the keyboard button. */
+.wt-animate .wt-switcher-switch {
+  transition:
+    width var(--dur-enter) var(--ease-standard),
+    margin var(--dur-enter) var(--ease-standard),
+    opacity var(--dur-standard) var(--ease-standard);
+}
+
 /* Switch motion: a subtle content fade on switch, so the cache-first repaint
    reads as a change rather than a flicker. A swipe additionally slides the
    content in from the swipe's direction (next from the right, prev from the
