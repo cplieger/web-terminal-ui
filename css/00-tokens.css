@@ -19,9 +19,15 @@
     in oklch,
     var(--accent) 30%,
     var(--surface)
-  ); /* active tab fill: accent-derived (a blue by default; themed per consumer), so the active tab reads blue with the lighter accent-edge border below */
+  ); /* active tab fill: accent-derived (a blue by default; themed per consumer), so the active tab reads blue with a subtle lighter edge below */
+
   --tab-active-fg: var(--text); /* active tab text */
-  --tab-active-border: color-mix(in oklch, var(--accent) 90%, transparent); /* accent edge */
+  --tab-active-border: color-mix(
+    in oklch,
+    var(--tab-active-bg),
+    var(--text) 25%
+  ); /* subtle edge: the fill lightened + slightly desaturated, matching the inactive chip's faint border rather than a vivid accent outline */
+
   --radius: 0.75rem;
   --radius-inner: 0.5rem;
   /* Small square icon buttons (e.g. the 24px tab-close x): at that size the
