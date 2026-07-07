@@ -15,7 +15,11 @@
   --accent: oklch(72% 0.15 250deg); /* light blue; themed per consumer */
   --tab-bg: oklch(30% 0 0deg / 90%); /* inactive-tab chip (translucent) */
   --tab-hover-bg: var(--text-active); /* pressed controls / mobile switcher hovers */
-  --tab-active-bg: color-mix(in oklch, var(--text) 22%, var(--surface)); /* active tab fill */
+  --tab-active-bg: color-mix(
+    in oklch,
+    var(--accent) 30%,
+    var(--surface)
+  ); /* active tab fill: accent-derived (a blue by default; themed per consumer), so the active tab reads blue with the lighter accent-edge border below */
   --tab-active-fg: var(--text); /* active tab text */
   --tab-active-border: color-mix(in oklch, var(--accent) 90%, transparent); /* accent edge */
   --radius: 0.75rem;
