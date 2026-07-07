@@ -755,7 +755,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!t) {
           return; // no active tab
         }
-        for (const b of bytes) {
+        for (let i = 0; i < bytes.length; i++) {
+          const b = bytes[i];
+          if (b === undefined) {
+            continue;
+          }
           if (escState === 1) {
             escState = b === 0x5b ? 2 : b === 0x4f ? 3 : 0; // ESC [ = CSI, ESC O = SS3
             continue;
@@ -786,11 +790,32 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           if (b === 0x1b) {
             escState = 1; // ESC: start of an escape sequence
           } else if (b === 0x0d || b === 0x0a) {
-            if (inPaste) {
-              // A newline INSIDE a bracketed paste is pasted content, not a
-              // submit: fold it to a single space so the whole paste stays one
-              // logical line and the title reflects its START (a multi-line
-              // paste previously left only its LAST line as the title).
+            // A newline is a line SUBMIT only when it terminates the input. It is
+            // folded to a single space (keeping the current line going) when it is
+            // instead a paste-internal break, so a multi-line message becomes one
+            // logical line whose title reflects its START rather than only its
+            // LAST line. Two cases fold:
+            //   - inside a bracketed paste (ESC[200~ … ESC[201~), and
+            //   - a newline FOLLOWED by more printable input in this SAME chunk:
+            //     a human pressing Enter sends the newline as the end of its own
+            //     input event, whereas a paste (even one sent WITHOUT bracketed-
+            //     paste guards — e.g. an agent shell like kiro-cli that keeps a
+            //     pasted multi-line message as one prompt) delivers
+            //     text + newline + text together, so trailing content marks the
+            //     newline as a soft break, not a submit. Without this, such a
+            //     paste left only its last line as the title (the reported
+            //     "the title cut off the start of my message").
+            let softBreak = inPaste;
+            if (!softBreak) {
+              for (let j = i + 1; j < bytes.length; j++) {
+                const nb = bytes[j];
+                if (nb !== undefined && nb >= 0x20) {
+                  softBreak = true;
+                  break;
+                }
+              }
+            }
+            if (softBreak) {
               if (lineBytes.length > 0 && lineBytes[lineBytes.length - 1] !== 0x20) {
                 lineBytes.push(0x20);
               }
@@ -972,6 +997,22 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             animateRowIn(row); // grow + fade in (the tray height follows)
           }
         }
+        // Publish the measured content height so the expanded list animates its
+        // max-height between 0 and the REAL content height (--wt-list-h in
+        // 06-mobile.css), not a fixed 50dvh far larger than the content — which
+        // made the open finish early and the close start late (box height =
+        // min(content, max-height), so the transition's stretch past the content
+        // moved nothing: the asymmetric, choppy toggle). scrollHeight is the full
+        // content height regardless of the collapsed max-height:0 clip, so this
+        // is valid whether measured while collapsed (on open, before the expanded
+        // class) or already open (a tab added/closed). Capped at 50dvh (then
+        // overflow-y:auto scrolls). This works without interpolate-size (iOS
+        // Safari lacks it), unlike a height:auto transition.
+        const visH = window.visualViewport?.height ?? window.innerHeight;
+        switcher.style.setProperty(
+          "--wt-list-h",
+          `${String(Math.min(swList.scrollHeight, Math.round(visH * 0.5)))}px`,
+        );
       }
 
       // clearRows empties the list and drops the reused-row cache (after a
@@ -1065,7 +1106,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
           const exit = dir === "next" ? -pitch : pitch; // leaving row off the leading edge
           requestAnimationFrame(() => {
-            const trans = "transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease-out";
+            // Couple opacity to the SAME easing + duration as the transform so a
+            // row's fade tracks its DISTANCE from its target slot (every reel row
+            // travels one pitch): opacity is a linear function of remaining
+            // distance, so a row is transparent a pitch away (at the clipped
+            // edge) and only fully opaque once it settles. Entering rows fade IN
+            // as they rotate in and the leaving row fades OUT as it exits — no
+            // hard black cutoff at the list edges, and no permanent edge fade.
+            // (Was opacity 0.2s ease-out, decoupled from the motion, so a row hit
+            // full opacity while still at the edge — the reported hard cut.)
+            const trans =
+              "transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.25s cubic-bezier(0.2, 0, 0, 1)";
             for (const el of rowEls.values()) {
               el.style.transition = trans;
               el.style.transform = "translateY(0)";
@@ -1084,6 +1135,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         relabelAll();
         paintActive();
         syncMobile();
+        // The dedicated switch button only earns its place once there are ≥2
+        // tabs (a single tab has nothing to switch to; expandSwitcher no-ops
+        // there). .wt-switcher-multi drives its collapse-when-single / animate-in
+        // -when-a-second-opens motion in CSS (the active chip shrinks to make
+        // room in lockstep, via the flex layout); aria-hidden + tabindex keep the
+        // collapsed button out of the a11y tree and tab order.
+        const multiTab = tabList.length >= 2;
+        switcher.classList.toggle("wt-switcher-multi", multiTab);
+        swSwitch.setAttribute("aria-hidden", multiTab ? "false" : "true");
+        swSwitch.tabIndex = multiTab ? 0 : -1;
         if (expanded) {
           renderSwitcherList();
         }
