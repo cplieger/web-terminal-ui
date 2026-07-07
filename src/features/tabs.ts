@@ -160,10 +160,12 @@ export interface TabsOptions {
 const CLOSE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18"/></svg>`;
 const NEW_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`;
 const KB_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M15 15 9.5 9.5M9.5 13V9.5H13"/></svg>`;
-// Two-arrows "switch" glyph for the mobile switcher's dedicated open/close
-// button (a latest-wins background-tab notification dot rides on it — see
-// switchButtonHTML). Same viewBox + stroke=currentcolor treatment as the others.
-const SWITCH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h13M14 6l3 3-3 3M20 15H7M10 12l-3 3 3 3"/></svg>`;
+// Two-overlapping-windows glyph for the mobile switcher's dedicated open/close
+// button: the browser-style "tab switcher" icon, more recognisable than the
+// prior swap-arrows (which read like a keyboard Tab key). A latest-wins
+// background-tab notification dot rides on it (see switchButtonHTML). Same
+// viewBox + stroke=currentcolor treatment as the others.
+const SWITCH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="13" height="13" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3"/></svg>`;
 
 // chipContent is the ONE builder for a tab chip's content — a status dot, a
 // label, and a close (x) — shared by all three chip sites: the desktop strip
@@ -1099,33 +1101,43 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
               from = first - el.getBoundingClientRect().top; // survivor: old spot -> new
             } else {
               from = dir === "next" ? pitch : -pitch; // newcomer: in from the trailing edge
-              el.style.opacity = "0";
+              el.style.opacity = "0"; // fades in as it rotates to its slot (below)
             }
             el.style.transition = "none";
             el.style.transform = `translateY(${String(Math.round(from))}px)`;
           }
           const exit = dir === "next" ? -pitch : pitch; // leaving row off the leading edge
-          requestAnimationFrame(() => {
-            // Couple opacity to the SAME easing + duration as the transform so a
-            // row's fade tracks its DISTANCE from its target slot (every reel row
-            // travels one pitch): opacity is a linear function of remaining
-            // distance, so a row is transparent a pitch away (at the clipped
-            // edge) and only fully opaque once it settles. Entering rows fade IN
-            // as they rotate in and the leaving row fades OUT as it exits — no
-            // hard black cutoff at the list edges, and no permanent edge fade.
-            // (Was opacity 0.2s ease-out, decoupled from the motion, so a row hit
-            // full opacity while still at the edge — the reported hard cut.)
-            const trans =
-              "transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.25s cubic-bezier(0.2, 0, 0, 1)";
-            for (const el of rowEls.values()) {
-              el.style.transition = trans;
-              el.style.transform = "translateY(0)";
-              el.style.opacity = "";
-            }
-            ghost.style.transition = trans;
-            ghost.style.transform = `translateY(${String(Math.round(exit))}px)`;
-            ghost.style.opacity = "0";
-          });
+          // The leaving row starts at its captured spot, fully opaque.
+          ghost.style.transition = "none";
+          ghost.style.transform = "translateY(0)";
+          ghost.style.opacity = "1";
+          // Commit the from-state (transforms + opacities) with a forced reflow
+          // BEFORE the to-state, so BOTH the transform and the opacity transitions
+          // fire from it. The prior code used a bare rAF (letting the browser
+          // collapse from->to into one recalc) and reverted the entering row's
+          // opacity to "" (no explicit end value), so the fade never animated
+          // (the reported "no fade in / fade out"). The modern display/visibility
+          // transition (transition-behavior: allow-discrete + @starting-style,
+          // Baseline 2024) does NOT apply here: these rows are reused and moved by
+          // a JS transform FLIP, not toggled via display:none, so the reliable
+          // path is a real reflow plus an explicit opacity transition.
+          swList.getBoundingClientRect(); // read forces the reflow (commit the from-state)
+          // Couple opacity to the SAME easing + duration as the transform so a
+          // row's fade tracks its DISTANCE from its target slot (each reel row
+          // travels one pitch): a row is transparent a pitch away (at the clipped
+          // edge) and only fully opaque once it settles. Entering rows fade IN as
+          // they rotate in, the leaving row fades OUT as it exits: no hard cutoff
+          // at the list edges and no permanent edge mask.
+          const trans =
+            "transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.25s cubic-bezier(0.2, 0, 0, 1)";
+          for (const el of rowEls.values()) {
+            el.style.transition = trans;
+            el.style.transform = "translateY(0)";
+            el.style.opacity = "1";
+          }
+          ghost.style.transition = trans;
+          ghost.style.transform = `translateY(${String(Math.round(exit))}px)`;
+          ghost.style.opacity = "0";
           reelTimer = setTimeout(endReelNow, REEL_MS);
         };
       }

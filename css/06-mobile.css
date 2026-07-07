@@ -254,6 +254,18 @@
   margin-inline-start: 0;
 }
 
+/* When the tab list expands the switch button collapses too (its job is done:
+   the list is open), mirroring the keyboard button's collapse in the same
+   animation (07-animations.css animates width + margin + opacity). Placed after
+   the .wt-switcher-multi reveal so it wins when both apply (expanded, two or
+   more tabs). */
+.wt-switcher-expanded .wt-switcher-switch {
+  width: 0;
+  opacity: 0;
+  margin-inline-start: calc(-1 * var(--sp-1));
+  pointer-events: none;
+}
+
 @media (hover: hover) {
   .wt-switcher-switch:hover {
     background: var(--tab-hover-bg);
