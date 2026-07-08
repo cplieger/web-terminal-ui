@@ -479,6 +479,33 @@ describe("tabs feature", () => {
     expect(root.querySelector(".wt-tab-label")?.textContent).toBe("osc-title");
   });
 
+  it("derived title: plain multi-word typed input is captured verbatim", async () => {
+    // Regression guard for the input-derived tab title: typing a normal
+    // multi-word line (insertText input events) then Enter must reconstruct the
+    // line exactly. Previously the derived path was only tested via the server
+    // clientTitle, never via the real per-keystroke input observer.
+    listBody = [{ id: "s1", title: "crap-osc", clientTitle: "", createdAt: "1", status: "idle" }];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs({ preferInputTitle: true })] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    const input = root.querySelector<HTMLTextAreaElement>(".term-input");
+    if (!input) {
+      throw new Error("no .term-input");
+    }
+    const msg = "push and merge please";
+    for (const ch of msg) {
+      input.dispatchEvent(
+        new InputEvent("input", { data: ch, inputType: "insertText", bubbles: true }),
+      );
+    }
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+    await Promise.resolve();
+    expect(root.querySelector(".wt-tab-label")?.textContent).toBe(msg);
+  });
+
   it("closes tabs to the right from the context menu", async () => {
     vi.stubGlobal("confirm", () => true);
     listBody = [
