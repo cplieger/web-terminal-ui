@@ -102,7 +102,7 @@ individual features instead:
 - `presetAgentTabbed()` — the same feature set as `presetTabbed()` (activity
   monitor included), but with `preferInputTitle`: each tab's label follows the
   latest submitted line (persisted server-side and recovered on reload) and the
-  program's OSC 0/2 title is ignored — for an agent shell such as `vibecli`
+  program's OSC 0/2 title is ignored — for an agent shell such as `web-terminal-kiro`
   whose program emits a non-empty but useless OSC title. Its status dots
   (idle / working / done / needs-input) come from the same activity monitor,
   driven by the server's status SSE and its OSC-9 classifier.

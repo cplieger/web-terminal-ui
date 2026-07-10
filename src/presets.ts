@@ -66,7 +66,7 @@ function buildTabbed(preferInputTitle: boolean): TerminalFeature<unknown>[] {
 /** Tabbed UI: the touch features, tabs, the mobile keyboard bar, the activity
  *  monitor, and animations. Requires a server that speaks the session API
  *  (`/api/sessions`, `/ws?session=`, and the status SSE `/api/sessions/events`),
- *  such as `web-terminal-server` or `vibecli`. Each tab's title follows the
+ *  such as `web-terminal-server` or `web-terminal-kiro`. Each tab's title follows the
  *  process OSC 0/2 window title when the program sets one, else the last
  *  submitted line; each tab's activity dot stays hidden until its session
  *  reports activity via OSC 9;4 progress (kiro-cli, Claude Code, …), so a plain
@@ -75,7 +75,7 @@ export function presetTabbed(): TerminalFeature<unknown>[] {
   return buildTabbed(false);
 }
 
-/** Tabbed UI for an agent shell (vibecli). Same features as presetTabbed, but
+/** Tabbed UI for an agent shell (web-terminal-kiro). Same features as presetTabbed, but
  *  with `preferInputTitle`: the agent's program (kiro-cli) emits a non-empty but
  *  useless OSC 0/2 title, so each tab's label follows the latest submitted line
  *  (persisted server-side and recovered on reload) and the OSC title is ignored.

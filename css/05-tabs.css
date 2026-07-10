@@ -72,7 +72,7 @@
 
 /* The active tab reads clearly above the inactive chips: a stronger fill plus an
    accent-coloured edge (inactive chips carry a faint white --border; the active
-   one gets the accent equivalent). Themeable via --accent (vibecli -> purple). */
+   one gets the accent equivalent). Themeable via --accent (web-terminal-kiro -> purple). */
 .wt-tab-active {
   background: var(--tab-active-bg);
   border-color: var(--tab-active-border);

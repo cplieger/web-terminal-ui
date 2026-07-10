@@ -111,7 +111,7 @@
   /* Right padding reserves room for the close (x) overlaid inside the row. */
   padding: 0 var(--touch-target) 0 var(--sp-2);
   /* The bar row always represents the active tab, so it wears the active-tab
-     fill/foreground the desktop strip uses (themeable; purple in vibecli). */
+     fill/foreground the desktop strip uses (themeable; purple in web-terminal-kiro). */
   background: var(--tab-active-bg);
   color: var(--tab-active-fg);
   border: 1px solid var(--tab-active-border);

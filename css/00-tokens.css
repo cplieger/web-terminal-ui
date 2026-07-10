@@ -10,7 +10,7 @@
   /* ===== Themeable tokens (the consumer-configurable "template") =====
      These default to the neutral built-in look; a consumer recolors the UI by
      overriding them via createTerminal's `theme` option (which sets them on the
-     terminal root) or its own CSS. vibecli sets a purple palette. Everything
+     terminal root) or its own CSS. web-terminal-kiro sets a purple palette. Everything
      above is the fixed design palette; everything here is the public theme API. */
   --accent: oklch(72% 0.15 250deg); /* light blue; themed per consumer */
   --tab-bg: oklch(30% 0 0deg / 90%); /* inactive-tab chip (translucent) */
