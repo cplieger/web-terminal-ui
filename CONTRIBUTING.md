@@ -59,18 +59,18 @@ on the unpublished `@cplieger/web-terminal-engine`).
 
 ```sh
 npm install                # devDeps; the engine peer is overlaid by verify.sh
-npm run verify             # overlay local engine + tsgo (src & tests) + vitest
+npm run verify             # overlay local engine + tsc (src & tests) + vitest
 ```
 
 `scripts/verify.sh` copies the local engine's `web/src` into
-`node_modules/@cplieger/web-terminal-engine` (gitignored) so `tsgo` and `vitest` can
+`node_modules/@cplieger/web-terminal-engine` (gitignored) so `tsc` and `vitest` can
 resolve the bare `@cplieger/web-terminal-engine` specifier before the engine is
 published. Point it at a non-default location with `ENGINE_DIR=../web-terminal-engine
 npm run verify`. The individual gates are also available:
 
 ```sh
-npm run typecheck          # tsgo -p tsconfig.json (source)
-npm run typecheck:tests    # tsgo -p tsconfig.test.json (includes *.test.ts)
+npm run typecheck          # tsc -p tsconfig.json (source)
+npm run typecheck:tests    # tsc -p tsconfig.test.json (includes *.test.ts)
 npm test                   # vitest --run
 npm run lint:eslint        # strict typed-linting (needs the synced base present)
 npm run lint:prettier      # formatting (printWidth 100)
@@ -78,7 +78,7 @@ npm run lint:knip          # unused-export / dependency check
 ```
 
 There is **no build step** — the package ships TypeScript source
-(`exports` points at `./src/index.ts`), so `tsgo` stands in for a compile. CI
+(`exports` points at `./src/index.ts`), so `tsc` stands in for a compile. CI
 runs the same battery centrally via cplieger/ci; the `web-lint` job also lints
 `css/` (stylelint) and `scaffold/index.html` (html-validate).
 

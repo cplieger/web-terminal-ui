@@ -3,8 +3,8 @@
 #
 # The engine (@cplieger/web-terminal-engine) is not published yet, so npm cannot
 # resolve the peer dependency. This script overlays the LOCAL working-tree
-# engine into node_modules/@cplieger/web-terminal-engine (the same technique vibecli's
-# dev-build.sh uses) and then runs the real gates: tsgo typecheck (source +
+# engine into node_modules/@cplieger/web-terminal-engine (the same technique web-terminal-kiro's
+# dev-build.sh uses) and then runs the real gates: tsc typecheck (source +
 # tests) and vitest.
 #
 # Not for CI or release — CI resolves the published engine. The overlay dir is
@@ -36,11 +36,11 @@ done
 # Minimal manifest so bundler resolution maps the bare specifier to src.
 cp "$ENGINE_DIR/web/package.json" "$PKG/package.json"
 
-printf '%s\n' "[2/4] tsgo typecheck (source)"
-tsgo -p tsconfig.json
+printf '%s\n' "[2/4] tsc typecheck (source)"
+npx tsc -p tsconfig.json
 
-printf '%s\n' "[3/4] tsgo typecheck (tests)"
-tsgo -p tsconfig.test.json
+printf '%s\n' "[3/4] tsc typecheck (tests)"
+npx tsc -p tsconfig.test.json
 
 printf '%s\n' "[4/4] vitest"
 npx vitest --run

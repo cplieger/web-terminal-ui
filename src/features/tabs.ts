@@ -146,7 +146,7 @@ export interface TabsOptions {
   /** Prefer the input-derived title over the process OSC 0/2 title. Default
    *  false (OSC-first: a program that sets its own window title wins, else the
    *  last submitted line). Set true for an agent shell whose program emits a
-   *  non-empty but useless OSC title (kiro-cli under vibecli): the label then
+   *  non-empty but useless OSC title (kiro-cli under web-terminal-kiro): the label then
    *  follows the latest submitted line (live) or the persisted client title (on
    *  reload), and the unreliable OSC title is ignored entirely. presetAgentTabbed
    *  enables this. */
@@ -359,7 +359,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   }
   // Persist the input-derived tab title server-side so it survives a page reload
   // and shows on other devices. The engine stores it as the session's fallback
-  // title and uses it only when the program emits no OSC title (the vibecli case:
+  // title and uses it only when the program emits no OSC title (the web-terminal-kiro case:
   // kiro-cli emits no usable OSC title, so the latest user message is the label).
   // Best-effort and fire-and-forget: a failure never disrupts the terminal — the
   // locally-derived title still displays, it just is not persisted this time.
