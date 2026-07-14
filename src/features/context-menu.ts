@@ -21,13 +21,20 @@
 // getSelection() read at a fixed delay races the native selection and caused the
 // reported flakiness (sometimes native, sometimes custom, sometimes both). So we
 // TRACK whether a selection is made during THIS press via a selectionchange
-// listener armed only while a touch is down: the moment one appears we cancel
-// the pending menu and, if it already opened, close it — native always wins over
-// text. The platforms deliver the long-press differently: iOS fires NO
-// contextmenu (a hold timer detects it), Android DOES (we handle it and
-// preventDefault it when showing our own, so Android's native menu doesn't also
-// appear — the "both menus" case). Both paths are gated by the same selection
-// check, so the outcome is consistent across platforms.
+// listener armed only while a touch is down (the moment one appears we cancel
+// the pending menu and, if it already opened, close it), AND we gate the menu on
+// PRESS POSITION: a long-press that landed on a glyph run belongs to the
+// platform's word-select even when no selection has registered yet (iOS 26's
+// native selection can land well past our 550ms timer, so timing alone misfires
+// over text). The platforms deliver the long-press differently: iPhone fires NO
+// contextmenu (a hold timer detects it); iPadOS DOES fire contextmenu mid-press
+// and WebKit treats preventDefault on it as "cancel every remaining default of
+// this gesture" — including a not-yet-registered selection — so on Apple touch
+// devices the contextmenu handler never preventDefaults (that asymmetry is what
+// once made iPad unable to select at all while iPhone worked); Android also
+// fires contextmenu, and there we DO preventDefault when showing our own menu so
+// Android's native menu doesn't also appear (the "both menus" case). All paths
+// share the same selection + position gates, so the outcome is consistent.
 
 import type { TerminalFeature } from "../kernel/types.js";
 import type { ClipboardApi } from "./clipboard.js";
@@ -114,6 +121,22 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
           clearTimeout(longPressTimer);
           longPressTimer = 0;
         }
+      };
+
+      // True when the press landed on rendered text (a glyph run inside the
+      // output). The empty-space menu must not open there: a long-press on text
+      // belongs to the platform's word-selection, and opening ours first races
+      // it (on iOS 26 the native selection can register well after 550ms, so
+      // the old no-selection-yet check misfired over text). Hitting the row or
+      // container (the blank area beside/below content) still counts as empty
+      // space so Paste stays reachable.
+      const pressOverText = (x: number, y: number): boolean => {
+        const el = document.elementFromPoint(x, y);
+        if (!(el instanceof HTMLElement) || !el.closest(".term-output")) {
+          return false;
+        }
+        const run = el.closest("span, a");
+        return run !== null && run.textContent.trim().length > 0;
       };
 
       // True when text is (or just got) selected, so the OS callout owns Copy and
@@ -238,6 +261,20 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
           show(e.clientX, e.clientY, false);
           return;
         }
+        if (appleTouch) {
+          // NEVER preventDefault a touch contextmenu on iOS/iPadOS: WebKit then
+          // cancels every remaining default action of the gesture, including a
+          // native word-selection that registers AFTER this event (iPadOS fires
+          // contextmenu mid-long-press; on iOS 26 the selection can land well
+          // after it). iPhone fires no contextmenu at all, so suppressing here
+          // is exactly what made iPad behave differently from iPhone. If our
+          // empty-space menu opened first (the hold timer beat a slow native
+          // selection), stand down so the platform's selection wins.
+          if (menu.classList.contains("visible") && !hasNativeSelection()) {
+            hide(false);
+          }
+          return;
+        }
         if (menu.classList.contains("visible")) {
           e.preventDefault(); // the hold timer already opened it; just suppress native
           return;
@@ -245,12 +282,8 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         if (hasNativeSelection()) {
           return; // native selection toolbar owns Copy over text
         }
-        if (appleTouch) {
-          // iOS/iPadOS fires contextmenu a beat before the native word-select
-          // registers, so hasNativeSelection() can still be false here. Defer
-          // anyway so the platform's own selection wins instead of our
-          // empty-space menu (which would preventDefault and suppress it).
-          return;
+        if (pressOverText(e.clientX, e.clientY)) {
+          return; // a long-press on text belongs to the platform's word-select
         }
         e.preventDefault();
         clearLongPress();
@@ -322,7 +355,7 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         longPressOrigin = { x: t.clientX, y: t.clientY };
         longPressTimer = window.setTimeout(() => {
           longPressTimer = 0;
-          if (!hasNativeSelection()) {
+          if (!hasNativeSelection() && !pressOverText(longPressOrigin.x, longPressOrigin.y)) {
             show(longPressOrigin.x, longPressOrigin.y, true);
           }
         }, LONG_PRESS_MS);

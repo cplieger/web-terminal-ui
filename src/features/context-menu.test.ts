@@ -194,6 +194,77 @@ describe("contextMenu Paste (iOS paste fix)", () => {
     expect(cm.defaultPrevented).toBe(false);
   });
 
+  it("closes an already-open menu on an iPad touch contextmenu WITHOUT preventDefault (iOS 26 slow-selection race)", async () => {
+    // iOS 26 can register the native word-selection well after our 550ms hold
+    // timer, so the empty-space menu may already be open when iPadOS delivers
+    // the gesture's contextmenu. preventDefault here would cancel EVERY
+    // remaining default of the gesture — the not-yet-registered selection
+    // included — which left iPad unable to select at all while iPhone (which
+    // fires no contextmenu) still selected late. The menu must stand down and
+    // let the platform finish.
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+      platform: "MacIntel",
+      maxTouchPoints: 5,
+    });
+    const root = rootIn();
+    const clip = fakeClipboard();
+    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    await tick();
+
+    const surface = root.querySelector<HTMLElement>(".term");
+    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
+    Object.defineProperty(pd, "pointerType", { value: "touch" });
+    surface?.dispatchEvent(pd);
+
+    // The hold timer opened the empty-space menu first (no native selection yet).
+    const ts = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
+    Object.defineProperty(ts, "touches", { value: [{ clientX: 30, clientY: 40 }] });
+    surface?.dispatchEvent(ts);
+    await new Promise((r) => setTimeout(r, 600));
+    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
+
+    const cm = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 30,
+      clientY: 40,
+    });
+    surface?.dispatchEvent(cm);
+
+    expect(cm.defaultPrevented).toBe(false); // the gesture's defaults survive
+    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
+  });
+
+  it("does not open the hold-timer menu when the long-press landed on rendered text", async () => {
+    const root = rootIn();
+    const clip = fakeClipboard();
+    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    await tick();
+
+    const surface = root.querySelector<HTMLElement>(".term");
+    // Put a glyph run under the press point: a row span inside .term-output.
+    const output = root.querySelector<HTMLElement>(".term-output");
+    const row = document.createElement("div");
+    row.className = "term-row";
+    const run = document.createElement("span");
+    run.textContent = "hello world";
+    row.appendChild(run);
+    output?.appendChild(row);
+    const efp = vi.spyOn(document, "elementFromPoint").mockReturnValue(run);
+
+    const ts = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
+    Object.defineProperty(ts, "touches", { value: [{ clientX: 30, clientY: 40 }] });
+    surface?.dispatchEvent(ts);
+    await new Promise((r) => setTimeout(r, 600));
+
+    // A long-press on text belongs to the platform's word-select; our menu
+    // stays out even though no selection has registered yet (iOS 26 can be
+    // slower than the hold timer).
+    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
+    efp.mockRestore();
+  });
+
   it("omits Paste when no clipboard feature is present", async () => {
     const root = rootIn();
     term = createTerminal(root, { features: [contextMenu()] });
