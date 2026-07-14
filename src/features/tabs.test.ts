@@ -281,11 +281,15 @@ describe("tabs feature", () => {
     const newBtn = root.querySelector(".wt-tab-new");
     expect(newBtn).toBeTruthy();
     // The close-all bar button is gone (it moved to the right-click menu); the +
-    // is the last flex item in the strip, right after the tabs.
+    // is the last flex item in the strip, after the tabs and the (hidden until
+    // wired) keyboard button — the strip order is [tabs… kb +].
     expect(root.querySelector(".wt-tab-closeall")).toBeNull();
     expect(bar?.contains(newBtn ?? null)).toBe(true);
     expect(bar?.lastElementChild).toBe(newBtn);
-    expect(newBtn?.previousElementSibling?.classList.contains("wt-tab")).toBe(true);
+    expect(newBtn?.previousElementSibling?.classList.contains("wt-tab-kb")).toBe(true);
+    expect(
+      newBtn?.previousElementSibling?.previousElementSibling?.classList.contains("wt-tab"),
+    ).toBe(true);
   });
 
   it("closes a tab on middle-click", async () => {
@@ -477,6 +481,66 @@ describe("tabs feature", () => {
     term = createTerminal(root, { features: [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
     expect(root.querySelector(".wt-tab-label")?.textContent).toBe("osc-title");
+  });
+
+  it("recovers the persisted client title when the SSE snapshot beats the initial list", async () => {
+    // The reload race: the status SSE pushes its snapshot as tabs.setup
+    // subscribes, BEFORE the awaited GET /api/sessions resolves. adoptSession
+    // then dedups the list's entries and never re-applies their fields, so the
+    // snapshot itself is the only carrier of the persisted clientTitle. The
+    // monitor path used to drop it (clientTitle: undefined), reverting every
+    // tab to "New tab" after a reload in preferInputTitle mode.
+    const monitor = snapshotMonitor([
+      {
+        id: "s1",
+        status: "idle",
+        title: "crap-osc",
+        clientTitle: "build the thing",
+        createdAt: "1",
+      },
+    ]);
+    listBody = [
+      {
+        id: "s1",
+        title: "crap-osc",
+        clientTitle: "build the thing",
+        createdAt: "1",
+        status: "idle",
+      },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [monitor, tabs({ activityMonitor: monitor, preferInputTitle: true })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    // Give the initial list loop a turn (it must not be needed for the title).
+    await new Promise((r) => setTimeout(r, 0));
+    expect(root.querySelector(".wt-tab-label")?.textContent).toBe("build the thing");
+  });
+
+  it("applies a clientTitle pushed on the status stream (a PUT from another device)", async () => {
+    // A title PUT on another device reaches this client only via the status
+    // stream's clientTitle field; the monitor path must apply it live.
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [
+        monitor.feature,
+        tabs({ activityMonitor: monitor.feature, preferInputTitle: true }),
+      ],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    monitor.emit({
+      id: "s1",
+      status: "idle",
+      title: "crap-osc",
+      clientTitle: "from the other device",
+      createdAt: "1",
+    });
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("from the other device");
   });
 
   it("derived title: plain multi-word typed input is captured verbatim", async () => {
@@ -800,6 +864,79 @@ describe("tabs feature", () => {
     expect(dot?.dataset["status"]).toBeUndefined();
   });
 
+  it("clears the switch-button dot when a swipe arrives on the tab that raised it", async () => {
+    // Swiping through the tabs must acknowledge the cue on arrival at its
+    // subject, not only opening the list (the reported bug: the dot survived a
+    // swipe onto the concerned tab).
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    // Background s2 needs input -> the cue lights.
+    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    expect(dot?.dataset["status"]).toBe("input");
+
+    // A leftward swipe on the active row advances to s2 (the raising tab): the
+    // cue is resolved by arriving there.
+    const cur = root.querySelector<HTMLElement>(".wt-switcher-current");
+    cur?.dispatchEvent(new MouseEvent("pointerdown", { clientX: 220, clientY: 10, bubbles: true }));
+    cur?.dispatchEvent(new MouseEvent("pointerup", { clientX: 90, clientY: 14, bubbles: true }));
+    expect(setSession).toHaveBeenCalledWith("s2");
+    expect(dot?.dataset["status"]).toBeUndefined();
+  });
+
+  it("keeps the switch-button dot when switching to a tab other than the raiser", async () => {
+    const monitor = fakeMonitor();
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const feature = tabs({ activityMonitor: monitor.feature });
+    term = createTerminal(root, { features: [monitor.feature, feature] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    // Background s3 raised the cue; visiting s2 does NOT resolve it.
+    monitor.emit({ id: "s3", status: "done", title: "three", createdAt: "3" });
+    expect(dot?.dataset["status"]).toBe("done");
+    feature.api?.switchTo("s2");
+    expect(dot?.dataset["status"]).toBe("done");
+    // Arriving on s3 does.
+    feature.api?.switchTo("s3");
+    expect(dot?.dataset["status"]).toBeUndefined();
+  });
+
+  it("clears the switch-button dot when the tab that raised it is closed", async () => {
+    // A cue whose subject is gone can never be resolved by visiting it; a close
+    // must clear it rather than leave a permanently lit dot.
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    expect(dot?.dataset["status"]).toBe("input");
+
+    // Middle-click closes s2 (a background close from the desktop strip).
+    root
+      .querySelectorAll<HTMLElement>(".wt-tab")[1]
+      ?.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    expect(dot?.dataset["status"]).toBeUndefined();
+  });
+
   it("toggles the switcher list closed when the switch button is clicked while open", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -871,16 +1008,42 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // The desktop strip carries its own keyboard button (like the switcher's),
-    // a SIBLING of the strip so it never affects the strip's child order. It
-    // stays hidden until a keyboardToggle feature is wired, and never counts as
-    // a tab or the "+".
+    // an in-flow strip member BEFORE the "+" — mirroring the mobile switcher's
+    // kb-then-new order, so rotating a phone to landscape keeps the keyboard
+    // button left of the "+". It stays hidden until a keyboardToggle feature is
+    // wired, and never counts as a tab.
     const deskKb = root.querySelector<HTMLElement>(".wt-tab-kb");
     expect(deskKb).toBeTruthy();
     expect(deskKb?.hidden).toBe(true);
-    expect(root.querySelector(".wt-tab-bar")?.contains(deskKb ?? null)).toBe(false);
+    expect(root.querySelector(".wt-tab-bar")?.contains(deskKb ?? null)).toBe(true);
+    expect(deskKb?.previousElementSibling?.classList.contains("wt-tab")).toBe(true);
+    expect(deskKb?.nextElementSibling).toBe(root.querySelector(".wt-tab-new"));
     expect(root.querySelector(".wt-tab-bar")?.lastElementChild).toBe(
       root.querySelector(".wt-tab-new"),
     );
+  });
+
+  it("closes the key grid on a second tap of the desktop keyboard button", async () => {
+    const kbt = fakeKeyboardToggle();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const deskKb = root.querySelector<HTMLElement>(".wt-tab-kb");
+    deskKb?.click();
+    expect(kbt.isOpen()).toBe(true);
+
+    // A real tap delivers pointerup (bubbling to the document's capture-phase
+    // tap-dismiss handler) BEFORE the click. The handler used to treat the tab
+    // strip as "outside" chrome: it closed the grid on the pointerup and the
+    // button's click then re-opened it — so a second tap never closed the grid
+    // (the landscape-phone / iPad bug). The strip now counts as chrome.
+    deskKb?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    deskKb?.click();
+    expect(kbt.isOpen()).toBe(false);
   });
 
   it("wires the desktop + mobile keyboard buttons to the one shared grid toggle", async () => {
