@@ -458,20 +458,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       bar.className = "wt-tab-bar";
       bar.setAttribute("role", "tablist");
       slot.appendChild(bar);
-      // The "+" button is the last flex item INSIDE the strip. Appending it to
-      // the slot (a sibling of the fixed .wt-tab-bar) flowed it out of the strip
-      // to the root, so it never appeared; inside the flex bar it renders at the
-      // end of the tabs (addTabChrome inserts each tab before it).
+      // Strip-end controls, both flex items INSIDE the strip so they flow after
+      // the tabs (appending them to the slot flowed them out of the strip):
+      // the keyboard button first, then the "+" — mirroring the mobile
+      // switcher's kb-before-new order, so rotating a phone to landscape (which
+      // swaps in this strip) keeps the keyboard button LEFT of the "+" rather
+      // than jumping to its right. Built + wired by the same shared factories
+      // as the mobile switcher's; the kb button is CSS-gated to a wide
+      // touchscreen and un-hidden below only when a keyboardToggle is wired.
+      // addTabChrome inserts each tab before deskKb, keeping [tabs… kb +].
+      const deskKb = makeKbButton("wt-tab-kb wt-btn");
+      bar.appendChild(deskKb);
       const newBtn = makeNewButton("wt-tab-new");
       bar.appendChild(newBtn);
-      // Desktop-strip keyboard button, built + wired by the SAME factory as the
-      // mobile switcher's. A SIBLING of the strip (appended to the region slot,
-      // not into .wt-tab-bar) so it never affects the strip's child order; CSS
-      // shows it only on a wide touchscreen (where the strip, not the switcher,
-      // is used) and hides it on a fine-pointer desktop. Un-hidden below only
-      // when a keyboardToggle feature is wired.
-      const deskKb = makeKbButton("wt-tab-kb wt-btn");
-      slot.appendChild(deskKb);
 
       // Pull the terminal surface up off the fixed BOTTOM strip on desktop so
       // the bar does not overlap the last rows. The surface is position:fixed
@@ -522,8 +521,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       swBar.append(swKb, swSwitch, swNew);
       // Latest-wins notification state for the switch button's dot: overwritten
       // by each qualifying background-tab event (applyStatus) and cleared when
-      // the list opens (expandSwitcher). "" = no pending cue; the dot is hidden.
+      // the list opens (expandSwitcher) or the raising tab is visited or closed
+      // (acknowledgeSwitchNotify). "" = no pending cue; the dot is hidden.
       let switchNotify: "" | "input" | "done" = "";
+      // The session that raised the pending cue, so arriving on that tab (a
+      // swipe or any switch) acknowledges it without opening the list.
+      let switchNotifyId: string | null = null;
       function paintSwitchDot(): void {
         // Reuse the per-tab status-dot colours (single source, css/05-tabs.css
         // .wt-status-dot[data-status="input"|"done"]) instead of re-declaring
@@ -533,6 +536,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           delete swSwitchDot.dataset["status"];
         } else {
           swSwitchDot.dataset["status"] = switchNotify;
+        }
+      }
+      function clearSwitchNotify(): void {
+        switchNotify = "";
+        switchNotifyId = null;
+        paintSwitchDot();
+      }
+      // acknowledgeSwitchNotify clears the pending cue when its subject session
+      // is reached (switchTo — including a swipe arriving on it) or ceases to
+      // exist (a close/reap): the notification is resolved or moot then, and
+      // only opening the list used to clear it (the reported "swiping to the
+      // concerned tab leaves the dot lit").
+      function acknowledgeSwitchNotify(id: string): void {
+        if (switchNotifyId === id) {
+          clearSwitchNotify();
         }
       }
       ctx.region("bottom-switcher", "switcher").appendChild(switcher);
@@ -1223,8 +1241,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         // Opening the list acknowledges any pending background-tab notification:
         // the user is now looking at the tabs, so clear the switch button's dot.
-        switchNotify = "";
-        paintSwitchDot();
+        clearSwitchNotify();
         renderSwitcherList();
         setExpandedState(true);
         ctx.announce("Terminal list expanded");
@@ -1257,8 +1274,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         paintStatusDot(dot, info.status, info.reportsActivity ?? false);
         const aria = tablist.registerTab(el);
-        // Insert before the "+" button so it stays the last item in the strip.
-        bar.insertBefore(el, newBtn);
+        // Insert before the strip-end controls (keyboard button, then "+") so
+        // they stay the last items in the strip.
+        bar.insertBefore(el, deskKb);
         // Runtime-added tabs animate in; initial tabs do not (see `started`).
         // The timer (not animationend) also clears the class on the hidden mobile
         // strip, where the animation never fires.
@@ -1390,6 +1408,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // rebuild viewport-first, so the last-known screen paints with no
         // round-trip. Then let the kernel reconnect the WS to it (resume delta).
         activeId = next.id;
+        // Arriving on the tab that raised the switch-button cue resolves it
+        // (a swipe through the tabs must dismiss the dot, not only opening the
+        // list).
+        acknowledgeSwitchNotify(next.id);
         try {
           localStorage.setItem(ACTIVE_TAB_KEY, next.id);
         } catch {
@@ -1522,9 +1544,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       // dragTargetBefore returns the first tab whose horizontal midpoint is past
       // x (the element the dragged tab should sit before), or null to drop at the
-      // end (before the "+"). syncOrderFromDom rebuilds tabList to match the
-      // strip's DOM order after a drag, so position indicators, the switcher, and
-      // close-to-the-right/left all follow the visible order.
+      // end (before the strip-end controls). syncOrderFromDom rebuilds tabList to
+      // match the strip's DOM order after a drag, so position indicators, the
+      // switcher, and close-to-the-right/left all follow the visible order.
       function dragTargetBefore(x: number): HTMLElement | null {
         for (const el of bar.querySelectorAll<HTMLElement>(".wt-tab:not(.wt-tab-dragging)")) {
           const rect = el.getBoundingClientRect();
@@ -1647,6 +1669,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Tombstone this id briefly so a stale status snapshot/poll that predates
         // the server reaping it cannot re-adopt the just-closed tab.
         tombstone(id);
+        // A pending switch-button cue whose subject just closed is moot: clear
+        // it rather than leaving a dot no tab visit can ever resolve.
+        acknowledgeSwitchNotify(id);
         tab.aria.remove();
         // Remove immediately (no exit animation): a lingering element made the
         // "+" teleport after a delay, and made a last-tab replacement appear in
@@ -1711,6 +1736,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // server reaping these sessions cannot re-adopt (flash back) a just-
           // closed tab -- mirrors the single-close path in dropTab (h-f2).
           tombstone(t.id);
+          acknowledgeSwitchNotify(t.id); // a cue for a closed tab is moot
           t.aria.remove();
           t.el.remove();
           ctx.dropSession(t.id);
@@ -1880,6 +1906,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // dedicated button.
         if (id !== activeId && (status === "input" || status === "done")) {
           switchNotify = status;
+          switchNotifyId = id;
           paintSwitchDot();
         }
         // Record the raw server title; the displayed label (fallback + de-dup)
@@ -1914,15 +1941,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             return;
           }
           // Adopt a session created in another browser so all clients converge.
+          // Carry the persisted clientTitle through: the SSE snapshot usually
+          // beats the initial GET /api/sessions (whose adoptSession then dedups
+          // and never re-applies its fields), so dropping it here left every
+          // SSE-adopted tab without its persisted title — in preferInputTitle
+          // mode the label then fell back to "New tab" on reload.
           adoptSession({
             id: s.id,
             title: s.title,
-            clientTitle: undefined,
+            clientTitle: s.clientTitle,
             createdAt: s.createdAt,
             status: s.status,
             reportsActivity: s.reportsActivity ?? false,
           });
-          applyStatus(s.id, s.status, s.title, undefined, s.reportsActivity ?? false);
+          applyStatus(s.id, s.status, s.title, s.clientTitle, s.reportsActivity ?? false);
           ensureActive();
           syncChrome();
         });
@@ -1994,7 +2026,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (e.dataTransfer) {
           e.dataTransfer.dropEffect = "move";
         }
-        bar.insertBefore(draggingEl, dragTargetBefore(e.clientX) ?? newBtn);
+        bar.insertBefore(draggingEl, dragTargetBefore(e.clientX) ?? deskKb);
       });
       // Active-row close (x): closes the current tab (mirrors a listed row's x).
       // stopPropagation so it is not read as a tap/swipe on the row surface.
@@ -2054,9 +2086,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         const target = e.target as HTMLElement | null;
+        // The tab strip counts as chrome like the switcher: without it, the
+        // desktop-strip keyboard button's own pointerup landed here, closed the
+        // grid, and the button's click then re-opened it — so tapping the button
+        // to CLOSE the grid never worked (a wide-touchscreen / landscape-phone
+        // bug; the switcher's kb button was already exempt via .wt-switcher).
         const inChrome =
           target !== null &&
-          (target.closest(".wt-switcher") !== null || target.closest(".key-toolbar") !== null);
+          (target.closest(".wt-switcher") !== null ||
+            target.closest(".wt-tab-bar") !== null ||
+            target.closest(".key-toolbar") !== null);
         if (inChrome) {
           return;
         }

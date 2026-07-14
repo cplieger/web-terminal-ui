@@ -195,24 +195,21 @@
 }
 
 /* Desktop-strip keyboard button (tabs feature): opens the on-screen key grid on
-   a WIDE touchscreen (an iPad using the multi-tab strip), where there is no
-   mobile switcher to carry one. Built + wired by the SAME factory as the mobile
-   switcher's keyboard button (see makeKbButton in tabs.ts). Uses the shared
-   .wt-btn primitive for its 44px box + centered icon. Hidden on a fine-pointer
-   desktop (a real keyboard is present) and until a keyboardToggle feature is
-   wired ([hidden]); shown only on a coarse pointer at strip widths (the media
-   block below, kept in lockstep with SWITCHER_MEDIA in src/features/tabs.ts).
-   Fixed at the strip's bottom-right — above the fixed bottom strip, with a
-   matching-surface fill — so it caps the strip's right edge and never scrolls
-   with the tabs. */
+   a WIDE touchscreen (an iPad using the multi-tab strip, or a phone rotated to
+   landscape), where there is no mobile switcher to carry one. Built + wired by
+   the SAME factory as the mobile switcher's keyboard button (see makeKbButton
+   in tabs.ts). Uses the shared .wt-btn primitive for its 44px box + centered
+   icon, borderless like the switcher's — the old fixed-overlay styling gave it
+   a border and pinned it right of the "+", which read as a different control
+   the moment a phone rotated to landscape. Now an ordinary flex item inside the
+   strip, before the "+" (kb-then-new, mirroring the mobile switcher's order).
+   Hidden on a fine-pointer desktop (a real keyboard is present) and until a
+   keyboardToggle feature is wired ([hidden]); shown only on a coarse pointer at
+   strip widths (the media block below, kept in lockstep with SWITCHER_MEDIA in
+   src/features/tabs.ts). */
 .wt-tab-kb {
   display: none;
-  position: fixed;
-  right: var(--sp-2);
-  bottom: calc(var(--safe-bottom) + var(--sp-2));
-  z-index: 16;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  flex: none;
 }
 
 /* Grid open: filled so the toggled state reads at a glance (mirrors the
@@ -229,16 +226,12 @@
   color: var(--bg);
 }
 
-/* Show + reserve room only on a WIDE touchscreen (where the desktop strip is
-   used AND a keyboardToggle is wired, hence :not([hidden])): the strip gets
-   matching right padding so the tabs + "+" never scroll under the fixed button. */
+/* Show only on a WIDE touchscreen (where the desktop strip is used AND a
+   keyboardToggle is wired, hence :not([hidden])). In-flow now, so the strip
+   needs no reserved right padding for it. */
 @media (pointer: coarse) and (width >= 601px) {
   .wt-tab-kb:not([hidden]) {
     display: inline-flex;
-  }
-
-  .wt-tab-bar {
-    padding-right: calc(var(--touch-target) + 2 * var(--sp-2));
   }
 }
 
