@@ -1,4 +1,3 @@
 {
-  "ignoreDependencies": ["html-validate"],
-  "ignoreBinaries": ["tsc"]
+  "ignoreDependencies": ["html-validate"]
 }
