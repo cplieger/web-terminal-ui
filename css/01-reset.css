@@ -14,6 +14,12 @@ body {
   background: var(--bg);
   color-scheme: dark;
   -webkit-font-smoothing: antialiased;
+  /* Disable the browser's landscape text autosizing ("text inflation"): without
+     this, rotating a phone to landscape zooms the text. iOS Safari implements
+     ONLY the -webkit- prefixed form (the unprefixed property is ignored there),
+     so both are required — unprefixed alone left iPhones inflating on rotate. */
+  /* stylelint-disable-next-line property-no-vendor-prefix -- iOS Safari only implements the prefixed form */
+  -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   overscroll-behavior: none;
   /* Disable pinch-to-zoom and double-tap-to-zoom. The viewport meta tag
