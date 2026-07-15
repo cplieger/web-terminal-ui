@@ -130,6 +130,43 @@ describe("conn-state: restarted timer edges", () => {
   });
 });
 
+describe("conn-state: ended (definitive process exit)", () => {
+  it("shows 'ended' immediately once loaded, with no grace delay", () => {
+    m.setLoaded();
+    m.ended();
+    expect(states()).toEqual(["ended"]);
+    expect(m.current()).toBe("ended");
+  });
+
+  it("passes through the loading gate: an exit before the first frame still surfaces", () => {
+    // The active session died before rendering anything (attach to an
+    // already-dead session). "ended" is the only explanation the page will
+    // ever get, so unlike the transient states it must not be suppressed.
+    m.ended();
+    expect(states()).toEqual(["ended"]);
+  });
+
+  it("persists (no auto-clear) until open() replaces it on a switch to a live session", () => {
+    m.setLoaded();
+    m.ended();
+    vi.advanceTimersByTime(60_000);
+    expect(m.current()).toBe("ended");
+    m.open();
+    expect(m.current()).toBe("open");
+  });
+
+  it("resets the failure streak so a later live session starts escalation from zero", () => {
+    m.setLoaded();
+    m.closed();
+    m.closed();
+    m.closed(); // streak at 3; one more close would escalate to offline
+    m.ended(); // definitive end resets the streak
+    m.closed();
+    vi.advanceTimersByTime(600);
+    expect(m.current()).toBe("reconnecting"); // not "offline": the streak restarted
+  });
+});
+
 describe("conn-state: destroy clears pending timers", () => {
   beforeEach(() => {
     m.setLoaded();

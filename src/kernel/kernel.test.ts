@@ -152,6 +152,37 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
   });
 });
 
+describe("process exit (the engine's definitive 4001 close)", () => {
+  it("dismisses the loading overlay and emits 'ended', so a dead session can never wedge the page", async () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const seen: string[] = [];
+    const watcher: TerminalFeature = {
+      name: "state-watcher",
+      setup(ctx) {
+        ctx.on("connection:state", (s) => {
+          seen.push(s);
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(root, { features: [watcher], loading });
+    await tick(); // let feature setup complete
+    expect(loading.classList.contains("fade")).toBe(false);
+
+    // The engine reports the process-exited close on the active socket.
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onProcessExit?.();
+
+    // The overlay comes down even though no screen frame ever rendered
+    // (attach-to-already-dead-session): this is the anti-wedge guarantee.
+    expect(loading.classList.contains("fade")).toBe(true);
+    // And the state machine surfaces the definitive end, not a reconnect.
+    expect(seen).toContain("ended");
+  });
+});
+
 describe("switch detach (design 5.1 switch safety)", () => {
   it("cancels IME composition, and runs onDetach before setSession and before onSwitch", async () => {
     const composition = await import("../composition.js");

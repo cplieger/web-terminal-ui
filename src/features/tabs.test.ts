@@ -241,6 +241,75 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s1");
   });
 
+  it("spawns and activates a fresh session when every listed session is exited", async () => {
+    // The agent died in every listed session (e.g. a sign-in dead end). The
+    // bootstrap must not wedge on a corpse: it spawns a fresh live session,
+    // activates it, and keeps the exited one around as a viewable tab.
+    listBody = [{ id: "s1", title: "", createdAt: "1", status: "exited" }];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    expect(setSession).toHaveBeenCalledWith("s-new");
+    expect(setSession).not.toHaveBeenCalledWith("s1");
+    // The exited session still has a tab (switch to it to read its last screen).
+    expect(root.querySelectorAll(".wt-tab").length).toBe(2);
+  });
+
+  it("activates the oldest LIVE session, not an older exited one", async () => {
+    listBody = [
+      { id: "s1", title: "dead", createdAt: "1", status: "exited" },
+      { id: "s2", title: "alive", createdAt: "2", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    expect(setSession).toHaveBeenCalledWith("s2");
+    // No fresh session was spawned: a live one existed.
+    expect(fetchMock.mock.calls.some((c) => c[1]?.method === "POST")).toBe(false);
+  });
+
+  it("ignores a saved active id whose session has exited (no reload-onto-a-corpse)", async () => {
+    localStorage.setItem("wt-active-session", "s1");
+    listBody = [
+      { id: "s1", title: "dead", createdAt: "1", status: "exited" },
+      { id: "s2", title: "alive", createdAt: "2", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    expect(setSession).toHaveBeenCalledWith("s2");
+    expect(setSession).not.toHaveBeenCalledWith("s1");
+  });
+
+  it("falls back to the exited tab when nothing is live and the fresh spawn fails", async () => {
+    // Server lists only a corpse and refuses to create (e.g. rate limited).
+    // A frozen final screen + "Session ended" still beats a blank page, so the
+    // exited tab is activated as the last resort.
+    listBody = [{ id: "s1", title: "dead", createdAt: "1", status: "exited" }];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string | URL, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (method === "POST") {
+          return Promise.resolve(jsonResponse({ error: "rate_limited" }, 429));
+        }
+        return Promise.resolve(jsonResponse(listBody, 200));
+      }),
+    );
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => setSession.mock.calls.length > 0);
+
+    expect(setSession).toHaveBeenCalledWith("s1");
+  });
+
   it("switches to another tab: re-points the renderer and reconnects the WS", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

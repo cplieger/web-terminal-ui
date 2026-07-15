@@ -54,6 +54,11 @@ const ACTIVE_TAB_KEY = "wt-active-session";
 const SWITCHER_MEDIA = "(pointer: coarse) and (max-width: 600px)";
 // Default cadence for the no-activityMonitor polling fallback.
 const DEFAULT_POLL_MS = 4000;
+// The server-side status of a session whose process has exited (mirrors the
+// engine's terminal.StatusExited). Such a session is viewable history — its
+// final screen replays and the kernel shows "Session ended" — but it can never
+// produce output again, so session selection prefers live sessions everywhere.
+const STATUS_EXITED = "exited";
 // Tab context-menu viewport clamp (mirrors context-menu.ts): keep this margin
 // from every viewport edge, and this gap above the pointer when the menu has to
 // flip up (a right-click near the bottom edge) so it is neither clipped nor
@@ -1598,11 +1603,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // stream / poll adopt the existing sessions below; without this they would
       // render inert (blank, never connecting) until the user taps a tab. This
       // is the sibling of the '+'-retry recovery the bootstrap already handles.
+      // A live tab outranks an exited one (its dot status is fed by the same
+      // SSE/poll that adopted it); a corpse is only auto-activated when nothing
+      // else exists.
       function ensureActive(): void {
         if (activeId !== null) {
           return;
         }
-        const first = tabList[0];
+        const first = tabList.find((t) => t.dot.dataset["status"] !== STATUS_EXITED) ?? tabList[0];
         if (first) {
           switchTo(first.id);
         }
@@ -2471,18 +2479,24 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       } catch {
         sessions = [];
       }
-      if (sessions.length === 0) {
+      // Spawn a fresh session unless a LIVE one is listed. An exited session is
+      // viewable history, not a working terminal — booting a page whose every
+      // session has died (the agent exited: a sign-in dead end, a crash) onto a
+      // corpse was the stuck-loading wedge. The exited ones are still adopted
+      // below (switch to them to read their final screen; close them by hand).
+      if (!sessions.some((s) => s.status !== STATUS_EXITED)) {
         try {
-          sessions = [await apiCreate()];
+          sessions = [...sessions, await apiCreate()];
         } catch {
           // Do not let the initial spawn propagate out of setup(): the kernel
           // would tear down every feature ("terminal has no chrome") and, since
           // managesSessions skipped the startup connect, connectionInitiated
           // stays false so the wake handlers (visibilitychange/pageshow/online)
           // all no-op -- a permanently dead terminal with no recovery. Match the
-          // runtime create() path: toast and leave the chrome up so "+" can retry.
+          // runtime create() path: toast and leave the chrome up so "+" can
+          // retry. Any exited sessions stay adopted (frozen screen + "Session
+          // ended" is still better than a blank page).
           ctx.toast("Couldn't open a terminal");
-          sessions = [];
         }
       }
       // Adopt (dedup) rather than blindly push. The status SSE pushes a snapshot
@@ -2499,17 +2513,25 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // Activate the previously-active session if it still exists, else the
       // first (oldest). Session ids are stable server-side, so a page reload
       // reconnects to the tab the user left on instead of always the oldest.
-      let startTab = tabList[0];
+      // Live sessions outrank exited ones: the saved id is honored only while
+      // its session is still live (a reload used to restore straight onto the
+      // corpse of a died-while-away session and wedge there), and the default
+      // is the oldest LIVE tab. Only when nothing is live (the fresh-spawn
+      // above failed too) does an exited tab start — a frozen final screen
+      // with the "Session ended" banner beats a blank page.
+      const liveIds = new Set(sessions.filter((s) => s.status !== STATUS_EXITED).map((s) => s.id));
+      const oldestLive = tabList.find((t) => liveIds.has(t.id));
+      let startTab = oldestLive ?? tabList[0];
       try {
         const savedId = localStorage.getItem(ACTIVE_TAB_KEY);
         if (savedId !== null && savedId !== "") {
           const saved = tabList.find((x) => x.id === savedId);
-          if (saved) {
+          if (saved && (liveIds.has(saved.id) || oldestLive === undefined)) {
             startTab = saved;
           }
         }
       } catch {
-        /* storage unavailable — fall back to the oldest tab */
+        /* storage unavailable — fall back to the oldest live tab */
       }
       if (startTab) {
         activeId = startTab.id;
