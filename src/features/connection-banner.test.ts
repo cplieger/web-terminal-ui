@@ -42,6 +42,16 @@ describe("connectionBanner feature", () => {
     expect(b?.classList.contains("visible")).toBe(true);
   });
 
+  it("renders 'Session ended' for the ended state (process exit is not 'Reconnecting…')", () => {
+    const { ctx, emit, slot } = fakeCtx();
+    connectionBanner().setup(ctx);
+    emit("ended");
+    const b = banner(slot);
+    expect(b?.textContent).toBe("Session ended");
+    expect(b?.dataset["state"]).toBe("ended");
+    expect(b?.classList.contains("visible")).toBe(true);
+  });
+
   it("hides the banner and clears its text for a state with no mapped message", () => {
     const { ctx, emit, slot } = fakeCtx();
     connectionBanner().setup(ctx);

@@ -11,6 +11,9 @@ const TEXT: Partial<Record<ConnState, string>> = {
   reconnecting: "Reconnecting\u2026",
   offline: "Offline",
   restarted: "Server restarted; recent input may be lost",
+  // The session's process exited (definitive; nothing is retrying). The final
+  // screen stays rendered behind the banner; open a new tab to keep working.
+  ended: "Session ended",
 };
 
 export function connectionBanner(): TerminalFeature {

@@ -6,7 +6,7 @@
     "./presets": "./src/presets.ts"
   },
   "imports": {
-    "@cplieger/web-terminal-engine": "jsr:@cplieger/web-terminal-engine@^2.2.0"
+    "@cplieger/web-terminal-engine": "jsr:@cplieger/web-terminal-engine@^2.4.0"
   },
   "publish": {
     "include": [

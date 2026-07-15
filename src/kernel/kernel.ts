@@ -313,6 +313,19 @@ export function createTerminal(
     onOutboxFull() {
       connState.closed();
     },
+    onProcessExit() {
+      // The engine's definitive 4001 close: the session's process has exited
+      // and the engine will not reconnect it. Two jobs here. markReady()
+      // guarantees the page is usable even when the exit lands before any
+      // screen frame (attaching to an already-dead session on a server that
+      // races the replay) — without it the loading overlay would sit on top of
+      // the tabs chrome forever, which is exactly the reported stuck-loading
+      // wedge. Then surface the end state: "Session ended", not a flapping
+      // "Reconnecting…", since no reconnect is coming. The final screen (when
+      // the server delivered it) stays rendered behind the banner.
+      markReady();
+      connState.ended();
+    },
     onServerRestart() {
       render.resetScrollback();
       render.resetScreen();

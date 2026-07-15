@@ -33,6 +33,11 @@ export interface ConnStateMachine {
   closed(): void;
   /** Server restarted (epoch mismatch); recent input may be lost. */
   restarted(): void;
+  /** The active session's process exited (the engine's definitive 4001
+   *  close). Unlike closed(), this is not a failure to escalate or retry:
+   *  the state shows immediately and persists until open() (a switch to a
+   *  live session) replaces it. */
+  ended(): void;
   /** First screen frame rendered: the loading overlay is done, so the banner
    *  may show reconnect state from here on. */
   setLoaded(): void;
@@ -54,9 +59,14 @@ export function createConnState(opts: {
 
   function emit(): void {
     // Suppress transient states until the initial load is over (the loading
-    // overlay owns the screen), except "offline" once the initial-failure limit
-    // is reached. connectionBanner renders "open" as hidden.
-    if (!loaded && !(state === "offline" && consecutiveFailures >= INITIAL_FAILURE_LIMIT)) {
+    // overlay owns the screen), with two exceptions that must show through:
+    // "offline" once the initial-failure limit is reached, and "ended" (a
+    // definitive process exit — nothing further will ever fire, so suppressing
+    // it would hide the only explanation the page will get). connectionBanner
+    // renders "open" as hidden.
+    const passesLoadingGate =
+      state === "ended" || (state === "offline" && consecutiveFailures >= INITIAL_FAILURE_LIMIT);
+    if (!loaded && !passesLoadingGate) {
       opts.onState("open"); // nothing to show yet
       return;
     }
@@ -112,6 +122,13 @@ export function createConnState(opts: {
           setState("open", 0);
         }
       }, RESTARTED_CLEAR_MS);
+    },
+    ended(): void {
+      // A definitive end, not a failure: reset the failure streak so a later
+      // reconnect to a LIVE session starts its escalation ladder from zero,
+      // and show the state immediately (no grace delay — nothing is retrying).
+      consecutiveFailures = 0;
+      setState("ended", 0);
     },
     setLoaded(): void {
       loaded = true;

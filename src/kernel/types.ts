@@ -51,7 +51,16 @@ export interface SessionView {
 // --- Connection state (mirrors the kernel's connection-state machine) ---
 
 /** Connection state the kernel owns and broadcasts on `connection:state`. */
-export type ConnState = "open" | "connecting" | "reconnecting" | "offline" | "restarted";
+export type ConnState =
+  | "open"
+  | "connecting"
+  | "reconnecting"
+  | "offline"
+  | "restarted"
+  // The active session's process has EXITED (the engine's definitive 4001
+  // close): not a connectivity problem, so no reconnect is coming. Cleared
+  // only by connecting somewhere live (a tab switch / a new session).
+  | "ended";
 
 // --- Engine drive handles ---
 //
