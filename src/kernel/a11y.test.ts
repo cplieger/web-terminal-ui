@@ -15,34 +15,71 @@ describe("a11y: announcer", () => {
     expect(root.children.length).toBe(2);
   });
 
-  it("clears the region then sets the message on the next frame (repeat re-announces)", () => {
-    const root = document.createElement("div");
-    let rafCb: FrameRequestCallback | undefined;
-    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback): number => {
-      rafCb = cb;
-      return 1;
-    });
-    const ann = createAnnouncer(root);
-    const polite = root.querySelector<HTMLElement>('[aria-live="polite"]');
-    ann.announce("ready");
-    // Cleared synchronously so a screen reader re-announces an unchanged message.
-    expect(polite?.textContent).toBe("");
-    rafCb?.(0);
-    expect(polite?.textContent).toBe("ready");
+  it("clears the region then sets the message after the ~100ms delay (repeat re-announces)", () => {
+    vi.useFakeTimers();
+    try {
+      const root = document.createElement("div");
+      const ann = createAnnouncer(root);
+      const polite = root.querySelector<HTMLElement>('[aria-live="polite"]');
+      ann.announce("ready");
+      // Cleared synchronously so a screen reader re-announces an unchanged
+      // message; the re-set waits ~100ms (a sub-frame gap is too fast for
+      // some assistive tech to register two distinct mutations).
+      expect(polite?.textContent).toBe("");
+      vi.advanceTimersByTime(99);
+      expect(polite?.textContent).toBe("");
+      vi.advanceTimersByTime(1);
+      expect(polite?.textContent).toBe("ready");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a rapid follow-up announcement replaces the pending one (no interleave)", () => {
+    vi.useFakeTimers();
+    try {
+      const root = document.createElement("div");
+      const ann = createAnnouncer(root);
+      const polite = root.querySelector<HTMLElement>('[aria-live="polite"]');
+      ann.announce("first");
+      vi.advanceTimersByTime(50);
+      ann.announce("second");
+      vi.advanceTimersByTime(99);
+      // "first" must never land: its timer was cancelled by the follow-up.
+      expect(polite?.textContent).toBe("");
+      vi.advanceTimersByTime(1);
+      expect(polite?.textContent).toBe("second");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("routes an assertive message to the assertive region only", () => {
-    const root = document.createElement("div");
-    let rafCb: FrameRequestCallback | undefined;
-    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback): number => {
-      rafCb = cb;
-      return 1;
-    });
-    const ann = createAnnouncer(root);
-    ann.announce("stop", "assertive");
-    rafCb?.(0);
-    expect(root.querySelector<HTMLElement>('[aria-live="assertive"]')?.textContent).toBe("stop");
-    expect(root.querySelector<HTMLElement>('[aria-live="polite"]')?.textContent).toBe("");
+    vi.useFakeTimers();
+    try {
+      const root = document.createElement("div");
+      const ann = createAnnouncer(root);
+      ann.announce("stop", "assertive");
+      vi.advanceTimersByTime(100);
+      expect(root.querySelector<HTMLElement>('[aria-live="assertive"]')?.textContent).toBe("stop");
+      expect(root.querySelector<HTMLElement>('[aria-live="polite"]')?.textContent).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("destroy cancels a pending announcement", () => {
+    vi.useFakeTimers();
+    try {
+      const root = document.createElement("div");
+      const ann = createAnnouncer(root);
+      ann.announce("late");
+      ann.destroy();
+      vi.advanceTimersByTime(200); // must not throw or write to removed nodes
+      expect(root.children.length).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("destroy removes both live regions from the root", () => {

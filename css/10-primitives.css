@@ -1,26 +1,27 @@
 /* ===== web-terminal-ui design system: primitives =====
-   The v3 kernel builds named layout regions (wt-region-*) as siblings of the
-   terminal surface (.term, styled in 02-app.css); features mount chrome into
-   region slots. The regions are transparent groupings (display: contents) so
-   each feature's element floats over the fixed-inset terminal, and an absent
-   feature contributes nothing.
+   The kernel builds named layout regions (wt-region-*) as siblings of the
+   terminal surface (.term, styled in 02-terminal.css); features mount chrome
+   into region slots. The regions are transparent groupings (display: contents)
+   so each feature's element floats over the root-filling terminal, and an
+   absent feature contributes nothing.
 
-   The stylesheet is layered by concern and concatenated in css/MANIFEST order:
-   tokens (00) -> reset (01) -> terminal core + legacy key toolbar (02) -> these
-   shared primitives (03) -> per-feature chrome (04 feedback, 05 tabs, 06 mobile)
-   -> animations (07, where every .wt-animate-gated transition/keyframe lives, so
-   motion is opt-in from one place). Cascade order is the file order here.
+   The stylesheet is layered by concern and concatenated in manifest order:
+   tokens (00) -> scope + layout modes (01) -> terminal core (02) -> these
+   shared primitives (10) -> per-feature chrome (20-23, 30-31, one file per
+   feature so a per-preset manifest ships only what its composition mounts) ->
+   animations (40, where every .wt-animate-gated transition/keyframe lives, so
+   motion is opt-in from one place). Cascade order is the manifest file order.
 
    Primitives are the building blocks every feature reuses: the transparent
    layout regions, the 44px touch button, and the toast surface. */
 
-.wt-region,
-.wt-slot {
+:where(.wt-root) .wt-region,
+:where(.wt-root) .wt-slot {
   display: contents;
 }
 
 /* ===== Shared button primitive (44px touch target) ===== */
-.wt-btn {
+:where(.wt-root) .wt-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -36,11 +37,11 @@
   user-select: none;
 }
 
-.wt-btn:active {
+:where(.wt-root) .wt-btn:active {
   background: var(--text-active);
 }
 
-.wt-btn svg {
+:where(.wt-root) .wt-btn svg {
   width: var(--icon);
   height: var(--icon);
   stroke: currentcolor;
@@ -54,9 +55,10 @@
    Top-centre on every form factor (both desktop and the tabbed mobile UI dock a
    bar at the bottom, so a bottom toast would collide with it; top-centre is
    clear and the same everywhere). The vv-top/safe-top offset keeps it below the
-   notch and follows iOS's visual-viewport shift. */
-.wt-toast {
-  position: fixed;
+   notch and follows iOS's visual-viewport shift. Absolute against .wt-root,
+   like all chrome (identical geometry in wt-viewport mode; see 01-scope.css). */
+:where(.wt-root) .wt-toast {
+  position: absolute;
   top: calc(var(--safe-top, 0px) + var(--vv-top, 0px) + var(--sp-3));
   left: 50%;
   transform: translateX(-50%);
@@ -77,7 +79,7 @@
   opacity: 0;
 }
 
-.wt-toast.visible {
+:where(.wt-root) .wt-toast.visible {
   display: block;
   opacity: 1;
 }

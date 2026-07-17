@@ -1,18 +1,20 @@
 /* ===== Tabs: desktop strip + activity vocabulary (tabs feature) =====
    The desktop top-bar tab strip, its per-tab chrome (label, close, add, the
-   right-click menu), the surface offset that clears the fixed strip, and the
+   right-click menu), the surface offset that clears the docked strip, and the
    shared activity-dot status vocabulary. The mobile tab chrome (switcher bar,
-   overview sheet, external key grid) lives in 06-mobile.css; all motion lives in
-   07-animations.css. */
+   overview sheet, external key grid) lives in 31-switcher.css; all motion lives
+   in 40-animations.css. */
 
-.wt-region-top-bar {
+:where(.wt-root) .wt-region-top-bar {
   /* On desktop the tab strip docks to the top; the region is transparent, so
      the bar element below owns its own fixed placement. */
   display: contents;
 }
 
-.wt-tab-bar {
-  position: fixed;
+:where(.wt-root) .wt-tab-bar {
+  /* Absolute against .wt-root, like all chrome (identical geometry in
+     wt-viewport mode; see 01-scope.css). */
+  position: absolute;
   bottom: var(--safe-bottom);
   left: 0;
   right: 0;
@@ -28,7 +30,7 @@
   z-index: 15;
 }
 
-.wt-tab {
+:where(.wt-root) .wt-tab {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
@@ -56,12 +58,12 @@
 
 /* Inactive tabs read as outlined chips with a subtle dark fill (so adjacent tabs
    stay separated from the bar and from each other) and lift on hover. */
-.wt-tab:not(.wt-tab-active) {
+:where(.wt-root) .wt-tab:not(.wt-tab-active) {
   border-color: var(--border);
   background: var(--tab-bg);
 }
 
-.wt-tab:not(.wt-tab-active):hover {
+:where(.wt-root) .wt-tab:not(.wt-tab-active):hover {
   /* A solid lift over the chip. --tab-hover-bg is a translucent wash meant for a
      transparent-rest control; replacing the --tab-bg chip with it would read as
      "more transparent", not "lighter", so bake the same 15% --text lift into the
@@ -73,7 +75,7 @@
 /* The active tab reads clearly above the inactive chips: a stronger fill plus an
    accent-coloured edge (inactive chips carry a faint white --border; the active
    one gets the accent equivalent). Themeable via --accent (web-terminal-kiro -> purple). */
-.wt-tab-active {
+:where(.wt-root) .wt-tab-active {
   background: var(--tab-active-bg);
   border-color: var(--tab-active-border);
   color: var(--tab-active-fg);
@@ -81,7 +83,7 @@
 
 /* The label flexes to fill the fixed-width tab and truncates with an ellipsis
    (min-width: 0 lets a flex item shrink below its content width). */
-.wt-tab-label {
+:where(.wt-root) .wt-tab-label {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -90,14 +92,14 @@
 }
 
 /* A little breathing room after the activity dot, before the label. */
-.wt-tab-dot {
+:where(.wt-root) .wt-tab-dot {
   margin-right: 2px;
 }
 
 /* The tab close (x): a centered, muted square icon button with a box on hover.
    Its glyph is an inline SVG (styled below), so flex-centering the button
    centers it exactly. */
-.wt-tab-close {
+:where(.wt-root) .wt-tab-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -116,27 +118,28 @@
   cursor: pointer;
 }
 
-.wt-tab-close:hover {
+:where(.wt-root) .wt-tab-close:hover {
   background: var(--text-active);
   color: var(--text);
 }
 
 /* On an inactive tab the close appears only on hover, kept in the layout via
    visibility so the tab width never jumps; on the active tab it is always shown. */
-.wt-tab:not(.wt-tab-active) .wt-tab-close {
+:where(.wt-root) .wt-tab:not(.wt-tab-active) .wt-tab-close {
   visibility: hidden;
 }
 
-.wt-tab:not(.wt-tab-active):hover .wt-tab-close {
+:where(.wt-root) .wt-tab:not(.wt-tab-active):hover .wt-tab-close {
   visibility: visible;
 }
 
 /* Coarse pointer (an iPad using the strip): no hover fires, so an inactive tab's close
    would be unreachable without first activating the tab. Reveal every tab's close there,
-   matching the always-visible mobile switcher closes. Kept in lockstep with the strip-shown
-   gate (pointer: coarse, width >= 601px). */
-@media (pointer: coarse) and (width >= 601px) {
-  .wt-tab:not(.wt-tab-active) .wt-tab-close {
+   matching the always-visible mobile switcher closes. No narrow gate needed: on the
+   narrow-coarse phone the whole strip is display:none (31-switcher.css), so this rule
+   is moot there. */
+@media (pointer: coarse) {
+  :where(.wt-root) .wt-tab:not(.wt-tab-active) .wt-tab-close {
     visibility: visible;
   }
 }
@@ -144,7 +147,7 @@
 /* The add-tab (+) button: its hover box matches an active tab's fill and
    stretches to the strip height; the 2px strip gap (not a custom margin) spaces
    it from the last tab. Its glyph is an inline SVG. */
-.wt-tab-new {
+:where(.wt-root) .wt-tab-new {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -166,7 +169,7 @@
   cursor: pointer;
 }
 
-.wt-tab-new:hover {
+:where(.wt-root) .wt-tab-new:hover {
   /* Keep the accent glyph on hover (no colour override) so the "+" stays the
      accent colour like the mobile "+"; hover only adds the fill. */
   background: var(--tab-active-bg);
@@ -175,8 +178,8 @@
 /* The +/x icons are inline SVG so they center exactly in their flex-centered
    button and stay symmetric regardless of the UI font (fixes the off-center
    glyph and the lopsided "+"). The + is a touch larger and bolder than the x. */
-.wt-tab-close svg,
-.wt-tab-new svg {
+:where(.wt-root) .wt-tab-close svg,
+:where(.wt-root) .wt-tab-new svg {
   stroke: currentcolor;
   fill: none;
   stroke-width: 2.5;
@@ -184,12 +187,12 @@
   stroke-linejoin: round;
 }
 
-.wt-tab-close svg {
+:where(.wt-root) .wt-tab-close svg {
   width: 13px;
   height: 13px;
 }
 
-.wt-tab-new svg {
+:where(.wt-root) .wt-tab-new svg {
   width: 16px;
   height: 16px;
 }
@@ -205,23 +208,23 @@
    strip, before the "+" (kb-then-new, mirroring the mobile switcher's order).
    Hidden on a fine-pointer desktop (a real keyboard is present) and until a
    keyboardToggle feature is wired ([hidden]); shown only on a coarse pointer at
-   strip widths (the media block below, kept in lockstep with SWITCHER_MEDIA in
-   src/features/tabs.ts). */
-.wt-tab-kb {
+   strip widths (the .wt-narrow complement below; the breakpoint itself is the
+   kernel's, mirrored as the root class). */
+:where(.wt-root) .wt-tab-kb {
   display: none;
   flex: none;
 }
 
 /* Grid open: filled so the toggled state reads at a glance (mirrors the
    switcher keyboard button). */
-.wt-tab-kb.wt-active {
+:where(.wt-root) .wt-tab-kb.wt-active {
   background: var(--tab-hover-bg);
   color: var(--tab-active-fg);
 }
 
 /* Sticky-Ctrl armed: invert (matches the switcher keyboard button + the armed
    Ctrl key) so a pending Ctrl is visible with the grid closed. */
-.wt-tab-kb.wt-armed {
+:where(.wt-root) .wt-tab-kb.wt-armed {
   background: var(--text);
   color: var(--bg);
 }
@@ -229,14 +232,14 @@
 /* Show only on a WIDE touchscreen (where the desktop strip is used AND a
    keyboardToggle is wired, hence :not([hidden])). In-flow now, so the strip
    needs no reserved right padding for it. */
-@media (pointer: coarse) and (width >= 601px) {
-  .wt-tab-kb:not([hidden]) {
+@media (pointer: coarse) {
+  :where(.wt-root:not(.wt-narrow)) .wt-tab-kb:not([hidden]) {
     display: inline-flex;
   }
 }
 
 /* The tab being dragged (reorder) dims while it moves. */
-.wt-tab-dragging {
+:where(.wt-root) .wt-tab-dragging {
   opacity: 0.5;
 }
 
@@ -244,8 +247,10 @@
    Close to the right / Close to the left / Close all. Replaces the old bar
    "Close all" button. Mirrors .wt-ctx-menu (a fixed surface popover, clamped
    into the viewport by the feature); disabled items are dimmed and inert. */
-.wt-tab-menu {
-  position: fixed;
+:where(.wt-root) .wt-tab-menu {
+  /* Absolute against .wt-root; placed by the shared point-anchored positioner
+     (menu-position.ts), which converts to root-relative offsets. */
+  position: absolute;
   display: none;
   flex-direction: column;
   background: var(--surface);
@@ -256,11 +261,11 @@
   z-index: 30;
 }
 
-.wt-tab-menu.visible {
+:where(.wt-root) .wt-tab-menu.visible {
   display: flex;
 }
 
-.wt-tab-menu button {
+:where(.wt-root) .wt-tab-menu button {
   background: transparent;
   color: var(--text);
   border: none;
@@ -274,28 +279,35 @@
   white-space: nowrap;
 }
 
-.wt-tab-menu button:not(:disabled):hover {
+/* :enabled (not :not(:disabled)) keeps the pseudo-class count within the
+   stylelint budget alongside the zero-specificity scope. */
+:where(.wt-root) .wt-tab-menu button:enabled:hover {
   background: var(--text-active);
 }
 
-.wt-tab-menu button:disabled {
+:where(.wt-root) .wt-tab-menu button:disabled {
   color: color-mix(in oklch, var(--text) 35%, transparent);
   cursor: default;
 }
 
-/* Pull the terminal surface up off the fixed BOTTOM tab strip so it does not
+/* Pull the terminal surface up off the docked BOTTOM tab strip so it does not
    overlap the last rows (a mirror of the old top offset). The tabs feature
    marks the surface (.wt-with-tabbar) and keeps the measured strip height in
-   --wt-tabbar-h; the surface is position:fixed inset:0, so a bottom offset
-   clears it. Applies whenever the desktop strip is shown — a fine pointer OR a
-   wide viewport (an iPad) — the complement of the narrow-coarse switcher gate in
-   css/06-mobile.css (kept in lockstep with SWITCHER_MEDIA in tabs.ts). On the
-   narrow-coarse phone the strip is hidden and the mobile switcher's inset is
-   applied through viewport.ts (--wt-reserve-bottom) instead. */
-@media (pointer: fine), (width >= 601px) {
-  .term.wt-with-tabbar {
+   --wt-tabbar-h; the surface is absolute inset:0, so a bottom offset clears it.
+   Applies whenever the desktop strip is shown — a fine pointer OR a root that
+   is not narrow (an iPad) — the complement of the narrow-coarse switcher gate
+   in css/31-switcher.css. On the narrow-coarse phone the strip is hidden and
+   the mobile switcher's inset is applied through viewport.ts
+   (--wt-reserve-bottom) instead. Two rules because the class half cannot mix
+   into a media condition; they set the same declaration. */
+@media (pointer: fine) {
+  :where(.wt-root) .term.wt-with-tabbar {
     bottom: var(--wt-tabbar-h, 44px);
   }
+}
+
+:where(.wt-root:not(.wt-narrow)) .term.wt-with-tabbar {
+  bottom: var(--wt-tabbar-h, 44px);
 }
 
 /* ===== Activity dots (activityMonitor via tabs) =====
@@ -310,7 +322,7 @@
    stay clean, label-only; a progress-reporting agent (kiro-cli, Claude Code)
    lights up. The element stays in the DOM either way (JS sets data-status
    regardless), so revealing it is a pure CSS switch. */
-.wt-status-dot {
+:where(.wt-root) .wt-status-dot {
   display: none;
   width: 9px;
   height: 9px;
@@ -327,11 +339,11 @@
 /* Reveal a dot only once its session has reported activity (the tabs feature
    adds .wt-reports per dot; see paintStatusDot). Without it the dot — and the
    whole activity vocabulary for that tab — stays invisible. */
-.wt-status-dot.wt-reports {
+:where(.wt-root) .wt-status-dot.wt-reports {
   display: block;
 }
 
-.wt-status-dot[data-status="idle"] {
+:where(.wt-root) .wt-status-dot[data-status="idle"] {
   background: transparent;
   border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
 }
@@ -341,7 +353,7 @@
    on every tab state.) Motion is the primary non-hue cue. Server-side this is
    driven by the OSC 9;4 progress signal, so it tracks agent activity, not the
    user typing at the prompt. */
-.wt-status-dot[data-status="working"] {
+:where(.wt-root) .wt-status-dot[data-status="working"] {
   background: #fff;
   border-color: #fff;
   animation: wt-pulse 1.2s ease-in-out infinite;
@@ -349,7 +361,7 @@
 
 /* Agent done / ready: solid green, matching Kiro IDE's "Ready" (#22c55e), no
    motion. The filled dot distinguishes it from the hollow idle without hue. */
-.wt-status-dot[data-status="done"] {
+:where(.wt-root) .wt-status-dot[data-status="done"] {
   background: #22c55e;
   border-color: #22c55e;
 }
@@ -357,14 +369,14 @@
 /* User action required (permission / approval): solid amber matching Kiro IDE's
    "waiting-approval" (#fbbf24), plus a ring so it reads as "needs you" via shape
    as well as hue. It persists until you act on or switch into the tab. */
-.wt-status-dot[data-status="input"] {
+:where(.wt-root) .wt-status-dot[data-status="input"] {
   background: #fbbf24;
   border-color: #fbbf24;
   box-shadow: 0 0 0 2px oklch(85% 0.16 85deg / 40%);
 }
 
 /* Exited: a dim hollow dot, static; distinct from idle by its lower opacity. */
-.wt-status-dot[data-status="exited"] {
+:where(.wt-root) .wt-status-dot[data-status="exited"] {
   background: transparent;
   border: 1.5px solid color-mix(in oklch, var(--text) 30%, transparent);
   opacity: 0.5;
@@ -378,11 +390,38 @@
 
 /* Reduced-motion (or the animations feature off): drop the pulse, keep color. */
 @media (prefers-reduced-motion: reduce) {
-  .wt-status-dot[data-status="working"] {
+  :where(.wt-root) .wt-status-dot[data-status="working"] {
     animation: none;
     /* The pulse is working's ONLY non-hue cue; with motion removed,
        add a static shape cue (an inner hole -> a ring) so working differs
        from done (a solid green disc) by shape, not hue alone (WCAG 1.4.1). */
     box-shadow: inset 0 0 0 2px var(--bg);
   }
+}
+
+/* ===== Catching-up cue (tabs feature, sections 12/13) =====
+   A switched-into tab's cached screen is stale until its resume delta lands, so
+   it must not read as live. This unobtrusive cue shows only if the delta has not
+   arrived shortly after the switch, and clears on the first screen frame.
+   Absolute against .wt-root, like all chrome. */
+:where(.wt-root) .wt-catchup {
+  position: absolute;
+  top: calc(var(--safe-top, 0px) + var(--vv-top, 0px) + 44px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px var(--sp-2);
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: color-mix(in oklch, var(--text) 75%, transparent);
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  z-index: 24;
+  pointer-events: none; /* passive status surface: never steal taps from the terminal beneath */
+  display: none;
+}
+
+:where(.wt-root) .wt-catchup.visible {
+  display: block;
 }

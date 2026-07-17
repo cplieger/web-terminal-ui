@@ -1,0 +1,56 @@
+/* ===== Component scope + layout modes =====
+   Everything here is scoped under .wt-root — the class createTerminal stamps on
+   the consumer's root element. The library never styles the host document: page
+   concerns (html/body reset, fonts, viewport meta behavior) live in page.css,
+   served only by full-page hosts. This file owns the boundary itself: the
+   scoped box-sizing + font-smoothing baseline, the two layout modes, and the
+   scoped reduced-motion kill-switch. */
+
+/* Layout mode: how the root claims space (kernel stamps exactly one).
+   wt-viewport — the root IS the page surface: a fixed full-viewport box (the
+   full-page product; geometrically identical to the pre-v4 fixed-inset .term).
+   wt-container — the root fills its parent, which becomes the boundary: the
+   embedded case. overflow: clip keeps absolute chrome (menus, banners, the
+   switcher) inside the box, so an embedder needs no containment workarounds. */
+.wt-root.wt-viewport {
+  position: fixed;
+  inset: 0;
+}
+
+.wt-root.wt-container {
+  position: relative;
+  inline-size: 100%;
+  block-size: 100%;
+  overflow: clip;
+}
+
+.wt-root,
+.wt-root *,
+.wt-root *::before,
+.wt-root *::after {
+  box-sizing: border-box;
+}
+
+.wt-root {
+  -webkit-font-smoothing: antialiased;
+}
+
+/* stylelint-disable declaration-no-important, time-min-milliseconds --
+   Canonical prefers-reduced-motion override. !important and near-zero
+   durations are required to forcibly defeat any animation/transition rule
+   regardless of specificity, which is the whole point of this a11y reset.
+   Scoped to the terminal subtree: the host page's own motion policy is the
+   host's business (pre-v4 this hit `*` and silently flattened the embedding
+   app's animations). */
+@media (prefers-reduced-motion: reduce) {
+  .wt-root,
+  .wt-root *,
+  .wt-root *::before,
+  .wt-root *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+/* stylelint-enable declaration-no-important, time-min-milliseconds */

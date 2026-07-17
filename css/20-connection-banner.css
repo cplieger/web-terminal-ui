@@ -1,0 +1,42 @@
+/* ===== Connection banner (connectionBanner feature) =====
+   Top-centre on every form factor (same rationale as the toast: a bottom bar is
+   always docked now). Absolute against .wt-root, like all chrome (identical
+   geometry in wt-viewport mode; see 01-scope.css). */
+:where(.wt-root) .wt-conn-banner {
+  position: absolute;
+  top: calc(var(--safe-top, 0px) + var(--vv-top, 0px) + var(--sp-3));
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 2 * var(--sp-3));
+  padding: var(--sp-1) var(--sp-3);
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-align: center;
+  z-index: 20;
+  pointer-events: none; /* passive status surface: never steal taps from the terminal beneath */
+  display: none;
+}
+
+:where(.wt-root) .wt-conn-banner.visible {
+  display: block;
+}
+
+:where(.wt-root) .wt-conn-banner[data-state="reconnecting"] {
+  border-color: oklch(70% 0.15 60deg / 40%);
+}
+
+:where(.wt-root) .wt-conn-banner[data-state="offline"] {
+  color: #f55;
+  border-color: oklch(60% 0.2 25deg / 50%);
+}
+
+:where(.wt-root) .wt-conn-banner[data-state="restarted"] {
+  color: #fa5;
+  border-color: oklch(70% 0.15 60deg / 40%);
+}

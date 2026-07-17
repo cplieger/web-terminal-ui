@@ -2,26 +2,29 @@
    The bottom bar (switcher) is the mobile tab surface, the externally-driven key
    grid docks above it, and the overview sheet lists every tab. The desktop strip
    is hidden only on a narrow coarse-pointer device (a phone) and these appear
-   instead; all motion (bar number fade, sheet slide) lives in 07-animations.css. */
+   instead; all motion (bar number fade, sheet slide) lives in 40-animations.css. */
 
 /* The switcher is used only on a NARROW coarse-pointer device (a phone), where
    the top strip is hidden so tabs live in the thumb zone. A wide touchscreen (an
    iPad) and any fine-pointer device keep the multi-tab top strip — a single
-   giant tab wastes a big screen. This media query MUST stay in lockstep with
-   SWITCHER_MEDIA in src/features/tabs.ts and the complementary strip clearance
-   in css/05-tabs.css. */
-.wt-switcher {
+   giant tab wastes a big screen. "Narrow" is the kernel's .wt-narrow root class
+   (ROOT width at the single kernel breakpoint — so an embedded terminal in a
+   narrow panel counts as narrow); this file pairs it with (pointer: coarse),
+   and css/30-tabs.css carries the complementary strip clearance. */
+:where(.wt-root) .wt-switcher {
   display: none;
 }
 
-@media (pointer: coarse) and (width <= 600px) {
-  .wt-tab-bar,
-  .wt-tab-new {
+@media (pointer: coarse) {
+  :where(.wt-root.wt-narrow) .wt-tab-bar,
+  :where(.wt-root.wt-narrow) .wt-tab-new {
     display: none;
   }
 
-  .wt-switcher {
-    position: fixed;
+  :where(.wt-root.wt-narrow) .wt-switcher {
+    /* Absolute against .wt-root, like all chrome (identical geometry in
+       wt-viewport mode; see 01-scope.css). */
+    position: absolute;
     left: 0;
     right: 0;
     /* Lift above the soft keyboard rather than hiding, so the switch surface
@@ -39,7 +42,7 @@
 /* The always-visible bar row: active tab + keyboard + "+". The padding gives the
    active-tab chip breathing room above/below within the bar, matching the
    desktop strip (both use --sp-2). */
-.wt-switcher-bar {
+:where(.wt-root) .wt-switcher-bar {
   display: flex;
   align-items: stretch;
   gap: var(--sp-1);
@@ -48,8 +51,8 @@
 
 /* The other tabs, revealed below the bar row on expand (the bar slides up).
    Collapsed to zero height; expanded caps the height and scrolls. The max-height
-   transition lives in 07-animations.css. */
-.wt-switcher-list {
+   transition lives in 40-animations.css. */
+:where(.wt-root) .wt-switcher-list {
   list-style: none;
   margin: 0;
   /* Match the bar's horizontal padding (--sp-2) so a listed row lines up with
@@ -73,7 +76,7 @@
   box-sizing: border-box;
 }
 
-.wt-switcher-expanded .wt-switcher-list {
+:where(.wt-root) .wt-switcher-expanded .wt-switcher-list {
   /* Cap against the DYNAMIC viewport so a shown mobile browser toolbar can't push the list
      (and the bar above it) off the top; the switcher's own bottom: kb-inset already lifts it
      clear of the soft keyboard. */
@@ -90,7 +93,7 @@
    sibling over the surface's reserved right padding). The wrap is the flex item
    that grows in the bar (and fills the space when the keyboard button collapses
    on expand). */
-.wt-switcher-current-wrap {
+:where(.wt-root) .wt-switcher-current-wrap {
   position: relative;
   flex: 1 1 auto;
   display: flex;
@@ -101,7 +104,7 @@
   overflow: hidden;
 }
 
-.wt-switcher-current {
+:where(.wt-root) .wt-switcher-current {
   position: relative;
   flex: 1 1 auto;
   display: flex;
@@ -130,7 +133,7 @@
    padding, mirroring the listed rows' close. Hover fill only on real hover
    pointers so it never sticks white after a touch (a removed tab shifts the
    list under the finger otherwise). */
-.wt-switcher-current-close {
+:where(.wt-root) .wt-switcher-current-close {
   position: absolute;
   /* Centre vertically via top/bottom (not a translateY transform), so transform
      is free for the swipe translate — the close moves with the dot + label. And
@@ -142,14 +145,14 @@
 }
 
 @media (hover: hover) {
-  .wt-switcher-current-close:hover {
+  :where(.wt-root) .wt-switcher-current-close:hover {
     color: var(--text);
   }
 }
 
 /* Press feedback: brighten the active fill slightly (a lighter press over an
    already-filled row). */
-.wt-switcher-current:active {
+:where(.wt-root) .wt-switcher-current:active {
   background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 12%);
 }
 
@@ -157,7 +160,7 @@
    parts out; a horizontal swipe translates it (clipped by the row's
    overflow: hidden) so the active tab area physically slides with the finger,
    and the incoming tab's label slides in from the swipe direction on commit. */
-.wt-switcher-current-inner {
+:where(.wt-root) .wt-switcher-current-inner {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -165,7 +168,7 @@
   min-width: 0;
 }
 
-.wt-switcher-label {
+:where(.wt-root) .wt-switcher-label {
   flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -178,7 +181,7 @@
    just the wt-btn min-width) makes it animatable: when the tab list expands the
    button collapses to zero width and fades out (the key grid is closed too, in
    JS), and the active row flex-grows to fill the freed space. */
-.wt-switcher-kb {
+:where(.wt-root) .wt-switcher-kb {
   /* Rigid 44px box like the "+" and switch buttons (flex: none), so a long
      active-tab title that overflows the bar is absorbed entirely by the
      ellipsizing active-tab field, not shared with this button. It is otherwise
@@ -199,11 +202,11 @@
   overflow: hidden;
 }
 
-.wt-switcher-kb[hidden] {
+:where(.wt-root) .wt-switcher-kb[hidden] {
   display: none;
 }
 
-.wt-switcher-kb.wt-active {
+:where(.wt-root) .wt-switcher-kb.wt-active {
   background: var(--tab-hover-bg);
   color: var(--tab-active-fg);
 }
@@ -212,12 +215,12 @@
    Ctrl key uses) while a Ctrl press is pending, so the modifier stays visible
    even with the key grid — and its own Ctrl button — closed. After .wt-active so
    the armed fill wins when the grid is also open. */
-.wt-switcher-kb.wt-armed {
+:where(.wt-root) .wt-switcher-kb.wt-armed {
   background: var(--text);
   color: var(--bg);
 }
 
-.wt-switcher-expanded .wt-switcher-kb {
+:where(.wt-root) .wt-switcher-expanded .wt-switcher-kb {
   width: 0;
   /* Absorb the flex gap the collapsed button would otherwise leave behind. */
   margin-inline-start: calc(-1 * var(--sp-1));
@@ -230,9 +233,9 @@
    absolutely placed in the top-right corner. It only earns its place with ≥2
    tabs (a single tab has nothing to switch to), so it is COLLAPSED to zero width
    by default and revealed by .wt-switcher-multi (the tabs feature sets it on tab
-   count); the appear/collapse is animated in 07-animations.css and the active
+   count); the appear/collapse is animated in 40-animations.css and the active
    chip shrinks/grows to fill the freed space in lockstep (flex layout). */
-.wt-switcher-switch {
+:where(.wt-root) .wt-switcher-switch {
   position: relative;
   flex: none;
   width: 0;
@@ -247,7 +250,7 @@
 }
 
 /* Revealed once a second tab exists: full 44px box, interactive, no gap eat. */
-.wt-switcher-multi .wt-switcher-switch {
+:where(.wt-root) .wt-switcher-multi .wt-switcher-switch {
   width: var(--touch-target);
   opacity: 1;
   pointer-events: auto;
@@ -256,10 +259,10 @@
 
 /* When the tab list expands the switch button collapses too (its job is done:
    the list is open), mirroring the keyboard button's collapse in the same
-   animation (07-animations.css animates width + margin + opacity). Placed after
+   animation (40-animations.css animates width + margin + opacity). Placed after
    the .wt-switcher-multi reveal so it wins when both apply (expanded, two or
    more tabs). */
-.wt-switcher-expanded .wt-switcher-switch {
+:where(.wt-root) .wt-switcher-expanded .wt-switcher-switch {
   width: 0;
   opacity: 0;
   margin-inline-start: calc(-1 * var(--sp-1));
@@ -267,17 +270,17 @@
 }
 
 @media (hover: hover) {
-  .wt-switcher-switch:hover {
+  :where(.wt-root) .wt-switcher-switch:hover {
     background: var(--tab-hover-bg);
   }
 }
 
 /* Latest-wins background-tab notification dot on the switch button — the moved
    attention cue. Amber = a background terminal needs input, green = a background
-   turn finished. Reuses the exact .wt-status-dot colours (05-tabs.css) so it
+   turn finished. Reuses the exact .wt-status-dot colours (30-tabs.css) so it
    matches the per-tab dots. Hidden until the tabs feature sets data-status;
    cleared when the list opens (expandSwitcher). */
-.wt-switcher-switch-dot {
+:where(.wt-root) .wt-switcher-switch-dot {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -285,10 +288,10 @@
 
 /* The dot carries the .wt-status-dot class, so its size, shape, and colour come
    straight from the shared .wt-status-dot[data-status="input"|"done"] rules
-   (05-tabs.css) — the SAME dot colours every tab already uses, defined once.
+   (30-tabs.css) — the SAME dot colours every tab already uses, defined once.
    .wt-status-dot is display:none by default; force it visible only while a
    notification is set (data-status present). */
-.wt-switcher-switch-dot[data-status] {
+:where(.wt-root) .wt-switcher-switch-dot[data-status] {
   display: block;
 }
 
@@ -296,62 +299,37 @@
    permanent and prominent. Hover fill is gated to real hover pointers: on touch,
    :hover sticks after a tap (no pointer-leave), so the purple would linger — the
    press feedback there comes from :active, which clears on release. */
-.wt-switcher-new {
+:where(.wt-root) .wt-switcher-new {
   flex: none;
   color: var(--accent);
 }
 
 @media (hover: hover) {
-  .wt-switcher-new:hover {
+  :where(.wt-root) .wt-switcher-new:hover {
     background: var(--tab-hover-bg);
   }
 }
 
-.wt-switcher-new:active {
+:where(.wt-root) .wt-switcher-new:active {
   background: var(--tab-hover-bg);
 }
 
 /* ===== Externally-driven key grid (tabbed presets, WS3) =====
-   In the tabbed presets the mobile toolbar hides its own toggle (the tab bar's
-   keyboard button drives it) and the grid docks above the bar on the right, to
-   the left of where scroll-to-bottom sits. It collapses to fully hidden, since
-   there is no in-grid toggle to keep visible. */
-@media (pointer: coarse) and (width <= 600px) {
-  .wt-toolbar-external .kb-toggle {
+   In the tabbed presets the mobile toolbar hides its own toggle (a tab-chrome
+   keyboard button drives it — the switcher's on a narrow phone, the strip's
+   .wt-tab-kb on a wide touchscreen) and the grid docks bottom-right above the
+   tab chrome, to the left of where scroll-to-bottom sits. It collapses to
+   fully hidden, since there is no in-grid toggle to keep visible. The BASE
+   rules here are the wide-touchscreen (strip) placement — above --wt-tabbar-h;
+   the .wt-narrow override below re-anchors above the switcher bar instead
+   (--wt-switcher-h). Everything else (toggle hidden, right offset, grid
+   columns, collapsed fully hidden) is identical in both modes. */
+@media (pointer: coarse) {
+  :where(.wt-root) .wt-toolbar-external .kb-toggle {
     display: none;
   }
 
-  .key-toolbar.wt-toolbar-external {
-    top: auto;
-    right: calc(var(--sp-3) + var(--touch-target) + var(--sp-2));
-    bottom: calc(
-      var(--wt-switcher-h) + var(--safe-bottom, 0px) + var(--kb-inset, 0px) + var(--sp-2)
-    );
-    grid-template-columns: repeat(4, var(--touch-target));
-  }
-
-  .key-toolbar.wt-toolbar-external.collapsed {
-    display: none;
-  }
-}
-
-/* Desktop tab strip on a WIDE touchscreen (an iPad): the mobile switcher is
-   gone, so the desktop strip carries its OWN keyboard button (.wt-tab-kb, built
-   by the same factory as the switcher's — see css/05-tabs.css + tabs.ts) to open
-   the key grid. So, exactly like switcher mode, the toolbar's own toggle is
-   hidden and the collapsed grid fully hidden — the tab-strip keyboard button is
-   the sole control (this replaces the old CSS-only workaround that un-hid the
-   toolbar's own toggle here). The grid still docks bottom-right ABOVE the strip:
-   above the tabs (never overlapping them, even when many are open and the strip
-   scrolls) and to the left of the scroll-to-bottom FAB (same right offset as
-   switcher mode). Complements the strip-shown breakpoint in css/05-tabs.css;
-   keep in lockstep with SWITCHER_MEDIA in src/features/tabs.ts. */
-@media (pointer: coarse) and (width >= 601px) {
-  .wt-toolbar-external .kb-toggle {
-    display: none;
-  }
-
-  .key-toolbar.wt-toolbar-external {
+  :where(.wt-root) .key-toolbar.wt-toolbar-external {
     top: auto;
     right: calc(var(--sp-3) + var(--touch-target) + var(--sp-2));
     bottom: calc(
@@ -360,8 +338,15 @@
     grid-template-columns: repeat(4, var(--touch-target));
   }
 
-  .key-toolbar.wt-toolbar-external.collapsed {
+  :where(.wt-root) .key-toolbar.wt-toolbar-external.collapsed {
     display: none;
+  }
+
+  /* Narrow phone (mobile switcher mode): dock above the switcher bar. */
+  :where(.wt-root.wt-narrow) .key-toolbar.wt-toolbar-external {
+    bottom: calc(
+      var(--wt-switcher-h) + var(--safe-bottom, 0px) + var(--kb-inset, 0px) + var(--sp-2)
+    );
   }
 }
 
@@ -369,12 +354,12 @@
    One row per OTHER tab in the expanded list: a stretched select target (dot +
    label) with the close (x) laid inside at the right, mirroring the desktop
    tab's merged chrome. */
-.wt-switcher-row {
+:where(.wt-root) .wt-switcher-row {
   position: relative;
   display: flex;
 }
 
-.wt-switcher-row-select {
+:where(.wt-root) .wt-switcher-row-select {
   flex: 1 1 auto;
   display: flex;
   align-items: center;
@@ -394,7 +379,7 @@
 }
 
 @media (hover: hover) {
-  .wt-switcher-row-select:hover {
+  :where(.wt-root) .wt-switcher-row-select:hover {
     background: color-mix(in oklch, var(--tab-bg), var(--text) 15%);
   }
 }
@@ -403,11 +388,11 @@
    chip (the same 15% --text lift the desktop tabs use), not the translucent
    --tab-hover-bg wash that would erase the chip fill. The active tab is set apart
    by its accent border, so a lit inactive row is never mistaken for it. */
-.wt-switcher-row-select:active {
+:where(.wt-root) .wt-switcher-row-select:active {
   background: color-mix(in oklch, var(--tab-bg), var(--text) 15%);
 }
 
-.wt-switcher-row-label {
+:where(.wt-root) .wt-switcher-row-label {
   flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -415,7 +400,7 @@
 }
 
 /* The close sits flush at the row's right edge (no gap), vertically centered. */
-.wt-switcher-row-close {
+:where(.wt-root) .wt-switcher-row-close {
   position: absolute;
   top: 50%;
   right: 0;
@@ -427,7 +412,7 @@
    when closing a tab shifts the list under the finger the newly-under close
    would latch white. Touch feedback comes from the surrounding row's :active. */
 @media (hover: hover) {
-  .wt-switcher-row-close:hover {
+  :where(.wt-root) .wt-switcher-row-close:hover {
     color: var(--text);
   }
 }

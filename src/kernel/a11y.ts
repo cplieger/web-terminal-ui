@@ -25,6 +25,11 @@ export interface Announcer {
   destroy(): void;
 }
 
+/** Delay before a cleared live region is re-set with the new message (ms).
+ *  Long enough for assistive tech to register the clear and the set as two
+ *  distinct mutations (a sub-frame gap is not). */
+const REANNOUNCE_DELAY_MS = 100;
+
 /** Build the single pair of live regions inside root. */
 export function createAnnouncer(root: HTMLElement): Announcer {
   const polite = document.createElement("div");
@@ -37,17 +42,37 @@ export function createAnnouncer(root: HTMLElement): Announcer {
   hideVisually(assertive);
   root.append(polite, assertive);
 
+  // Pending re-set timers, one per region, so a rapid follow-up announcement
+  // replaces the pending one instead of interleaving with it.
+  const timers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
+
   function announce(message: string, politeness: "polite" | "assertive" = "polite"): void {
     const el = politeness === "assertive" ? assertive : polite;
-    // Clear then set on the next frame so a repeat of the same message is
-    // re-announced (screen readers ignore an unchanged live-region value).
+    // Clear then re-set after a short (~100ms) TIMER so a repeat of the same
+    // message is re-announced: screen readers ignore an unchanged live-region
+    // value, and a sub-frame gap (the previous requestAnimationFrame
+    // approach, ~16ms) is too fast for some assistive tech to register two
+    // distinct mutations — the same rationale ui-primitives' announce()
+    // documents for its shared region.
     el.textContent = "";
-    requestAnimationFrame(() => {
-      el.textContent = message;
-    });
+    const pending = timers.get(el);
+    if (pending !== undefined) {
+      clearTimeout(pending);
+    }
+    timers.set(
+      el,
+      setTimeout(() => {
+        timers.delete(el);
+        el.textContent = message;
+      }, REANNOUNCE_DELAY_MS),
+    );
   }
 
   function destroy(): void {
+    for (const t of timers.values()) {
+      clearTimeout(t);
+    }
+    timers.clear();
     polite.remove();
     assertive.remove();
   }

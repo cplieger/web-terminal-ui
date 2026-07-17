@@ -1,0 +1,12 @@
+# Component bundle for presetSingle() compositions (no toolbar, no tabs, no
+# animations feature). Library styles only — root-scoped, no page-level rules;
+# the host page owns its own reset/fonts (full-page hosts use the reference
+# MANIFEST instead, whose page.css carries those).
+# Files concatenate in declared order; the order IS the cascade.
+00-tokens.css
+01-scope.css
+02-terminal.css
+10-primitives.css
+20-connection-banner.css
+21-scroll-to-bottom.css
+22-context-menu.css

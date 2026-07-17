@@ -15,6 +15,8 @@ const sendBinary = vi.fn<(buf: Uint8Array) => boolean>(() => true);
 const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
 const connect = vi.fn();
 const setSession = vi.fn<(id: string) => void>();
+const resetScrollback = vi.fn();
+const resetScreen = vi.fn();
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -31,8 +33,8 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       handleScreen: vi.fn(),
       handleScroll: vi.fn(),
       updateReverseVideo: vi.fn(),
-      resetScrollback: vi.fn(),
-      resetScreen: vi.fn(),
+      resetScrollback,
+      resetScreen,
       bind: vi.fn(),
       boundStore: vi.fn(),
     },
@@ -61,6 +63,8 @@ beforeEach(async () => {
   connectionInit.mockClear();
   connect.mockClear();
   setSession.mockClear();
+  resetScrollback.mockClear();
+  resetScreen.mockClear();
   document.body.replaceChildren();
   ({ createTerminal } = await import("./kernel.js"));
 });
@@ -136,19 +140,126 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
     expect(connect).toHaveBeenCalledTimes(1);
   });
 
-  it("does NOT connect at startup when a feature manages sessions", () => {
+  it("does NOT connect to the bare /ws when a feature registers as session owner, and switches to the resolved session instead", async () => {
     const root = rootIn();
-    const sessionOwner: TerminalFeature = {
+    const owner: TerminalFeature = {
       name: "session-owner",
-      managesSessions: true,
+      sessionOwner: {
+        resolveInitialSession: () => Promise.resolve({ id: "s1" }),
+      },
       setup() {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: [sessionOwner] });
-    // The feature drives the first connect (via ctx.notifySwitch) once it has a
-    // session id; a bare /ws here would 404 against a SessionManager.
+    createTerminal(root, { features: [owner] });
+    // A bare /ws here would 404 against a SessionManager.
     expect(connect).not.toHaveBeenCalled();
+    await tick(); // setup completes
+    await tick(); // the kernel awaits the resolver, then performs the switch
+    expect(connect).not.toHaveBeenCalled();
+    expect(setSession).toHaveBeenCalledWith("s1");
+  });
+
+  it("dismisses the loading overlay when the owner resolves no session (failed bootstrap shows the retry chrome)", async () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const owner: TerminalFeature = {
+      name: "session-owner",
+      sessionOwner: {
+        resolveInitialSession: () => Promise.resolve(null),
+      },
+      setup() {
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(root, { features: [owner], loading });
+    await tick();
+    await tick();
+    // No session could be listed or spawned: the kernel saw the null directly
+    // and lowered the overlay so the feature's retry chrome is visible.
+    expect(loading.classList.contains("fade")).toBe(true);
+    expect(setSession).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("treats a rejecting resolver as null (reported, overlay dismissed) rather than wedging", async () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const errors: string[] = [];
+    const owner: TerminalFeature = {
+      name: "session-owner",
+      sessionOwner: {
+        resolveInitialSession: () => Promise.reject(new Error("boom")),
+      },
+      setup(ctx) {
+        ctx.onError((feature) => errors.push(feature));
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(root, { features: [owner], loading });
+    await tick();
+    await tick();
+    expect(loading.classList.contains("fade")).toBe(true);
+    expect(errors).toContain("session-owner");
+  });
+
+  it("throws when two features register as session owner", () => {
+    const root = rootIn();
+    const mk = (name: string): TerminalFeature => ({
+      name,
+      sessionOwner: { resolveInitialSession: () => Promise.resolve(null) },
+      setup() {
+        return { teardown: () => undefined };
+      },
+    });
+    expect(() => createTerminal(root, { features: [mk("a"), mk("b")] })).toThrow(
+      /multiple session-owning features/,
+    );
+  });
+});
+
+describe("layout modes and root classes", () => {
+  it("stamps wt-root + wt-viewport by default and removes them on destroy", () => {
+    const root = rootIn();
+    const term = createTerminal(root, { features: [] });
+    expect(root.classList.contains("wt-root")).toBe(true);
+    expect(root.classList.contains("wt-viewport")).toBe(true);
+    expect(root.classList.contains("wt-container")).toBe(false);
+    term.destroy();
+    expect(root.classList.contains("wt-root")).toBe(false);
+    expect(root.classList.contains("wt-viewport")).toBe(false);
+  });
+
+  it("stamps wt-container for layout: container", () => {
+    const root = rootIn();
+    createTerminal(root, { features: [], layout: "container" });
+    expect(root.classList.contains("wt-container")).toBe(true);
+    expect(root.classList.contains("wt-viewport")).toBe(false);
+  });
+});
+
+describe("host handle send/reset", () => {
+  it("send() routes through the sanitizing funnel and no-ops after destroy", () => {
+    const root = rootIn();
+    const term = createTerminal(root, { features: [] });
+    term.send(new TextEncoder().encode("echo hi\n"));
+    expect(sentText()).toContain("echo hi");
+    sendBinary.mockClear();
+    term.destroy();
+    term.send(new TextEncoder().encode("late"));
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("reset() drops the local scrollback and screen without injecting keystrokes", () => {
+    const root = rootIn();
+    const term = createTerminal(root, { features: [] });
+    sendBinary.mockClear();
+    term.reset();
+    expect(resetScrollback).toHaveBeenCalledTimes(1);
+    expect(resetScreen).toHaveBeenCalledTimes(1);
+    expect(sendBinary).not.toHaveBeenCalled();
   });
 });
 

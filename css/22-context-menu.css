@@ -1,0 +1,45 @@
+/* ===== Context menu (contextMenu feature) =====
+   Absolute against .wt-root, like all chrome; the shared point-anchored
+   positioner (src/features/menu-position.ts) converts its viewport-clamped
+   coordinates into root-relative offsets, so placement is identical in both
+   layout modes. */
+:where(.wt-root) .wt-ctx-menu {
+  position: absolute;
+  display: none;
+  flex-direction: column;
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--sp-1);
+  z-index: 30;
+}
+
+:where(.wt-root) .wt-ctx-menu.visible {
+  display: flex;
+}
+
+:where(.wt-root) .wt-ctx-menu button {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: var(--radius-inner);
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  text-align: left;
+}
+
+:where(.wt-root) .wt-ctx-menu button:active {
+  background: var(--text-active);
+}
+
+@media (pointer: coarse) {
+  :where(.wt-root) .wt-ctx-menu button {
+    min-height: var(--touch-target);
+    padding-block: var(--sp-2);
+    touch-action: manipulation;
+  }
+}

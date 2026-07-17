@@ -6,7 +6,20 @@
   "license": "GPL-3.0-or-later",
   "exports": {
     ".": "./src/index.ts",
-    "./presets": "./src/presets.ts"
+    "./presets": "./src/presets.ts",
+    "./presets/single": "./src/presets/single.ts",
+    "./presets/touch": "./src/presets/touch.ts",
+    "./presets/tabbed": "./src/presets/tabbed.ts",
+    "./presets/agent-tabbed": "./src/presets/agent-tabbed.ts",
+    "./features/clipboard": "./src/features/clipboard.ts",
+    "./features/context-menu": "./src/features/context-menu.ts",
+    "./features/scroll-to-bottom": "./src/features/scroll-to-bottom.ts",
+    "./features/predictive-echo": "./src/features/predictive-echo.ts",
+    "./features/connection-banner": "./src/features/connection-banner.ts",
+    "./features/mobile-toolbar": "./src/features/mobile-toolbar.ts",
+    "./features/tabs": "./src/features/tabs/index.ts",
+    "./features/activity-monitor": "./src/features/activity-monitor.ts",
+    "./features/animations": "./src/features/animations.ts"
   },
   "sideEffects": [
     "**/*.css"
@@ -25,7 +38,7 @@
     "verify": "bash scripts/verify.sh"
   },
   "peerDependencies": {
-    "@cplieger/web-terminal-engine": ">=2.4.0"
+    "@cplieger/web-terminal-engine": "^2.8.0"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

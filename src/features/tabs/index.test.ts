@@ -9,11 +9,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "./../kernel/kernel.js";
-import type * as TabsModule from "./tabs.js";
-import type { TerminalFeature } from "./../kernel/types.js";
-import type { ActivityMonitorApi } from "./activity-monitor.js";
-import type { MobileToolbarApi } from "./mobile-toolbar.js";
+import type * as KernelModule from "../../kernel/kernel.js";
+import type * as TabsModule from "./index.js";
+import type { TerminalFeature } from "../../kernel/types.js";
+import type { ActivityMonitorApi } from "../activity-monitor.js";
+import type { MobileToolbarApi } from "../mobile-toolbar.js";
 
 // A fake activityMonitor feature: lets a test push status events into tabs
 // without the real SSE. tabs reads it via ctx.use, so passing the same feature
@@ -182,8 +182,8 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
   localStorage.clear(); // isolate the persisted active-tab id between tests
-  ({ createTerminal } = await import("./../kernel/kernel.js"));
-  ({ tabs } = await import("./tabs.js"));
+  ({ createTerminal } = await import("../../kernel/kernel.js"));
+  ({ tabs } = await import("./index.js"));
 });
 
 afterEach(() => {

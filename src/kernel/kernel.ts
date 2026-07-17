@@ -49,6 +49,14 @@ const TAP_MOVEMENT_PX = 10;
 // native text selection / the context menu — so tap-to-focus bows out above
 // this duration and never steals a long-press or a selection.
 const TAP_MAX_MS = 500;
+// The narrow-layout breakpoint, in ROOT-width pixels. The single source of the
+// number: the kernel mirrors it into the .wt-narrow root class for CSS (paired
+// there with pointer-coarseness media queries where touch matters) and features
+// read the same fact via ctx.layout(). Root width — not viewport width — so an
+// embedded terminal in a narrow panel counts as narrow. For every full-page
+// consumer root width equals viewport width, so the behavior matches the old
+// (max-width: 600px) media queries exactly.
+const NARROW_MAX_PX = 600;
 
 // Kernel-owned core subtree: the display-only output, the hidden textarea (the
 // single keyboard target), and the IME composition view. No chrome; features
@@ -75,6 +83,16 @@ export function createTerminal(
   const wsPath = opts.wsPath ?? DEFAULT_WS_PATH;
   const fontReady = opts.fontReady ?? DEFAULT_FONT_READY;
   const featureList = opts.features ?? [];
+  // At most one feature owns session selection (fail fast, before any DOM
+  // work): the kernel drives the first connect through its registration.
+  const owners = featureList.filter((f) => f.sessionOwner !== undefined);
+  if (owners.length > 1) {
+    throw new Error(
+      `web-terminal-ui: multiple session-owning features: ${owners.map((f) => f.name).join(", ")}`,
+    );
+  }
+  const sessionOwner = owners[0]?.sessionOwner;
+  const sessionOwnerName = owners[0]?.name ?? "";
   const encoder = new TextEncoder();
   const kernelAbort = new AbortController();
   const { signal } = kernelAbort;
@@ -91,6 +109,15 @@ export function createTerminal(
     }
   }
 
+  // Stamp the boundary classes: .wt-root scopes every library token and style
+  // rule to this subtree, and the layout-mode class decides how the root claims
+  // space — wt-viewport pins the root itself to the full viewport (the
+  // full-page product), wt-container fills the parent element (the embedded
+  // case). All chrome positions against the root, never the page. destroy()
+  // removes them.
+  const layoutMode = opts.layout ?? "viewport";
+  root.classList.add("wt-root", layoutMode === "container" ? "wt-container" : "wt-viewport");
+
   // --- Build the core subtree ---
   const tpl = document.createElement("template");
   tpl.innerHTML = CORE_TEMPLATE;
@@ -105,6 +132,18 @@ export function createTerminal(
   const bus = createBus();
   const announcer = createAnnouncer(root);
   const tablistController = createTablist(outputEl);
+
+  // --- Narrow-layout driver (.wt-narrow mirrors root width for CSS) ---
+  const isNarrow = (): boolean => root.clientWidth <= NARROW_MAX_PX;
+  function updateNarrow(): void {
+    root.classList.toggle("wt-narrow", isNarrow());
+  }
+  updateNarrow();
+  let narrowObserver: ResizeObserver | null = null;
+  if (typeof ResizeObserver === "function") {
+    narrowObserver = new ResizeObserver(updateNarrow);
+    narrowObserver.observe(root);
+  }
 
   // Toast surface (kernel-owned shared primitive, section 22.3).
   const toastEl = document.createElement("div");
@@ -187,13 +226,13 @@ export function createTerminal(
   let activeSession: SessionRef | null = null;
   // Whether the first connection has been kicked off. The wake-reconnect
   // handlers (visibilitychange/pageshow/online) must not open a socket before
-  // it has: a session-managing feature (tabs) drives the first connect via
-  // notifySwitch once it resolves a session id, and connecting to the bare
-  // wsPath before then hits a session-gated endpoint (the SessionManager 404s a
-  // /ws with no ?session=). pageshow fires on the initial load, so without this
-  // gate a slow session list lets pageshow's reconnectNow open a bare /ws that
-  // 404s (seen in Firefox, where the list loses the race). Flips true on the
-  // startup connect (unmanaged) or the first setSession (managed).
+  // it has: under a session owner the kernel drives the first connect only
+  // once resolveInitialSession() returns a session id, and connecting to the
+  // bare wsPath before then hits a session-gated endpoint (the SessionManager
+  // 404s a /ws with no ?session=). pageshow fires on the initial load, so
+  // without this gate a slow session list lets pageshow's reconnectNow open a
+  // bare /ws that 404s (seen in Firefox, where the list loses the race). Flips
+  // true on the startup connect (no owner) or the first setSession (owned).
   let connectionInitiated = false;
 
   // --- Loading lifecycle ---
@@ -544,6 +583,7 @@ export function createTerminal(
   // --- Viewport ---
   viewport.init({
     termWrap,
+    root,
     suppressKeyboardInset: hasFinePointer,
     onSettled() {
       render.updateFontMetrics();
@@ -615,6 +655,42 @@ export function createTerminal(
   const apiMap = new Map<TerminalFeature<unknown>, unknown>();
   const instances: { feature: TerminalFeature<unknown>; instance: FeatureInstance<unknown> }[] = [];
 
+  // The one switch path: ctx.notifySwitch (tab switches) and the kernel's own
+  // owner-resolved first connect both land here.
+  function performSwitch(session: SessionRef): void {
+    // A feature's un-cancelled async (tabs create()/pollOnce()) can resolve
+    // after destroy() and request a switch; ignore it so a torn-down terminal
+    // never re-points or reopens the socket (connection.setSession below).
+    if (isDestroyed()) {
+      return;
+    }
+    // Detach (design 5.1): make input safe before the socket is re-pointed.
+    // End any in-flight IME composition and clear the textarea so
+    // half-composed text is not delivered to either session, and let every
+    // feature disarm latched input state (mobileToolbar's sticky-Ctrl) so it
+    // cannot fire against the incoming session. This all runs before
+    // setSession, and the switch is synchronous, so input is inert between
+    // detach here and the onSwitch attach below.
+    composition.cancelComposition();
+    resetToPlaceholder(input);
+    for (const { instance } of instances) {
+      instance.onDetach?.();
+    }
+    activeSession = session;
+    // Reconnect the terminal WS to this session using its per-tab resume
+    // state; the renderer was already pointed at its store by the owner.
+    connection.setSession(session.id);
+    // The owned first connect has happened (session id is now on the WS URL);
+    // wake-reconnect handlers may fire from here on.
+    connectionInitiated = true;
+    for (const { instance } of instances) {
+      if (instance.onSwitch) {
+        instance.onSwitch(session);
+      }
+    }
+    bus.emit("session:switch", session);
+  }
+
   function makeContext(featureName: string): TerminalContext {
     return {
       region: (name, slot) => regions.region(name, slot),
@@ -678,38 +754,13 @@ export function createTerminal(
         announcer.announce(message, politeness);
       },
       tablist: () => tablistController,
+      layout: () => ({
+        narrow: isNarrow(),
+        coarse:
+          typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches,
+      }),
       notifySwitch(session) {
-        // A feature's un-cancelled async (tabs bootstrap/create()/pollOnce()) can
-        // resolve after destroy() and call this; ignore it so a torn-down terminal
-        // never re-points or reopens the socket (connection.setSession below).
-        if (isDestroyed()) {
-          return;
-        }
-        // Detach (design 5.1): make input safe before the socket is re-pointed.
-        // End any in-flight IME composition and clear the textarea so
-        // half-composed text is not delivered to either session, and let every
-        // feature disarm latched input state (mobileToolbar's sticky-Ctrl) so it
-        // cannot fire against the incoming session. This all runs before
-        // setSession, and the switch is synchronous, so input is inert between
-        // detach here and the onSwitch attach below.
-        composition.cancelComposition();
-        resetToPlaceholder(input);
-        for (const { instance } of instances) {
-          instance.onDetach?.();
-        }
-        activeSession = session;
-        // Reconnect the terminal WS to this session using its per-tab resume
-        // state; the renderer was already pointed at its store by tabs.
-        connection.setSession(session.id);
-        // The managed first connect has happened (session id is now on the WS
-        // URL); wake-reconnect handlers may fire from here on.
-        connectionInitiated = true;
-        for (const { instance } of instances) {
-          if (instance.onSwitch) {
-            instance.onSwitch(session);
-          }
-        }
-        bus.emit("session:switch", session);
+        performSwitch(session);
       },
       dropSession(id) {
         connection.forgetSession(id);
@@ -744,10 +795,14 @@ export function createTerminal(
     instances.length = 0;
   }
 
-  async function setupFeatures(): Promise<void> {
+  // Resolves true when every feature set up; false when setup was aborted (a
+  // feature threw and everything rolled back, or destroy() ran mid-setup). The
+  // session-owner first connect below runs only on true — a resolver must never
+  // run against torn-down chrome.
+  async function setupFeatures(): Promise<boolean> {
     for (const feature of featureList) {
       if (destroyed) {
-        return;
+        return false;
       }
       try {
         const instance = await feature.setup(makeContext(feature.name));
@@ -762,7 +817,7 @@ export function createTerminal(
           } catch (err) {
             reportError(feature.name, err);
           }
-          return;
+          return false;
         }
         instances.push({ feature, instance });
         // Populate the feature value's readonly api (consumer pattern:
@@ -778,27 +833,47 @@ export function createTerminal(
           `web-terminal-ui: feature "${feature.name}" setup failed; terminal has no chrome`,
           err,
         );
-        return;
+        return false;
       }
     }
+    return true;
   }
-  // A session-managing feature (tabs) drives the first connect itself once it
-  // has resolved a session id (ctx.notifySwitch -> connection.setSession, which
-  // adds ?session=<id>). Connecting here first would open a bare /ws that a
-  // SessionManager 404s (no ?session=), flashing a disconnect banner and
-  // churning the reconnect backoff until the feature sets a session. So skip the
-  // startup connect when managed; the single-terminal presets leave it to us.
-  const sessionManaged = featureList.some((f) => f.managesSessions === true);
-
   // Features set up in the background; first paint is never gated on them.
-  void setupFeatures().then(() => {
-    // A session-managing feature that finished setup WITHOUT initiating a
-    // connection means its bootstrap failed (no session could be listed or
-    // spawned) or its setup threw. markReady (needs a screen frame) and onGiveUp
-    // (needs the connect to be attempted and fail) then never fire, so the
-    // loading overlay would stay up forever, hiding the retry chrome the feature
-    // keeps alive (tabs' "+"). Dismiss it so the page shows its real state.
-    if (sessionManaged && !connectionInitiated && !destroyed) {
+  // Under a session owner the kernel then drives the first connect itself:
+  // await the owner's resolveInitialSession() and switch to the session it
+  // returns through the same path a tab switch uses. Connecting to the bare
+  // wsPath first would open a /ws that a SessionManager 404s (no ?session=),
+  // flashing a disconnect banner and churning the reconnect backoff — hence no
+  // startup connect below when an owner is registered. A null (or thrown)
+  // resolution means the bootstrap failed: the owner keeps its retry chrome
+  // alive, and the kernel — which now SEES the failure instead of inferring it
+  // from a missing side effect — dismisses the loading overlay so that chrome
+  // is visible instead of an eternal spinner.
+  void setupFeatures().then(async (ok) => {
+    if (!ok) {
+      // Setup aborted (rolled back or destroyed). Under a session owner no
+      // connect will ever be attempted, so nothing else can lower the loading
+      // overlay — dismiss it so the page shows its real state.
+      if (!connectionInitiated && !destroyed) {
+        dismissLoadingOverlay();
+      }
+      return;
+    }
+    if (!sessionOwner || isDestroyed()) {
+      return;
+    }
+    let resolved: SessionRef | null = null;
+    try {
+      resolved = await sessionOwner.resolveInitialSession();
+    } catch (err) {
+      reportError(sessionOwnerName, err);
+    }
+    if (isDestroyed()) {
+      return;
+    }
+    if (resolved) {
+      performSwitch(resolved);
+    } else if (!connectionInitiated) {
       dismissLoadingOverlay();
     }
   });
@@ -806,7 +881,7 @@ export function createTerminal(
   // --- Connect + focus ---
   render.updateFontMetrics();
   composition.positionCompositionView();
-  if (!sessionManaged) {
+  if (!sessionOwner) {
     connection.connect();
     connectionInitiated = true;
   }
@@ -814,6 +889,19 @@ export function createTerminal(
 
   return {
     focus: focusTerminal,
+    send(bytes) {
+      if (destroyed) {
+        return;
+      }
+      sendBytes(bytes);
+    },
+    reset() {
+      if (destroyed) {
+        return;
+      }
+      render.resetScrollback();
+      render.resetScreen();
+    },
     destroy() {
       if (destroyed) {
         return;
@@ -821,6 +909,7 @@ export function createTerminal(
       destroyed = true;
       teardownFeatures();
       kernelAbort.abort();
+      narrowObserver?.disconnect();
       viewport.teardown();
       // Reset the composition singleton (kernel-driven, no feature teardown): a
       // destroy() mid-IME-composition otherwise leaves module-level `composing`
@@ -839,6 +928,7 @@ export function createTerminal(
       bus.clear();
       announcer.destroy();
       regions.destroy();
+      root.classList.remove("wt-root", "wt-viewport", "wt-container", "wt-narrow");
       root.replaceChildren();
     },
   };

@@ -6,6 +6,11 @@
 <meta name="color-scheme" content="dark">
 <title>Web Terminal</title>
 <!-- App icons and web-app manifest are deployment-specific; add your own. -->
+<!-- /style.css = the package's css/MANIFEST concatenated: the reference
+     FULL-PAGE bundle (css/page.css — html/body reset + @font-face expecting
+     the font files at /vendor/fonts/ — plus the complete tabbed component
+     set). An embedder serves a per-preset manifest (css/MANIFEST.single/
+     .touch/.tabbed) instead and passes layout: "container". -->
 <link rel="stylesheet" href="/style.css">
 <!-- [html-validate-disable-next no-style-tag -- critical CSS for instant loading indicator] -->
 <style>

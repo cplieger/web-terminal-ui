@@ -1,4 +1,11 @@
-/* ===== Reset ===== */
+/* ===== Page kit (full-page hosts ONLY — never ship this to an embedder) =====
+   The page-level half of the full-page terminal product: what the HOST PAGE
+   owns when the terminal IS the page (web-terminal-server, web-terminal-kiro,
+   scaffold/index.html). The component bundle (00-10) never touches the host
+   document; everything here is deliberately page-scoped. An embedding consumer
+   (vibekit) serves a per-preset manifest instead and owns its own page.
+   Concatenated FIRST by the reference MANIFEST. */
+
 *,
 *::before,
 *::after {
@@ -11,7 +18,10 @@ body {
   padding: 0;
   height: 100%;
   overflow: hidden;
-  background: var(--bg);
+  /* The pre-JS backdrop (the loading state paints over it). Matches the
+     component's --bg default (css/00-tokens.css, oklch(0% 0 0deg)); a themed
+     full-page host overrides both together. */
+  background: #000;
   color-scheme: dark;
   -webkit-font-smoothing: antialiased;
   /* Disable the browser's landscape text autosizing ("text inflation"): without
@@ -29,23 +39,12 @@ body {
   touch-action: pan-x pan-y;
 }
 
-/* stylelint-disable declaration-no-important, time-min-milliseconds --
-   Canonical prefers-reduced-motion override. !important and near-zero
-   durations are required to forcibly defeat any animation/transition rule
-   regardless of specificity, which is the whole point of this a11y reset. */
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-/* stylelint-enable declaration-no-important, time-min-milliseconds */
-
-/* ===== Fonts ===== */
+/* ===== Fonts =====
+   The terminal web font, served by the full-page host at /vendor/fonts (both
+   web-terminal-server and web-terminal-kiro ship these files there; see their
+   Dockerfiles). An embedder does not serve this file, so it never inherits
+   these URLs — it either ships its own @font-face or lets --font-mono fall back
+   to the platform monospace stack. */
 @font-face {
   font-family: "MonaspiceNe NFM";
   src: url("/vendor/fonts/MonaspiceNeNerdFontMono-Regular.otf") format("opentype");

@@ -1,6 +1,11 @@
 /* ===== Terminal ===== */
-.term {
-  position: fixed;
+:where(.wt-root) .term {
+  /* Absolute against .wt-root (the positioning boundary in BOTH layout modes):
+     in wt-viewport the root is a fixed full-viewport box, so this is
+     geometrically identical to the pre-v4 `position: fixed`; in wt-container it
+     fills the embedder's panel. viewport.ts still pins top/bottom inline to
+     track the visual viewport around the soft keyboard. */
+  position: absolute;
   inset: 0;
   overflow: hidden auto;
   /* The scroll controller (vterm scroll.ts) is the single owner of
@@ -27,7 +32,7 @@
   color: var(--text);
 }
 
-.term-row {
+:where(.wt-root) .term-row {
   white-space: pre;
   min-height: 17px;
   font-variant-ligatures: none;
@@ -48,7 +53,7 @@
      cell tracks the column on every flush. */
 }
 
-.term-row:empty::after {
+:where(.wt-root) .term-row:empty::after {
   content: "\00a0";
 }
 
@@ -56,7 +61,7 @@
    as the first row when history older than the buffer holds was evicted —
    client-side cap or a server-reported resume gap). A quiet, centered,
    non-selectable divider so the user knows scrollback doesn't go further up. */
-.term-trim-marker {
+:where(.wt-root) .term-trim-marker {
   color: color-mix(in oklch, var(--text) 60%, transparent);
   font-size: 0.6875rem;
   text-align: center;
@@ -65,7 +70,7 @@
   font-family: var(--font-ui);
 }
 
-.term-input {
+:where(.wt-root) .term-input {
   /* The hidden keyboard target. position:absolute (NOT fixed) so it lives in
      the terminal's scroll/content coordinate space alongside .composition-view
      and .pred-cursor: composition.positionCompositionView() moves it to the
@@ -94,7 +99,7 @@
   font-size: 16px;
 }
 
-.term-output {
+:where(.wt-root) .term-output {
   position: relative;
   outline: none;
 
@@ -128,7 +133,7 @@
    so the candidate popup tracks what the user is typing.
    Visibility is gated by the `.active` class so empty state doesn't
    render a phantom box on top of the cursor. */
-.composition-view {
+:where(.wt-root) .composition-view {
   position: absolute;
   pointer-events: none;
   background: var(--surface);
@@ -143,7 +148,7 @@
   display: none;
 }
 
-.composition-view.active {
+:where(.wt-root) .composition-view.active {
   display: block;
 }
 
@@ -153,7 +158,7 @@
    cursor (predict.ts deactivates on bail and the renderer hides on
    coincidence). Dashed outline + reduced opacity reads as "tentative"
    — distinct from the solid block of the real cursor. */
-.pred-cursor {
+:where(.wt-root) .pred-cursor {
   position: absolute;
   pointer-events: none;
   border: 1px dashed var(--text);
@@ -163,7 +168,7 @@
   box-sizing: border-box;
 }
 
-.pred-cursor.visible {
+:where(.wt-root) .pred-cursor.visible {
   display: block;
 }
 
@@ -177,17 +182,17 @@
    Auto-detected bare URLs (.term-autolink) are tightly scoped to the URL text and
    never bleed, so they keep a subtle persistent underline. (The engine also only
    anchors runs with real link text, so the underline hugs the text either way.) */
-.term-link {
+:where(.wt-root) .term-link {
   color: inherit;
   text-decoration: none;
   cursor: pointer;
 }
 
-.term-autolink {
+:where(.wt-root) .term-autolink {
   text-decoration: underline dotted;
 }
 
-.term-link:hover {
+:where(.wt-root) .term-link:hover {
   text-decoration: underline solid;
 }
 
@@ -197,9 +202,9 @@
    the viewport. JS-driven instead of CSS animation because the cursor
    span is recreated every row update — a CSS animation would restart on
    each recreation and never reach the "off" frame during streaming. */
-.term-cursor,
-.term-cursor-underline,
-.term-cursor-bar {
+:where(.wt-root) .term-cursor,
+:where(.wt-root) .term-cursor-underline,
+:where(.wt-root) .term-cursor-bar {
   box-sizing: border-box;
   display: inline-block;
   height: 17px;
@@ -207,35 +212,35 @@
   vertical-align: top;
 }
 
-.term-cursor {
+:where(.wt-root) .term-cursor {
   background: var(--text);
   color: var(--bg);
 }
 
 /* Underline cursor (DECSCUSR 3/4) */
-.term-cursor-underline {
+:where(.wt-root) .term-cursor-underline {
   background: transparent;
   color: var(--text);
   border-bottom: 2px solid var(--text);
 }
 
 /* Bar cursor (DECSCUSR 5/6) */
-.term-cursor-bar {
+:where(.wt-root) .term-cursor-bar {
   background: transparent;
   color: var(--text);
   border-left: 2px solid var(--text);
 }
 
-.cursor-blink-off .term-cursor {
+:where(.wt-root) .cursor-blink-off .term-cursor {
   background: transparent;
   color: var(--text);
 }
 
-.term-blink {
-  animation: term-blink-anim 1s step-end infinite;
+:where(.wt-root) .term-blink {
+  animation: wt-blink-anim 1s step-end infinite;
 }
 
-@keyframes term-blink-anim {
+@keyframes wt-blink-anim {
   50% {
     opacity: 0;
   }
@@ -243,9 +248,9 @@
 
 /* When the terminal isn't focused, render the cursor as an outline
    rather than a filled block (xterm.js convention). */
-.term:not(.focus) .term-cursor,
-.term:not(.focus) .term-cursor-underline,
-.term:not(.focus) .term-cursor-bar {
+:where(.wt-root) .term:not(.focus) .term-cursor,
+:where(.wt-root) .term:not(.focus) .term-cursor-underline,
+:where(.wt-root) .term:not(.focus) .term-cursor-bar {
   background: transparent;
   color: var(--text);
   border: none;
@@ -257,280 +262,100 @@
 }
 
 /* ===== Terminal color classes (basic 16 — themeable) ===== */
-.term-fg-0 {
+:where(.wt-root) .term-fg-0 {
   color: #000;
 }
-.term-fg-1 {
+:where(.wt-root) .term-fg-1 {
   color: #a00;
 }
-.term-fg-2 {
+:where(.wt-root) .term-fg-2 {
   color: #0a0;
 }
-.term-fg-3 {
+:where(.wt-root) .term-fg-3 {
   color: #a50;
 }
-.term-fg-4 {
+:where(.wt-root) .term-fg-4 {
   color: #00a;
 }
-.term-fg-5 {
+:where(.wt-root) .term-fg-5 {
   color: #a0a;
 }
-.term-fg-6 {
+:where(.wt-root) .term-fg-6 {
   color: #0aa;
 }
-.term-fg-7 {
+:where(.wt-root) .term-fg-7 {
   color: #aaa;
 }
-.term-fg-8 {
+:where(.wt-root) .term-fg-8 {
   color: #555;
 }
-.term-fg-9 {
+:where(.wt-root) .term-fg-9 {
   color: #f55;
 }
-.term-fg-10 {
+:where(.wt-root) .term-fg-10 {
   color: #5f5;
 }
-.term-fg-11 {
+:where(.wt-root) .term-fg-11 {
   color: #ff5;
 }
-.term-fg-12 {
+:where(.wt-root) .term-fg-12 {
   color: #55f;
 }
-.term-fg-13 {
+:where(.wt-root) .term-fg-13 {
   color: #f5f;
 }
-.term-fg-14 {
+:where(.wt-root) .term-fg-14 {
   color: #5ff;
 }
-.term-fg-15 {
+:where(.wt-root) .term-fg-15 {
   color: #fff;
 }
 
-.term-bg-0 {
+:where(.wt-root) .term-bg-0 {
   background: #000;
 }
-.term-bg-1 {
+:where(.wt-root) .term-bg-1 {
   background: #a00;
 }
-.term-bg-2 {
+:where(.wt-root) .term-bg-2 {
   background: #0a0;
 }
-.term-bg-3 {
+:where(.wt-root) .term-bg-3 {
   background: #a50;
 }
-.term-bg-4 {
+:where(.wt-root) .term-bg-4 {
   background: #00a;
 }
-.term-bg-5 {
+:where(.wt-root) .term-bg-5 {
   background: #a0a;
 }
-.term-bg-6 {
+:where(.wt-root) .term-bg-6 {
   background: #0aa;
 }
-.term-bg-7 {
+:where(.wt-root) .term-bg-7 {
   background: #aaa;
 }
-.term-bg-8 {
+:where(.wt-root) .term-bg-8 {
   background: #555;
 }
-.term-bg-9 {
+:where(.wt-root) .term-bg-9 {
   background: #f55;
 }
-.term-bg-10 {
+:where(.wt-root) .term-bg-10 {
   background: #5f5;
 }
-.term-bg-11 {
+:where(.wt-root) .term-bg-11 {
   background: #ff5;
 }
-.term-bg-12 {
+:where(.wt-root) .term-bg-12 {
   background: #55f;
 }
-.term-bg-13 {
+:where(.wt-root) .term-bg-13 {
   background: #f5f;
 }
-.term-bg-14 {
+:where(.wt-root) .term-bg-14 {
   background: #5ff;
 }
-.term-bg-15 {
+:where(.wt-root) .term-bg-15 {
   background: #fff;
-}
-
-/* ===== Key toolbar (touch devices only) =====
-   Uses interpolate-size: allow-keywords (on :root) to animate
-   width/height between a fixed collapsed size and auto (intrinsic).
-   Toggle is first in DOM so it's at top-left of the grid — visible
-   when the container clips to 1-cell size. Container is right-anchored
-   so it grows leftward on open. */
-.key-toolbar {
-  display: contents;
-}
-
-/* Touch-only toolbar children: the on-screen Esc/Tab/arrows/hamburger
-   are useless on desktop where the user has a real keyboard. Hidden by
-   default; the @media (pointer: coarse) block below restores them. */
-.kb-key,
-.kb-toggle {
-  display: none;
-}
-
-@media (pointer: coarse) {
-  .key-toolbar {
-    position: fixed;
-    top: calc(var(--safe-top) + var(--sp-2) + var(--vv-top, 0px));
-    right: var(--sp-2);
-    z-index: 10;
-    display: grid;
-    grid-template-columns: repeat(4, var(--touch-target)) var(--touch-target);
-    grid-template-rows: var(--touch-target) var(--touch-target);
-    place-content: start end;
-    gap: var(--sp-1);
-    padding: var(--sp-1);
-    background: var(--surface);
-    backdrop-filter: var(--blur);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    width: auto;
-    height: auto;
-    transition:
-      width var(--dur-enter) var(--ease-standard),
-      height var(--dur-enter) var(--ease-standard);
-  }
-
-  /* Collapsed: fixed size = 1 button + padding + border. Content is
-     right-aligned (justify-content:end) so the toggle (col 5) stays at
-     the right edge, visible within the clipped area. --pill-outer
-     includes the 2px border (box-sizing:border-box); omitting it left
-     the content box 2px short, pinning the button top-right with
-     unequal bottom/left gaps. */
-  .key-toolbar.collapsed {
-    width: var(--pill-outer);
-    height: var(--pill-outer);
-  }
-
-  /* Grid placement: toggle at col 5 row 1 (top-right). */
-  .kb-toggle {
-    grid-area: 1 / 5;
-    position: relative;
-  }
-  .kb-r1c1 {
-    grid-area: 1 / 1;
-  }
-  .kb-r1c2 {
-    grid-area: 1 / 2;
-  }
-  .kb-r1c3 {
-    grid-area: 1 / 3;
-  }
-  .kb-r1c4 {
-    grid-area: 1 / 4;
-  }
-  .kb-r2c1 {
-    grid-area: 2 / 1;
-  }
-  .kb-r2c2 {
-    grid-area: 2 / 2;
-  }
-  .kb-r2c3 {
-    grid-area: 2 / 3;
-  }
-  .kb-r2c4 {
-    grid-area: 2 / 4;
-  }
-
-  /* Keys fade in/out during open/close. The container's width/height
-     transition handles the background slide; opacity handles the
-     individual button appearance. Stagger the fade slightly after
-     the container starts growing (delay on open) and before it
-     finishes shrinking (no delay on close). */
-  .kb-key {
-    opacity: 1;
-    transition: opacity var(--dur-standard) var(--ease-enter) 0.05s;
-  }
-
-  .key-toolbar.collapsed .kb-key {
-    opacity: 0;
-    transition: opacity var(--dur-exit) var(--ease-exit);
-  }
-
-  /* Shared button */
-  .key-toolbar button {
-    width: var(--touch-target);
-    height: var(--touch-target);
-    background: transparent;
-    color: var(--text);
-    border: none;
-    border-radius: var(--radius-inner);
-    font-size: 0.9375rem;
-    font-family: var(--font-ui);
-    font-weight: 500;
-    cursor: pointer;
-    touch-action: manipulation;
-    user-select: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .key-toolbar button:active {
-    background: var(--text-active);
-  }
-
-  /* Sticky Ctrl, armed: inverted fill so the toggle state reads clearly
-     in the monochrome palette (stays filled while pressed). */
-  .kb-key.armed,
-  .kb-key.armed:active {
-    background: var(--text);
-    color: var(--bg);
-  }
-
-  .key-toolbar button svg {
-    width: var(--icon);
-    height: var(--icon);
-    stroke: currentcolor;
-    fill: none;
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
-  /* Toggle icon crossfade. Both icons are stacked absolute so they
-     can independently fade + rotate during the open<->close
-     transition. inset:0 + margin:auto centers them within the
-     button (works because the SVGs carry explicit width/height); a
-     bare `position: absolute` would pin them at the top-left, giving
-     the toggle visibly unequal left/right padding when collapsed. */
-  .kb-toggle .icon-hamburger,
-  .kb-toggle .icon-close {
-    position: absolute;
-    inset: 0;
-    margin: auto;
-    transition:
-      opacity var(--dur-standard) linear,
-      transform var(--dur-standard) linear;
-  }
-
-  .kb-toggle .icon-close {
-    opacity: 1;
-    transform: rotate(0deg);
-  }
-  .kb-toggle .icon-hamburger {
-    opacity: 0;
-    transform: rotate(-90deg);
-  }
-  .key-toolbar.collapsed .kb-toggle .icon-close {
-    opacity: 0;
-    transform: rotate(90deg);
-  }
-  .key-toolbar.collapsed .kb-toggle .icon-hamburger {
-    opacity: 1;
-    transform: rotate(0deg);
-  }
-
-  /* No-transition on first render */
-  .key-toolbar.no-transition,
-  .key-toolbar.no-transition .kb-toggle .icon-hamburger,
-  .key-toolbar.no-transition .kb-toggle .icon-close {
-    transition: none;
-  }
 }

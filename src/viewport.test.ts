@@ -83,8 +83,6 @@ describe("viewport: visualViewport keyboard inset", () => {
   afterEach(() => {
     viewport.teardown();
     Reflect.deleteProperty(window, "visualViewport");
-    document.documentElement.style.removeProperty("--kb-inset");
-    document.documentElement.style.removeProperty("--vv-top");
   });
 
   it("pins the term wrap to the visual viewport and publishes --kb-inset/--vv-top", () => {
@@ -96,15 +94,17 @@ describe("viewport: visualViewport keyboard inset", () => {
     };
     Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
     const tw = document.createElement("div");
-    document.body.replaceChildren(tw);
-    viewport.init({ termWrap: tw, onSettled: vi.fn() });
+    const root = document.createElement("div");
+    root.appendChild(tw);
+    document.body.replaceChildren(root);
+    viewport.init({ termWrap: tw, root, onSettled: vi.fn() });
     // .term is pinned to the visual viewport: top = offsetTop (30); the bottom
     // inset is the gap from the layout bottom to the keyboard top
     // (innerHeight - offsetTop - vv.height = innerHeight - 30 - (innerHeight - 200) = 170).
     expect(tw.style.top).toBe("30px");
     expect(tw.style.bottom).toBe("170px");
-    expect(document.documentElement.style.getPropertyValue("--kb-inset")).toBe("170px");
-    expect(document.documentElement.style.getPropertyValue("--vv-top")).toBe("30px");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("170px");
+    expect(root.style.getPropertyValue("--vv-top")).toBe("30px");
   });
 
   it("clears the top/bottom insets and zeroes --kb-inset when the keyboard closes", () => {
@@ -116,11 +116,13 @@ describe("viewport: visualViewport keyboard inset", () => {
     };
     Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
     const tw = document.createElement("div");
-    document.body.replaceChildren(tw);
-    viewport.init({ termWrap: tw, onSettled: vi.fn() });
+    const root = document.createElement("div");
+    root.appendChild(tw);
+    document.body.replaceChildren(root);
+    viewport.init({ termWrap: tw, root, onSettled: vi.fn() });
     expect(tw.style.top).toBe("");
     expect(tw.style.bottom).toBe("");
-    expect(document.documentElement.style.getPropertyValue("--kb-inset")).toBe("0px");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
   });
 
   it("ignores keyboard geometry when suppressKeyboardInset is set (hardware keyboard)", () => {
@@ -138,12 +140,14 @@ describe("viewport: visualViewport keyboard inset", () => {
     };
     Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
     const tw = document.createElement("div");
-    document.body.replaceChildren(tw);
-    viewport.init({ termWrap: tw, onSettled: vi.fn(), suppressKeyboardInset: () => true });
+    const root = document.createElement("div");
+    root.appendChild(tw);
+    document.body.replaceChildren(root);
+    viewport.init({ termWrap: tw, root, onSettled: vi.fn(), suppressKeyboardInset: () => true });
     expect(tw.style.top).toBe("");
     expect(tw.style.bottom).toBe("");
-    expect(document.documentElement.style.getPropertyValue("--kb-inset")).toBe("0px");
-    expect(document.documentElement.style.getPropertyValue("--vv-top")).toBe("0px");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
+    expect(root.style.getPropertyValue("--vv-top")).toBe("0px");
   });
 });
 
@@ -155,9 +159,6 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
   afterEach(() => {
     viewport.teardown();
     Reflect.deleteProperty(window, "visualViewport");
-    document.documentElement.style.removeProperty("--wt-reserve-bottom");
-    document.documentElement.style.removeProperty("--kb-inset");
-    document.documentElement.style.removeProperty("--vv-top");
     Object.defineProperty(window, "innerHeight", { configurable: true, value: realInnerHeight });
   });
 
@@ -169,10 +170,12 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
       removeEventListener: vi.fn(),
     };
     Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
-    document.documentElement.style.setProperty("--wt-reserve-bottom", "48px");
     const tw = document.createElement("div");
-    document.body.replaceChildren(tw);
-    viewport.init({ termWrap: tw, onSettled: vi.fn() });
+    tw.style.setProperty("--wt-reserve-bottom", "48px");
+    const root = document.createElement("div");
+    root.appendChild(tw);
+    document.body.replaceChildren(root);
+    viewport.init({ termWrap: tw, root, onSettled: vi.fn() });
     // Keyboard closed (vv.height == innerHeight, offsetTop 0) so bottomInset is 0;
     // the 48px reserve (< innerHeight/3 == 300) is the whole bottom offset.
     expect(tw.style.bottom).toBe("48px");
@@ -189,10 +192,12 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
     // A reserve near/over the screen height (e.g. the switcher bar measured while a
     // phantom keyboard inset had lifted it) must be clamped so it never strands the
     // lower screen black. round(innerHeight / 3) == round(900 / 3) == 300.
-    document.documentElement.style.setProperty("--wt-reserve-bottom", "100000px");
     const tw = document.createElement("div");
-    document.body.replaceChildren(tw);
-    viewport.init({ termWrap: tw, onSettled: vi.fn() });
+    tw.style.setProperty("--wt-reserve-bottom", "100000px");
+    const root = document.createElement("div");
+    root.appendChild(tw);
+    document.body.replaceChildren(root);
+    viewport.init({ termWrap: tw, root, onSettled: vi.fn() });
     expect(tw.style.bottom).toBe("300px");
   });
 });

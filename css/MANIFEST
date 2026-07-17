@@ -1,12 +1,20 @@
-# web-terminal-ui CSS bundle manifest
-# Files concatenated in declared order to produce the served style.css.
-# The order IS the cascade: tokens + reset + terminal core, then the v3 design
-# system (shared primitives, then per-feature chrome), then all motion last.
+# web-terminal-ui CSS — the REFERENCE FULL-PAGE bundle.
+# What the full-page product serves (web-terminal-server, web-terminal-kiro,
+# scaffold/index.html): the page kit (page.css — html/body reset + @font-face;
+# full-page hosts ONLY) plus the complete tabbed component set. An EMBEDDING
+# consumer must NOT serve this file's bundle — it concatenates the per-preset
+# manifest matching its composition instead (MANIFEST.single / MANIFEST.touch /
+# MANIFEST.tabbed), which contains no page-level rules.
+# Files concatenate in declared order; the order IS the cascade.
+page.css
 00-tokens.css
-01-reset.css
-02-app.css
-03-primitives.css
-04-feedback.css
-05-tabs.css
-06-mobile.css
-07-animations.css
+01-scope.css
+02-terminal.css
+10-primitives.css
+20-connection-banner.css
+21-scroll-to-bottom.css
+22-context-menu.css
+23-toolbar.css
+30-tabs.css
+31-switcher.css
+40-animations.css
