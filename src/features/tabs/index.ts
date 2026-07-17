@@ -9,115 +9,57 @@
 // background delta arrives after.
 
 import { LineStore, modes } from "@cplieger/web-terminal-engine";
-import type { TerminalContext, TerminalFeature, TabHandle } from "../kernel/types.js";
-import type { ActivityMonitorApi } from "./activity-monitor.js";
-import type { MobileToolbarApi } from "./mobile-toolbar.js";
-import { fromHTML } from "./dom.js";
+import type { SessionRef, TerminalContext, TerminalFeature } from "../../kernel/types.js";
+import type { ActivityMonitorApi } from "../activity-monitor.js";
+import type { MobileToolbarApi } from "../mobile-toolbar.js";
+import { fromHTML } from "../dom.js";
+import { placeMenuAt } from "../menu-position.js";
+import type { SessionInfo, Tab } from "./model.js";
+import {
+  ACTIVE_TAB_KEY,
+  STATUS_EXITED,
+  SWIPE_HINT_KEY,
+  baseLabel,
+  createInputTitleDeriver,
+  createSessionAPI,
+  createTombstones,
+} from "./model.js";
+import {
+  TAB_HTML,
+  kbButtonHTML,
+  newButtonHTML,
+  paintStatusDot,
+  pick,
+  switchButtonHTML,
+} from "./strip.js";
+import {
+  AXIS_LOCK_PX,
+  PREVIEW_DRAG_RATIO,
+  PREVIEW_PEEK_MAX,
+  SWIPE_DURATION,
+  SWIPE_MIN_PX,
+  SWIPE_VELOCITY,
+  SWITCHER_HTML,
+  SWITCHER_ROW_HTML,
+  VELOCITY_STALE_MS,
+  animateRowIn,
+  animateRowOut,
+} from "./switcher.js";
 
 const DEFAULT_API_BASE = "/api/sessions";
-// Swipe recognition on the mobile switcher bar: a mostly-horizontal drag past
-// this distance switches; a near-stationary release is a tap (opens overview).
-const SWIPE_MIN_PX = 40;
-// Movement (px) before an in-progress bar drag commits to a horizontal
-// (tab-switch preview) or vertical (expand/collapse) axis.
-const AXIS_LOCK_PX = 8;
-// Flick-to-commit thresholds (from @use-gesture's drag defaults, MIT): a release
-// counts as a flick when the gesture was quick, fast, and travelled enough, so a
-// short fast swipe commits the switch/expand even below the halfway distance.
-const SWIPE_VELOCITY = 0.5; // px/ms at release
-const SWIPE_DURATION = 250; // ms, whole-gesture cap for a flick
-// If the finger paused longer than this before lifting, the release velocity is
-// stale (pointerup usually repeats the last pointermove position -> reads ~0),
-// so ignore it and commit by distance instead (@use-gesture issue #332).
-const VELOCITY_STALE_MS = 32;
-// Live drag preview: while an open list is being swiped, it peeks in the swipe
-// direction by this fraction of the finger's horizontal travel, capped at this
-// many pixels — a hint of the coming rotation, not the full shift (the incoming
-// row only appears on release, so a large move looked wrong). The release reel
-// continues from wherever the peek left the rows.
-const PREVIEW_DRAG_RATIO = 0.1;
-const PREVIEW_PEEK_MAX = 10;
-// One-time "swipe to switch" hint, remembered across loads.
-const SWIPE_HINT_KEY = "wt-swipe-hint-seen";
-// localStorage key for the last active session id, so a page reload reopens the
-// tab the user left on rather than always defaulting to the oldest one.
-const ACTIVE_TAB_KEY = "wt-active-session";
 // The mobile bottom-switcher (a single full-width active-tab chip + swipe) is
 // used ONLY on a narrow coarse-pointer device (a phone). A wide touchscreen (an
 // iPad) and every fine-pointer device (a desktop, or an iPad with a trackpad /
 // Magic Keyboard) get the multi-tab top strip instead — the switcher's
 // single-giant-tab layout wastes a big screen (an iPad was getting the phone
-// UI). MUST stay in lockstep with the identical media query in css/06-mobile.css
-// (.wt-switcher shown / .wt-tab-bar hidden) and its complement in css/05-tabs.css
-// (the desktop-strip terminal clearance). Width chosen to sit above every phone
-// portrait width and below iPad portrait (768).
-const SWITCHER_MEDIA = "(pointer: coarse) and (max-width: 600px)";
+// UI). The narrow half of that fact is the kernel's .wt-narrow root class /
+// ctx.layout().narrow (ONE breakpoint constant, kernel-owned, root-width
+// driven); CSS pairs it with (pointer: coarse) where touch matters.
 // Default cadence for the no-activityMonitor polling fallback.
 const DEFAULT_POLL_MS = 4000;
-// The server-side status of a session whose process has exited (mirrors the
-// engine's terminal.StatusExited). Such a session is viewable history — its
-// final screen replays and the kernel shows "Session ended" — but it can never
-// produce output again, so session selection prefers live sessions everywhere.
-const STATUS_EXITED = "exited";
-// Tab context-menu viewport clamp (mirrors context-menu.ts): keep this margin
-// from every viewport edge, and this gap above the pointer when the menu has to
-// flip up (a right-click near the bottom edge) so it is neither clipped nor
-// hidden under the cursor.
-const TAB_MENU_EDGE = 8;
-const TAB_MENU_GAP = 16;
-
-/** One session's client-side wire shape (matches terminal.SessionInfo). */
-interface SessionInfo {
-  id: string;
-  title: string;
-  /** The raw client-set title (the value pushed via PUT .../title), before the
-   *  server's OSC fallback baked into `title`. A consumer that treats the
-   *  program's OSC window title as unreliable (an agent shell) reads this. */
-  clientTitle?: string | undefined;
-  createdAt: string;
-  status: string;
-  /** Sticky: true once the session has emitted a genuine activity signal
-   *  (OSC 9;4 progress, or a classified OSC 9 notification). Gates whether the
-   *  per-tab activity dot is shown; see paintStatusDot / baseLabel. */
-  reportsActivity?: boolean;
-}
-
-interface Tab {
-  id: string;
-  /** The raw server title (the OSC 0/2 window title the process set), possibly
-   *  empty before the process sets one. The displayed label is derived from it
-   *  with a numbered fallback and de-duplication (see relabelAll). */
-  title: string;
-  /** The computed, de-duplicated label actually shown in the chrome. */
-  display: string;
-  createdAt: string;
-  store: LineStore;
-  el: HTMLElement;
-  label: HTMLElement;
-  dot: HTMLElement;
-  aria: TabHandle;
-  scrollTop: number;
-  following: boolean;
-  /** Sticky: true once this session emitted a genuine activity signal (OSC 9;4).
-   *  Its activity dot is shown only while true; a session that never reports
-   *  activity (a plain shell) keeps a clean, dot-less tab. Fed from the server's
-   *  reportsActivity via applyStatus. */
-  reports: boolean;
-  /** A fallback title derived from the LAST non-empty line the user submitted
-   *  into this tab (updated on every Enter). Used only when the process sets no
-   *  window title of its own: the OSC 0/2 title (`title` above) takes precedence
-   *  when present and keeps updating, and this is what the tab reads as when it
-   *  does not — a plain shell with no PROMPT_COMMAND title, or kiro-cli with its
-   *  cwd-only title disabled. Undefined until the first non-empty submission; see
-   *  baseLabel. */
-  derived?: string;
-  /** The persisted client title reported by the server (its `clientTitle` wire
-   *  field): the last derived title pushed via PUT .../title, surviving reloads.
-   *  In `preferInputTitle` mode this is the reload-recovery source (the live
-   *  `derived` is lost on reload, and `title` is the unreliable OSC value there).
-   *  In the default mode it is the lowest-priority fallback after title/derived. */
-  clientTitle?: string | undefined;
-}
+// Tab context-menu viewport clamping + the flip-above-the-pointer gap live in
+// the shared point-anchored positioner (menu-position.ts), shared with the
+// terminal context menu (formerly two hand-synced copies of the same math).
 
 export interface TabsApi {
   /** Spawn a fresh session and switch to it. */
@@ -158,130 +100,6 @@ export interface TabsOptions {
   preferInputTitle?: boolean;
 }
 
-// The +/x/keyboard glyphs are inline SVG (not font glyphs) so they center
-// exactly in their flex-centered buttons and stay symmetric regardless of the UI
-// font's metrics. Each is defined ONCE here and shared by every chip site and
-// control below (rather than duplicated across the desktop and mobile markup).
-const CLOSE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18"/></svg>`;
-const NEW_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`;
-const KB_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M15 15 9.5 9.5M9.5 13V9.5H13"/></svg>`;
-// Two-overlapping-windows glyph for the mobile switcher's dedicated open/close
-// button: the browser-style "tab switcher" icon, more recognisable than the
-// prior swap-arrows (which read like a keyboard Tab key). A latest-wins
-// background-tab notification dot rides on it (see switchButtonHTML). Same
-// viewBox + stroke=currentcolor treatment as the others.
-const SWITCH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="13" height="13" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3"/></svg>`;
-
-// chipContent is the ONE builder for a tab chip's content — a status dot, a
-// label, and a close (x) — shared by all three chip sites: the desktop strip
-// (.wt-tab), the mobile active row (.wt-switcher-current), and each expanded
-// mobile list row (.wt-switcher-row). Each site passes its OWN class set (never
-// renamed) so every existing selector — and thus all CSS and all tests — still
-// matches. The one structural difference is WHERE the close sits: the desktop
-// chip nests it flat inside .wt-tab, while the two mobile chips place it as a
-// sibling of the select/swipe button (a button can't nest in a button). So the
-// builder returns two fragments — the dot+label pair and the close — that each
-// site drops into its own structure.
-function chipContent(v: { dot: string; label: string; close: string; closeAttr?: string }): {
-  dotLabel: string;
-  close: string;
-} {
-  return {
-    dotLabel:
-      `<span class="${v.dot} wt-status-dot" aria-hidden="true"></span>` +
-      `<span class="${v.label}"></span>`,
-    close: `<button type="button" class="${v.close}" aria-label="Close terminal"${v.closeAttr ?? ""}>${CLOSE_SVG}</button>`,
-  };
-}
-
-// The ONE "+" (new-terminal) and keyboard button factories, shared by the
-// desktop strip and the mobile switcher — only the class set differs. These
-// build the markup; element construction + event wiring live in makeNewButton /
-// makeKbButton (in setup), which close over create() and the key-grid toggle.
-function newButtonHTML(cls: string): string {
-  return `<button type="button" class="${cls}" aria-label="New terminal">${NEW_SVG}</button>`;
-}
-function kbButtonHTML(cls: string): string {
-  return `<button type="button" class="${cls}" aria-label="Keyboard keys" aria-expanded="false" hidden>${KB_SVG}</button>`;
-}
-// The mobile switcher's dedicated open/close button. It toggles the tab list and
-// carries a latest-wins notification dot (a child span) — amber when a background
-// terminal needs input, green when a background turn finished — cleared when the
-// list opens. Only the mobile switcher builds it (element construction + event
-// wiring live in makeSwitchButton in setup); the desktop strip already shows
-// every tab's own status dot, so it needs no aggregate cue.
-function switchButtonHTML(cls: string): string {
-  return (
-    `<button type="button" class="${cls}" aria-label="Open tab switcher">${SWITCH_SVG}` +
-    `<span class="wt-status-dot wt-switcher-switch-dot" aria-hidden="true"></span></button>`
-  );
-}
-
-// Desktop strip chip: dot + label + close all flat inside .wt-tab (the whole
-// chip is the click/switch target; the close is a nested button). tabindex="-1"
-// keeps the close out of the tab order.
-const TAB_CHIP = chipContent({
-  dot: "wt-tab-dot",
-  label: "wt-tab-label",
-  close: "wt-tab-close",
-  closeAttr: ' tabindex="-1"',
-});
-const TAB_HTML = `
-<div class="wt-tab">
-  ${TAB_CHIP.dotLabel}
-  ${TAB_CHIP.close}
-</div>`;
-
-// Mobile bottom bar. One element, two parts stacked in a column: the always-
-// visible bar row (active tab as a tap/swipe surface + keyboard + "+") on top,
-// and a list of the OTHER tabs BELOW it. On swipe-up / tap the whole bar slides
-// up and the list fills in beneath it (down to the safe area); swipe-down /
-// tap collapses it back to the bottom. Selecting a listed tab swaps it into the
-// active row. This replaces the old separate modal overview sheet ("one element"
-// per the user): the bar itself lifts rather than opening a distinct surface.
-// The bar is the FIRST child and the list the SECOND: the switcher is bottom-
-// anchored, so a column with the list last grows the container upward, lifting
-// the bar and revealing the list below it (DOM order = visual order top-to-bottom).
-//   - .wt-switcher-current-wrap: the active-tab row — a select/swipe surface
-//     (.wt-switcher-current with dot + label) plus a close (x) overlaid at the
-//     right, mirroring the listed rows. No "n / m" counter: the list below is a
-//     rotating circular queue, so an absolute position number is meaningless.
-//   - The keyboard button (.wt-switcher-kb, opens the key grid above the bar,
-//     only wired + shown when a keyboardToggle feature is provided) and the
-//     accent "+" (.wt-switcher-new, spawns a terminal) are appended to the bar
-//     row from the shared factories in setup (see makeKbButton / makeNewButton).
-const CURRENT_CHIP = chipContent({
-  dot: "wt-switcher-dot",
-  label: "wt-switcher-label",
-  close: "wt-switcher-current-close wt-btn",
-});
-const SWITCHER_HTML = `
-<div class="wt-switcher" role="group" aria-label="Terminal tabs">
-  <div class="wt-switcher-bar">
-    <div class="wt-switcher-current-wrap">
-      <button type="button" class="wt-switcher-current" aria-haspopup="true" aria-expanded="false">
-        <span class="wt-switcher-current-inner">${CURRENT_CHIP.dotLabel}</span>
-      </button>
-      ${CURRENT_CHIP.close}
-    </div>
-  </div>
-  <ul class="wt-switcher-list" role="list"></ul>
-</div>`;
-
-// One row per OTHER tab in the expanded list: a stretched select target (dot +
-// label) with the close (x) laid inside it at the right (two buttons can't nest,
-// so the x is a sibling overlapping the select's reserved right padding).
-const ROW_CHIP = chipContent({
-  dot: "wt-switcher-row-dot",
-  label: "wt-switcher-row-label",
-  close: "wt-switcher-row-close wt-btn",
-});
-const SWITCHER_ROW_HTML = `
-<li class="wt-switcher-row">
-  <button type="button" class="wt-switcher-row-select">${ROW_CHIP.dotLabel}</button>
-  ${ROW_CHIP.close}
-</li>`;
-
 // looksLikeHardwareKey reports whether a keydown could only have come from a
 // PHYSICAL keyboard on a touch device. There is no web API that directly says "a
 // hardware keyboard is attached" (navigator.keyboard is layout/lock only and
@@ -315,80 +133,26 @@ function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
 export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
   const preferInputTitle = opts.preferInputTitle ?? false;
-  // fetch has no default timeout; a stalled-but-open server would otherwise leave a
-  // boot apiList/apiCreate await pending forever, so setup() never resolves and the
-  // kernel's post-setup overlay-dismiss never fires (permanent loading overlay). Bound
-  // every session-REST call; on expiry the existing catch paths recover.
-  const SESSION_API_TIMEOUT_MS = 15000;
+  // The session REST client (model.ts): every call timeout-bounded, list
+  // shape-guarded, title persistence fire-and-forget.
+  const api = createSessionAPI(apiBase);
 
-  async function apiList(): Promise<SessionInfo[]> {
-    const r = await fetch(apiBase, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
-    });
-    if (!r.ok) {
-      throw new Error(`web-terminal-ui: session list failed (${String(r.status)})`);
-    }
-    const data: unknown = await r.json();
-    // A 200 with a non-array body -- a proxy error object, or a Go server
-    // marshaling a nil session slice as JSON `null` -- must not reach the
-    // bootstrap's `sessions.length` / `for...of` (or the poll's `list.map`)
-    // uncaught: it would throw out of setup(), trip the kernel's 'terminal
-    // has no chrome' teardown, and (managesSessions skipped the startup
-    // connect) leave connectionInitiated false -> a permanently dead
-    // terminal. Reject a non-array so the callers' existing catch paths
-    // recover (bootstrap -> [], poll -> skip the tick).
-    if (!Array.isArray(data)) {
-      throw new Error("web-terminal-ui: session list returned a non-array body");
-    }
-    return data as SessionInfo[];
-  }
-  async function apiCreate(): Promise<SessionInfo> {
-    const r = await fetch(apiBase, {
-      method: "POST",
-      signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
-    });
-    if (!r.ok) {
-      throw new Error(`web-terminal-ui: session create failed (${String(r.status)})`);
-    }
-    return (await r.json()) as SessionInfo;
-  }
-  async function apiClose(id: string): Promise<void> {
-    const r = await fetch(`${apiBase}/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-      signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
-    });
-    if (!r.ok) {
-      throw new Error(`web-terminal-ui: session close failed (${String(r.status)})`);
-    }
-  }
-  // Persist the input-derived tab title server-side so it survives a page reload
-  // and shows on other devices. The engine stores it as the session's fallback
-  // title and uses it only when the program emits no OSC title (the web-terminal-kiro case:
-  // kiro-cli emits no usable OSC title, so the latest user message is the label).
-  // Best-effort and fire-and-forget: a failure never disrupts the terminal — the
-  // locally-derived title still displays, it just is not persisted this time.
-  async function apiSetTitle(id: string, title: string): Promise<void> {
-    try {
-      await fetch(`${apiBase}/${encodeURIComponent(id)}/title`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title }),
-        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
-      });
-    } catch {
-      /* best-effort persistence; ignore network/timeout errors */
-    }
-  }
-
+  // tabs owns session selection. The static sessionOwner registration tells
+  // the kernel not to open a bare /ws at startup (which a SessionManager would
+  // 404 for lack of ?session=); the kernel instead awaits
+  // resolveInitialSession() once setup completes and performs the first switch
+  // itself. The registration must exist on the feature VALUE (read before
+  // setup), while the bootstrap needs setup-scoped state — so it delegates to
+  // a closure setup() wires. resolveImpl is nulled on teardown.
+  let resolveImpl: (() => Promise<SessionRef | null>) | null = null;
   return {
     name: "tabs",
-    // tabs owns session selection: it resolves the first session id from
-    // GET/POST /api/sessions during setup and drives the first connect via
-    // ctx.notifySwitch. This tells the kernel not to open a bare /ws at startup
-    // (which a SessionManager would 404 for lack of ?session=).
-    managesSessions: true,
-    async setup(ctx: TerminalContext) {
+    sessionOwner: {
+      resolveInitialSession: () => (resolveImpl ? resolveImpl() : Promise.resolve(null)),
+    },
+    // Synchronous setup: the chrome mounts immediately; the async session
+    // bootstrap that used to live here is the kernel-driven resolver above.
+    setup(ctx: TerminalContext) {
       const tablist = ctx.tablist();
       const monitor = opts.activityMonitor ? ctx.use(opts.activityMonitor) : undefined;
 
@@ -477,23 +241,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const newBtn = makeNewButton("wt-tab-new");
       bar.appendChild(newBtn);
 
-      // Pull the terminal surface up off the fixed BOTTOM strip on desktop so
-      // the bar does not overlap the last rows. The surface is position:fixed
-      // inset:0, so a bottom offset (gated to a fine pointer in CSS, since the
-      // strip is hidden on a coarse pointer where the mobile switcher applies its
-      // own inset) clears it. A ResizeObserver keeps the offset in step with the
-      // real strip height rather than a hard-coded guess. The measured height is
-      // published on the document root (not the surface): the scroll-to-bottom
-      // button sits in a sibling region, not inside .term, so a property set on
-      // .term would not inherit to it and it would fall back to the 44px guess
-      // and overlap the strip. Both .term and the button inherit it from :root.
+      // Pull the terminal surface up off the docked BOTTOM strip on desktop so
+      // the bar does not overlap the last rows. The surface is absolute
+      // inset:0, so a bottom offset (gated to a fine pointer / non-narrow root
+      // in CSS, since the strip is hidden on the narrow-coarse phone where the
+      // mobile switcher applies its own inset) clears it. A ResizeObserver
+      // keeps the offset in step with the real strip height rather than a
+      // hard-coded guess. The measured height is published on the terminal
+      // ROOT (not the surface): the scroll-to-bottom button sits in a sibling
+      // region, not inside .term, so a property set on .term would not inherit
+      // to it and it would fall back to the 44px guess and overlap the strip.
+      // Both .term and the button inherit it from .wt-root — and the host page
+      // never sees it.
       const surface = ctx.surface();
       surface.classList.add("wt-with-tabbar");
+      const varRoot = surface.parentElement ?? surface;
       const barResize = new ResizeObserver(() => {
-        document.documentElement.style.setProperty(
-          "--wt-tabbar-h",
-          `${String(bar.offsetHeight)}px`,
-        );
+        varRoot.style.setProperty("--wt-tabbar-h", `${String(bar.offsetHeight)}px`);
       });
       barResize.observe(bar);
 
@@ -592,7 +356,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       root?.classList.add("wt-tabbed");
       // Reserve the collapsed bar row's height so terminal content stops above it
       // (mobile item 2): viewport.ts adds --wt-reserve-bottom to the surface's
-      // bottom inset. Measure the bar row (not the expandable list, which just
+      // bottom inset (it reads the var off the surface, which inherits it from
+      // the root). Measure the bar row (not the expandable list, which just
       // overlays content). innerHeight - rect.top captures the row plus the
       // safe-area beneath it; the RO fires with the keyboard closed, so the value
       // excludes the keyboard lift (viewport.ts adds that separately). The
@@ -600,7 +365,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const swReserve = new ResizeObserver(() => {
         const rect = swBar.getBoundingClientRect();
         const px = rect.height > 0 ? Math.max(0, Math.round(window.innerHeight - rect.top)) : 0;
-        document.documentElement.style.setProperty("--wt-reserve-bottom", `${String(px)}px`);
+        varRoot.style.setProperty("--wt-reserve-bottom", `${String(px)}px`);
         window.visualViewport?.dispatchEvent(new Event("resize"));
       });
       swReserve.observe(swBar);
@@ -635,24 +400,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       ctx.region("overlay", "tab-menu").appendChild(tabMenu);
 
       const tabList: Tab[] = [];
-      // Ids the user closed within CLOSE_TOMBSTONE_MS, so a stale server listing
-      // (the SSE re-open snapshot, or the poll's GET /api/sessions) that predates
-      // the server reaping the session does not re-adopt (flash back) the closed
-      // tab. TTL-cleared in adoptSession.
-      const recentlyClosed = new Map<string, number>();
-      const CLOSE_TOMBSTONE_MS = 15000;
-      function tombstone(id: string): void {
-        const now = Date.now();
-        // Sweep entries whose window already elapsed (adoptSession treats them as
-        // untombstoned anyway) so the map cannot grow without bound over a long
-        // session of opens/closes; then record this close.
-        for (const [k, t] of recentlyClosed) {
-          if (now - t >= CLOSE_TOMBSTONE_MS) {
-            recentlyClosed.delete(k);
-          }
-        }
-        recentlyClosed.set(id, now);
-      }
+      // Close tombstones (model.ts): ids the user closed recently, so a stale
+      // server listing (the SSE re-open snapshot, or the poll's GET
+      // /api/sessions) that predates the server reaping the session does not
+      // re-adopt (flash back) a closed tab.
+      const tombstones = createTombstones();
       // The expanded mobile list's row elements, keyed by tab id. Rows are
       // reused across re-renders (reconcile, not rebuild) so a swipe can FLIP the
       // same elements from their old slots to their new ones (the rotation).
@@ -694,28 +446,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const prefersReduce = (): boolean =>
         window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-      // baseLabel is a tab's label before de-duplication. Preference order: the
-      // process window title (OSC 0/2, e.g. a shell's PROMPT_COMMAND title),
-      // which takes precedence whenever the program sets one and keeps updating
-      // as it changes (the status SSE re-pushes it); then a fallback derived from
-      // the last line the user submitted, for a program that sets no title (a
-      // bare shell, or kiro-cli with its cwd-only title disabled); then a plain
-      // "New tab". fallback=true marks that last case so relabelAll leaves
-      // untitled tabs as "New tab" with no numeric suffix.
-      function baseLabel(tab: Tab): { text: string; fallback: boolean } {
-        // preferInputTitle (agent shell with an unreliable OSC title): show the
-        // live submitted line, then the persisted client title on reload — the
-        // process OSC `title` is ignored. Default: OSC title first, then the live
-        // derived line, then the persisted client title (the latter two are the
-        // "latest user message" fallback when the program sets no OSC title).
-        const derived = tab.derived?.trim() ?? "";
-        const persisted = tab.clientTitle?.trim() ?? "";
-        const real = preferInputTitle
-          ? derived || persisted
-          : tab.title.trim() || derived || persisted;
-        return real ? { text: real, fallback: false } : { text: "New tab", fallback: true };
-      }
-
       // relabelAll recomputes every tab's display label with de-duplication:
       // when two tabs resolve to the same base label (e.g. two shells with the
       // same window title, or two tabs whose last submitted line was identical),
@@ -726,14 +456,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // read "New tab" without a numeric suffix.
         const counts = new Map<string, number>();
         for (const t of tabList) {
-          const { text, fallback } = baseLabel(t);
+          const { text, fallback } = baseLabel(t, preferInputTitle);
           if (!fallback) {
             counts.set(text, (counts.get(text) ?? 0) + 1);
           }
         }
         const seen = new Map<string, number>();
         for (const t of tabList) {
-          const { text, fallback } = baseLabel(t);
+          const { text, fallback } = baseLabel(t, preferInputTitle);
           let display = text;
           if (!fallback && (counts.get(text) ?? 0) > 1) {
             const k = (seen.get(text) ?? 0) + 1;
@@ -749,133 +479,24 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // --- Fallback title derivation from the user's submitted lines ---
-      // Used only when the process sets no OSC window title of its own (baseLabel
-      // prefers tab.title). A shell without a PROMPT_COMMAND title, or kiro-cli
-      // with its cwd-only title disabled, sets none — so the useful fallback is
-      // the last line the user submitted. The kernel routes input to the active
-      // session, so an input observer's bytes belong to activeId. A tiny line
-      // editor tracks the current input line (handling backspace and skipping
-      // the escape sequences arrow keys and bracketed paste emit) and updates the
-      // tab's derived title on every non-empty submission. Best-effort: an odd
-      // editing sequence just yields no derived title (the tab then reads "New
-      // tab" until the next submission).
-      // A generous storage bound for the fallback (input-derived) title. The tab
-      // label truncates it visually with max-width + ellipsis in EVERY view — the
-      // desktop strip, the mobile active bar, and the mobile list — so this is
-      // only a guard against storing a huge paste, not a display cut. (It was a
-      // hard 60 that cut the label mid-word regardless of how much fit.)
-      const MAX_DERIVED = 512;
-      let lineBytes: number[] = [];
-      let escState = 0; // 0 normal, 1 saw ESC, 2 in CSI, 3 in SS3 (one more byte)
-      let csiParams = ""; // accumulated CSI parameter bytes, to spot paste guards
-      let inPaste = false; // inside a bracketed paste (ESC[200~ … ESC[201~)
-      function resetInputLine(): void {
-        lineBytes = [];
-        escState = 0;
-        csiParams = "";
-        inPaste = false;
-      }
-      function deriveTitleFromInput(bytes: Uint8Array): void {
+      // The line-editor state machine lives in model.ts
+      // (createInputTitleDeriver); this wires its submissions to the active
+      // tab. Used only when the process sets no OSC window title of its own
+      // (baseLabel prefers tab.title). The kernel routes input to the active
+      // session, so an input observer's bytes belong to activeId. Every
+      // non-empty submitted line updates the fallback title (the last one
+      // wins) and is persisted server-side (engine PUT .../title) so a reload
+      // and other devices recover this "latest message" label; the engine uses
+      // it only when the program emits no OSC title.
+      const titleDeriver = createInputTitleDeriver((line) => {
         const t = tabList.find((x) => x.id === activeId);
         if (!t) {
           return; // no active tab
         }
-        for (let i = 0; i < bytes.length; i++) {
-          const b = bytes[i];
-          if (b === undefined) {
-            continue;
-          }
-          if (escState === 1) {
-            escState = b === 0x5b ? 2 : b === 0x4f ? 3 : 0; // ESC [ = CSI, ESC O = SS3
-            continue;
-          }
-          if (escState === 2) {
-            if (b >= 0x40 && b <= 0x7e) {
-              // CSI final byte. Recognize the bracketed-paste guards ESC[200~
-              // (start) and ESC[201~ (end) so embedded newlines in a pasted,
-              // often multi-line, message are not read as line submissions.
-              if (b === 0x7e) {
-                if (csiParams === "200") {
-                  inPaste = true;
-                } else if (csiParams === "201") {
-                  inPaste = false;
-                }
-              }
-              csiParams = "";
-              escState = 0; // CSI final byte
-            } else if (b >= 0x30 && b <= 0x3f) {
-              csiParams += String.fromCharCode(b); // parameter byte (digits, ; ? etc.)
-            }
-            continue;
-          }
-          if (escState === 3) {
-            escState = 0; // SS3 final byte
-            continue;
-          }
-          if (b === 0x1b) {
-            escState = 1; // ESC: start of an escape sequence
-          } else if (b === 0x0d || b === 0x0a) {
-            // A newline is a line SUBMIT only when it terminates the input. It is
-            // folded to a single space (keeping the current line going) when it is
-            // instead a paste-internal break, so a multi-line message becomes one
-            // logical line whose title reflects its START rather than only its
-            // LAST line. Two cases fold:
-            //   - inside a bracketed paste (ESC[200~ … ESC[201~), and
-            //   - a newline FOLLOWED by more printable input in this SAME chunk:
-            //     a human pressing Enter sends the newline as the end of its own
-            //     input event, whereas a paste (even one sent WITHOUT bracketed-
-            //     paste guards — e.g. an agent shell like kiro-cli that keeps a
-            //     pasted multi-line message as one prompt) delivers
-            //     text + newline + text together, so trailing content marks the
-            //     newline as a soft break, not a submit. Without this, such a
-            //     paste left only its last line as the title (the reported
-            //     "the title cut off the start of my message").
-            let softBreak = inPaste;
-            if (!softBreak) {
-              for (let j = i + 1; j < bytes.length; j++) {
-                const nb = bytes[j];
-                if (nb !== undefined && nb >= 0x20) {
-                  softBreak = true;
-                  break;
-                }
-              }
-            }
-            if (softBreak) {
-              if (lineBytes.length > 0 && lineBytes[lineBytes.length - 1] !== 0x20) {
-                lineBytes.push(0x20);
-              }
-              continue;
-            }
-            const line = new TextDecoder().decode(new Uint8Array(lineBytes)).trim();
-            lineBytes = [];
-            // Every non-empty submitted line updates the fallback title (the
-            // last one wins); a leading "/" counts, since it is a valid shell
-            // command path.
-            if (line) {
-              t.derived = line.slice(0, MAX_DERIVED);
-              // Persist it server-side (engine PUT .../title) so a reload and
-              // other devices recover this "latest message" label; the engine
-              // uses it only when the program emits no OSC title.
-              void apiSetTitle(t.id, t.derived);
-              syncChrome();
-            }
-          } else if (b === 0x7f || b === 0x08) {
-            // Backspace: drop one codepoint (pop UTF-8 continuation bytes + lead).
-            while (lineBytes.length > 0) {
-              const last = lineBytes[lineBytes.length - 1];
-              if (last === undefined || (last & 0xc0) !== 0x80) {
-                break;
-              }
-              lineBytes.pop();
-            }
-            lineBytes.pop();
-          } else if (b === 0x03) {
-            lineBytes = []; // Ctrl-C: cancel the current line
-          } else if (b >= 0x20) {
-            lineBytes.push(b); // printable ASCII or a UTF-8 byte
-          }
-        }
-      }
+        t.derived = line;
+        void api.setTitle(t.id, t.derived);
+        syncChrome();
+      });
 
       function focusInput(): void {
         ctx.surface().querySelector<HTMLElement>(".term-input")?.focus({ preventScroll: true });
@@ -928,51 +549,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         );
         pick(row, ".wt-switcher-row-label").textContent = t.display;
       }
-      // animateRowIn / animateRowOut give a listed tab an enter / leave motion:
-      // the row's own max-height grows from 0 (fading in) on add, and collapses
-      // to 0 (fading out, then removed) on close. The flex list's height follows
-      // the row, so adding/closing a tab animates the tray height rather than
-      // snapping. Inline-driven (cleared when done); the caller gates motion.
-      const ROW_ANIM_MS = 220;
-      const ROW_ANIM_EASE = "cubic-bezier(0.2, 0, 0, 1)";
-      function animateRowIn(row: HTMLElement): void {
-        const h = row.getBoundingClientRect().height;
-        if (h <= 0) {
-          return;
-        }
-        row.style.overflow = "hidden";
-        row.style.transition = "none";
-        row.style.maxHeight = "0";
-        row.style.opacity = "0";
-        requestAnimationFrame(() => {
-          row.style.transition = `max-height ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}, opacity ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}`;
-          row.style.maxHeight = `${String(Math.ceil(h))}px`;
-          row.style.opacity = "1";
-        });
-        window.setTimeout(() => {
-          row.style.transition = "";
-          row.style.maxHeight = "";
-          row.style.opacity = "";
-          row.style.overflow = "";
-        }, ROW_ANIM_MS + 60);
-      }
-      function animateRowOut(row: HTMLElement): void {
-        const h = row.getBoundingClientRect().height;
-        row.style.overflow = "hidden";
-        row.style.pointerEvents = "none";
-        row.style.transition = "none";
-        row.style.maxHeight = `${String(Math.ceil(h))}px`;
-        row.style.opacity = "1";
-        requestAnimationFrame(() => {
-          row.style.transition = `max-height ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}, opacity ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}`;
-          row.style.maxHeight = "0";
-          row.style.opacity = "0";
-        });
-        window.setTimeout(() => {
-          row.remove();
-        }, ROW_ANIM_MS + 60);
-      }
-
       // renderSwitcherList reconciles the expanded list to a row per OTHER tab
       // (the active tab lives in the bar row), REUSING existing row elements
       // rather than rebuilding, so element identity is stable and the swipe
@@ -1309,7 +885,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         };
         // Set an initial label immediately (relabelAll refines it with de-dup
         // once the tab is in tabList and syncChrome runs).
-        tab.display = baseLabel(tab).text;
+        tab.display = baseLabel(tab, preferInputTitle).text;
         label.textContent = tab.display;
         aria.setLabel(tab.display);
         el.addEventListener("click", (e) => {
@@ -1422,7 +998,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         } catch {
           /* storage unavailable (private mode / disabled) — non-fatal */
         }
-        resetInputLine(); // a partial line typed in the old tab does not carry over
+        titleDeriver.reset(); // a partial line typed in the old tab does not carry over
         ctx.render.bind(next.store);
         ctx.notifySwitch({ id: next.id });
         armCatchup();
@@ -1585,12 +1161,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (tabList.find((t) => t.id === info.id)) {
           return;
         }
-        const closedAt = recentlyClosed.get(info.id);
-        if (closedAt !== undefined) {
-          if (Date.now() - closedAt < CLOSE_TOMBSTONE_MS) {
-            return; // just closed here; ignore a stale listing until the server reaps it
-          }
-          recentlyClosed.delete(info.id);
+        if (tombstones.active(info.id)) {
+          return; // just closed here; ignore a stale listing until the server reaps it
         }
         tabList.push(addTabChrome(info));
       }
@@ -1619,7 +1191,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       async function create(): Promise<void> {
         let info: SessionInfo;
         try {
-          info = await apiCreate();
+          info = await api.create();
         } catch {
           // A create can still fail transiently (network, server error); tell
           // the user rather than throwing.
@@ -1676,7 +1248,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         // Tombstone this id briefly so a stale status snapshot/poll that predates
         // the server reaping it cannot re-adopt the just-closed tab.
-        tombstone(id);
+        tombstones.add(id);
         // A pending switch-button cue whose subject just closed is moot: clear
         // it rather than leaving a dot no tab visit can ever resolve.
         acknowledgeSwitchNotify(id);
@@ -1699,7 +1271,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         syncChrome(); // reflect the drop immediately (count, position)
         if (remote) {
           try {
-            await apiClose(id);
+            await api.close(id);
           } catch {
             ctx.toast("Couldn't close the terminal on the server");
           }
@@ -1743,7 +1315,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // Tombstone briefly so a stale status snapshot/poll that predates the
           // server reaping these sessions cannot re-adopt (flash back) a just-
           // closed tab -- mirrors the single-close path in dropTab (h-f2).
-          tombstone(t.id);
+          tombstones.add(t.id);
           acknowledgeSwitchNotify(t.id); // a cue for a closed tab is moot
           t.aria.remove();
           t.el.remove();
@@ -1764,7 +1336,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         for (const t of victims) {
           try {
-            await apiClose(t.id);
+            await api.close(t.id);
           } catch {
             ctx.toast("Couldn't close a terminal on the server");
           }
@@ -1836,31 +1408,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         tabMenuItem("Close all", false, () => {
           void closeAll();
         });
-        // Make visible (so it has measurable size), then clamp within the visible
-        // viewport; position:fixed means x/y are viewport coordinates, and the
-        // visual viewport (when present) excludes the on-screen keyboard.
+        // Make visible (so it has measurable size), then place it within the
+        // visible viewport via the shared point-anchored positioner (clamp to
+        // the visual viewport; flip above the pointer near the bottom edge).
         tabMenu.classList.add("visible");
-        const vv = window.visualViewport;
-        const viewLeft = vv ? vv.offsetLeft : 0;
-        const viewTop = vv ? vv.offsetTop : 0;
-        const viewWidth = vv ? vv.width : window.innerWidth;
-        const viewHeight = vv ? vv.height : window.innerHeight;
-        const menuW = tabMenu.offsetWidth;
-        const menuH = tabMenu.offsetHeight;
-        const left = Math.max(
-          viewLeft + TAB_MENU_EDGE,
-          Math.min(x, viewLeft + viewWidth - menuW - TAB_MENU_EDGE),
-        );
-        let top = y;
-        if (y + menuH + TAB_MENU_EDGE > viewTop + viewHeight) {
-          top = y - menuH - TAB_MENU_GAP;
-        }
-        top = Math.max(
-          viewTop + TAB_MENU_EDGE,
-          Math.min(top, viewTop + viewHeight - menuH - TAB_MENU_EDGE),
-        );
-        tabMenu.style.left = `${String(left)}px`;
-        tabMenu.style.top = `${String(top)}px`;
+        placeMenuAt(tabMenu, x, y);
       }
 
       // One-time "swipe to switch" hint on first multi-tab state, mobile only.
@@ -1869,7 +1421,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         hintShown = true;
-        if (!window.matchMedia(SWITCHER_MEDIA).matches) {
+        const l = ctx.layout();
+        if (!(l.narrow && l.coarse)) {
           return; // only the mobile switcher layout has a swipe-to-switch bar
         }
         let seen = false;
@@ -1949,19 +1502,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             return;
           }
           // Adopt a session created in another browser so all clients converge.
-          // Carry the persisted clientTitle through: the SSE snapshot usually
-          // beats the initial GET /api/sessions (whose adoptSession then dedups
-          // and never re-applies its fields), so dropping it here left every
+          // The status record IS the session's wire shape (SessionStatus
+          // extends SessionInfo), so it flows through whole — which also
+          // carries the persisted clientTitle: the SSE snapshot usually beats
+          // the initial GET /api/sessions (whose adoptSession then dedups and
+          // never re-applies its fields), so dropping it here left every
           // SSE-adopted tab without its persisted title — in preferInputTitle
           // mode the label then fell back to "New tab" on reload.
-          adoptSession({
-            id: s.id,
-            title: s.title,
-            clientTitle: s.clientTitle,
-            createdAt: s.createdAt,
-            status: s.status,
-            reportsActivity: s.reportsActivity ?? false,
-          });
+          adoptSession(s);
           applyStatus(s.id, s.status, s.title, s.clientTitle, s.reportsActivity ?? false);
           ensureActive();
           syncChrome();
@@ -1981,7 +1529,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           try {
             let list: SessionInfo[];
             try {
-              list = await apiList();
+              list = await api.list();
             } catch {
               return; // transient; try again next tick
             }
@@ -2014,8 +1562,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // --- Event wiring ---
-      // Derive each tab's title from the first line the user submits into it.
-      const offInput = ctx.registerInputObserver(deriveTitleFromInput);
+      // Derive each tab's title from the lines the user submits into it.
+      const offInput = ctx.registerInputObserver((bytes) => {
+        titleDeriver.observe(bytes);
+      });
       // Observe (never consume) keydowns to detect a physical keyboard: a
       // hardware-only key latches sawHardwareKey, which upgrades focus-on-switch
       // for a keyboard folio with no trackpad (no fine pointer to key off).
@@ -2472,68 +2022,86 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         toggleSwitcher();
       });
 
-      // Initial population: list existing sessions, or create the first one.
-      let sessions: SessionInfo[];
-      try {
-        sessions = await apiList();
-      } catch {
-        sessions = [];
-      }
-      // Spawn a fresh session unless a LIVE one is listed. An exited session is
-      // viewable history, not a working terminal — booting a page whose every
-      // session has died (the agent exited: a sign-in dead end, a crash) onto a
-      // corpse was the stuck-loading wedge. The exited ones are still adopted
-      // below (switch to them to read their final screen; close them by hand).
-      if (!sessions.some((s) => s.status !== STATUS_EXITED)) {
+      // The kernel-driven bootstrap (sessionOwner.resolveInitialSession): list
+      // existing sessions or create the first one, adopt them, pick the start
+      // tab, bind the renderer to its store — and RETURN its ref rather than
+      // switching; the kernel performs the switch through the same path a tab
+      // switch uses. A null return (nothing could be listed or spawned) keeps
+      // the chrome up with the "+" retry alive, and the kernel — which now sees
+      // the failure directly — dismisses the loading overlay over it.
+      resolveImpl = async (): Promise<SessionRef | null> => {
+        // Initial population: list existing sessions, or create the first one.
+        let sessions: SessionInfo[];
         try {
-          sessions = [...sessions, await apiCreate()];
+          sessions = await api.list();
         } catch {
-          // Do not let the initial spawn propagate out of setup(): the kernel
-          // would tear down every feature ("terminal has no chrome") and, since
-          // managesSessions skipped the startup connect, connectionInitiated
-          // stays false so the wake handlers (visibilitychange/pageshow/online)
-          // all no-op -- a permanently dead terminal with no recovery. Match the
-          // runtime create() path: toast and leave the chrome up so "+" can
-          // retry. Any exited sessions stay adopted (frozen screen + "Session
-          // ended" is still better than a blank page).
-          ctx.toast("Couldn't open a terminal");
+          sessions = [];
         }
-      }
-      // Adopt (dedup) rather than blindly push. The status SSE pushes a snapshot
-      // of the existing sessions on open, and tabs subscribes (monitor.onStatus)
-      // BEFORE this list resolves, so a session may already have a tab by the
-      // time the list lands. A straight push doubled every already-adopted
-      // session (6 tabs from 3 across a fresh load), and paintActive then lit
-      // both copies of the active id ("2 active tabs" that move together).
-      for (const info of sessions) {
-        adoptSession(info);
-      }
-      // From here on, tabs added at runtime (create / adopt) animate in.
-      started = true;
-      // Activate the previously-active session if it still exists, else the
-      // first (oldest). Session ids are stable server-side, so a page reload
-      // reconnects to the tab the user left on instead of always the oldest.
-      // Live sessions outrank exited ones: the saved id is honored only while
-      // its session is still live (a reload used to restore straight onto the
-      // corpse of a died-while-away session and wedge there), and the default
-      // is the oldest LIVE tab. Only when nothing is live (the fresh-spawn
-      // above failed too) does an exited tab start — a frozen final screen
-      // with the "Session ended" banner beats a blank page.
-      const liveIds = new Set(sessions.filter((s) => s.status !== STATUS_EXITED).map((s) => s.id));
-      const oldestLive = tabList.find((t) => liveIds.has(t.id));
-      let startTab = oldestLive ?? tabList[0];
-      try {
-        const savedId = localStorage.getItem(ACTIVE_TAB_KEY);
-        if (savedId !== null && savedId !== "") {
-          const saved = tabList.find((x) => x.id === savedId);
-          if (saved && (liveIds.has(saved.id) || oldestLive === undefined)) {
-            startTab = saved;
+        // Spawn a fresh session unless a LIVE one is listed. An exited session
+        // is viewable history, not a working terminal — booting a page whose
+        // every session has died (the agent exited: a sign-in dead end, a
+        // crash) onto a corpse was the stuck-loading wedge. The exited ones are
+        // still adopted below (switch to them to read their final screen; close
+        // them by hand).
+        if (!sessions.some((s) => s.status !== STATUS_EXITED)) {
+          try {
+            sessions = [...sessions, await api.create()];
+          } catch {
+            // Match the runtime create() path: toast and leave the chrome up so
+            // "+" can retry. Any exited sessions stay adopted (frozen screen +
+            // "Session ended" is still better than a blank page). A throw here
+            // would also be survivable (the kernel treats a rejected resolver
+            // as null), but the toast is the better UX.
+            ctx.toast("Couldn't open a terminal");
           }
         }
-      } catch {
-        /* storage unavailable — fall back to the oldest live tab */
-      }
-      if (startTab) {
+        // Adopt (dedup) rather than blindly push. The status SSE pushes a
+        // snapshot of the existing sessions on open, and tabs subscribes
+        // (monitor.onStatus) BEFORE this list resolves, so a session may
+        // already have a tab by the time the list lands. A straight push
+        // doubled every already-adopted session (6 tabs from 3 across a fresh
+        // load), and paintActive then lit both copies of the active id
+        // ("2 active tabs" that move together).
+        for (const info of sessions) {
+          adoptSession(info);
+        }
+        // From here on, tabs added at runtime (create / adopt) animate in.
+        started = true;
+        // The SSE snapshot may have raced this bootstrap and already activated
+        // a tab (ensureActive during the await above). The switch is then
+        // already in flight — return null; the kernel sees connectionInitiated
+        // and leaves the loading overlay to the normal ready path.
+        if (activeId !== null) {
+          return null;
+        }
+        // Activate the previously-active session if it still exists, else the
+        // first (oldest). Session ids are stable server-side, so a page reload
+        // reconnects to the tab the user left on instead of always the oldest.
+        // Live sessions outrank exited ones: the saved id is honored only while
+        // its session is still live (a reload used to restore straight onto the
+        // corpse of a died-while-away session and wedge there), and the default
+        // is the oldest LIVE tab. Only when nothing is live (the fresh-spawn
+        // above failed too) does an exited tab start — a frozen final screen
+        // with the "Session ended" banner beats a blank page.
+        const liveIds = new Set(
+          sessions.filter((s) => s.status !== STATUS_EXITED).map((s) => s.id),
+        );
+        const oldestLive = tabList.find((t) => liveIds.has(t.id));
+        let startTab = oldestLive ?? tabList[0];
+        try {
+          const savedId = localStorage.getItem(ACTIVE_TAB_KEY);
+          if (savedId !== null && savedId !== "") {
+            const saved = tabList.find((x) => x.id === savedId);
+            if (saved && (liveIds.has(saved.id) || oldestLive === undefined)) {
+              startTab = saved;
+            }
+          }
+        } catch {
+          /* storage unavailable — fall back to the oldest live tab */
+        }
+        if (!startTab) {
+          return null;
+        }
         activeId = startTab.id;
         try {
           localStorage.setItem(ACTIVE_TAB_KEY, startTab.id);
@@ -2541,10 +2109,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           /* storage unavailable — non-fatal */
         }
         ctx.render.bind(startTab.store);
-        ctx.notifySwitch({ id: startTab.id });
         syncChrome();
         focusInput();
-      }
+        return { id: startTab.id };
+      };
 
       return {
         api: {
@@ -2555,6 +2123,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             tabList.map((t) => ({ id: t.id, title: t.display, active: t.id === activeId })),
         },
         teardown() {
+          resolveImpl = null;
           offStatus?.();
           offInput();
           offHwKey();
@@ -2570,9 +2139,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           barResize.disconnect();
           swReserve.disconnect();
           surface.classList.remove("wt-with-tabbar");
-          document.documentElement.style.removeProperty("--wt-tabbar-h");
+          varRoot.style.removeProperty("--wt-tabbar-h");
           root?.classList.remove("wt-tabbed");
-          document.documentElement.style.removeProperty("--wt-reserve-bottom");
+          varRoot.style.removeProperty("--wt-reserve-bottom");
           if (switchAnimTimer !== null) {
             clearTimeout(switchAnimTimer);
           }
@@ -2599,24 +2168,4 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       };
     },
   };
-}
-
-// paintStatusDot applies a status dot's two orthogonal bits: data-status drives
-// its appearance (idle / working / done / input / exited via CSS), and the
-// .wt-reports class controls its visibility — the dot is hidden by default and
-// shown only once the session has reported activity (OSC 9;4 progress or a
-// classified OSC 9 notification), so a plain shell's tabs stay clean and
-// label-only while an agent's light up.
-function paintStatusDot(el: HTMLElement, status: string, reports: boolean): void {
-  el.dataset["status"] = status || "idle";
-  el.classList.toggle("wt-reports", reports);
-}
-
-// pick returns a required descendant element or throws (static chrome only).
-function pick(root: ParentNode, selector: string): HTMLElement {
-  const el = root.querySelector<HTMLElement>(selector);
-  if (!el) {
-    throw new Error(`web-terminal-ui: tabs chrome missing ${selector}`);
-  }
-  return el;
 }

@@ -38,17 +38,15 @@
 
 import type { TerminalFeature } from "../kernel/types.js";
 import type { ClipboardApi } from "./clipboard.js";
+import { placeMenuAt } from "./menu-position.js";
 
 // Slightly longer than the browser's ~500ms native long-press so a native word
 // selection (which we defer to) has registered — and fired selectionchange —
 // before this fires.
 const LONG_PRESS_MS = 550;
 const LONG_PRESS_MOVE_PX = 10;
-const EDGE_MARGIN = 8;
-// When the menu can't fit below the anchor (a long-press near the bottom edge or
-// above the keyboard), it opens above the point. This gap lifts it clear of the
-// fingertip so the touch does not cover the menu items.
-const MENU_GAP = 16;
+// Viewport clamping + the flip-above-the-fingertip gap live in the shared
+// point-anchored positioner (menu-position.ts), shared with the tab menu.
 // After a touch long-press opens the menu, swallow the trailing click/tap that
 // the same gesture emits on finger-release for this window, so the menu does not
 // immediately dismiss itself (the classic contextmenu-then-touchend race).
@@ -209,35 +207,10 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
           return; // nothing to offer
         }
         // Make visible (so it has measurable size), then place it within the
-        // VISIBLE viewport. position:fixed => x/y are viewport coordinates; the
-        // visual viewport (when present) is the area above the on-screen
-        // keyboard, so clamping to it keeps the menu off the keyboard too.
+        // visible viewport via the shared point-anchored positioner (clamp to
+        // the visual viewport; flip above the finger near the bottom edge).
         menu.classList.add("visible");
-        const vv = window.visualViewport;
-        const viewLeft = vv ? vv.offsetLeft : 0;
-        const viewTop = vv ? vv.offsetTop : 0;
-        const viewWidth = vv ? vv.width : window.innerWidth;
-        const viewHeight = vv ? vv.height : window.innerHeight;
-        const menuW = menu.offsetWidth;
-        const menuH = menu.offsetHeight;
-        const left = Math.max(
-          viewLeft + EDGE_MARGIN,
-          Math.min(x, viewLeft + viewWidth - menuW - EDGE_MARGIN),
-        );
-        // Open just below the point; but if that would overflow the visible
-        // bottom (a long-press near the bottom edge, where the user naturally
-        // taps), flip above the finger so the menu is neither clipped off-screen
-        // nor hidden under the fingertip.
-        let top = y;
-        if (y + menuH + EDGE_MARGIN > viewTop + viewHeight) {
-          top = y - menuH - MENU_GAP;
-        }
-        top = Math.max(
-          viewTop + EDGE_MARGIN,
-          Math.min(top, viewTop + viewHeight - menuH - EDGE_MARGIN),
-        );
-        menu.style.left = `${String(left)}px`;
-        menu.style.top = `${String(top)}px`;
+        placeMenuAt(menu, x, y);
         // A touch long-press is immediately followed by a synthetic click on
         // release; swallow it so the menu stays open (see SWALLOW_MS).
         if (touch) {

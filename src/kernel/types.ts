@@ -110,9 +110,6 @@ export interface TerminalEvents {
   "wire:modes": ModesMessage;
   /** A screen frame (first-paint / activity hooks). */
   "wire:screen": ScreenMessage;
-  /** The layout breakpoint changed (desktop <-> mobile), so a feature re-homes
-   *  its chrome across regions (section 22.13). */
-  "layout:change": { mobile: boolean };
   /** The user scrolled away from / back to the bottom (drives the
    *  scroll-to-bottom affordance). */
   "scroll:state": { scrolledUp: boolean };
@@ -204,6 +201,14 @@ export interface TerminalContext {
   /** The kernel's tablist/tabpanel ARIA controller (used by tabs). */
   tablist(): TablistController;
 
+  /** The current layout facts a feature keys touch-vs-desktop behavior on.
+   *  `narrow` is ROOT width at or below the kernel's single breakpoint (the
+   *  same fact the .wt-narrow root class exposes to CSS — root width, not
+   *  viewport width, so an embedded terminal in a narrow panel counts as
+   *  narrow). `coarse` is the primary pointer's coarseness (a live media-query
+   *  read). Read lazily at interaction time. */
+  layout(): { narrow: boolean; coarse: boolean };
+
   /** Switch the live terminal to a session. tabs binds the renderer to the
    *  session's cached store (ctx.render.bind) first, then calls this; the kernel
    *  reconnects the terminal WS to that session (connection.setSession, using
@@ -236,15 +241,32 @@ export interface TerminalFeature<Api = void> {
    *  Readonly so a feature is covariant in Api (a TerminalFeature<X> is a
    *  TerminalFeature<unknown>); the kernel sets it through a narrow cast. */
   readonly api?: Api;
-  /** True if this feature owns session selection and drives the first
-   *  connection itself (via ctx.notifySwitch once it has resolved a session id).
-   *  The kernel reads this synchronously from the feature list and, when any
-   *  feature sets it, SKIPS its own startup connect: connecting to the bare
-   *  wsPath before a session exists would hit a session-gated /ws (the
-   *  SessionManager 404s a /ws with no ?session=) and churn the reconnect
-   *  backoff until the feature set a session. `tabs` sets this; single-terminal
-   *  presets leave it unset so the kernel connects to the bare wsPath as before. */
-  readonly managesSessions?: boolean;
+  /** Present on the ONE feature that owns session selection (at most one per
+   *  terminal; createTerminal throws when two features register). Its presence
+   *  makes the kernel SKIP the startup connect to the bare wsPath (which a
+   *  session-gated server 404s, churning the reconnect backoff); the kernel
+   *  instead drives the first connect through resolveInitialSession() once
+   *  feature setup completes. Single-terminal presets leave it unset so the
+   *  kernel connects to the bare wsPath at startup. */
+  readonly sessionOwner?: SessionOwnerRegistration;
+}
+
+/** The session-owner registration: how the one session-owning feature and the
+ *  kernel split the first connect. The feature owns session selection (list /
+ *  spawn / pick) and its own bootstrap state; the kernel owns the connect
+ *  itself, so a failed bootstrap is SEEN by the kernel (which dismisses the
+ *  loading overlay) instead of inferred from a missing side effect. */
+export interface SessionOwnerRegistration {
+  /** Resolve the initial session: list (or spawn) one, build per-session
+   *  state, and bind the renderer to the session's store (ctx.render.bind) —
+   *  but do NOT call ctx.notifySwitch for it. The kernel performs the switch
+   *  with the returned ref through the same path notifySwitch uses. Return
+   *  null when no session could be resolved (the bootstrap failed): the
+   *  feature keeps its retry chrome alive, and the kernel dismisses the
+   *  loading overlay so that chrome is visible. A throw is treated as null
+   *  (and reported through the feature-error channel). Called exactly once,
+   *  after every feature's setup has resolved. */
+  resolveInitialSession(): Promise<SessionRef | null>;
 }
 
 /** What a feature's setup returns: its optional typed API, a teardown, and an
@@ -275,6 +297,14 @@ export interface CreateTerminalOptions {
    *  Heterogeneous feature APIs are held as unknown here; a consumer reads a
    *  specific feature's api off the feature value it holds. */
   features?: readonly TerminalFeature<unknown>[];
+  /** How the terminal claims space (default "viewport").
+   *  "viewport": the root becomes a fixed full-viewport box — the full-page
+   *  product (web-terminal-server, web-terminal-kiro, the scaffold page).
+   *  "container": the root fills its parent element, which becomes the
+   *  boundary — the embedded case (vibekit's panel). Either way the kernel
+   *  stamps the matching class (wt-viewport / wt-container) on the root and
+   *  every piece of chrome positions against the root, never the page. */
+  layout?: "viewport" | "container";
   /** WebSocket endpoint path (default "/ws"). */
   wsPath?: string;
   /** CSS font shorthand awaited before the first resize. */
@@ -286,8 +316,8 @@ export interface CreateTerminalOptions {
    *  Keys must be CSS custom-property names (start with "--"); values are any
    *  CSS value. The library ships the defaults (css/00-tokens.css) — the
    *  "template"; these are the consumer's "settings" and override them for this
-   *  instance. Known tokens: --accent, --tab-hover-bg, --tab-active-bg,
-   *  --tab-active-fg. */
+   *  instance. Known tokens: --accent, --tab-bg, --tab-hover-bg,
+   *  --tab-active-bg, --tab-active-fg, --tab-active-border. */
   theme?: Readonly<Record<string, string>>;
 }
 
@@ -297,6 +327,17 @@ export interface CreateTerminalOptions {
 export interface TerminalHandle {
   /** Focus the terminal input (opens the soft keyboard on touch). */
   focus(): void;
+  /** Send bytes to the active session through the kernel's sanitizing,
+   *  session-routed input funnel — the same path features use: input
+   *  transforms apply, and the view snaps to the bottom exactly like typed
+   *  input. The supported host path for "type this command" affordances
+   *  (a run-in-shell button). No-op after destroy(). */
+  send(bytes: Uint8Array): void;
+  /** Reset the LOCAL display: drop the client-side scrollback and screen (the
+   *  same reset the engine performs on a server restart). Deliberately injects
+   *  no keystroke — a host that wants a freshly drawn prompt sends one itself
+   *  (e.g. Ctrl+L via send()). No-op after destroy(). */
+  reset(): void;
   /** Tear down every feature in reverse order, dispose all subscriptions, and
    *  release the kernel's DOM and engine wiring. */
   destroy(): void;

@@ -1,5 +1,11 @@
-/* ===== Tokens ===== */
-:root {
+/* ===== Tokens =====
+   Every token defaults on .wt-root (the class createTerminal stamps on the
+   consumer's root element), never on the document :root: the terminal subtree
+   inherits them, the host page never does, and a host page's identically-named
+   custom properties never reach the terminal (the class definition wins for the
+   subtree). The `theme` option overrides them as inline style on the same
+   element — the consumer contract is unchanged. */
+.wt-root {
   interpolate-size: allow-keywords;
 
   --bg: oklch(0% 0 0deg);

@@ -17,6 +17,7 @@ export type {
   TerminalHandle,
   TerminalFeature,
   FeatureInstance,
+  SessionOwnerRegistration,
   TerminalContext,
   TerminalEvents,
   RegionName,

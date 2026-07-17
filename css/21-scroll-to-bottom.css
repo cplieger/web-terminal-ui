@@ -1,0 +1,65 @@
+/* ===== Scroll-to-bottom (scrollToBottom feature) =====
+   A compact floating icon button docked in the bottom-right corner, shown only
+   while the user has scrolled up. Same button on both form factors (the old
+   desktop bottom-centre text pill was dropped in the design-system switch);
+   each form factor just lifts it above its own bottom bar. Size + icon
+   centering come from the .wt-btn primitive (a 44px icon button); this rule
+   adds only the floating chrome and placement. Absolute against .wt-root, like
+   all chrome (identical geometry in wt-viewport mode; see 01-scope.css). */
+:where(.wt-root) .wt-scroll-bottom {
+  position: absolute;
+  right: var(--sp-3);
+  bottom: calc(var(--safe-bottom, 0px) + var(--sp-3) + var(--kb-inset, 0px));
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--border);
+  /* Match the tab "+" buttons (and every other .wt-btn), which round to
+     --radius-inner. Both are 44px boxes, so matching the corner radius makes
+     the FAB read as the same-sized button as the new-tab "+" beside/above it
+     rather than a rounder, different-looking control. */
+  border-radius: var(--radius-inner);
+  /* Full --text icon, matching the switcher's keyboard/switch/"+" icons (which
+     use .wt-btn's default color). Was a muted 70% mix that read as grey next to
+     those white bar icons. */
+  color: var(--text);
+  z-index: 10;
+  display: none;
+}
+
+/* The scroll slot gets .scrolled-up toggled by the feature; show the button. */
+:where(.wt-root) .wt-slot-scroll.scrolled-up .wt-scroll-bottom {
+  display: inline-flex;
+}
+
+/* Hover brightens the border; press fills the background (the .wt-btn :active
+   fill would otherwise be masked by this button's own surface fill). The icon
+   is already full --text, so hover no longer needs to change it. */
+:where(.wt-root) .wt-scroll-bottom:hover {
+  border-color: color-mix(in oklch, var(--text) 35%, transparent);
+}
+
+:where(.wt-root) .wt-scroll-bottom:active {
+  background: var(--text-active);
+}
+
+/* Mobile + tabbed: lift above the switcher bar and the keyboard (WS3), and pull
+   the right edge in to --sp-2 so the button sits directly above the switcher's
+   "+" (whose right edge is inset by the bar's --sp-2 padding). Both are 44px
+   border-box boxes, so matching the right inset lines them up in one vertical
+   column (they were 4px out: the FAB's base --sp-3 vs the "+"'s --sp-2). */
+@media (pointer: coarse) {
+  :where(.wt-root.wt-tabbed) .wt-scroll-bottom {
+    right: var(--sp-2);
+    bottom: calc(
+      var(--wt-switcher-h) + var(--safe-bottom, 0px) + var(--kb-inset, 0px) + var(--sp-2)
+    );
+  }
+}
+
+/* Desktop + tabbed: the tab strip docks at the bottom, so lift the button above
+   it with a clear gap. */
+@media (pointer: fine) {
+  :where(.wt-root.wt-tabbed) .wt-scroll-bottom {
+    bottom: calc(var(--wt-tabbar-h, 44px) + var(--sp-3));
+  }
+}

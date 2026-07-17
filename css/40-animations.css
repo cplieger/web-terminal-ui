@@ -4,10 +4,10 @@
    base rules in 03-06 carry the resting state, and these rules add the
    transitions and keyframes on top. A few pieces of motion are intentionally NOT
    gated on .wt-animate and animate unconditionally: terminal-core motion (cursor
-   and SGR blink) and the mobile key toolbar open/close in 02-app.css, plus the
-   working-status-dot pulse in 05-tabs.css (motion is its only non-hue cue, per
-   WCAG 1.4.1). prefers-reduced-motion still defeats all of it via the reset in
-   01-reset.css. Keeping the chrome-surface motion in one file is the
+   and SGR blink) and the mobile key toolbar open/close in 23-toolbar.css, plus the
+   working-status-dot pulse in 30-tabs.css (motion is its only non-hue cue, per
+   WCAG 1.4.1). prefers-reduced-motion still defeats all of it via the scoped
+   kill-switch in 01-scope.css. Keeping the chrome-surface motion in one file is the
    design-system seam for "does this chrome animate, and how". */
 
 /* Fade the toast OUT on hide (display allow-discrete holds display:block for
@@ -21,16 +21,16 @@
    shared opacity transition would be inert while the `display allow-discrete`
    half held them fully visible for --dur-standard before popping out on hide.
    They show and hide instantly. */
-.wt-animate .wt-toast {
+:where(.wt-root.wt-animate) .wt-toast {
   transition:
     opacity var(--dur-standard) var(--ease-standard),
     display var(--dur-standard) allow-discrete;
 }
 
 /* Tab chrome micro-transitions (hover/active color shifts). */
-.wt-animate .wt-tab,
-.wt-animate .wt-tab-close,
-.wt-animate .wt-tab-new {
+:where(.wt-root.wt-animate) .wt-tab,
+:where(.wt-root.wt-animate) .wt-tab-close,
+:where(.wt-root.wt-animate) .wt-tab-new {
   transition:
     background-color var(--dur-micro) var(--ease-standard),
     color var(--dur-micro) var(--ease-standard);
@@ -41,7 +41,7 @@
    immediately with no exit animation, so the strip reflows in one frame (a
    delayed exit made the "+" teleport and put a last-tab replacement in the wrong
    slot). scale() is a transform, so the enter never shifts the "+". */
-.wt-animate .wt-tab-enter {
+:where(.wt-root.wt-animate) .wt-tab-enter {
   animation: wt-tab-in var(--dur-enter) var(--ease-enter);
 }
 
@@ -58,7 +58,7 @@
    — animating only max-height let the padding snap away instantly at the start
    of a collapse (a choppy, two-step close). The tabs feature clears the rows
    after the collapse. */
-.wt-animate .wt-switcher-list {
+:where(.wt-root.wt-animate) .wt-switcher-list {
   transition:
     max-height var(--dur-enter) var(--ease-standard),
     padding var(--dur-enter) var(--ease-standard);
@@ -67,7 +67,7 @@
 /* When the tab list expands, the keyboard button collapses to zero width and
    fades (the key grid is closed in JS); the active row flex-grows into the freed
    space in lockstep as the button's width animates. */
-.wt-animate .wt-switcher-kb {
+:where(.wt-root.wt-animate) .wt-switcher-kb {
   transition:
     width var(--dur-enter) var(--ease-standard),
     margin var(--dur-enter) var(--ease-standard),
@@ -78,7 +78,7 @@
    at one tab (.wt-switcher-multi, tabs feature). Animate its width + margin +
    opacity so it slides in from zero width — the active-tab chip shrinks to make
    room in lockstep (flex) — rather than popping. Mirrors the keyboard button. */
-.wt-animate .wt-switcher-switch {
+:where(.wt-root.wt-animate) .wt-switcher-switch {
   transition:
     width var(--dur-enter) var(--ease-standard),
     margin var(--dur-enter) var(--ease-standard),
@@ -89,15 +89,15 @@
    reads as a change rather than a flicker. A swipe additionally slides the
    content in from the swipe's direction (next from the right, prev from the
    left, WS5). */
-.wt-animate .term.wt-switching .term-output {
+:where(.wt-root.wt-animate) .term.wt-switching .term-output {
   animation: wt-switch-in var(--dur-standard) var(--ease-standard);
 }
 
-.wt-animate .term.wt-switching-next .term-output {
+:where(.wt-root.wt-animate) .term.wt-switching-next .term-output {
   animation: wt-switch-next var(--dur-standard) var(--ease-standard);
 }
 
-.wt-animate .term.wt-switching-prev .term-output {
+:where(.wt-root.wt-animate) .term.wt-switching-prev .term-output {
   animation: wt-switch-prev var(--dur-standard) var(--ease-standard);
 }
 

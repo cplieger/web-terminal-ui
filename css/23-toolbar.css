@@ -1,0 +1,181 @@
+/* ===== Key toolbar (mobileToolbar feature; touch devices only) =====
+   Uses interpolate-size: allow-keywords (on .wt-root) to animate
+   width/height between a fixed collapsed size and auto (intrinsic).
+   Toggle is first in DOM so it's at top-left of the grid — visible
+   when the container clips to 1-cell size. Container is right-anchored
+   so it grows leftward on open. */
+:where(.wt-root) .key-toolbar {
+  display: contents;
+}
+
+/* Touch-only toolbar children: the on-screen Esc/Tab/arrows/hamburger
+   are useless on desktop where the user has a real keyboard. Hidden by
+   default; the @media (pointer: coarse) block below restores them. */
+:where(.wt-root) .kb-key,
+:where(.wt-root) .kb-toggle {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  :where(.wt-root) .key-toolbar {
+    /* Absolute against .wt-root (identical geometry in wt-viewport mode; see
+       01-scope.css). --vv-top keeps it following iOS's visual-viewport shift. */
+    position: absolute;
+    top: calc(var(--safe-top) + var(--sp-2) + var(--vv-top, 0px));
+    right: var(--sp-2);
+    z-index: 10;
+    display: grid;
+    grid-template-columns: repeat(4, var(--touch-target)) var(--touch-target);
+    grid-template-rows: var(--touch-target) var(--touch-target);
+    place-content: start end;
+    gap: var(--sp-1);
+    padding: var(--sp-1);
+    background: var(--surface);
+    backdrop-filter: var(--blur);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    width: auto;
+    height: auto;
+    transition:
+      width var(--dur-enter) var(--ease-standard),
+      height var(--dur-enter) var(--ease-standard);
+  }
+
+  /* Collapsed: fixed size = 1 button + padding + border. Content is
+     right-aligned (justify-content:end) so the toggle (col 5) stays at
+     the right edge, visible within the clipped area. --pill-outer
+     includes the 2px border (box-sizing:border-box); omitting it left
+     the content box 2px short, pinning the button top-right with
+     unequal bottom/left gaps. */
+  :where(.wt-root) .key-toolbar.collapsed {
+    width: var(--pill-outer);
+    height: var(--pill-outer);
+  }
+
+  /* Grid placement: toggle at col 5 row 1 (top-right). */
+  :where(.wt-root) .kb-toggle {
+    grid-area: 1 / 5;
+    position: relative;
+  }
+  :where(.wt-root) .kb-r1c1 {
+    grid-area: 1 / 1;
+  }
+  :where(.wt-root) .kb-r1c2 {
+    grid-area: 1 / 2;
+  }
+  :where(.wt-root) .kb-r1c3 {
+    grid-area: 1 / 3;
+  }
+  :where(.wt-root) .kb-r1c4 {
+    grid-area: 1 / 4;
+  }
+  :where(.wt-root) .kb-r2c1 {
+    grid-area: 2 / 1;
+  }
+  :where(.wt-root) .kb-r2c2 {
+    grid-area: 2 / 2;
+  }
+  :where(.wt-root) .kb-r2c3 {
+    grid-area: 2 / 3;
+  }
+  :where(.wt-root) .kb-r2c4 {
+    grid-area: 2 / 4;
+  }
+
+  /* Keys fade in/out during open/close. The container's width/height
+     transition handles the background slide; opacity handles the
+     individual button appearance. Stagger the fade slightly after
+     the container starts growing (delay on open) and before it
+     finishes shrinking (no delay on close). */
+  :where(.wt-root) .kb-key {
+    opacity: 1;
+    transition: opacity var(--dur-standard) var(--ease-enter) 0.05s;
+  }
+
+  :where(.wt-root) .key-toolbar.collapsed .kb-key {
+    opacity: 0;
+    transition: opacity var(--dur-exit) var(--ease-exit);
+  }
+
+  /* Shared button */
+  :where(.wt-root) .key-toolbar button {
+    width: var(--touch-target);
+    height: var(--touch-target);
+    background: transparent;
+    color: var(--text);
+    border: none;
+    border-radius: var(--radius-inner);
+    font-size: 0.9375rem;
+    font-family: var(--font-ui);
+    font-weight: 500;
+    cursor: pointer;
+    touch-action: manipulation;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  :where(.wt-root) .key-toolbar button:active {
+    background: var(--text-active);
+  }
+
+  /* Sticky Ctrl, armed: inverted fill so the toggle state reads clearly
+     in the monochrome palette (stays filled while pressed). */
+  :where(.wt-root) .kb-key.armed,
+  :where(.wt-root) .kb-key.armed:active {
+    background: var(--text);
+    color: var(--bg);
+  }
+
+  :where(.wt-root) .key-toolbar button svg {
+    width: var(--icon);
+    height: var(--icon);
+    stroke: currentcolor;
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* Toggle icon crossfade. Both icons are stacked absolute so they
+     can independently fade + rotate during the open<->close
+     transition. inset:0 + margin:auto centers them within the
+     button (works because the SVGs carry explicit width/height); a
+     bare `position: absolute` would pin them at the top-left, giving
+     the toggle visibly unequal left/right padding when collapsed. */
+  :where(.wt-root) .kb-toggle .icon-hamburger,
+  :where(.wt-root) .kb-toggle .icon-close {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    transition:
+      opacity var(--dur-standard) linear,
+      transform var(--dur-standard) linear;
+  }
+
+  :where(.wt-root) .kb-toggle .icon-close {
+    opacity: 1;
+    transform: rotate(0deg);
+  }
+  :where(.wt-root) .kb-toggle .icon-hamburger {
+    opacity: 0;
+    transform: rotate(-90deg);
+  }
+  :where(.wt-root) .key-toolbar.collapsed .kb-toggle .icon-close {
+    opacity: 0;
+    transform: rotate(90deg);
+  }
+  :where(.wt-root) .key-toolbar.collapsed .kb-toggle .icon-hamburger {
+    opacity: 1;
+    transform: rotate(0deg);
+  }
+
+  /* No-transition on first render */
+  :where(.wt-root) .key-toolbar.no-transition,
+  :where(.wt-root) .key-toolbar.no-transition .kb-toggle .icon-hamburger,
+  :where(.wt-root) .key-toolbar.no-transition .kb-toggle .icon-close {
+    transition: none;
+  }
+}

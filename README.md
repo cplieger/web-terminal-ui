@@ -49,11 +49,26 @@ pins the engine version explicitly.
 
 ## Usage
 
-Serve the bundled CSS (`css/` concatenated per `css/MANIFEST` into the
-`style.css` your page links) plus a minimal HTML page that has one empty
-container element for the terminal, then call `createTerminal(root, { features })`
-from your entry module. Feature bundles (presets) live at the `./presets`
-sub-path:
+Serve a CSS bundle matching how you embed the terminal, plus a minimal HTML
+page that has one empty container element, then call
+`createTerminal(root, { features })` from your entry module.
+
+**Full-page host** (the terminal IS the page — `web-terminal-server`,
+`web-terminal-kiro`): concatenate `css/MANIFEST` into the `style.css` your page
+links. That reference bundle is `css/page.css` (the page kit: `html/body`
+reset + the terminal web font's `@font-face`, expecting the font files at
+`/vendor/fonts/`) plus the complete component set.
+
+**Embedder** (the terminal lives inside your app's layout — a panel, a pane):
+concatenate the per-preset manifest matching your composition instead —
+`css/MANIFEST.single`, `css/MANIFEST.touch`, or `css/MANIFEST.tabbed`. These
+contain ONLY root-scoped component styles: no page reset, no fonts, no
+document-level rules, nothing to quarantine. Pass `layout: "container"` so the
+terminal fills (and positions its chrome against) your container element
+instead of the viewport.
+
+Feature bundles (presets) live at the `./presets` sub-path, with per-preset
+entry modules beside it:
 
 ```html
 <div id="terminal"></div>
@@ -81,14 +96,22 @@ sub-path:
 
 `createTerminal(root, opts?)` builds the entire terminal subtree (the kernel
 plus every feature's chrome) inside `root` itself — there is no element-id
-contract for the host page to reproduce. Call it exactly once; the engine's
+contract for the host page to reproduce, and every style and CSS custom
+property is scoped to the `wt-root` class it stamps on your element (removed
+again by `destroy()`). Call it exactly once; the engine's
 render/connection/scroll modules are single-instance per page (tabs multiplex
 sessions over the one kernel). `scaffold/index.html` is a complete reference page
 to copy and adapt.
 
-Four presets are provided (import from `@cplieger/web-terminal-ui/presets`); each
-is a plain feature-array factory, so you can spread and edit it, or hand-pick
-individual features instead:
+Four presets are provided; each is a plain feature-array factory, so you can
+spread and edit it. Import the barrel (`@cplieger/web-terminal-ui/presets`) for
+convenience, or a per-preset entry module for the minimal delivered import
+graph — `…/presets/single`, `…/presets/touch`, `…/presets/tabbed`,
+`…/presets/agent-tabbed` (the barrel statically reaches every feature; the
+touch entry, for example, never imports the tabs module). Individual features
+are importable from `…/features/<name>` (`clipboard`, `context-menu`,
+`scroll-to-bottom`, `predictive-echo`, `connection-banner`, `mobile-toolbar`,
+`tabs`, `activity-monitor`, `animations`) for hand-picked compositions:
 
 - `presetSingle()` — single-pane desktop UI (context menu, clipboard,
   scroll-to-bottom, predictive echo, connection banner).
@@ -110,25 +133,31 @@ individual features instead:
 
 ### Options
 
-| Option      | Default                    | Purpose                                                                                                                                                               |
-| ----------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `features`  | _(none — bare kernel)_     | The feature list. Omitted or empty builds only the terminal (no chrome). Use a preset from `./presets` or a hand-picked array.                                        |
-| `wsPath`    | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                       |
-| `fontReady` | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                           |
-| `loading`   | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.          |
-| `theme`     | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`. The library ships neutral defaults. |
+| Option      | Default                    | Purpose                                                                                                                                                                                                                                        |
+| ----------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `features`  | _(none — bare kernel)_     | The feature list. Omitted or empty builds only the terminal (no chrome). Use a preset from `./presets` or a hand-picked array.                                                                                                                 |
+| `layout`    | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case). |
+| `wsPath`    | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                |
+| `fontReady` | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                    |
+| `loading`   | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                   |
+| `theme`     | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`. The library ships neutral defaults.                                       |
 
 `createTerminal()` returns a handle: `focus()` re-focuses the terminal input
-(and opens the soft keyboard on touch), and `destroy()` tears every feature down
-and releases the kernel.
+(and opens the soft keyboard on touch); `send(bytes)` sends bytes to the active
+session through the kernel's sanitizing input funnel (the supported host path
+for a "type this command" affordance); `reset()` drops the local scrollback and
+screen without injecting keystrokes (send a redraw keystroke yourself if you
+want one — e.g. Ctrl+L); and `destroy()` tears every feature down and releases
+the kernel.
 
 ## What ships
 
-| Path                     | Purpose                                                                                                         |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| `src/**/*.ts`            | The UI modules: the kernel (`kernel/`), opt-in features (`features/`), presets, IME, predictive echo, viewport. |
-| `css/*.css` + `MANIFEST` | The default theme + layout; concatenate in MANIFEST order.                                                      |
-| `scaffold/index.html`    | A reference HTML page: `<head>` + one empty root element + importmap.                                           |
+| Path                    | Purpose                                                                                                                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/**/*.ts`           | The UI modules: the kernel (`kernel/`), opt-in features (`features/`), per-preset entries (`presets/`), IME, predictive echo, viewport.                                                                                   |
+| `css/*.css` + manifests | Root-scoped component styles. `MANIFEST` = the reference full-page bundle (`page.css` + the tabbed set); `MANIFEST.single/touch/tabbed` = component-only per-preset bundles for embedders. Concatenate in manifest order. |
+| `css/page.css`          | The page kit (full-page hosts only): `html/body` reset + the terminal web font's `@font-face`.                                                                                                                            |
+| `scaffold/index.html`   | A reference full-page HTML host: `<head>` + one empty root element + importmap.                                                                                                                                           |
 
 ## Related projects
 

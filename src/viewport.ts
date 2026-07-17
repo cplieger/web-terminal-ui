@@ -20,6 +20,11 @@ import { scroll } from "@cplieger/web-terminal-engine";
 const SETTLE_MS = 350;
 
 let termWrap: HTMLElement;
+// The terminal root (.wt-root): the geometry CSS vars (--kb-inset, --vv-top)
+// are published here so the terminal subtree — and nothing else on the host
+// page — inherits them. Falls back to termWrap if init was somehow given no
+// root (never in practice; the kernel always passes it).
+let varTarget: HTMLElement;
 let onSettled: ((wasAtBottom: boolean) => void) | null = null;
 let inTransition = false;
 let wasAtBottomAtStart = true;
@@ -59,6 +64,10 @@ function startTransition(): void {
 
 export function init(opts: {
   termWrap: HTMLElement;
+  /** The terminal root (.wt-root): receives the geometry CSS vars the sibling
+   *  chrome reads (--kb-inset, --vv-top), so they scope to the terminal
+   *  subtree instead of leaking onto the host document. */
+  root?: HTMLElement;
   onSettled: (wasAtBottom: boolean) => void;
   /** Ignore the visualViewport keyboard geometry (a hardware-keyboard device
    *  has no soft keyboard to accommodate); only reserved bottom chrome insets
@@ -66,6 +75,7 @@ export function init(opts: {
   suppressKeyboardInset?: () => boolean;
 }): void {
   termWrap = opts.termWrap;
+  varTarget = opts.root ?? opts.termWrap;
   onSettled = opts.onSettled;
   suppressKeyboardInset = opts.suppressKeyboardInset ?? (() => false);
 
@@ -105,12 +115,13 @@ export function init(opts: {
       // folds the reserve into the bottom offset here. The reserve excludes the
       // keyboard (it is measured with the keyboard closed), so adding it to
       // bottomInset does not double-count.
+      // Read the reserve off the terminal itself: tabs publishes it on the
+      // root (.wt-root), and termWrap inherits it — nothing terminal-scoped
+      // lives on the document root anymore.
       const rawReserve = Math.max(
         0,
         Math.round(
-          parseFloat(
-            getComputedStyle(document.documentElement).getPropertyValue("--wt-reserve-bottom"),
-          ) || 0,
+          parseFloat(getComputedStyle(termWrap).getPropertyValue("--wt-reserve-bottom")) || 0,
         ),
       );
       // Sanity cap: the reserve is bottom chrome (a tab bar), tens of px. A value
@@ -122,13 +133,13 @@ export function init(opts: {
       const bottom = bottomInset + reserve;
       termWrap.style.top = offsetTop > 0 ? `${offsetTop}px` : "";
       termWrap.style.bottom = bottom > 0 ? `${bottom}px` : "";
-      // Expose the same geometry as CSS vars for the sibling fixed chrome:
-      // --kb-inset lifts the bottom banner above the keyboard; --vv-top lets the
-      // top key toolbar follow the visual viewport's offset (otherwise it
-      // scrolls off the top when iOS shifts the layout up).
-      const root = document.documentElement.style;
-      root.setProperty("--kb-inset", `${bottomInset}px`);
-      root.setProperty("--vv-top", `${offsetTop}px`);
+      // Expose the same geometry as CSS vars for the sibling chrome, on the
+      // terminal ROOT (scoped: the host page never sees them): --kb-inset
+      // lifts the bottom banner above the keyboard; --vv-top lets the top key
+      // toolbar follow the visual viewport's offset (otherwise it scrolls off
+      // the top when iOS shifts the layout up).
+      varTarget.style.setProperty("--kb-inset", `${bottomInset}px`);
+      varTarget.style.setProperty("--vv-top", `${offsetTop}px`);
       startTransition();
     };
     vv.addEventListener("resize", onChange);
@@ -192,11 +203,13 @@ export function teardown(): void {
     clearTimeout(settleTimer);
     settleTimer = null;
   }
-  // Clear the global root CSS vars onChange published, so a destroy without
-  // a remount (which would recompute them) leaves no stale inset on :root.
-  const rootStyle = document.documentElement.style;
-  rootStyle.removeProperty("--kb-inset");
-  rootStyle.removeProperty("--vv-top");
+  // Clear the CSS vars onChange published on the terminal root, so a destroy
+  // without a remount (which would recompute them) leaves no stale inset.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- teardown may run before any init in tests
+  if (varTarget) {
+    varTarget.style.removeProperty("--kb-inset");
+    varTarget.style.removeProperty("--vv-top");
+  }
   inTransition = false;
   onSettled = null;
   suppressKeyboardInset = () => false;
