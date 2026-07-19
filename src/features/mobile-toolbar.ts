@@ -1,15 +1,16 @@
 // mobileToolbar feature: the on-screen key toolbar (Tab/Esc/arrows/Enter + a
 // collapse toggle and sticky-Ctrl) in the thumb-zone region (design section
-// 22.4). The engine's keyboard.bindMobileToolbar wires the buttons (DECCKM-aware
-// arrows, sticky-Ctrl state); this feature builds the toolbar chrome, routes its
+// 22.4). The engine's toolbar.bindMobileToolbar wires the buttons (DECCKM-aware
+// arrows, sticky-Ctrl state; engine >= v3, where the widget moved out of the
+// keyboard module); this feature builds the toolbar chrome, routes its
 // output through the kernel funnel, and registers sticky-Ctrl as an input
 // transform so a typed character is rewritten to its Ctrl byte when armed.
 
-import { keyboard } from "@cplieger/web-terminal-engine";
+import { toolbar } from "@cplieger/web-terminal-engine";
 import type { TerminalFeature } from "../kernel/types.js";
 import { fromHTML } from "./dom.js";
 
-const { bindMobileToolbar } = keyboard;
+const { bindMobileToolbar } = toolbar;
 
 /** mobileToolbar's public API, so a peer feature (tabs) can drive the key grid
  *  from a button it owns instead of the toolbar's own toggle. */

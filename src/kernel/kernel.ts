@@ -49,14 +49,24 @@ const TAP_MOVEMENT_PX = 10;
 // native text selection / the context menu — so tap-to-focus bows out above
 // this duration and never steals a long-press or a selection.
 const TAP_MAX_MS = 500;
-// The narrow-layout breakpoint, in ROOT-width pixels. The single source of the
-// number: the kernel mirrors it into the .wt-narrow root class for CSS (paired
-// there with pointer-coarseness media queries where touch matters) and features
-// read the same fact via ctx.layout(). Root width — not viewport width — so an
-// embedded terminal in a narrow panel counts as narrow. For every full-page
-// consumer root width equals viewport width, so the behavior matches the old
-// (max-width: 600px) media queries exactly.
+// The narrow-layout breakpoints, in ROOT pixels. The single source of the
+// numbers: the kernel mirrors the resulting fact into the .wt-narrow root
+// class for CSS (paired there with pointer-coarseness media queries where
+// touch matters) and features read the same fact via ctx.layout(). Root
+// dimensions — not viewport dimensions — so an embedded terminal in a narrow
+// panel counts as narrow. For every full-page consumer root size equals
+// viewport size, so the width half matches the old (max-width: 600px) media
+// queries exactly.
 const NARROW_MAX_PX = 600;
+// A root can be compact by HEIGHT as well as width: a large phone rotated to
+// landscape (e.g. an iPhone 14 Pro Max at 932x430) is wider than
+// NARROW_MAX_PX, but its short viewport is still a phone in the hand — the
+// thumb-reach switcher bar is the right UX and the desktop strip wastes
+// scarce rows. Tablets are never this short (the smallest iPad is 744 CSS px
+// tall in landscape), so height <= 500 cleanly separates "landscape phone"
+// from "tablet/desktop" with margin on both sides (the tallest current
+// phones are ~440 in landscape, less with browser chrome).
+const SHORT_MAX_PX = 500;
 
 // Kernel-owned core subtree: the display-only output, the hidden textarea (the
 // single keyboard target), and the IME composition view. No chrome; features
@@ -133,8 +143,12 @@ export function createTerminal(
   const announcer = createAnnouncer(root);
   const tablistController = createTablist(outputEl);
 
-  // --- Narrow-layout driver (.wt-narrow mirrors root width for CSS) ---
-  const isNarrow = (): boolean => root.clientWidth <= NARROW_MAX_PX;
+  // --- Narrow-layout driver (.wt-narrow mirrors root size for CSS) ---
+  // Narrow = compact in EITHER dimension: skinny (a phone in portrait, a
+  // narrow embedded panel) or short (a phone in landscape). The one
+  // ResizeObserver below fires on both width and height changes.
+  const isNarrow = (): boolean =>
+    root.clientWidth <= NARROW_MAX_PX || root.clientHeight <= SHORT_MAX_PX;
   function updateNarrow(): void {
     root.classList.toggle("wt-narrow", isNarrow());
   }
@@ -364,6 +378,13 @@ export function createTerminal(
       // the server delivered it) stays rendered behind the banner.
       markReady();
       connState.ended();
+    },
+    onWireIncompatible() {
+      // Compatibility refusal is terminal for this page instance. Lower the
+      // pre-JS overlay even if no screen frame arrived, then leave the
+      // actionable banner visible while the engine suppresses reconnects.
+      markReady();
+      connState.incompatible();
     },
     onServerRestart() {
       render.resetScrollback();

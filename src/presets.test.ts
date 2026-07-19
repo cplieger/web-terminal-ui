@@ -34,7 +34,13 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       bind: vi.fn(),
       boundStore: vi.fn(),
     },
-    scroll: { init: vi.fn(), scrollToBottom: vi.fn(), isUserScrolledUp: vi.fn(() => false) },
+    scroll: {
+      init: vi.fn(),
+      scrollToBottom: vi.fn(),
+      isUserScrolledUp: vi.fn(() => false),
+      currentScrollTop: vi.fn(() => 0),
+      restoreScrollTop: vi.fn(),
+    },
     connection: {
       init: connectionInit,
       connect: vi.fn(),

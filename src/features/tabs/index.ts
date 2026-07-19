@@ -48,13 +48,15 @@ import {
 
 const DEFAULT_API_BASE = "/api/sessions";
 // The mobile bottom-switcher (a single full-width active-tab chip + swipe) is
-// used ONLY on a narrow coarse-pointer device (a phone). A wide touchscreen (an
-// iPad) and every fine-pointer device (a desktop, or an iPad with a trackpad /
-// Magic Keyboard) get the multi-tab top strip instead — the switcher's
-// single-giant-tab layout wastes a big screen (an iPad was getting the phone
-// UI). The narrow half of that fact is the kernel's .wt-narrow root class /
-// ctx.layout().narrow (ONE breakpoint constant, kernel-owned, root-width
-// driven); CSS pairs it with (pointer: coarse) where touch matters.
+// used ONLY on a narrow coarse-pointer device (a phone — in EITHER
+// orientation: a landscape phone is wide but short, and the kernel's narrow
+// fact covers both). A big touchscreen (an iPad) and every fine-pointer device
+// (a desktop, or an iPad with a trackpad / Magic Keyboard) get the multi-tab
+// top strip instead — the switcher's single-giant-tab layout wastes a big
+// screen (an iPad was getting the phone UI). The narrow half of that fact is
+// the kernel's .wt-narrow root class / ctx.layout().narrow (kernel-owned
+// breakpoint constants, root-size driven); CSS pairs it with
+// (pointer: coarse) where touch matters.
 // Default cadence for the no-activityMonitor polling fallback.
 const DEFAULT_POLL_MS = 4000;
 // Tab context-menu viewport clamping + the flip-above-the-pointer gap live in
@@ -222,24 +224,30 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // --- Desktop tab strip (top-bar region) ---
+      // Two layers: the bar itself never scrolls; an inner scroller
+      // (.wt-tab-scroll, the tablist) holds the tabs plus the "+", which floats
+      // right of the tab list and scrolls WITH it when many tabs overflow. The
+      // keyboard button sits OUTSIDE the scroller as the bar's last flex item,
+      // pinned at the bar's right edge in the scroll-to-bottom button's column
+      // (an overflowing tab list can never push or scroll it away). On a fine
+      // pointer it is display:none (CSS), and the scroller stretches to the
+      // full bar width so the tabs reclaim that space. Both controls are built
+      // + wired by the same shared factories as the mobile switcher's; the kb
+      // button is CSS-gated to a wide touchscreen and un-hidden below only when
+      // a keyboardToggle is wired. addTabChrome inserts each tab before newBtn,
+      // keeping the scroller [tabs… +].
       const slot = ctx.region("top-bar", "tabs");
       const bar = document.createElement("div");
       bar.className = "wt-tab-bar";
-      bar.setAttribute("role", "tablist");
       slot.appendChild(bar);
-      // Strip-end controls, both flex items INSIDE the strip so they flow after
-      // the tabs (appending them to the slot flowed them out of the strip):
-      // the keyboard button first, then the "+" — mirroring the mobile
-      // switcher's kb-before-new order, so rotating a phone to landscape (which
-      // swaps in this strip) keeps the keyboard button LEFT of the "+" rather
-      // than jumping to its right. Built + wired by the same shared factories
-      // as the mobile switcher's; the kb button is CSS-gated to a wide
-      // touchscreen and un-hidden below only when a keyboardToggle is wired.
-      // addTabChrome inserts each tab before deskKb, keeping [tabs… kb +].
+      const scroller = document.createElement("div");
+      scroller.className = "wt-tab-scroll";
+      scroller.setAttribute("role", "tablist");
+      bar.appendChild(scroller);
+      const newBtn = makeNewButton("wt-tab-new");
+      scroller.appendChild(newBtn);
       const deskKb = makeKbButton("wt-tab-kb wt-btn");
       bar.appendChild(deskKb);
-      const newBtn = makeNewButton("wt-tab-new");
-      bar.appendChild(newBtn);
 
       // Pull the terminal surface up off the docked BOTTOM strip on desktop so
       // the bar does not overlap the last rows. The surface is absolute
@@ -400,6 +408,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       ctx.region("overlay", "tab-menu").appendChild(tabMenu);
 
       const tabList: Tab[] = [];
+      // Monotonic local-mutation counter stamped onto each adopted tab (Tab.born)
+      // and snapshotted by reconcileOnce before its GET /api/sessions, so a
+      // stale listing can never drop a tab adopted while it was in flight (the
+      // boot race: the bootstrap's create vs the SSE stream-open reconcile).
+      let tabEpoch = 0;
       // Close tombstones (model.ts): ids the user closed recently, so a stale
       // server listing (the SSE re-open snapshot, or the poll's GET
       // /api/sessions) that predates the server reaping the session does not
@@ -855,9 +868,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         paintStatusDot(dot, info.status, info.reportsActivity ?? false);
         const aria = tablist.registerTab(el);
-        // Insert before the strip-end controls (keyboard button, then "+") so
-        // they stay the last items in the strip.
-        bar.insertBefore(el, deskKb);
+        // Insert before the "+" so it stays the last item of the scrolling tab
+        // list (the keyboard button lives outside the scroller, at the bar end).
+        scroller.insertBefore(el, newBtn);
         // Runtime-added tabs animate in; initial tabs do not (see `started`).
         // The timer (not animationend) also clears the class on the hidden mobile
         // strip, where the animation never fires.
@@ -870,6 +883,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
         const tab: Tab = {
           id: info.id,
+          born: ++tabEpoch,
           title: info.title,
           clientTitle: info.clientTitle,
           display: "",
@@ -959,11 +973,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             slide = to > from ? "next" : "prev";
           }
         }
-        const surface = ctx.surface();
         // Detach the current tab: save its scroll memory (keep its cache).
+        // Read through the engine's scroll seam, never surface.scrollTop —
+        // the controller owns the container's scroll geometry.
         const cur = tabList.find((t) => t.id === activeId);
         if (cur) {
-          cur.scrollTop = surface.scrollTop;
+          cur.scrollTop = ctx.scroll.currentScrollTop();
           cur.following = !ctx.scroll.isUserScrolledUp();
         }
         // Decide whether to animate the expanded list as a rotation: only a
@@ -1025,7 +1040,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           if (following) {
             ctx.scroll.scrollToBottom();
           } else {
-            surface.scrollTop = savedTop;
+            // The write half of scroll memory goes through the same seam; the
+            // controller re-derives hold from the resulting scroll event.
+            ctx.scroll.restoreScrollTop(savedTop);
           }
         });
         ctx.announce(`Switched to ${next.display}`);
@@ -1125,11 +1142,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       // dragTargetBefore returns the first tab whose horizontal midpoint is past
       // x (the element the dragged tab should sit before), or null to drop at the
-      // end (before the strip-end controls). syncOrderFromDom rebuilds tabList to
+      // end (before the "+"). syncOrderFromDom rebuilds tabList to
       // match the strip's DOM order after a drag, so position indicators, the
       // switcher, and close-to-the-right/left all follow the visible order.
       function dragTargetBefore(x: number): HTMLElement | null {
-        for (const el of bar.querySelectorAll<HTMLElement>(".wt-tab:not(.wt-tab-dragging)")) {
+        for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab:not(.wt-tab-dragging)")) {
           const rect = el.getBoundingClientRect();
           if (x < rect.left + rect.width / 2) {
             return el;
@@ -1139,7 +1156,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
       function syncOrderFromDom(): void {
         const order: Tab[] = [];
-        for (const el of bar.querySelectorAll<HTMLElement>(".wt-tab")) {
+        for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab")) {
           const t = tabList.find((x) => x.el === el);
           if (t) {
             order.push(t);
@@ -1494,7 +1511,66 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // drop; the poll additionally learns of a background exit the SSE would
       // have pushed (section 22.5).
       let offStatus: (() => void) | undefined;
+      let offStreamOpen: (() => void) | undefined;
       let pollTimer: ReturnType<typeof setInterval> | null = null;
+      // One-shot list reconcile shared by both status sources: adopt every
+      // session the server lists, then drop tabs it no longer lists. The poll
+      // fallback runs it on a timer; the SSE path runs it on every stream
+      // (re)open — the reopen against a RESTARTED manager is the moment
+      // zombie tabs must drop, because the fresh server's snapshot carries no
+      // tombstones for sessions it never knew, so those tabs would otherwise
+      // spin "Reconnecting…" forever (judgement finding sf-2).
+      // Guarded against overlapping runs: a server slower than the trigger
+      // cadence (but within the 15s API timeout) would otherwise race tabList
+      // mutation. Skip the extra run instead.
+      let reconciling = false;
+      const reconcileOnce = async (): Promise<void> => {
+        if (reconciling) {
+          return;
+        }
+        reconciling = true;
+        try {
+          // Snapshot the mutation epoch BEFORE the list round-trip: the listing
+          // is authoritative only for tabs that already existed when it was
+          // requested. A tab adopted while the GET was in flight (the boot
+          // race: the bootstrap's create vs this stream-open reconcile) is
+          // invisible to the returned snapshot, and dropping it here cascaded
+          // into a duplicate replacement session (dropTab's last-tab intercept
+          // spawns one) — the double-create boot bug.
+          const epochAtList = tabEpoch;
+          let list: SessionInfo[];
+          try {
+            list = await api.list();
+          } catch {
+            return; // transient; try again on the next trigger
+          }
+          const seen = new Set(list.map((s) => s.id));
+          for (const info of list) {
+            adoptSession(info); // add sessions created elsewhere (no local tab)
+            applyStatus(
+              info.id,
+              info.status,
+              info.title,
+              info.clientTitle,
+              info.reportsActivity ?? false,
+            );
+          }
+          // A tab the server no longer lists was reaped/closed elsewhere (or
+          // died with a restarted manager): drop it locally (no DELETE — it
+          // is already gone). Tabs born after the list snapshot are spared this
+          // round; the next reconcile sees the server truth for them.
+          const gone = tabList
+            .filter((t) => !seen.has(t.id) && t.born <= epochAtList)
+            .map((t) => t.id);
+          for (const id of gone) {
+            await dropTab(id, false);
+          }
+          ensureActive();
+          syncChrome();
+        } finally {
+          reconciling = false;
+        }
+      };
       if (monitor) {
         offStatus = monitor.onStatus((s) => {
           if (s.removed) {
@@ -1514,50 +1590,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           ensureActive();
           syncChrome();
         });
+        offStreamOpen = monitor.onStreamOpen?.(() => {
+          void reconcileOnce();
+        });
       } else {
         const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
-        // Guard against overlapping runs: a server slower than pollMs (but
-        // within the 15s API timeout) would otherwise let setInterval start
-        // a second pollOnce while the first is still awaiting, racing tabList
-        // mutation. Skip the tick instead.
-        let polling = false;
-        const pollOnce = async (): Promise<void> => {
-          if (polling) {
-            return;
-          }
-          polling = true;
-          try {
-            let list: SessionInfo[];
-            try {
-              list = await api.list();
-            } catch {
-              return; // transient; try again next tick
-            }
-            const seen = new Set(list.map((s) => s.id));
-            for (const info of list) {
-              adoptSession(info); // add sessions created elsewhere (no local tab)
-              applyStatus(
-                info.id,
-                info.status,
-                info.title,
-                info.clientTitle,
-                info.reportsActivity ?? false,
-              );
-            }
-            // A tab the server no longer lists was reaped/closed elsewhere: drop it
-            // locally (no DELETE — it is already gone).
-            const gone = tabList.filter((t) => !seen.has(t.id)).map((t) => t.id);
-            for (const id of gone) {
-              await dropTab(id, false);
-            }
-            ensureActive();
-            syncChrome();
-          } finally {
-            polling = false;
-          }
-        };
         pollTimer = setInterval(() => {
-          void pollOnce();
+          void reconcileOnce();
         }, pollMs);
       }
 
@@ -1584,7 +1623,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (e.dataTransfer) {
           e.dataTransfer.dropEffect = "move";
         }
-        bar.insertBefore(draggingEl, dragTargetBefore(e.clientX) ?? deskKb);
+        scroller.insertBefore(draggingEl, dragTargetBefore(e.clientX) ?? newBtn);
       });
       // Active-row close (x): closes the current tab (mirrors a listed row's x).
       // stopPropagation so it is not read as a tap/swipe on the row surface.
@@ -2125,6 +2164,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         teardown() {
           resolveImpl = null;
           offStatus?.();
+          offStreamOpen?.();
           offInput();
           offHwKey();
           offArmed?.();

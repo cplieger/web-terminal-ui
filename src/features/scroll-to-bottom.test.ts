@@ -24,7 +24,12 @@ function fakeCtx(): {
   const ctx = {
     region: () => slot,
     surface: () => surface,
-    scroll: { scrollToBottom: scrollToBottomSpy, isUserScrolledUp: () => false },
+    scroll: {
+      scrollToBottom: scrollToBottomSpy,
+      isUserScrolledUp: () => false,
+      currentScrollTop: () => 0,
+      restoreScrollTop: () => undefined,
+    },
     on: (_e: string, fn: (p: { scrolledUp: boolean }) => void) => {
       scrollHandler = fn;
       return offSpy;

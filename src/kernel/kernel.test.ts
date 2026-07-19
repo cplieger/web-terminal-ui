@@ -38,7 +38,13 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       bind: vi.fn(),
       boundStore: vi.fn(),
     },
-    scroll: { init: vi.fn(), scrollToBottom: vi.fn(), isUserScrolledUp: vi.fn(() => false) },
+    scroll: {
+      init: vi.fn(),
+      scrollToBottom: vi.fn(),
+      isUserScrolledUp: vi.fn(() => false),
+      currentScrollTop: vi.fn(() => 0),
+      restoreScrollTop: vi.fn(),
+    },
     connection: {
       init: connectionInit,
       connect,
@@ -291,6 +297,35 @@ describe("process exit (the engine's definitive 4001 close)", () => {
     expect(loading.classList.contains("fade")).toBe(true);
     // And the state machine surfaces the definitive end, not a reconnect.
     expect(seen).toContain("ended");
+  });
+
+  it("dismisses the loading overlay and emits 'incompatible' on wire refusal", async () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const seen: string[] = [];
+    const watcher: TerminalFeature = {
+      name: "wire-state-watcher",
+      setup(ctx) {
+        ctx.on("connection:state", (s) => {
+          seen.push(s);
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(root, { features: [watcher], loading });
+    await tick();
+
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onWireIncompatible?.({
+      source: "server-close",
+      clientVersion: 4,
+      minimumServerVersion: 3,
+      reason: "upgrade required",
+    });
+
+    expect(loading.classList.contains("fade")).toBe(true);
+    expect(seen).toContain("incompatible");
   });
 });
 

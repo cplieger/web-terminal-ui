@@ -31,7 +31,8 @@ with opt-in feature modules that own everything above the raw terminal:
 - **predictive local echo**, **IME / composition** (CJK, dictation,
   autocorrect), and **viewport + keyboard-inset** handling for the iOS soft
   keyboard, rotation, and font-load reflows
-- a connection-status banner and a copy toast
+- a connection-status banner, including a persistent protocol-incompatibility
+  state, and a copy toast
 
 It is published as TypeScript source (no build step) to npm and JSR, alongside
 the CSS bundle and a reference HTML page. Consumers who want a different UI should
@@ -43,9 +44,12 @@ depend on the engine directly and skip this package.
 npm install @cplieger/web-terminal-ui @cplieger/web-terminal-engine
 ```
 
-`@cplieger/web-terminal-engine` is a peer dependency — the UI is built on the engine,
-and both halves of the wire protocol must stay in lockstep, so the consumer
-pins the engine version explicitly.
+`@cplieger/web-terminal-engine` is a peer dependency — the UI is built on the
+engine, so the consumer pins the engine version explicitly. Pairing compatibility
+is governed by the engine's
+[directional wire contract](https://github.com/cplieger/web-terminal-engine#wire-protocol),
+not strict package-version equality; the UI surfaces a terminal incompatibility
+through its connection banner.
 
 ## Usage
 

@@ -6,10 +6,14 @@ import type { activityMonitor as ActivityMonitorFn } from "./activity-monitor.js
 
 const close = vi.fn();
 let captured: ((s: SessionStatus) => void) | undefined;
-const connectStatusStream = vi.fn((_path: string, cb: { onStatus: (s: SessionStatus) => void }) => {
-  captured = cb.onStatus;
-  return { close };
-});
+let capturedOpen: (() => void) | undefined;
+const connectStatusStream = vi.fn(
+  (_path: string, cb: { onStatus: (s: SessionStatus) => void; onOpen?: () => void }) => {
+    captured = cb.onStatus;
+    capturedOpen = cb.onOpen;
+    return { close };
+  },
+);
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -35,6 +39,7 @@ beforeEach(async () => {
   connectStatusStream.mockClear();
   close.mockClear();
   captured = undefined;
+  capturedOpen = undefined;
   ({ activityMonitor } = await import("./activity-monitor.js"));
 });
 
@@ -102,5 +107,58 @@ describe("activityMonitor: subscriber isolation", () => {
     expect(bCalled).toBe(true);
     expect(inst.api?.current("s1")).toBeDefined();
     expect(errSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("activityMonitor: stream-open fan-out (restart reconcile hook)", () => {
+  it("notifies open subscribers on every stream (re)open", async () => {
+    const inst = await activityMonitor().setup(ctx);
+    let opens = 0;
+    inst.api?.onStreamOpen?.(() => {
+      opens++;
+    });
+    capturedOpen?.(); // initial connect
+    capturedOpen?.(); // reconnect (e.g. after a manager restart)
+    expect(opens).toBe(2);
+  });
+
+  it("catches a late subscriber up when the stream already opened", async () => {
+    const inst = await activityMonitor().setup(ctx);
+    capturedOpen?.(); // stream opens before anyone subscribes
+    let opens = 0;
+    inst.api?.onStreamOpen?.(() => {
+      opens++;
+    });
+    expect(opens).toBe(1); // immediate catch-up
+    capturedOpen?.();
+    expect(opens).toBe(2);
+  });
+
+  it("the onStreamOpen unsubscribe stops further delivery", async () => {
+    const inst = await activityMonitor().setup(ctx);
+    capturedOpen?.();
+    let opens = 0;
+    const off = inst.api?.onStreamOpen?.(() => {
+      opens++;
+    });
+    off?.();
+    capturedOpen?.();
+    expect(opens).toBe(1); // only the catch-up call
+  });
+
+  it("isolates a throwing open subscriber from its peers", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const inst = await activityMonitor().setup(ctx);
+    let peerRan = false;
+    inst.api?.onStreamOpen?.(() => {
+      throw new Error("boom");
+    });
+    inst.api?.onStreamOpen?.(() => {
+      peerRan = true;
+    });
+    capturedOpen?.();
+    expect(peerRan).toBe(true);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    errSpy.mockRestore();
   });
 });

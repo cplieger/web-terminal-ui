@@ -8,6 +8,20 @@
   position: absolute;
   inset: 0;
   overflow: hidden auto;
+  /* Scroll stays in the terminal: reaching the top of scrollback (or the
+     bottom) must not chain the gesture into an embedding page (wt-container
+     mode), and a touch pull inside the terminal must not trigger the host's
+     pull-to-refresh. Full-page hosts already get this via page.css's
+     html/body overscroll-behavior: none; this covers the embedded case. */
+  overscroll-behavior: contain;
+  /* Reserve the scrollbar gutter from the start on classic-scrollbar
+     platforms. Without it the scrollbar pops in when scrollback first
+     exceeds a screen, narrowing the content box -> ResizeObserver -> column
+     recount -> PTY resize -> the running program reflows: a one-time layout
+     jump every fresh session. Real terminals reserve this space permanently;
+     with the boundary's thin dark scrollbars (01-scope.css) the idle gutter
+     is a subtle strip. No-op on overlay-scrollbar platforms. */
+  scrollbar-gutter: stable;
   /* The scroll controller (vterm scroll.ts) is the single owner of
      scrollTop: it pins to the bottom only while the user is following,
      and does nothing while they are scrolled up reading. New output
@@ -234,6 +248,41 @@
 :where(.wt-root) .cursor-blink-off .term-cursor {
   background: transparent;
   color: var(--text);
+}
+
+/* Caret overlay (engine >= v3): the renderer paints the REAL cursor as one
+   absolutely-positioned element in the scroll container (a sibling of
+   .pred-cursor, below it in the stack), not as a restyled span inside the
+   cursor row — rows stay pure content, so a native text selection survives
+   cursor motion and typing. The engine sets left/top/width/height/line-height
+   inline each flush; the .term-cursor / -underline / -bar variant classes
+   above keep supplying the colors and borders, and the JS-driven
+   .cursor-blink-off toggle (now on the scroll container) keeps driving the
+   block blink. */
+:where(.wt-root) .term-cursor-overlay {
+  position: absolute;
+  pointer-events: none;
+  white-space: pre;
+  overflow: hidden;
+  z-index: 3;
+  box-sizing: border-box;
+}
+
+:where(.wt-root) .term-cursor-overlay:not(.visible) {
+  display: none;
+}
+
+/* DECSCNM reverse video (private mode 5): the engine toggles
+   .term-reverse-video on the scroll container (render.updateReverseVideo);
+   this rule swaps the DEFAULT color pair for the terminal subtree via the
+   captured copies from 00-tokens.css. Everything painted with var(--text)/
+   var(--bg) — default-colored cells, the screen background, the block cursor's
+   inverted cell — follows automatically; explicitly colored cells keep their
+   colors, matching xterm's DECSCNM semantics (the default pair swaps, not a
+   per-pixel inversion). */
+:where(.wt-root) .term.term-reverse-video {
+  --text: var(--bg-default);
+  --bg: var(--text-default);
 }
 
 :where(.wt-root) .term-blink {

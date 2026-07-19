@@ -82,6 +82,10 @@
      clear of the soft keyboard. */
   max-height: var(--wt-list-h, 50dvh);
   overflow-y: auto;
+  /* Reaching the list's end must not hand the touch scroll to an embedding
+     page (wt-container mode) — the tray sits over the terminal, and a chained
+     scroll behind an open tray is disorienting. */
+  overscroll-behavior-y: contain;
   /* No top padding: the bar's --sp-2 bottom padding already sits between the
      active tab and the first row, so the seam equals the --sp-2 inter-row gap. */
   padding-top: 0;
@@ -318,12 +322,19 @@
    In the tabbed presets the mobile toolbar hides its own toggle (a tab-chrome
    keyboard button drives it — the switcher's on a narrow phone, the strip's
    .wt-tab-kb on a wide touchscreen) and the grid docks bottom-right above the
-   tab chrome, to the left of where scroll-to-bottom sits. It collapses to
-   fully hidden, since there is no in-grid toggle to keep visible. The BASE
-   rules here are the wide-touchscreen (strip) placement — above --wt-tabbar-h;
-   the .wt-narrow override below re-anchors above the switcher bar instead
-   (--wt-switcher-h). Everything else (toggle hidden, right offset, grid
-   columns, collapsed fully hidden) is identical in both modes. */
+   tab chrome, its RIGHT edge aligned with the keyboard button that opened it,
+   so the popup visually hangs off its toggle in every mode (it may overlap the
+   scroll-to-bottom button — deliberate: the grid is transient and on top). It
+   collapses to fully hidden, since there is no in-grid toggle to keep visible.
+   The BASE rules here are the wide-touchscreen (strip) placement — above
+   --wt-tabbar-h, right-aligned to the strip's .wt-tab-kb (the bar's last flex
+   item, inset --sp-2 by the bar padding); the .wt-narrow overrides below
+   re-anchor above the switcher bar (--wt-switcher-h) and shift left past the
+   bar controls sitting right of the switcher's kb button: the "+" (always)
+   and, once a second tab reveals it, the switch button (.wt-switcher-multi
+   from the tabs feature, read here via :has() since the grid is a sibling
+   region of the switcher). Everything else (toggle hidden, grid columns,
+   collapsed fully hidden) is identical in all modes. */
 @media (pointer: coarse) {
   :where(.wt-root) .wt-toolbar-external .kb-toggle {
     display: none;
@@ -331,7 +342,7 @@
 
   :where(.wt-root) .key-toolbar.wt-toolbar-external {
     top: auto;
-    right: calc(var(--sp-3) + var(--touch-target) + var(--sp-2));
+    right: var(--sp-2);
     bottom: calc(
       var(--wt-tabbar-h, 44px) + var(--safe-bottom, 0px) + var(--kb-inset, 0px) + var(--sp-2)
     );
@@ -342,11 +353,20 @@
     display: none;
   }
 
-  /* Narrow phone (mobile switcher mode): dock above the switcher bar. */
+  /* Narrow phone (mobile switcher mode): dock above the switcher bar,
+     right-aligned to the switcher's kb button — one 44px control (+ gap)
+     in from the edge past the "+"... */
   :where(.wt-root.wt-narrow) .key-toolbar.wt-toolbar-external {
+    right: calc(var(--sp-2) + var(--touch-target) + var(--sp-1));
     bottom: calc(
       var(--wt-switcher-h) + var(--safe-bottom, 0px) + var(--kb-inset, 0px) + var(--sp-2)
     );
+  }
+
+  /* ...and a second control in once the switch button is revealed (>= 2 tabs).
+     Ordered after the single-tab rule so it wins when both match. */
+  :where(.wt-root.wt-narrow:has(.wt-switcher-multi)) .key-toolbar.wt-toolbar-external {
+    right: calc(var(--sp-2) + 2 * (var(--touch-target) + var(--sp-1)));
   }
 }
 

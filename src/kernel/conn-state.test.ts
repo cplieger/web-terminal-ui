@@ -187,3 +187,19 @@ describe("conn-state: destroy clears pending timers", () => {
     expect(onState).not.toHaveBeenCalled();
   });
 });
+
+describe("conn-state: incompatible wire revision", () => {
+  it("passes through the loading gate and persists without a retry timer", () => {
+    m.incompatible();
+    expect(states()).toEqual(["incompatible"]);
+    vi.advanceTimersByTime(60_000);
+    expect(m.current()).toBe("incompatible");
+  });
+
+  it("is replaced only when a later connection opens", () => {
+    m.setLoaded();
+    m.incompatible();
+    m.open();
+    expect(states()).toEqual(["incompatible", "open"]);
+  });
+});

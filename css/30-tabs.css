@@ -13,7 +13,10 @@
 
 :where(.wt-root) .wt-tab-bar {
   /* Absolute against .wt-root, like all chrome (identical geometry in
-     wt-viewport mode; see 01-scope.css). */
+     wt-viewport mode; see 01-scope.css). The bar itself never scrolls: the
+     tabs + "+" scroll inside .wt-tab-scroll (below), so the keyboard button —
+     the bar's last flex item, outside the scroller — stays pinned at the right
+     edge however many tabs are open. */
   position: absolute;
   bottom: var(--safe-bottom);
   left: 0;
@@ -26,8 +29,25 @@
   background: var(--surface);
   backdrop-filter: var(--blur);
   border-top: 1px solid var(--border);
-  overflow-x: auto;
   z-index: 15;
+}
+
+/* The scrolling tab list inside the bar: the tabs plus the "+", which floats
+   right of the last tab and scrolls with the list. Horizontal scrolling lives
+   HERE, not on the bar, so the strip-end keyboard button never scrolls away.
+   flex: 1 + min-width: 0 make it shrink to leave room for the keyboard button
+   when that is shown (a wide touchscreen) and stretch to the full bar width
+   when it is hidden (a fine-pointer desktop), so the tabs reclaim the space. */
+:where(.wt-root) .wt-tab-scroll {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  /* A wheel/trackpad/touch scroll that runs out of tabs must not chain into
+     an embedding page (wt-container mode). */
+  overscroll-behavior-x: contain;
 }
 
 :where(.wt-root) .wt-tab {
@@ -35,8 +55,8 @@
   align-items: center;
   gap: var(--sp-1);
   /* Browser-style tabs: up to 300px per tab when there is room, shrinking toward
-     a 100px floor as the strip fills; past the floor the bar scrolls horizontally
-     (.wt-tab-bar has overflow-x: auto). flex-grow is 0, so the 300px basis is a
+     a 100px floor as the strip fills; past the floor the list scrolls horizontally
+     (.wt-tab-scroll has overflow-x: auto). flex-grow is 0, so the 300px basis is a
      hard cap — every tab is the same size and never stretches past it, whatever
      its title; the label truncates instead. box-sizing keeps the basis a true
      total. */
@@ -202,14 +222,16 @@
    landscape), where there is no mobile switcher to carry one. Built + wired by
    the SAME factory as the mobile switcher's keyboard button (see makeKbButton
    in tabs.ts). Uses the shared .wt-btn primitive for its 44px box + centered
-   icon, borderless like the switcher's — the old fixed-overlay styling gave it
-   a border and pinned it right of the "+", which read as a different control
-   the moment a phone rotated to landscape. Now an ordinary flex item inside the
-   strip, before the "+" (kb-then-new, mirroring the mobile switcher's order).
-   Hidden on a fine-pointer desktop (a real keyboard is present) and until a
-   keyboardToggle feature is wired ([hidden]); shown only on a coarse pointer at
-   strip widths (the .wt-narrow complement below; the breakpoint itself is the
-   kernel's, mirrored as the root class). */
+   icon, borderless like the switcher's. The bar's LAST flex item, OUTSIDE the
+   tab scroller: pinned at the bar's right edge in the same column as the
+   scroll-to-bottom button floating above it (both 44px boxes whose right edge
+   sits --sp-2 from the root's right edge), where an overflowing tab list can
+   never push or scroll it away; the "+" stays with the tabs inside the
+   scroller. Hidden on a fine-pointer desktop (a real keyboard is present; the
+   scroller then stretches to the full bar width) and until a keyboardToggle
+   feature is wired ([hidden]); shown only on a coarse pointer at strip widths
+   (the .wt-narrow complement below; the breakpoint itself is the kernel's,
+   mirrored as the root class). */
 :where(.wt-root) .wt-tab-kb {
   display: none;
   flex: none;
