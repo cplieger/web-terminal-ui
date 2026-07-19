@@ -22,8 +22,10 @@ import type { MobileToolbarApi } from "../mobile-toolbar.js";
 function fakeMonitor(): {
   feature: TerminalFeature<ActivityMonitorApi>;
   emit: (s: SessionStatus) => void;
+  open: () => void;
 } {
   const subs = new Set<(s: SessionStatus) => void>();
+  const openSubs = new Set<() => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
     setup() {
@@ -34,6 +36,10 @@ function fakeMonitor(): {
             return () => subs.delete(cb);
           },
           current: () => undefined,
+          onStreamOpen(cb) {
+            openSubs.add(cb);
+            return () => openSubs.delete(cb);
+          },
         },
         teardown: () => undefined,
       };
@@ -44,6 +50,11 @@ function fakeMonitor(): {
     emit: (s) => {
       for (const cb of [...subs]) {
         cb(s);
+      }
+    },
+    open: () => {
+      for (const cb of [...openSubs]) {
+        cb();
       }
     },
   };
@@ -126,7 +137,13 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       bind,
       boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
     },
-    scroll: { init: vi.fn(), scrollToBottom: vi.fn(), isUserScrolledUp: vi.fn(() => false) },
+    scroll: {
+      init: vi.fn(),
+      scrollToBottom: vi.fn(),
+      isUserScrolledUp: vi.fn(() => false),
+      currentScrollTop: vi.fn(() => 0),
+      restoreScrollTop: vi.fn(),
+    },
     connection: {
       init: vi.fn(),
       connect: vi.fn(),
@@ -340,25 +357,23 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s-new");
   });
 
-  it("renders the + button as the last item inside the tab strip", async () => {
+  it("renders the + button as the last item of the scrolling tab list", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, { features: [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
-    const bar = root.querySelector(".wt-tab-bar");
+    const scroller = root.querySelector(".wt-tab-scroll");
     const newBtn = root.querySelector(".wt-tab-new");
     expect(newBtn).toBeTruthy();
-    // The close-all bar button is gone (it moved to the right-click menu); the +
-    // is the last flex item in the strip, after the tabs and the (hidden until
-    // wired) keyboard button — the strip order is [tabs… kb +].
+    // The close-all bar button is gone (it moved to the right-click menu). The +
+    // is the last flex item of the scroller, directly after the tabs, so it
+    // floats right of the tab list and scrolls with it when many tabs overflow;
+    // the keyboard button lives outside the scroller (see its own test).
     expect(root.querySelector(".wt-tab-closeall")).toBeNull();
-    expect(bar?.contains(newBtn ?? null)).toBe(true);
-    expect(bar?.lastElementChild).toBe(newBtn);
-    expect(newBtn?.previousElementSibling?.classList.contains("wt-tab-kb")).toBe(true);
-    expect(
-      newBtn?.previousElementSibling?.previousElementSibling?.classList.contains("wt-tab"),
-    ).toBe(true);
+    expect(scroller?.contains(newBtn ?? null)).toBe(true);
+    expect(scroller?.lastElementChild).toBe(newBtn);
+    expect(newBtn?.previousElementSibling?.classList.contains("wt-tab")).toBe(true);
   });
 
   it("closes a tab on middle-click", async () => {
@@ -1076,20 +1091,19 @@ describe("tabs feature", () => {
     term = createTerminal(root, { features: [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
-    // The desktop strip carries its own keyboard button (like the switcher's),
-    // an in-flow strip member BEFORE the "+" — mirroring the mobile switcher's
-    // kb-then-new order, so rotating a phone to landscape keeps the keyboard
-    // button left of the "+". It stays hidden until a keyboardToggle feature is
-    // wired, and never counts as a tab.
+    // The desktop strip carries its own keyboard button (like the switcher's):
+    // the bar's LAST flex item, OUTSIDE the scrolling tab list, so it is pinned
+    // at the bar's right edge (the scroll-to-bottom button's column) and an
+    // overflowing tab list can never push or scroll it away. It stays hidden
+    // until a keyboardToggle feature is wired, and never counts as a tab.
     const deskKb = root.querySelector<HTMLElement>(".wt-tab-kb");
+    const bar = root.querySelector(".wt-tab-bar");
     expect(deskKb).toBeTruthy();
     expect(deskKb?.hidden).toBe(true);
-    expect(root.querySelector(".wt-tab-bar")?.contains(deskKb ?? null)).toBe(true);
-    expect(deskKb?.previousElementSibling?.classList.contains("wt-tab")).toBe(true);
-    expect(deskKb?.nextElementSibling).toBe(root.querySelector(".wt-tab-new"));
-    expect(root.querySelector(".wt-tab-bar")?.lastElementChild).toBe(
-      root.querySelector(".wt-tab-new"),
-    );
+    expect(bar?.contains(deskKb ?? null)).toBe(true);
+    expect(bar?.lastElementChild).toBe(deskKb);
+    expect(root.querySelector(".wt-tab-scroll")?.contains(deskKb)).toBe(false);
+    expect(deskKb?.previousElementSibling?.classList.contains("wt-tab-scroll")).toBe(true);
   });
 
   it("closes the key grid on a second tap of the desktop keyboard button", async () => {
@@ -1140,5 +1154,100 @@ describe("tabs feature", () => {
     expect(mobKb?.getAttribute("aria-expanded")).toBe("true");
     expect(deskKb?.classList.contains("wt-active")).toBe(true);
     expect(mobKb?.classList.contains("wt-active")).toBe(true);
+  });
+});
+
+describe("tabs feature: stream-open reconcile (manager-restart zombie tabs)", () => {
+  it("drops tabs the server no longer lists when the status stream (re)opens", async () => {
+    // A manager restart kills every session; the replacement server's SSE
+    // snapshot carries no tombstones for sessions it never knew, so the only
+    // signal is the stream REOPEN. tabs must reconcile against
+    // GET /api/sessions there and drop the zombies (no DELETE — they are
+    // already gone) instead of leaving them spinning "Reconnecting…".
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    // Restart: s1 died with the old manager; the new one lists only s2
+    // (recreated elsewhere). The reopen triggers the one-shot reconcile.
+    listBody = [{ id: "s2", title: "two", createdAt: "2", status: "idle" }];
+    fetchMock.mockClear();
+    monitor.open();
+
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    expect(root.querySelectorAll(".wt-tab").length).toBe(1);
+    // The zombie was dropped locally, never DELETEd (it is already gone).
+    expect(fetchMock.mock.calls.some((c) => c[1]?.method === "DELETE")).toBe(false);
+    // The reconcile listed sessions exactly once for this open.
+    const gets = fetchMock.mock.calls.filter((c) => (c[1]?.method ?? "GET") === "GET");
+    expect(gets.length).toBe(1);
+  });
+});
+
+describe("tabs feature: boot race (stream-open reconcile vs bootstrap create)", () => {
+  it("spares a tab adopted while the reconcile's list was in flight (no double create)", async () => {
+    // The real boot interleaving (the double-create bug): the SSE stream opens
+    // while the bootstrap's create POST is in flight, so the stream-open
+    // reconcile's GET /api/sessions is answered from a snapshot taken BEFORE
+    // the create committed (an empty list). That stale listing is not
+    // authoritative for the tab the bootstrap adopts meanwhile: dropping it
+    // cascaded into dropTab's last-tab intercept spawning a replacement — a
+    // second POST, an orphaned server session, and an aborted first WS.
+    const monitor = fakeMonitor();
+    const stale: { resolve: (() => void) | null } = { resolve: null };
+    let posts = 0;
+    let gets = 0;
+    fetchMock.mockImplementation((_url: string | URL, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (method === "POST") {
+        posts++;
+        if (posts === 1) {
+          // The stream opens exactly while the create is in flight: the
+          // reconcile snapshots its epoch NOW (no tabs adopted yet) and its
+          // GET hangs until after the bootstrap adopted the created session.
+          monitor.open();
+        }
+        return Promise.resolve(
+          jsonResponse({ id: `s-new-${posts}`, title: "", createdAt: "3", status: "idle" }, 201),
+        );
+      }
+      if (method === "DELETE") {
+        return Promise.resolve(jsonResponse(null, 204));
+      }
+      gets++;
+      if (gets === 1) {
+        // The bootstrap's own list: empty server, so it proceeds to create.
+        return Promise.resolve(jsonResponse([], 200));
+      }
+      // The reconcile's list: deferred, resolved by the test AFTER the
+      // bootstrap adopted its tab, with the stale pre-create body.
+      return new Promise<Response>((res) => {
+        stale.resolve = () => {
+          res(jsonResponse([], 200));
+        };
+      });
+    });
+
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+
+    // Bootstrap created + adopted its session while the reconcile's GET hangs.
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    await until(() => stale.resolve !== null);
+    expect(stale.resolve).not.toBeNull();
+    stale.resolve?.();
+    // Let the reconcile finish; the adopted tab must survive its stale listing.
+    await until(() => posts > 1, 5); // settles (no second create expected)
+
+    expect(root.querySelectorAll(".wt-tab").length).toBe(1);
+    expect(posts).toBe(1); // no duplicate replacement session
+    expect(fetchMock.mock.calls.some((c) => c[1]?.method === "DELETE")).toBe(false);
   });
 });

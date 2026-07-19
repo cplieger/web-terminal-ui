@@ -14,6 +14,7 @@ const TEXT: Partial<Record<ConnState, string>> = {
   // The session's process exited (definitive; nothing is retrying). The final
   // screen stays rendered behind the banner; open a new tab to keep working.
   ended: "Session ended",
+  incompatible: "Terminal protocol mismatch; update the server or reload this page",
 };
 
 export function connectionBanner(): TerminalFeature {

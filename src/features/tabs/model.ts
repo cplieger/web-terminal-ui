@@ -29,6 +29,14 @@ export const SWIPE_HINT_KEY = "wt-swipe-hint-seen";
 
 export interface Tab {
   id: string;
+  /** Local mutation epoch at which this tab was adopted (a monotonic counter,
+   *  not a timestamp). The list reconcile snapshots the counter BEFORE its GET
+   *  /api/sessions and drops a server-unlisted tab only when the tab predates
+   *  that snapshot — a tab born while the list was in flight (the bootstrap's
+   *  create racing the SSE stream-open reconcile) is invisible to that stale
+   *  listing, and dropping it would cascade into a duplicate replacement
+   *  session (the boot double-create bug). */
+  born: number;
   /** The raw server title (the OSC 0/2 window title the process set), possibly
    *  empty before the process sets one. The displayed label is derived from it
    *  with a numbered fallback and de-duplication (see relabelAll in index.ts). */

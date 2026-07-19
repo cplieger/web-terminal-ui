@@ -33,6 +33,26 @@
 
 .wt-root {
   -webkit-font-smoothing: antialiased;
+  /* The terminal subtree is dark regardless of the host page's scheme, and
+     UA-rendered bits inside it (classic scrollbars, selection tints) must
+     match — page.css declares this on html for full-page hosts, but an
+     embedded root (wt-container) inherits the HOST's scheme without this. */
+  color-scheme: dark;
+  /* Design-system scrollbar COLOR on every scroller in the subtree (the
+     terminal, the tab scroller, the expanded switcher list): border-grey
+     thumb, no track — the vibekit/subflux treatment. scrollbar-color
+     INHERITS, so the boundary is the one place to set it. Where it is not
+     supported the color-scheme above still renders the UA fallback dark.
+     Overlay-scrollbar platforms are unaffected. */
+  scrollbar-color: var(--border) transparent;
+}
+
+/* scrollbar-width does NOT inherit (unlike scrollbar-color), so the thin
+   variant is applied to every element in the boundary: a no-op for anything
+   that does not scroll, and any scroller a future feature adds is covered
+   automatically instead of joining an explicit list nobody remembers. */
+.wt-root * {
+  scrollbar-width: thin;
 }
 
 /* stylelint-disable declaration-no-important, time-min-milliseconds --

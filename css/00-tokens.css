@@ -12,6 +12,16 @@
   --surface: oklch(16% 0.005 280deg / 70%);
   --border: oklch(100% 0 0deg / 15%);
   --text: oklch(90% 0.005 280deg);
+
+  /* Captured copies of the default color pair, resolved HERE (custom
+     properties substitute var() at computed-value time, so descendants
+     inherit the resolved colors, not the references). The DECSCNM
+     reverse-video rule in 02-terminal.css swaps --text/--bg on .term by
+     reading these — a direct self-referential swap (--text: var(--bg))
+     would be a cycle and invalidate both. Theme overrides (inline custom
+     properties on this element, or a consumer rule) are captured too. */
+  --text-default: var(--text);
+  --bg-default: var(--bg);
   --text-active: color-mix(in oklch, var(--text) 15%, transparent);
   /* ===== Themeable tokens (the consumer-configurable "template") =====
      These default to the neutral built-in look; a consumer recolors the UI by

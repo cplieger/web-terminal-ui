@@ -60,7 +60,10 @@ export type ConnState =
   // The active session's process has EXITED (the engine's definitive 4001
   // close): not a connectivity problem, so no reconnect is coming. Cleared
   // only by connecting somewhere live (a tab switch / a new session).
-  | "ended";
+  | "ended"
+  // The engine refused an explicitly incompatible wire revision. This is a
+  // terminal state, not a transient disconnect; page reload/update is required.
+  | "incompatible";
 
 // --- Engine drive handles ---
 //
@@ -89,6 +92,13 @@ export interface RenderHandle {
 export interface ScrollHandle {
   scrollToBottom(): void;
   isUserScrolledUp(): boolean;
+  /** The viewport's current scroll offset — the read half of per-tab scroll
+   *  memory. The engine's scroll controller owns the container's scrollTop;
+   *  features go through this seam, never the DOM element (engine >= v3). */
+  currentScrollTop(): number;
+  /** Restore a saved offset; follow/hold re-derives from the resulting scroll
+   *  event exactly as for a user scroll — the write half of scroll memory. */
+  restoreScrollTop(top: number): void;
 }
 
 // --- Typed event bus payloads (section 22.4) ---
@@ -202,11 +212,13 @@ export interface TerminalContext {
   tablist(): TablistController;
 
   /** The current layout facts a feature keys touch-vs-desktop behavior on.
-   *  `narrow` is ROOT width at or below the kernel's single breakpoint (the
-   *  same fact the .wt-narrow root class exposes to CSS — root width, not
-   *  viewport width, so an embedded terminal in a narrow panel counts as
-   *  narrow). `coarse` is the primary pointer's coarseness (a live media-query
-   *  read). Read lazily at interaction time. */
+   *  `narrow` is a ROOT compact in EITHER dimension against the kernel's
+   *  breakpoints: skinny (width, a portrait phone or a narrow embedded panel)
+   *  or short (height, a landscape phone) — the same fact the .wt-narrow root
+   *  class exposes to CSS; root size, not viewport size, so an embedded
+   *  terminal in a narrow panel counts as narrow. `coarse` is the primary
+   *  pointer's coarseness (a live media-query read). Read lazily at
+   *  interaction time. */
   layout(): { narrow: boolean; coarse: boolean };
 
   /** Switch the live terminal to a session. tabs binds the renderer to the

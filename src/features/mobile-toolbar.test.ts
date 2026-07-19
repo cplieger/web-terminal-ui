@@ -19,7 +19,7 @@ const bindMobileToolbar = vi.fn((o: { onCtrlChange: (a: boolean) => void }) => {
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
-  return { ...actual, keyboard: { ...actual.keyboard, bindMobileToolbar } };
+  return { ...actual, toolbar: { ...actual.toolbar, bindMobileToolbar } };
 });
 
 function fakeCtx(): {

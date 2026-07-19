@@ -52,6 +52,18 @@ describe("connectionBanner feature", () => {
     expect(b?.classList.contains("visible")).toBe(true);
   });
 
+  it("renders an actionable persistent message for wire incompatibility", () => {
+    const { ctx, emit, slot } = fakeCtx();
+    connectionBanner().setup(ctx);
+    emit("incompatible");
+    const b = banner(slot);
+    expect(b?.textContent).toBe(
+      "Terminal protocol mismatch; update the server or reload this page",
+    );
+    expect(b?.dataset["state"]).toBe("incompatible");
+    expect(b?.classList.contains("visible")).toBe(true);
+  });
+
   it("hides the banner and clears its text for a state with no mapped message", () => {
     const { ctx, emit, slot } = fakeCtx();
     connectionBanner().setup(ctx);

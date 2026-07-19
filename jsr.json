@@ -19,7 +19,7 @@
     "./features/animations": "./src/features/animations.ts"
   },
   "imports": {
-    "@cplieger/web-terminal-engine": "jsr:@cplieger/web-terminal-engine@^2.8.0"
+    "@cplieger/web-terminal-engine": "jsr:@cplieger/web-terminal-engine@^3.0.0"
   },
   "publish": {
     "include": [

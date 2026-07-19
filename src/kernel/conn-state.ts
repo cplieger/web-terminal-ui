@@ -38,6 +38,9 @@ export interface ConnStateMachine {
    *  the state shows immediately and persists until open() (a switch to a
    *  live session) replaces it. */
   ended(): void;
+  /** The engine refused an explicitly incompatible wire revision. This
+   *  terminal state bypasses the loading gate and persists until open(). */
+  incompatible(): void;
   /** First screen frame rendered: the loading overlay is done, so the banner
    *  may show reconnect state from here on. */
   setLoaded(): void;
@@ -59,13 +62,14 @@ export function createConnState(opts: {
 
   function emit(): void {
     // Suppress transient states until the initial load is over (the loading
-    // overlay owns the screen), with two exceptions that must show through:
-    // "offline" once the initial-failure limit is reached, and "ended" (a
-    // definitive process exit — nothing further will ever fire, so suppressing
-    // it would hide the only explanation the page will get). connectionBanner
-    // renders "open" as hidden.
+    // overlay owns the screen). Terminal states ("ended" and "incompatible")
+    // must pass through because no later frame or reconnect will explain the
+    // failure; "offline" also passes once the initial-failure limit is reached.
+    // connectionBanner renders "open" as hidden.
     const passesLoadingGate =
-      state === "ended" || (state === "offline" && consecutiveFailures >= INITIAL_FAILURE_LIMIT);
+      state === "ended" ||
+      state === "incompatible" ||
+      (state === "offline" && consecutiveFailures >= INITIAL_FAILURE_LIMIT);
     if (!loaded && !passesLoadingGate) {
       opts.onState("open"); // nothing to show yet
       return;
@@ -129,6 +133,12 @@ export function createConnState(opts: {
       // and show the state immediately (no grace delay — nothing is retrying).
       consecutiveFailures = 0;
       setState("ended", 0);
+    },
+    incompatible(): void {
+      // Wire refusal is terminal for this page instance. Like ended, it is not
+      // part of the failure ladder and must remain visible without a timer.
+      consecutiveFailures = 0;
+      setState("incompatible", 0);
     },
     setLoaded(): void {
       loaded = true;
