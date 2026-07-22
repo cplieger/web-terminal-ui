@@ -357,7 +357,7 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s-new");
   });
 
-  it("renders the + button as the last item of the scrolling tab list", async () => {
+  it("renders the + button as a fixed bar item outside the scrolling tab list", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, { features: [tabs()] });
@@ -366,14 +366,14 @@ describe("tabs feature", () => {
     const scroller = root.querySelector(".wt-tab-scroll");
     const newBtn = root.querySelector(".wt-tab-new");
     expect(newBtn).toBeTruthy();
-    // The close-all bar button is gone (it moved to the right-click menu). The +
-    // is the last flex item of the scroller, directly after the tabs, so it
-    // floats right of the tab list and scrolls with it when many tabs overflow;
-    // the keyboard button lives outside the scroller (see its own test).
+    // The close-all bar button is gone (it moved to the right-click menu). The
+    // + sits OUTSIDE the scroller, directly after it in the bar, so an
+    // overflowing tab list scrolls under it and can never push it away; the
+    // scroller holds only the tabs, its last child being the last tab.
     expect(root.querySelector(".wt-tab-closeall")).toBeNull();
-    expect(scroller?.contains(newBtn ?? null)).toBe(true);
-    expect(scroller?.lastElementChild).toBe(newBtn);
-    expect(newBtn?.previousElementSibling?.classList.contains("wt-tab")).toBe(true);
+    expect(scroller?.contains(newBtn ?? null)).toBe(false);
+    expect(newBtn?.previousElementSibling).toBe(scroller);
+    expect(scroller?.lastElementChild?.classList.contains("wt-tab")).toBe(true);
   });
 
   it("closes a tab on middle-click", async () => {
@@ -581,9 +581,11 @@ describe("tabs feature", () => {
     expect(labels).toEqual(["two", "one", "three"]);
     // The internal order follows the DOM (positions, switcher, close-to-side).
     expect(feature.api?.list().map((t) => t.id)).toEqual(["s2", "s1", "s3"]);
-    // The "+" stays the scroller's last item after the re-insertion.
+    // The scroller still holds only tabs after the re-insertion (the "+" is a
+    // fixed bar item outside it), so the last child is the last TAB.
     const scroller = root.querySelector(".wt-tab-scroll");
-    expect(scroller?.lastElementChild?.classList.contains("wt-tab-new")).toBe(true);
+    expect(scroller?.querySelectorAll(":scope > :not(.wt-tab)").length).toBe(0);
+    expect(scroller?.lastElementChild?.querySelector(".wt-tab-label")?.textContent).toBe("three");
 
     // "Move left" on it (now second) restores the original order: one slot back.
     menuItem(openTabMenu(root, 1), "Move left")?.click();
@@ -1226,7 +1228,57 @@ describe("tabs feature", () => {
     expect(bar?.contains(deskKb ?? null)).toBe(true);
     expect(bar?.lastElementChild).toBe(deskKb);
     expect(root.querySelector(".wt-tab-scroll")?.contains(deskKb)).toBe(false);
-    expect(deskKb?.previousElementSibling?.classList.contains("wt-tab-scroll")).toBe(true);
+    // Bar order [scroller | + | kb]: the kb button anchors to the right of the
+    // fixed "+" (both outside the scroller).
+    expect(deskKb?.previousElementSibling?.classList.contains("wt-tab-new")).toBe(true);
+  });
+
+  it("maps a vertical wheel over the bar to horizontal tab-list scrolling", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
+    const scroller = root.querySelector<HTMLElement>(".wt-tab-scroll");
+    if (!bar || !scroller) {
+      throw new Error("missing tab bar chrome");
+    }
+
+    // Not overflowing (happy-dom reports scrollWidth = clientWidth = 0): the
+    // wheel falls through untouched so the page keeps it.
+    const inert = new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true });
+    bar.dispatchEvent(inert);
+    expect(inert.defaultPrevented).toBe(false);
+    expect(scroller.scrollLeft).toBe(0);
+
+    // Overflowing: a vertical wheel translates to scrollLeft and claims the
+    // event; a horizontal-dominant delta (trackpad pan) keeps native handling.
+    Object.defineProperty(scroller, "scrollWidth", { value: 600, configurable: true });
+    Object.defineProperty(scroller, "clientWidth", { value: 200, configurable: true });
+    const vertical = new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true });
+    bar.dispatchEvent(vertical);
+    expect(vertical.defaultPrevented).toBe(true);
+    expect(scroller.scrollLeft).toBe(120);
+
+    const lines = new WheelEvent("wheel", {
+      deltaY: 3,
+      deltaMode: 1, // DOM_DELTA_LINE (Firefox wheel): fixed per-line step
+      bubbles: true,
+      cancelable: true,
+    });
+    bar.dispatchEvent(lines);
+    expect(scroller.scrollLeft).toBe(120 + 3 * 32);
+
+    const pan = new WheelEvent("wheel", {
+      deltaX: 80,
+      deltaY: 10,
+      bubbles: true,
+      cancelable: true,
+    });
+    bar.dispatchEvent(pan);
+    expect(pan.defaultPrevented).toBe(false);
+    expect(scroller.scrollLeft).toBe(120 + 3 * 32);
   });
 
   it("closes the key grid on a second tap of the desktop keyboard button", async () => {

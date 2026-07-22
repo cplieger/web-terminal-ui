@@ -225,17 +225,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       // --- Desktop tab strip (top-bar region) ---
       // Two layers: the bar itself never scrolls; an inner scroller
-      // (.wt-tab-scroll, the tablist) holds the tabs plus the "+", which floats
-      // right of the tab list and scrolls WITH it when many tabs overflow. The
-      // keyboard button sits OUTSIDE the scroller as the bar's last flex item,
-      // pinned at the bar's right edge in the scroll-to-bottom button's column
-      // (an overflowing tab list can never push or scroll it away). On a fine
-      // pointer it is display:none (CSS), and the scroller stretches to the
-      // full bar width so the tabs reclaim that space. Both controls are built
-      // + wired by the same shared factories as the mobile switcher's; the kb
-      // button is CSS-gated to a wide touchscreen and un-hidden below only when
-      // a keyboardToggle is wired. addTabChrome inserts each tab before newBtn,
-      // keeping the scroller [tabs… +].
+      // (.wt-tab-scroll, the tablist) holds ONLY the tabs. The "+" and the
+      // keyboard button sit OUTSIDE the scroller as fixed bar items in the
+      // order [scroller | + | kb], so an overflowing tab list can never push
+      // or scroll either control away. The scroller shrink-wraps its content
+      // (CSS flex: 0 1 auto), so while the tabs fit the "+" trails the last
+      // tab exactly as if it were in the list, while the kb button (a wide
+      // touchscreen; hidden on a fine pointer) stays pinned at the bar's FAR
+      // right edge via margin-left: auto whatever the tab count. Once the
+      // tabs overflow, the scroller caps at the remaining bar width and the
+      // "+" packs right, up against the kb. Both controls are built + wired
+      // by the same shared factories as the mobile switcher's; the kb button
+      // is CSS-gated to a wide touchscreen and un-hidden below only when a
+      // keyboardToggle is wired. addTabChrome appends each tab to the
+      // scroller's end.
       const slot = ctx.region("top-bar", "tabs");
       const bar = document.createElement("div");
       bar.className = "wt-tab-bar";
@@ -245,9 +248,38 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       scroller.setAttribute("role", "tablist");
       bar.appendChild(scroller);
       const newBtn = makeNewButton("wt-tab-new");
-      scroller.appendChild(newBtn);
+      bar.appendChild(newBtn);
       const deskKb = makeKbButton("wt-tab-kb wt-btn");
       bar.appendChild(deskKb);
+      // A vertical mouse wheel anywhere over the strip scrolls the tab list
+      // horizontally — the strip has no vertical dimension to spend the delta
+      // on, and this is the affordance browser tab bars train. Bound on the
+      // BAR so the empty strip area and the fixed controls translate too.
+      // Horizontal-dominant deltas (a trackpad pan) keep native handling, and
+      // a wheel over a non-overflowing strip falls through untouched. The
+      // listener is non-passive because a translated tick must preventDefault
+      // so an embedding page (wt-container mode) does not also scroll.
+      bar.addEventListener(
+        "wheel",
+        (e) => {
+          if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) {
+            return; // horizontal-dominant: native scroll already handles it
+          }
+          if (scroller.scrollWidth <= scroller.clientWidth) {
+            return; // nothing to scroll: let the page have the wheel
+          }
+          e.preventDefault();
+          // deltaMode: 0 = pixels, 1 = lines (Firefox wheel), 2 = pages.
+          const step =
+            e.deltaMode === 1
+              ? e.deltaY * 32
+              : e.deltaMode === 2
+                ? e.deltaY * scroller.clientWidth
+                : e.deltaY;
+          scroller.scrollLeft += step;
+        },
+        { passive: false },
+      );
 
       // Pull the terminal surface up off the docked BOTTOM strip on desktop so
       // the bar does not overlap the last rows. The surface is absolute
@@ -515,12 +547,26 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ctx.surface().querySelector<HTMLElement>(".term-input")?.focus({ preventScroll: true });
       }
 
-      // paintActive updates the desktop strip's active state.
+      // paintActive updates the desktop strip's active state. When the ACTIVE
+      // TAB CHANGES (tracked via lastRevealedActive — not on every chrome
+      // sync, so a user browsing a scrolled strip is never yanked back by an
+      // unrelated repaint), the newly active chip is brought into view in the
+      // overflowed scroller; inline: "nearest" is a no-op when it is already
+      // visible. The typeof guard covers happy-dom, which lacks
+      // scrollIntoView.
+      let lastRevealedActive = "";
       function paintActive(): void {
         for (const t of tabList) {
           const on = t.id === activeId;
           t.el.classList.toggle("wt-tab-active", on);
           t.aria.setSelected(on);
+        }
+        if (activeId && activeId !== lastRevealedActive) {
+          lastRevealedActive = activeId;
+          const active = tabList.find((t) => t.id === activeId);
+          if (active && typeof active.el.scrollIntoView === "function") {
+            active.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+          }
         }
       }
 
@@ -868,9 +914,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         paintStatusDot(dot, info.status, info.reportsActivity ?? false);
         const aria = tablist.registerTab(el);
-        // Insert before the "+" so it stays the last item of the scrolling tab
-        // list (the keyboard button lives outside the scroller, at the bar end).
-        scroller.insertBefore(el, newBtn);
+        // Append to the scroller's end: the tab list is ALL the scroller holds
+        // (the "+" and keyboard button are fixed bar items outside it).
+        scroller.appendChild(el);
         // Runtime-added tabs animate in; initial tabs do not (see `started`).
         // The timer (not animationend) also clears the class on the hidden mobile
         // strip, where the animation never fires.
@@ -1183,8 +1229,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // dragTargetBefore returns the first tab whose horizontal midpoint is past
-      // x (the element the dragged tab should sit before), or null to drop at the
-      // end (before the "+"). syncOrderFromDom rebuilds tabList to
+      // x (the element the dragged tab should sit before), or null to drop at
+      // the end of the tab list. syncOrderFromDom rebuilds tabList to
       // match the strip's DOM order after a drag, so position indicators, the
       // switcher, and close-to-the-right/left all follow the visible order.
       function dragTargetBefore(x: number): HTMLElement | null {
@@ -1211,8 +1257,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // moveTab shifts a tab one slot left or right in tabList and re-inserts
-      // every tab element in list order (before the "+") so the DOM matches.
+      // moveTab shifts a tab one slot left or right in tabList and re-appends
+      // every tab element in list order so the DOM matches.
       // It is the single-pointer / non-drag alternative to the drag-and-drop
       // reorder (WCAG 2.5.7), surfaced as Move left / Move right in the tab
       // context menu.
@@ -1228,7 +1274,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         tabList.splice(to, 0, tab);
         for (const item of tabList) {
-          scroller.insertBefore(item.el, newBtn);
+          scroller.appendChild(item.el);
         }
         syncChrome();
         ctx.announce(`Moved ${tab.display} to position ${String(to + 1)}`);
@@ -1694,7 +1740,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (e.dataTransfer) {
           e.dataTransfer.dropEffect = "move";
         }
-        scroller.insertBefore(draggingEl, dragTargetBefore(e.clientX) ?? newBtn);
+        scroller.insertBefore(draggingEl, dragTargetBefore(e.clientX));
       });
       // Active-row close (x): closes the current tab (mirrors a listed row's x).
       // stopPropagation so it is not read as a tap/swipe on the row surface.

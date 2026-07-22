@@ -13,10 +13,10 @@
 
 :where(.wt-root) .wt-tab-bar {
   /* Absolute against .wt-root, like all chrome (identical geometry in
-     wt-viewport mode; see 01-scope.css). The bar itself never scrolls: the
-     tabs + "+" scroll inside .wt-tab-scroll (below), so the keyboard button —
-     the bar's last flex item, outside the scroller — stays pinned at the right
-     edge however many tabs are open. */
+     wt-viewport mode; see 01-scope.css). The bar itself never scrolls: only
+     the tabs scroll, inside .wt-tab-scroll (below); the "+" and the keyboard
+     button are fixed bar items after it, so both stay visible at the bar's
+     right edge however many tabs are open. */
   position: absolute;
   bottom: var(--safe-bottom);
   left: 0;
@@ -32,17 +32,22 @@
   z-index: 15;
 }
 
-/* The scrolling tab list inside the bar: the tabs plus the "+", which floats
-   right of the last tab and scrolls with the list. Horizontal scrolling lives
-   HERE, not on the bar, so the strip-end keyboard button never scrolls away.
-   flex: 1 + min-width: 0 make it shrink to leave room for the keyboard button
-   when that is shown (a wide touchscreen) and stretch to the full bar width
-   when it is hidden (a fine-pointer desktop), so the tabs reclaim the space. */
+/* The scrolling tab list inside the bar: the tabs and nothing else — the "+"
+   and the keyboard button are fixed bar siblings after it. Horizontal
+   scrolling lives HERE, not on the bar, so neither control ever scrolls away.
+   flex: 0 1 auto + min-width: 0 shrink-WRAP the list: while the tabs fit, the
+   scroller is exactly as wide as its content and the "+" trails the last tab
+   across the bar gap (visually identical to living in the list); once the
+   tabs overflow, the scroller caps at the space the fixed controls leave and
+   the "+" reads as pinned at the bar's right edge (with the keyboard button,
+   when shown on a wide touchscreen, anchored to its right). The tabs feature
+   also maps a vertical wheel over the bar to scrollLeft here — the strip has
+   no vertical scroll to spend it on. */
 :where(.wt-root) .wt-tab-scroll {
   display: flex;
   align-items: center;
   gap: var(--sp-1);
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   overflow-x: auto;
   /* A wheel/trackpad/touch scroll that runs out of tabs must not chain into
@@ -164,9 +169,12 @@
   }
 }
 
-/* The add-tab (+) button: its hover box matches an active tab's fill and
-   stretches to the strip height; the 2px strip gap (not a custom margin) spaces
-   it from the last tab. Its glyph is an inline SVG. */
+/* The add-tab (+) button: a fixed bar item OUTSIDE the tab scroller (it never
+   scrolls away with an overflowing list; the shrink-wrapped scroller keeps it
+   visually trailing the last tab while the tabs fit — see .wt-tab-scroll). Its
+   hover box matches an active tab's fill and stretches to the strip height;
+   the bar gap (not a custom margin) spaces it from the list. Its glyph is an
+   inline SVG. */
 :where(.wt-root) .wt-tab-new {
   display: inline-flex;
   align-items: center;
@@ -226,8 +234,10 @@
    tab scroller: pinned at the bar's right edge in the same column as the
    scroll-to-bottom button floating above it (both 44px boxes whose right edge
    sits --sp-2 from the root's right edge), where an overflowing tab list can
-   never push or scroll it away; the "+" stays with the tabs inside the
-   scroller. Hidden on a fine-pointer desktop (a real keyboard is present; the
+   never push or scroll it away — margin-left: auto (below) keeps it there
+   whatever the tab count. The "+" is likewise a fixed bar item outside the
+   scroller, but it TRAILS the tab list (the auto margin sits between them)
+   and packs up against the kb only when the strip overflows. Hidden on a fine-pointer desktop (a real keyboard is present; the
    scroller then stretches to the full bar width) and until a keyboardToggle
    feature is wired ([hidden]); shown only on a coarse pointer at strip widths
    (the .wt-narrow complement below; the breakpoint itself is the kernel's,
@@ -235,6 +245,11 @@
 :where(.wt-root) .wt-tab-kb {
   display: none;
   flex: none;
+  /* Pin at the bar's FAR right edge always: the auto margin absorbs whatever
+     width the shrink-wrapped scroller + "+" leave free, so the kb button's
+     position is independent of the tab count (the "+" trails the tab list and
+     only packs up against the kb once the strip overflows). */
+  margin-left: auto;
 }
 
 /* Grid open: filled so the toggled state reads at a glance (mirrors the
