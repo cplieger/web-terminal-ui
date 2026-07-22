@@ -123,6 +123,23 @@ describe("a11y: tablist", () => {
     expect(tab.getAttribute("aria-selected")).toBe("false");
   });
 
+  it("manages a roving tabindex: -1 on register, 0 when selected, cleared on remove", () => {
+    const panel = document.createElement("div");
+    panel.id = "p";
+    const ctl = createTablist(panel);
+    const tab = document.createElement("div");
+    tab.id = "t";
+    const handle = ctl.registerTab(tab);
+    // Only the selected tab sits in the Tab sequence (WAI-ARIA APG Tabs).
+    expect(tab.tabIndex).toBe(-1);
+    handle.setSelected(true);
+    expect(tab.tabIndex).toBe(0);
+    handle.setSelected(false);
+    expect(tab.tabIndex).toBe(-1);
+    handle.remove();
+    expect(tab.hasAttribute("tabindex")).toBe(false);
+  });
+
   it("setLabel sets the tab's aria-label", () => {
     const panel = document.createElement("div");
     panel.id = "p";
