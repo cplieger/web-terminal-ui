@@ -44,6 +44,13 @@
     var(--text) 25%
   ); /* subtle edge: the fill lightened + slightly desaturated, matching the inactive chip's faint border rather than a vivid accent outline */
 
+  /* Status-dot palette (the activity vocabulary painted in 30-tabs.css; the
+     switcher notification dot reuses the same rules). The working and input
+     rings each derive from their own token in 30-tabs.css, so one override
+     recolors dot + ring together. */
+  --status-working: #d9f99d; /* agent working (pulses): pale lime */
+  --status-done: #22c55e; /* turn finished: solid green */
+  --status-input: #fb923c; /* action required: solid orange + ring */
   --radius: 0.75rem;
   --radius-inner: 0.5rem;
   /* Small square icon buttons (e.g. the 24px tab-close x): at that size the

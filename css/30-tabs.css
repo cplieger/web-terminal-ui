@@ -376,33 +376,42 @@
   border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
 }
 
-/* Agent working: solid pulsing pale lime. Its high lightness keeps it clear on
-   every tab state, while its yellow-green hue complements the Kiro purple active
-   tab. Motion is the primary non-hue cue. Server-side this is driven by the OSC
-   9;4 progress signal, so it tracks agent activity, not the user typing at the
-   prompt. */
+/* Agent working: solid pulsing dot (--status-working; pale lime by default —
+   its high lightness keeps it clear on every tab state) wearing the same 2px
+   ring as input, so the two agent-turn states share one silhouette: a live
+   turn pulses (dot + ring together), a turn blocked on the user is that same
+   silhouette frozen and recolored (input, below). Motion separates working
+   from input; the ring separates both from done's bare disc. Server-side this
+   is driven by the OSC 9;4 progress signal, so it tracks agent activity, not
+   the user typing at the prompt. */
 :where(.wt-root) .wt-status-dot[data-status="working"] {
-  background: #d9f99d;
-  border-color: #d9f99d;
+  background: var(--status-working);
+  border-color: var(--status-working);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
   animation: wt-pulse 1.2s ease-in-out infinite;
 }
 
-/* Agent done / ready: solid saturated green, matching Kiro IDE's "Ready"
-   (#22c55e), no motion. Keeping it darker and more saturated than working's
-   pale lime makes the two states distinct by lightness as well as motion. */
+/* Agent done / ready: solid disc (--status-done), no motion. The default green
+   matches Kiro IDE's "Ready" (#22c55e), darker and more saturated than
+   working's default pale lime so the two states differ by lightness as well as
+   motion. */
 :where(.wt-root) .wt-status-dot[data-status="done"] {
-  background: #22c55e;
-  border-color: #22c55e;
+  background: var(--status-done);
+  border-color: var(--status-done);
 }
 
-/* User action required (permission / approval): solid orange (#fb923c), shifted
-   away from the old amber so it is clearly separated from both pale-lime working
-   and green done, plus a matching ring so it reads as "needs you" via shape as
-   well as hue. It persists until you act on or switch into the tab. */
+/* User action required (permission / approval): working's exact silhouette —
+   solid dot + 2px ring — frozen and recolored (--status-input; the default
+   orange is shifted away from the old amber so it separates from both
+   default-lime working and green done). The stillness is the message: the
+   agent's turn is mid-flight but blocked on you. The ring keeps it distinct
+   from done's bare disc without leaning on hue; it derives from the same token
+   at 40% alpha, so a theme override recolors dot + ring together. It persists
+   until you act on or switch into the tab. */
 :where(.wt-root) .wt-status-dot[data-status="input"] {
-  background: #fb923c;
-  border-color: #fb923c;
-  box-shadow: 0 0 0 2px rgb(251 146 60 / 40%);
+  background: var(--status-input);
+  border-color: var(--status-input);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-input) 40%, transparent);
 }
 
 /* Exited: a dim hollow dot, static; distinct from idle by its lower opacity. */
@@ -417,15 +426,18 @@
   100% {
     /* Pin the animated layer's paint as well as its opacity. When working begins
        in the same frame that input/done ends, an opacity-only animation can
-       pulse the previously rasterized orange/green dot. */
-    background-color: #d9f99d;
-    border-color: #d9f99d;
+       pulse the previously rasterized input/done paint (the input ring
+       included, hence the box-shadow pin). */
+    background-color: var(--status-working);
+    border-color: var(--status-working);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
     opacity: 1;
   }
 
   50% {
-    background-color: #d9f99d;
-    border-color: #d9f99d;
+    background-color: var(--status-working);
+    border-color: var(--status-working);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
     opacity: 0.4;
   }
 }
@@ -434,10 +446,13 @@
 @media (prefers-reduced-motion: reduce) {
   :where(.wt-root) .wt-status-dot[data-status="working"] {
     animation: none;
-    /* The pulse is working's ONLY non-hue cue; with motion removed,
-       add a static shape cue (an inner hole -> a ring) so working differs
-       from done (a solid green disc) by shape, not hue alone (WCAG 1.4.1). */
-    box-shadow: inset 0 0 0 2px var(--bg);
+    /* The pulse is what separates working from input's frozen silhouette; with
+       motion removed, punch an inner hole (dot -> donut) so working differs
+       from input (solid ringed disc) and done (bare disc) by shape, not hue
+       alone (WCAG 1.4.1). The outer ring stays. */
+    box-shadow:
+      inset 0 0 0 2px var(--bg),
+      0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
   }
 }
 
