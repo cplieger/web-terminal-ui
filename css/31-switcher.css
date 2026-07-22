@@ -280,10 +280,11 @@
 }
 
 /* Latest-wins background-tab notification dot on the switch button — the moved
-   attention cue. Amber = a background terminal needs input, green = a background
-   turn finished. Reuses the exact .wt-status-dot colours (30-tabs.css) so it
-   matches the per-tab dots. Hidden until the tabs feature sets data-status;
-   cleared when the list opens (expandSwitcher). */
+   attention cue: the input colour when a background terminal needs input, the
+   done colour when a background turn finished. Reuses the exact .wt-status-dot
+   rules (30-tabs.css, --status-* tokens) so it matches the per-tab dots. Hidden
+   until the tabs feature sets data-status; cleared when the list opens
+   (expandSwitcher). */
 :where(.wt-root) .wt-switcher-switch-dot {
   position: absolute;
   top: 6px;
