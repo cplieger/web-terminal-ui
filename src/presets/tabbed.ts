@@ -14,19 +14,26 @@ import { presetSingle } from "./single.js";
  *  externally-driven mobile toolbar (its grid is opened from a keyboard button
  *  in the tab bar, not its own toggle), the activity monitor (the status-SSE
  *  data source), tabs wired to both, and animations. The activity dot reveals
- *  itself per tab only when a session reports activity (OSC 9;4), so the
- *  monitor is always included — a plain shell just never shows a dot. The
+ *  itself per tab only when a session reports activity (OSC 9;4) — or from tab
+ *  creation when the agent composition presumes it — so the monitor is always
+ *  included; a plain shell under presetTabbed just never shows a dot. The
  *  toolbar and monitor are ordered before tabs because tabs reads their APIs
  *  via ctx.use. Shared by presetTabbed and presetAgentTabbed (agent-tabbed.ts),
- *  which differ only in the title source. */
-export function buildTabbed(preferInputTitle: boolean): TerminalFeature<unknown>[] {
+ *  which differ only in the agent-shell tuning: input-derived titles
+ *  (preferInputTitle) + presumed activity reporting (presumeReports). */
+export function buildTabbed(agentShell: boolean): TerminalFeature<unknown>[] {
   const kb = mobileToolbar({ externalToggle: true });
   const monitor = activityMonitor();
   return [
     ...presetSingle(),
     kb,
     monitor,
-    tabs({ keyboardToggle: kb, activityMonitor: monitor, preferInputTitle }),
+    tabs({
+      keyboardToggle: kb,
+      activityMonitor: monitor,
+      preferInputTitle: agentShell,
+      presumeReports: agentShell,
+    }),
     animations(),
   ];
 }
