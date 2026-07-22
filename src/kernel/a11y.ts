@@ -97,10 +97,14 @@ export function createTablist(panel: HTMLElement): TablistController {
     tab.setAttribute("role", "tab");
     tab.setAttribute("aria-controls", panelId);
     tab.setAttribute("aria-selected", "false");
+    // Roving tabindex (WAI-ARIA APG Tabs pattern): only the selected tab is in
+    // the Tab sequence; the others are focusable programmatically (arrow keys).
+    tab.tabIndex = -1;
 
     return {
       setSelected(selected: boolean): void {
         tab.setAttribute("aria-selected", selected ? "true" : "false");
+        tab.tabIndex = selected ? 0 : -1;
         if (selected) {
           // The panel is labelled by whichever tab is currently selected.
           panel.setAttribute("aria-labelledby", tabId);
@@ -113,6 +117,7 @@ export function createTablist(panel: HTMLElement): TablistController {
         tab.removeAttribute("role");
         tab.removeAttribute("aria-controls");
         tab.removeAttribute("aria-selected");
+        tab.removeAttribute("tabindex");
         if (panel.getAttribute("aria-labelledby") === tabId) {
           panel.removeAttribute("aria-labelledby");
         }

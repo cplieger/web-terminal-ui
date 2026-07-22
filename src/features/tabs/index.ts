@@ -908,6 +908,48 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
           switchTo(tab.id);
         });
+        // Keyboard interaction for the ARIA tabs pattern (WCAG 2.1.1): arrows
+        // move selection (wrapping), Home/End jump to the boundaries, Delete
+        // closes the focused tab. Pairs with the roving tabindex the kernel's
+        // registerTab manages (selected tab is tabIndex 0, others -1).
+        el.addEventListener("keydown", (e) => {
+          const current = tabList.indexOf(tab);
+          if (current < 0) {
+            return;
+          }
+
+          if (e.key === "Delete") {
+            e.preventDefault();
+            void close_(tab.id);
+            return;
+          }
+
+          let targetIndex: number;
+          switch (e.key) {
+            case "ArrowLeft":
+              targetIndex = (current - 1 + tabList.length) % tabList.length;
+              break;
+            case "ArrowRight":
+              targetIndex = (current + 1) % tabList.length;
+              break;
+            case "Home":
+              targetIndex = 0;
+              break;
+            case "End":
+              targetIndex = tabList.length - 1;
+              break;
+            default:
+              return;
+          }
+
+          e.preventDefault();
+          const target = tabList[targetIndex];
+          if (!target) {
+            return;
+          }
+          switchTo(target.id);
+          target.el.focus();
+        });
         close.addEventListener("click", (e) => {
           e.stopPropagation();
           void close_(tab.id);
@@ -1169,6 +1211,29 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
+      // moveTab shifts a tab one slot left or right in tabList and re-inserts
+      // every tab element in list order (before the "+") so the DOM matches.
+      // It is the single-pointer / non-drag alternative to the drag-and-drop
+      // reorder (WCAG 2.5.7), surfaced as Move left / Move right in the tab
+      // context menu.
+      function moveTab(id: string, delta: -1 | 1): void {
+        const from = tabList.findIndex((t) => t.id === id);
+        const to = from + delta;
+        if (from < 0 || to < 0 || to >= tabList.length) {
+          return;
+        }
+        const [tab] = tabList.splice(from, 1);
+        if (!tab) {
+          return;
+        }
+        tabList.splice(to, 0, tab);
+        for (const item of tabList) {
+          scroller.insertBefore(item.el, newBtn);
+        }
+        syncChrome();
+        ctx.announce(`Moved ${tab.display} to position ${String(to + 1)}`);
+      }
+
       // adoptSession adds a tab for a session that exists server-side but has no
       // local tab yet, e.g. one created in another browser (the server pushes it
       // over the status SSE, and the poll fallback lists it). This keeps every
@@ -1410,6 +1475,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         const n = tabList.length;
+        tabMenuItem("Move left", idx <= 0, () => {
+          moveTab(id, -1);
+        });
+        tabMenuItem("Move right", idx >= n - 1, () => {
+          moveTab(id, 1);
+        });
         tabMenuItem("Close", false, () => {
           void close_(id);
         });

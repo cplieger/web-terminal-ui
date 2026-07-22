@@ -460,7 +460,7 @@ describe("tabs feature", () => {
     );
   }
 
-  it("opens a right-click context menu on a tab with the five close actions", async () => {
+  it("opens a right-click context menu on a tab with the move and close actions", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, { features: [tabs()] });
@@ -472,16 +472,139 @@ describe("tabs feature", () => {
     const items = openTabMenu(root, 0);
     expect(menu?.classList.contains("visible")).toBe(true);
     expect(items.map((b) => b.textContent)).toEqual([
+      "Move left",
+      "Move right",
       "Close",
       "Close others",
       "Close to the right",
       "Close to the left",
       "Close all",
     ]);
-    // On the first of two tabs, "Close to the left" is disabled; the rest enabled.
+    // On the first of two tabs, the leftward actions are disabled; the rest enabled.
+    expect(menuItem(items, "Move left")?.disabled).toBe(true);
+    expect(menuItem(items, "Move right")?.disabled).toBe(false);
     expect(menuItem(items, "Close to the left")?.disabled).toBe(true);
     expect(menuItem(items, "Close to the right")?.disabled).toBe(false);
     expect(menuItem(items, "Close others")?.disabled).toBe(false);
+  });
+
+  // --- Keyboard interaction on the desktop strip (WCAG 2.1.1; APG Tabs) ---
+  function pressKey(el: HTMLElement | undefined, key: string): void {
+    el?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  }
+
+  it("manages a roving tabindex: exactly the selected tab is in the Tab order", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const tabEls = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
+    expect(tabEls.map((t) => t.tabIndex)).toEqual([0, -1]);
+    tabEls[1]?.click();
+    expect(tabEls.map((t) => t.tabIndex)).toEqual([-1, 0]);
+  });
+
+  it("ArrowRight/ArrowLeft move the selection and focus, wrapping at the ends", async () => {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    const tabEls = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
+    setSession.mockClear();
+    // Arrow from the focused (active) tab selects and focuses its neighbor.
+    pressKey(tabEls[0], "ArrowRight");
+    expect(setSession).toHaveBeenCalledWith("s2");
+    expect(tabEls[1]?.classList.contains("wt-tab-active")).toBe(true);
+    expect(document.activeElement).toBe(tabEls[1]);
+    // ArrowRight from the last tab wraps to the first.
+    pressKey(tabEls[2], "ArrowRight");
+    expect(tabEls[0]?.classList.contains("wt-tab-active")).toBe(true);
+    // ArrowLeft from the first tab wraps to the last.
+    pressKey(tabEls[0], "ArrowLeft");
+    expect(tabEls[2]?.classList.contains("wt-tab-active")).toBe(true);
+    expect(document.activeElement).toBe(tabEls[2]);
+  });
+
+  it("Home and End select the boundary tabs", async () => {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    const tabEls = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
+    pressKey(tabEls[0], "End");
+    expect(tabEls[2]?.classList.contains("wt-tab-active")).toBe(true);
+    pressKey(tabEls[2], "Home");
+    expect(tabEls[0]?.classList.contains("wt-tab-active")).toBe(true);
+  });
+
+  it("Delete closes the focused tab", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    fetchMock.mockClear();
+    pressKey(root.querySelectorAll<HTMLElement>(".wt-tab")[1], "Delete");
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    expect(wasDeleted("s2")).toBe(true);
+  });
+
+  // --- Move left / Move right (WCAG 2.5.7 single-pointer reorder) ---
+  it("moves a tab one slot per command, keeping DOM and list order aligned", async () => {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const feature = tabs();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [feature] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    // "Move right" on the first tab moves it exactly one slot.
+    menuItem(openTabMenu(root, 0), "Move right")?.click();
+    let labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
+    expect(labels).toEqual(["two", "one", "three"]);
+    // The internal order follows the DOM (positions, switcher, close-to-side).
+    expect(feature.api?.list().map((t) => t.id)).toEqual(["s2", "s1", "s3"]);
+    // The "+" stays the scroller's last item after the re-insertion.
+    const scroller = root.querySelector(".wt-tab-scroll");
+    expect(scroller?.lastElementChild?.classList.contains("wt-tab-new")).toBe(true);
+
+    // "Move left" on it (now second) restores the original order: one slot back.
+    menuItem(openTabMenu(root, 1), "Move left")?.click();
+    labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
+    expect(labels).toEqual(["one", "two", "three"]);
+    expect(feature.api?.list().map((t) => t.id)).toEqual(["s1", "s2", "s3"]);
+    // No session was closed or created by a reorder.
+    expect(fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") !== "GET")).toBe(false);
+  });
+
+  it("announces a tab move on the polite live region", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    menuItem(openTabMenu(root, 0), "Move right")?.click();
+    // The announcer re-sets the cleared region after a ~100ms timer.
+    await new Promise((r) => setTimeout(r, 130));
+    const live = root.querySelector('[aria-live="polite"]');
+    expect(live?.textContent).toBe("Moved one to position 2");
   });
 
   it("disables 'Close to the right' on the last tab", async () => {
