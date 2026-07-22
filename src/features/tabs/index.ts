@@ -100,6 +100,13 @@ export interface TabsOptions {
    *  reload), and the unreliable OSC title is ignored entirely. presetAgentTabbed
    *  enables this. */
   preferInputTitle?: boolean;
+  /** Presume every session reports activity (an agent shell, where the program
+   *  always emits OSC 9;4 progress): each tab's dot is visible as idle from
+   *  creation instead of popping in seconds later when the agent has booted
+   *  far enough to first report — the server's sticky reportsActivity flag
+   *  then merely confirms. Default false (evidence-driven reveal: a plain
+   *  shell keeps clean, label-only tabs). presetAgentTabbed enables this. */
+  presumeReports?: boolean;
 }
 
 // looksLikeHardwareKey reports whether a keydown could only have come from a
@@ -135,6 +142,12 @@ function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
 export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
   const preferInputTitle = opts.preferInputTitle ?? false;
+  const presumeReports = opts.presumeReports ?? false;
+  // reportsOf floors the server's per-session reportsActivity flag with the
+  // consumer's presumption (see TabsOptions.presumeReports): an agent shell
+  // shows the idle dot from tab creation instead of waiting out the agent's
+  // boot-to-first-OSC-9;4 window.
+  const reportsOf = (reports?: boolean): boolean => presumeReports || (reports ?? false);
   // The session REST client (model.ts): every call timeout-bounded, list
   // shape-guarded, title persistence fire-and-forget.
   const api = createSessionAPI(apiBase);
@@ -912,7 +925,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!label || !dot || !close) {
           throw new Error("web-terminal-ui: tab chrome missing parts");
         }
-        paintStatusDot(dot, info.status, info.reportsActivity ?? false);
+        paintStatusDot(dot, info.status, reportsOf(info.reportsActivity));
         const aria = tablist.registerTab(el);
         // Append to the scroller's end: the tab list is ALL the scroller holds
         // (the "+" and keyboard button are fixed bar items outside it).
@@ -941,7 +954,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           aria,
           scrollTop: 0,
           following: true,
-          reports: info.reportsActivity ?? false,
+          reports: reportsOf(info.reportsActivity),
         };
         // Set an initial label immediately (relabelAll refines it with de-dup
         // once the tab is in tabList and syncChrome runs).
@@ -1669,7 +1682,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
               info.status,
               info.title,
               info.clientTitle,
-              info.reportsActivity ?? false,
+              reportsOf(info.reportsActivity),
             );
           }
           // A tab the server no longer lists was reaped/closed elsewhere (or
@@ -1703,7 +1716,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // SSE-adopted tab without its persisted title — in preferInputTitle
           // mode the label then fell back to "New tab" on reload.
           adoptSession(s);
-          applyStatus(s.id, s.status, s.title, s.clientTitle, s.reportsActivity ?? false);
+          applyStatus(s.id, s.status, s.title, s.clientTitle, reportsOf(s.reportsActivity));
           ensureActive();
           syncChrome();
         });

@@ -376,6 +376,34 @@ describe("tabs feature", () => {
     expect(scroller?.lastElementChild?.classList.contains("wt-tab")).toBe(true);
   });
 
+  it("keeps a tab's dot hidden until its session reports activity (default)", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    // The listed sessions carry no reportsActivity flag: evidence-driven
+    // reveal keeps every dot unrevealed (a plain shell's tabs stay label-only).
+    const dot = root.querySelector<HTMLElement>(".wt-tab .wt-tab-dot");
+    expect(dot).toBeTruthy();
+    expect(dot?.classList.contains("wt-reports")).toBe(false);
+  });
+
+  it("shows the idle dot from tab creation with presumeReports (agent shell)", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs({ presumeReports: true })] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    // An agent shell presumes every session reports (presetAgentTabbed): the
+    // dot is revealed as idle immediately, without waiting for the agent's
+    // first OSC 9;4 signal.
+    for (const dot of root.querySelectorAll<HTMLElement>(".wt-tab .wt-tab-dot")) {
+      expect(dot.classList.contains("wt-reports")).toBe(true);
+      expect(dot.dataset["status"]).toBe("idle");
+    }
+  });
+
   it("closes a tab on middle-click", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

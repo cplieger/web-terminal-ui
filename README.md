@@ -128,12 +128,15 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
   keeps clean, label-only tabs. Requires a server that speaks the session API
   (`/api/sessions` and `/ws?session=`), such as `web-terminal-server`.
 - `presetAgentTabbed()` — the same feature set as `presetTabbed()` (activity
-  monitor included), but with `preferInputTitle`: each tab's label follows the
-  latest submitted line (persisted server-side and recovered on reload) and the
-  program's OSC 0/2 title is ignored — for an agent shell such as `web-terminal-kiro`
-  whose program emits a non-empty but useless OSC title. Its status dots
-  (idle / working / done / needs-input) come from the same activity monitor,
-  driven by the server's status SSE and its OSC-9 classifier.
+  monitor included), tuned for an agent shell such as `web-terminal-kiro`: with
+  `preferInputTitle`, each tab's label follows the latest submitted line
+  (persisted server-side and recovered on reload) and the program's non-empty
+  but useless OSC 0/2 title is ignored; and with `presumeReports`, the idle
+  activity dot shows from tab creation instead of waiting for the session's
+  first OSC 9;4 signal — every session is an agent, so there is nothing to
+  prove. Its status dots (idle / working / done / needs-input) come from the
+  same activity monitor, driven by the server's status SSE and its OSC-9
+  classifier.
 
 ### Options
 

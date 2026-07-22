@@ -357,8 +357,11 @@
    tabs feature adds .wt-reports to that dot (paintStatusDot). A program that
    emits no OSC 9 signal (a plain bash/sh) has no activity concept, so its tabs
    stay clean, label-only; a progress-reporting agent (kiro-cli, Claude Code)
-   lights up. The element stays in the DOM either way (JS sets data-status
-   regardless), so revealing it is a pure CSS switch. */
+   lights up. An agent-shell consumer can PRESUME the report instead (tabs'
+   presumeReports option, on in presetAgentTabbed): .wt-reports is then set
+   from tab creation, so the idle dot shows immediately rather than popping in
+   after the agent's first signal. The element stays in the DOM either way (JS
+   sets data-status regardless), so revealing it is a pure CSS switch. */
 :where(.wt-root) .wt-status-dot {
   display: none;
   width: 9px;
@@ -391,19 +394,43 @@
   border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
 }
 
-/* Agent working: solid pulsing dot (--status-working; pale lime by default —
-   its high lightness keeps it clear on every tab state) wearing the same 2px
-   ring as input, so the two agent-turn states share one silhouette: a live
-   turn pulses (dot + ring together), a turn blocked on the user is that same
-   silhouette frozen and recolored (input, below). Motion separates working
-   from input; the ring separates both from done's bare disc. Server-side this
-   is driven by the OSC 9;4 progress signal, so it tracks agent activity, not
-   the user typing at the prompt. */
+/* Agent working: two INDEPENDENTLY animated layers on one element make the
+   "alive" read (the status-badge "processing" idiom — Ant Design's processing
+   badge, the classic CSS live-indicator ripple): the solid disc keeps full
+   opacity and gently GLOWS (its colors brighten mid-beat), while a ::after
+   ring — born exactly on the static 2px ring — RIPPLES outward and dissolves,
+   re-emitted each cycle. The static ring itself never moves, so working keeps
+   input's exact rest silhouette (a live turn ripples; a turn blocked on the
+   user is that same silhouette frozen — see input below). Motion separates
+   working from input; the ring separates both from done's bare disc. The old
+   single-layer pulse faded disc + ring together (opacity on the element),
+   which read as a blink and coupled the layers — an element's opacity always
+   multiplies onto its pseudos, so true independence requires animating disc
+   COLORS, not element opacity. Server-side this is driven by the OSC 9;4
+   progress signal, so it tracks agent activity, not the user typing at the
+   prompt. */
 :where(.wt-root) .wt-status-dot[data-status="working"] {
+  position: relative;
   background: var(--status-working);
   border-color: var(--status-working);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
-  animation: wt-pulse 1.2s ease-in-out infinite;
+  animation: wt-working-glow 1.2s ease-in-out infinite;
+}
+
+/* The ripple layer: at scale(1) its 2px border overlays the static ring's
+   9->13px band exactly (inset -2px), then the wave detaches, expanding and
+   fading. transform + opacity only, so it composites without repaints. It
+   exists only in the working state — no stale layer to pin when a dot changes
+   status. (The switcher notification dot never shows working — input/done
+   only — so its position: absolute placement never meets this rule's
+   position: relative.) */
+:where(.wt-root) .wt-status-dot[data-status="working"]::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border: 2px solid var(--status-working);
+  border-radius: 50%;
+  animation: wt-working-ripple 1.2s ease-in-out infinite;
 }
 
 /* Agent done / ready: solid disc (--status-done), no motion. The default green
@@ -436,38 +463,57 @@
   opacity: 0.5;
 }
 
-@keyframes wt-pulse {
+/* The disc's glow beat: base -> brighter -> base, then a rest until the next
+   cycle. Colors are set at EVERY frame, which both drives the glow and pins
+   the paint — a dot entering working in the same frame input/done ends can
+   never re-pulse the previously rasterized paint (the hazard the old
+   opacity-only pulse had to pin box-shadow against). Element opacity stays 1
+   throughout; see the layer-independence note on the working rule. */
+@keyframes wt-working-glow {
   0%,
+  70%,
   100% {
-    /* Pin the animated layer's paint as well as its opacity. When working begins
-       in the same frame that input/done ends, an opacity-only animation can
-       pulse the previously rasterized input/done paint (the input ring
-       included, hence the box-shadow pin). */
     background-color: var(--status-working);
     border-color: var(--status-working);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
-    opacity: 1;
   }
 
-  50% {
-    background-color: var(--status-working);
-    border-color: var(--status-working);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
-    opacity: 0.4;
+  35% {
+    background-color: color-mix(in oklch, var(--status-working) 78%, #fff);
+    border-color: color-mix(in oklch, var(--status-working) 78%, #fff);
   }
 }
 
-/* Reduced-motion (or the animations feature off): drop the pulse, keep color. */
+/* The ripple wave: one emission per cycle, launching off the static ring and
+   dissolving by ~2.1x. Opacity starts at the static ring's own 40% weight so
+   the wave reads as the ring letting go of a copy, not a new brighter object. */
+@keyframes wt-working-ripple {
+  0% {
+    transform: scale(1);
+    opacity: 0.4;
+  }
+
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
+/* Reduced-motion: drop the working motion (glow + ripple), keep color. */
 @media (prefers-reduced-motion: reduce) {
   :where(.wt-root) .wt-status-dot[data-status="working"] {
     animation: none;
-    /* The pulse is what separates working from input's frozen silhouette; with
-       motion removed, punch an inner hole (dot -> donut) so working differs
-       from input (solid ringed disc) and done (bare disc) by shape, not hue
-       alone (WCAG 1.4.1). The outer ring stays. */
+    /* Motion is what separates working from input's frozen silhouette; with
+       it removed, punch an inner hole (dot -> donut) so working differs from
+       input (solid ringed disc) and done (bare disc) by shape, not hue alone
+       (WCAG 1.4.1). The outer ring stays. */
     box-shadow:
       inset 0 0 0 2px var(--bg),
       0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
+  }
+
+  /* The ripple layer disappears entirely (not just paused mid-wave). */
+  :where(.wt-root) .wt-status-dot[data-status="working"]::after {
+    content: none;
   }
 }
 
