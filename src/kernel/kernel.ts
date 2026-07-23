@@ -186,7 +186,13 @@ export function createTerminal(
       return;
     }
     for (const fn of [...errorHandlers]) {
-      fn(feature, err);
+      try {
+        fn(feature, err);
+      } catch (handlerErr) {
+        // Error reporting must never turn the original feature failure into an
+        // unhandled rejection or prevent fatal-startup cleanup from running.
+        console.error("web-terminal-ui: feature error handler failed", handlerErr);
+      }
     }
   }
 
@@ -508,6 +514,11 @@ export function createTerminal(
   let pointerDownY = 0;
   let pointerDownTime = 0;
   function focusTerminal(): void {
+    // The public handle can outlive a fatal startup or explicit destroy. Never
+    // focus the detached textarea after the runtime has been released.
+    if (destroyed) {
+      return;
+    }
     input.focus({ preventScroll: true });
   }
   termWrap.addEventListener(
@@ -794,13 +805,19 @@ export function createTerminal(
   }
 
   // --- Feature lifecycle ---
+  // `destroyed` means the terminal runtime is no longer usable, whether that
+  // happened through the public destroy() handle or a fatal startup rollback.
+  // `rootReleased` is narrower: destroy() has also removed the recovery surface
+  // and boundary classes. Keeping the two facts separate lets a fatal terminal
+  // remain visible and still be explicitly destroyed later.
   let destroyed = false;
-  // Live read of `destroyed` for the post-await re-check in setupFeatures():
-  // a plain `if (destroyed)` there is narrowed to always-false by TS CFA
-  // (it cannot model destroy() firing during the await), tripping
-  // @typescript-eslint/no-unnecessary-condition. A call defeats the stale
-  // narrowing with identical runtime behavior.
+  let rootReleased = false;
+  let runtimeCleaned = false;
+  // Live read of `destroyed` for post-await re-checks: a plain variable read is
+  // narrowed to always-false by TS CFA because it cannot model destroy() firing
+  // while feature setup or session resolution is awaiting.
   const isDestroyed = (): boolean => destroyed;
+
   function teardownFeatures(): void {
     for (let i = instances.length - 1; i >= 0; i--) {
       const entry = instances[i];
@@ -816,49 +833,157 @@ export function createTerminal(
     instances.length = 0;
   }
 
-  // Resolves true when every feature set up; false when setup was aborted (a
-  // feature threw and everything rolled back, or destroy() ran mid-setup). The
-  // session-owner first connect below runs only on true — a resolver must never
-  // run against torn-down chrome.
-  async function setupFeatures(): Promise<boolean> {
+  // Release the complete live runtime while leaving the root boundary classes
+  // intact. Fatal startup uses the root for its recovery surface; destroy()
+  // follows this cleanup by removing the classes and any recovery UI.
+  function cleanupRuntime(): void {
+    if (runtimeCleaned) {
+      return;
+    }
+    runtimeCleaned = true;
+    teardownFeatures();
+    kernelAbort.abort();
+    narrowObserver?.disconnect();
+    narrowObserver = null;
+    viewport.teardown();
+    // Reset the composition singleton: a failure during an IME cycle must not
+    // leave module state or a deferred send alive for a later terminal mount.
+    composition.teardown();
+    connection.disconnect();
+    connState.destroy();
+    if (toastTimer !== null) {
+      clearTimeout(toastTimer);
+      toastTimer = null;
+    }
+    for (const off of subscriptions) {
+      off();
+    }
+    subscriptions.length = 0;
+    inputTransforms.length = 0;
+    inputObservers.length = 0;
+    keydownHandlers.length = 0;
+    errorHandlers.clear();
+    apiMap.clear();
+    activeSession = null;
+    bus.clear();
+    announcer.destroy();
+    regions.destroy();
+    root.classList.remove("wt-narrow");
+    root.replaceChildren();
+  }
+
+  function renderFatalStartup(): void {
+    const surface = document.createElement("section");
+    surface.className = "wt-fatal";
+    surface.setAttribute("role", "alertdialog");
+    surface.setAttribute("aria-labelledby", "wt-fatal-title");
+    surface.setAttribute("aria-describedby", "wt-fatal-message");
+    if (layoutMode === "viewport") {
+      // A full-page terminal has no usable host UI behind it, so this is the
+      // page's modal recovery state. An embedded terminal is only one panel in
+      // a larger app and must not claim that the rest of the app is inert.
+      surface.setAttribute("aria-modal", "true");
+    }
+
+    const card = document.createElement("div");
+    card.className = "wt-fatal-card";
+    const title = document.createElement("h2");
+    title.id = "wt-fatal-title";
+    title.className = "wt-fatal-title";
+    title.textContent = "Terminal failed to start";
+    const message = document.createElement("p");
+    message.id = "wt-fatal-message";
+    message.className = "wt-fatal-message";
+    message.textContent = "A required interface could not be loaded. Reload the page to try again.";
+    const reloadButton = document.createElement("button");
+    reloadButton.className = "wt-btn wt-fatal-reload";
+    reloadButton.type = "button";
+    reloadButton.textContent = "Reload page";
+    reloadButton.addEventListener("click", () => {
+      window.location.reload();
+    });
+    card.append(title, message, reloadButton);
+    surface.appendChild(card);
+    root.replaceChildren(surface);
+
+    // The terminal input held focus before setup failed. Move that focus to the
+    // only recovery action; container mode remains non-modal because no trap or
+    // aria-modal claim prevents the user from leaving the terminal panel.
+    reloadButton.focus();
+  }
+
+  function enterFatalStartup(feature: string, cause: unknown): void {
+    if (destroyed) {
+      return;
+    }
+    destroyed = true;
+    cleanupRuntime();
+    dismissLoadingOverlay();
+
+    let handled = false;
+    try {
+      handled = opts.onFatalError?.({ phase: "feature-setup", feature, cause }) === true;
+    } catch (handlerErr) {
+      console.error("web-terminal-ui: onFatalError handler failed", handlerErr);
+    }
+    // A handler may call destroy() while taking over, so do not recreate the
+    // default surface after the root has explicitly been released.
+    if (!handled && !rootReleased) {
+      renderFatalStartup();
+    }
+  }
+
+  type FeatureSetupOutcome =
+    | { readonly status: "ready" }
+    | { readonly status: "aborted" }
+    | {
+        readonly status: "failed";
+        readonly feature: string;
+        readonly cause: unknown;
+      };
+
+  // Distinguish intentional cancellation from a fatal feature failure. A
+  // boolean collapsed both into the same "not ready" outcome, which is why a
+  // failed setup previously left a half-live terminal and only wrote a log.
+  async function setupFeatures(): Promise<FeatureSetupOutcome> {
     for (const feature of featureList) {
       if (destroyed) {
-        return false;
+        return { status: "aborted" };
       }
       try {
         const instance = await feature.setup(makeContext(feature.name));
-        // destroy() may have run during the await above; teardownFeatures() has already
-        // swept `instances`, and destroy() is one-shot, so a straight push here would
-        // leave this instance's listeners/timers/observers (tabs' SSE + poll + window/
-        // document listeners + ResizeObservers) alive forever. Tear it down instead of
-        // registering it.
+        // destroy() may have run during the await above; cleanupRuntime() has
+        // already swept `instances`, and destroy() is one-shot, so a straight
+        // push here would leave this instance's listeners/timers/observers alive
+        // forever. Tear it down instead of registering it.
         if (isDestroyed()) {
           try {
             instance.teardown();
           } catch (err) {
             reportError(feature.name, err);
           }
-          return false;
+          return { status: "aborted" };
         }
         instances.push({ feature, instance });
         // Populate the feature value's readonly api (consumer pattern:
         // tabs.api?.create()) via a narrow cast, and the ctx.use lookup map.
         (feature as { api?: unknown }).api = instance.api;
         apiMap.set(feature, instance.api);
-      } catch (err) {
-        // Fail fast: roll back the already-set-up features in reverse and
-        // surface a composed, named error (section 22.4).
-        reportError(feature.name, err);
-        teardownFeatures();
-        console.error(
-          `web-terminal-ui: feature "${feature.name}" setup failed; terminal has no chrome`,
-          err,
-        );
-        return false;
+      } catch (cause) {
+        if (isDestroyed()) {
+          return { status: "aborted" };
+        }
+        reportError(feature.name, cause);
+        console.error(`web-terminal-ui: feature "${feature.name}" setup failed`, cause);
+        if (isDestroyed()) {
+          return { status: "aborted" };
+        }
+        return { status: "failed", feature: feature.name, cause };
       }
     }
-    return true;
+    return { status: "ready" };
   }
+
   // Features set up in the background; first paint is never gated on them.
   // Under a session owner the kernel then drives the first connect itself:
   // await the owner's resolveInitialSession() and switch to the session it
@@ -870,14 +995,12 @@ export function createTerminal(
   // alive, and the kernel — which now SEES the failure instead of inferring it
   // from a missing side effect — dismisses the loading overlay so that chrome
   // is visible instead of an eternal spinner.
-  void setupFeatures().then(async (ok) => {
-    if (!ok) {
-      // Setup aborted (rolled back or destroyed). Under a session owner no
-      // connect will ever be attempted, so nothing else can lower the loading
-      // overlay — dismiss it so the page shows its real state.
-      if (!connectionInitiated && !destroyed) {
-        dismissLoadingOverlay();
-      }
+  void setupFeatures().then(async (outcome) => {
+    if (outcome.status === "failed") {
+      enterFatalStartup(outcome.feature, outcome.cause);
+      return;
+    }
+    if (outcome.status === "aborted") {
       return;
     }
     if (!sessionOwner || isDestroyed()) {
@@ -924,32 +1047,15 @@ export function createTerminal(
       render.resetScreen();
     },
     destroy() {
-      if (destroyed) {
+      if (rootReleased) {
         return;
       }
+      rootReleased = true;
       destroyed = true;
-      teardownFeatures();
-      kernelAbort.abort();
-      narrowObserver?.disconnect();
-      viewport.teardown();
-      // Reset the composition singleton (kernel-driven, no feature teardown): a
-      // destroy() mid-IME-composition otherwise leaves module-level `composing`
-      // stuck true, so a remounted terminal swallows every keydown until an IME
-      // cycle resets it; also neutralizes a pending compositionend setTimeout.
-      composition.teardown();
-      connection.disconnect();
-      connState.destroy();
-      if (toastTimer !== null) {
-        clearTimeout(toastTimer);
-      }
-      for (const off of subscriptions) {
-        off();
-      }
-      subscriptions.length = 0;
-      bus.clear();
-      announcer.destroy();
-      regions.destroy();
+      cleanupRuntime();
       root.classList.remove("wt-root", "wt-viewport", "wt-container", "wt-narrow");
+      // cleanupRuntime() removed the live subtree. A fatal handler may have
+      // rendered replacement UI afterward, so destroy() clears once more.
       root.replaceChildren();
     },
   };

@@ -303,6 +303,18 @@ export interface FeatureInstance<Api = void> {
 
 // --- Entry point ---
 
+/** A fatal failure while createTerminal is starting its feature composition.
+ *  The kernel has already stopped the connection, released every listener and
+ *  singleton, torn down completed features, and cleared the terminal root when
+ *  it delivers this value to `onFatalError`. */
+export interface TerminalStartupFailure {
+  readonly phase: "feature-setup";
+  /** Name of the feature whose setup threw or rejected. */
+  readonly feature: string;
+  /** The original thrown or rejected value. */
+  readonly cause: unknown;
+}
+
 /** Options for createTerminal. */
 export interface CreateTerminalOptions {
   /** The feature list; omitted or empty means the bare kernel (no chrome).
@@ -323,6 +335,14 @@ export interface CreateTerminalOptions {
   fontReady?: string;
   /** Optional pre-JS loading overlay the kernel fades out on first paint. */
   loading?: HTMLElement;
+  /** Observe or replace the kernel's fatal feature-setup surface. Called only
+   *  after the live terminal has been completely torn down and its root
+   *  cleared. Return true after rendering a replacement recovery surface into
+   *  that root; false or undefined keeps the built-in Reload page surface. If
+   *  this callback throws, the kernel logs that error and shows the built-in
+   *  surface, so a reporting failure cannot leave the page blank. */
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- an observing handler returns nothing; only a literal `true` claims the recovery surface, so forcing `return undefined` on every observer is worse than the union
+  onFatalError?: (failure: TerminalStartupFailure) => boolean | void;
   /** Theme overrides: CSS custom properties set on the terminal root so a
    *  consumer recolors the UI (accent, tab hover/active) without shipping CSS.
    *  Keys must be CSS custom-property names (start with "--"); values are any

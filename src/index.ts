@@ -14,6 +14,7 @@
 export { createTerminal } from "./kernel/kernel.js";
 export type {
   CreateTerminalOptions,
+  TerminalStartupFailure,
   TerminalHandle,
   TerminalFeature,
   FeatureInstance,

@@ -9,12 +9,13 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as KernelModule from "./kernel.js";
-import type { TerminalContext, TerminalFeature } from "./types.js";
+import type { TerminalContext, TerminalFeature, TerminalStartupFailure } from "./types.js";
 
 const sendBinary = vi.fn<(buf: Uint8Array) => boolean>(() => true);
 const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
 const connect = vi.fn();
 const setSession = vi.fn<(id: string) => void>();
+const disconnect = vi.fn();
 const resetScrollback = vi.fn();
 const resetScreen = vi.fn();
 
@@ -51,7 +52,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       sendBinary,
       sendResize: vi.fn(),
       reconnectNow: vi.fn(),
-      disconnect: vi.fn(),
+      disconnect,
       setSession,
       forgetSession: vi.fn(),
     },
@@ -69,6 +70,7 @@ beforeEach(async () => {
   connectionInit.mockClear();
   connect.mockClear();
   setSession.mockClear();
+  disconnect.mockClear();
   resetScrollback.mockClear();
   resetScreen.mockClear();
   document.body.replaceChildren();
@@ -440,6 +442,134 @@ describe("feature lifecycle", () => {
     await tick();
     term.destroy();
     expect(teardown).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("fatal startup (a feature's setup threw or rejected)", () => {
+  const boom: TerminalFeature = {
+    name: "boom",
+    setup() {
+      throw new Error("import graph broken");
+    },
+  };
+
+  it("tears down the runtime and renders the modal recovery surface (viewport)", async () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const peerTeardown = vi.fn();
+    const peer: TerminalFeature = {
+      name: "peer",
+      setup() {
+        return { teardown: peerTeardown };
+      },
+    };
+    createTerminal(root, { features: [peer, boom], loading });
+    await tick();
+
+    // The completed peer rolled back, the socket closed, the terminal DOM is
+    // gone — nothing half-live remains behind the recovery surface.
+    expect(peerTeardown).toHaveBeenCalledTimes(1);
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(root.querySelector(".term-output")).toBeNull();
+    // The pre-JS overlay came down (nothing else would ever lower it), and the
+    // surface is modal: a full-page terminal has no usable UI behind it.
+    expect(loading.classList.contains("fade")).toBe(true);
+    const fatal = root.querySelector(".wt-fatal");
+    expect(fatal).not.toBeNull();
+    expect(fatal?.getAttribute("role")).toBe("alertdialog");
+    expect(fatal?.getAttribute("aria-modal")).toBe("true");
+    expect(root.querySelector(".wt-fatal-reload")).not.toBeNull();
+    // Boundary classes stay so the recovery surface keeps the design tokens.
+    expect(root.classList.contains("wt-root")).toBe(true);
+  });
+
+  it("stays non-modal in container layout (the host app is not inert)", async () => {
+    const root = rootIn();
+    createTerminal(root, { features: [boom], layout: "container" });
+    await tick();
+    const fatal = root.querySelector(".wt-fatal");
+    expect(fatal?.getAttribute("role")).toBe("alertdialog");
+    expect(fatal?.getAttribute("aria-modal")).toBeNull();
+  });
+
+  it("handles an async setup rejection identically", async () => {
+    const root = rootIn();
+    const asyncBoom: TerminalFeature = {
+      name: "async-boom",
+      setup: () => Promise.reject(new Error("nope")),
+    };
+    createTerminal(root, { features: [asyncBoom] });
+    await tick();
+    await tick();
+    expect(root.querySelector(".wt-fatal")).not.toBeNull();
+  });
+
+  it("lets onFatalError take over the surface and delivers the failure", async () => {
+    const root = rootIn();
+    const seen: TerminalStartupFailure[] = [];
+    createTerminal(root, {
+      features: [boom],
+      onFatalError(failure) {
+        seen.push(failure);
+        const own = document.createElement("p");
+        own.className = "host-recovery";
+        root.appendChild(own);
+        return true;
+      },
+    });
+    await tick();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.phase).toBe("feature-setup");
+    expect(seen[0]?.feature).toBe("boom");
+    expect(seen[0]?.cause).toBeInstanceOf(Error);
+    // The handler claimed the surface, so the built-in panel never rendered.
+    expect(root.querySelector(".wt-fatal")).toBeNull();
+    expect(root.querySelector(".host-recovery")).not.toBeNull();
+  });
+
+  it("shows the built-in surface when the handler itself throws", async () => {
+    const root = rootIn();
+    createTerminal(root, {
+      features: [boom],
+      onFatalError() {
+        throw new Error("reporter broke too");
+      },
+    });
+    await tick();
+    expect(root.querySelector(".wt-fatal")).not.toBeNull();
+  });
+
+  it("destroy() after a fatal removes the surface and boundary classes", async () => {
+    const root = rootIn();
+    const term = createTerminal(root, { features: [boom] });
+    await tick();
+    expect(root.querySelector(".wt-fatal")).not.toBeNull();
+    term.destroy();
+    expect(root.childElementCount).toBe(0);
+    expect(root.classList.contains("wt-root")).toBe(false);
+    expect(root.classList.contains("wt-viewport")).toBe(false);
+  });
+
+  it("destroy() mid-setup still aborts quietly (no fatal surface)", async () => {
+    const root = rootIn();
+    let release: (() => void) | undefined;
+    const slow: TerminalFeature = {
+      name: "slow",
+      setup: () =>
+        new Promise((resolve) => {
+          release = () => {
+            resolve({ teardown: () => undefined });
+          };
+        }),
+    };
+    const term = createTerminal(root, { features: [slow, boom] });
+    term.destroy();
+    release?.();
+    await tick();
+    // An intentional destroy during setup is cancellation, not failure.
+    expect(root.querySelector(".wt-fatal")).toBeNull();
+    expect(root.childElementCount).toBe(0);
   });
 });
 

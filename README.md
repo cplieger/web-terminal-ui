@@ -140,22 +140,30 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
 
 ### Options
 
-| Option      | Default                    | Purpose                                                                                                                                                                                                                                                                                                                                                  |
-| ----------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `features`  | _(none — bare kernel)_     | The feature list. Omitted or empty builds only the terminal (no chrome). Use a preset from `./presets` or a hand-picked array.                                                                                                                                                                                                                           |
-| `layout`    | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                                                                           |
-| `wsPath`    | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                                                                                          |
-| `fontReady` | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                                                                                                                              |
-| `loading`   | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                                                                             |
-| `theme`     | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input` (the working and input rings derive from their own tokens). The library ships neutral defaults. |
+| Option         | Default                    | Purpose                                                                                                                                                                                                                                                                                                                                                  |
+| -------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `features`     | _(none — bare kernel)_     | The feature list. Omitted or empty builds only the terminal (no chrome). Use a preset from `./presets` or a hand-picked array.                                                                                                                                                                                                                           |
+| `layout`       | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                                                                           |
+| `wsPath`       | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                                                                                          |
+| `fontReady`    | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                                                                                                                              |
+| `loading`      | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                                                                             |
+| `onFatalError` | _(built-in recovery)_      | Called after a fatal feature setup failure has stopped the connection, released the terminal runtime, and cleared the root. It receives `{ phase, feature, cause }`. Return `true` only after rendering replacement recovery UI into the root; otherwise the kernel shows its Reload page surface.                                                       |
+| `theme`        | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input` (the working and input rings derive from their own tokens). The library ships neutral defaults. |
 
 `createTerminal()` returns a handle: `focus()` re-focuses the terminal input
 (and opens the soft keyboard on touch); `send(bytes)` sends bytes to the active
 session through the kernel's sanitizing input funnel (the supported host path
 for a "type this command" affordance); `reset()` drops the local scrollback and
 screen without injecting keystrokes (send a redraw keystroke yourself if you
-want one — e.g. Ctrl+L); and `destroy()` tears every feature down and releases
-the kernel.
+want one, for example Ctrl+L); and `destroy()` tears every feature down and
+releases the kernel.
+
+If a feature's setup throws or rejects, the kernel stops the connection, tears
+down every completed feature and core listener, clears the broken subtree, and
+shows a reload surface. The surface is modal when the terminal owns the
+viewport and non-modal when it fills an embedded container. `onFatalError`
+receives the failure after cleanup; return `true` only when the host has rendered
+replacement recovery UI into the terminal root.
 
 ## What ships
 
