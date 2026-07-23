@@ -59,14 +59,21 @@
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
-  /* Browser-style tabs: up to 300px per tab when there is room, shrinking toward
-     a 100px floor as the strip fills; past the floor the list scrolls horizontally
-     (.wt-tab-scroll has overflow-x: auto). flex-grow is 0, so the 300px basis is a
-     hard cap — every tab is the same size and never stretches past it, whatever
-     its title; the label truncates instead. box-sizing keeps the basis a true
+  /* Browser-style tabs: every tab STARTS at the full 300px, shrinking toward a
+     100px floor only once the strip is full; past the floor the list scrolls
+     horizontally (.wt-tab-scroll has overflow-x: auto). A definite width (not
+     flex-basis: 300px) is load-bearing: the scroller shrink-wraps its content,
+     and in intrinsic sizing a non-growable item's flex BASIS caps at its
+     content width (min(label, 300px)) — short-labeled tabs then rendered at
+     content width and every added tab dragged all widths toward the mean. A
+     definite width contributes the full 300px regardless of the label, while
+     flex-shrink still compresses it once the bar runs out of room. flex-grow
+     is 0, so 300px is also a hard cap — every tab is the same size whatever
+     its title; the label truncates instead. box-sizing keeps the width a true
      total. */
   box-sizing: border-box;
-  flex: 0 1 300px;
+  width: 300px;
+  flex: 0 1 auto;
   min-width: 100px;
   padding: var(--sp-2);
   /* A transparent border is reserved on every tab so toggling the inactive
