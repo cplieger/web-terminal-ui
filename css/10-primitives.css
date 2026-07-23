@@ -13,7 +13,8 @@
    motion is opt-in from one place). Cascade order is the manifest file order.
 
    Primitives are the building blocks every feature reuses: the transparent
-   layout regions, the 44px touch button, and the toast surface. */
+   layout regions, the 44px touch button, the toast surface, and the kernel's
+   fatal-startup recovery surface. */
 
 :where(.wt-root) .wt-region,
 :where(.wt-root) .wt-slot {
@@ -95,4 +96,64 @@
 :where(.wt-root) .wt-toast.visible {
   display: block;
   opacity: 1;
+}
+
+/* ===== Fatal startup recovery =====
+   Feature setup is part of the kernel composition contract. If it fails, the
+   kernel removes the half-live terminal and fills only its own layout boundary
+   with this recovery surface. In container mode that leaves the host app
+   outside the terminal fully visible and interactive. */
+:where(.wt-root) .wt-fatal {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: calc(var(--safe-top) + var(--sp-3)) var(--sp-3) calc(var(--safe-bottom) + var(--sp-3));
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  text-align: center;
+}
+
+:where(.wt-root) .wt-fatal-card {
+  inline-size: min(100%, 28rem);
+  padding: clamp(1.25rem, 5vi, 2rem);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+:where(.wt-root) .wt-fatal-title {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(1.25rem, 5vi, 1.5rem);
+  line-height: 1.2;
+}
+
+:where(.wt-root) .wt-fatal-message {
+  margin: var(--sp-3) 0 1.25rem;
+  color: color-mix(in oklch, var(--text), transparent 20%);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+
+:where(.wt-root) .wt-fatal-reload {
+  inline-size: fit-content;
+  padding-inline: 1rem;
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+@media (hover: hover) {
+  :where(.wt-root) .wt-fatal-reload:hover {
+    background: color-mix(in oklch, var(--accent), var(--text) 12%);
+  }
+}
+
+:where(.wt-root) .wt-fatal-reload:active {
+  background: color-mix(in oklch, var(--accent), var(--bg) 12%);
+  transform: translateY(1px);
 }
