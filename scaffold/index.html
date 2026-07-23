@@ -19,7 +19,11 @@
 #loading .bar{position:relative;inline-size:min(220px,62vw);block-size:5px;overflow:hidden;border-radius:999px;background:color-mix(in oklch,currentColor 16%,transparent)}
 #loading .bar::before{content:"";position:absolute;inset-block:0;inline-size:42%;border-radius:inherit;background:linear-gradient(90deg,transparent,currentColor 28%,color-mix(in oklch,currentColor,#fff 45%) 50%,currentColor 72%,transparent);filter:drop-shadow(0 0 4px color-mix(in oklch,currentColor 55%,transparent));animation:wt-loading-slide 1.5s cubic-bezier(.65,0,.35,1) infinite}
 @keyframes wt-loading-slide{0%{transform:translateX(-110%)}100%{transform:translateX(250%)}}
-@media (prefers-reduced-motion:reduce){#loading .bar::before{animation-duration:3s}}
+@keyframes wt-loading-pulse{0%,100%{opacity:1}50%{opacity:.55}}
+/* Reduced motion: no translation sweep (the vestibular-trigger class). The bar
+   becomes a full-width solid fill whose only animation is a gentle opacity
+   pulse — liveness stays signaled, nothing moves. */
+@media (prefers-reduced-motion:reduce){#loading .bar::before{inline-size:100%;background:currentColor;filter:none;animation:wt-loading-pulse 2s ease-in-out infinite}}
 </style>
 </head>
 <body>
