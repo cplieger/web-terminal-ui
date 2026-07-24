@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Local pre-publish verification for @cplieger/web-terminal-ui.
 #
-# The engine (@cplieger/web-terminal-engine) is not published yet, so npm cannot
-# resolve the peer dependency. This script overlays the LOCAL working-tree
-# engine into node_modules/@cplieger/web-terminal-engine (the same technique web-terminal-kiro's
+# Verifies against the LOCAL working-tree engine instead of the published
+# @cplieger/web-terminal-engine: the script overlays the sibling checkout into
+# node_modules/@cplieger/web-terminal-engine (the same technique web-terminal-kiro's
 # dev-build.sh uses) and then runs the real gates: tsc typecheck (source +
-# tests) and vitest.
+# tests) and vitest. That is what makes pre-release engine+UI changes testable
+# together before the engine version they need is published.
 #
-# Not for CI or release — CI resolves the published engine. The overlay dir is
+# Not for CI or release: CI resolves the published engine. The overlay dir is
 # gitignored. Override the engine location with ENGINE_DIR=... if the sibling
 # checkout lives elsewhere (default ../web-terminal-engine).
 set -euo pipefail

@@ -9,7 +9,7 @@ org-wide defaults are inherited from
 configuration is synced from [cplieger/ci](https://github.com/cplieger/ci) (do
 not hand-edit `.editorconfig`, `.prettierrc.json`, `.stylelintrc.json`,
 `.htmlvalidate.json`, `eslint.config.base.mjs`, `cliff.toml`, the workflows, or
-`LICENSE` — they arrive as `chore(sync)` PRs).
+`LICENSE`; they arrive as `chore(sync)` PRs).
 
 ## Architecture
 
@@ -17,31 +17,31 @@ The package is a thin UI layer over the engine. The engine owns the VT screen
 buffer, the wire protocol, rendering, scrolling, and the WebSocket/resume
 lifecycle; this package owns the input model and chrome.
 
-- `kernel/kernel.ts` — the entry (`createTerminal`). Builds the kernel subtree
+- `kernel/kernel.ts`: the entry (`createTerminal`). Builds the kernel subtree
   plus each listed feature's chrome inside the host root, initializes the engine
   layers (`render` / `scroll` / `connection`), and wires every listener: textarea
   input + keydown, tap-to-focus (pointerup-based to stay inside iOS's user-gesture
   window), and the visibility/pageshow/online reconnect hooks. `createTerminal(root, opts)`
-  is the only public export; features live in `features/` and bundles in
-  `presets.ts`.
-- `composition.ts` — IME / composition (`compositionstart/update/end` + native
+  is the only public export; features live in `features/` and preset bundles in
+  `presets.ts` plus the per-preset entries in `presets/`.
+- `composition.ts`: IME / composition (`compositionstart/update/end` + native
   `paste`). Mirrors xterm.js's CompositionHelper; the deferred read at
   `compositionend` is the Chromium-correctness workaround.
-- `predict.ts` — predictive local-echo mini-VT. Advances a predicted cursor
-  optimistically and **bails (suspends) on any byte it cannot model** — wrong
+- `predict.ts`: predictive local-echo mini-VT. Advances a predicted cursor
+  optimistically and **bails (suspends) on any byte it cannot model**; wrong
   predictions are worse than missing ones. It carries unit and property-based
   tests (`predict.test.ts`, `predict.property.test.ts`); the other UI modules
-  now have unit tests too.
-- `viewport.ts` — coalesces iOS keyboard transitions, resizes, font-load
+  have unit tests too.
+- `viewport.ts`: coalesces iOS keyboard transitions, resizes, font-load
   reflows, and `ResizeObserver` fires into one transition→settle lifecycle.
-- `input-placeholder.ts` — the invisible NBSP placeholder constant
+- `input-placeholder.ts`: the invisible NBSP placeholder constant
   (`INPUT_PLACEHOLDER`) and its `resetToPlaceholder()` helper, shared by
   the kernel and `composition.ts` so the iOS held-Backspace key-repeat
   workaround stays in lockstep across both.
 
-The public API is whatever `src/index.ts` re-exports, currently `createTerminal`
-plus its `CreateTerminalOptions` / `TerminalHandle` / `TerminalFeature` /
-`TerminalContext` types (presets from `./presets`). Keep the README's API section in sync.
+The public API is whatever `src/index.ts` re-exports: `createTerminal` plus the
+option, handle, feature, and context types around it (presets from `./presets`).
+Keep the README's API section in sync.
 
 ### The input-model contract (protect this)
 
@@ -54,8 +54,8 @@ not move keyboard handling onto the output element.
 
 ## Local development
 
-Requires Node and npm, plus a sibling checkout of the engine (the UI is built
-on the unpublished `@cplieger/web-terminal-engine`).
+Requires Node and npm, plus a sibling checkout of the engine (local checks run
+against your working-tree engine, not a published snapshot).
 
 ```sh
 npm install                # devDeps; the engine peer is overlaid by verify.sh
@@ -63,9 +63,9 @@ npm run verify             # overlay local engine + tsc (src & tests) + vitest
 ```
 
 `scripts/verify.sh` copies the local engine's `web/src` into
-`node_modules/@cplieger/web-terminal-engine` (gitignored) so `tsc` and `vitest` can
-resolve the bare `@cplieger/web-terminal-engine` specifier before the engine is
-published. Point it at a non-default location with `ENGINE_DIR=../web-terminal-engine
+`node_modules/@cplieger/web-terminal-engine` (gitignored) so `tsc` and `vitest`
+resolve the bare `@cplieger/web-terminal-engine` specifier against your local
+engine checkout. Point it at a non-default location with `ENGINE_DIR=../web-terminal-engine
 npm run verify`. The individual gates are also available:
 
 ```sh
@@ -77,7 +77,7 @@ npm run lint:prettier      # formatting (printWidth 100)
 npm run lint:knip          # unused-export / dependency check
 ```
 
-There is **no build step** — the package ships TypeScript source
+There is **no build step**: the package ships TypeScript source
 (`exports` points at `./src/index.ts`), so `tsc` stands in for a compile. CI
 runs the same battery centrally via cplieger/ci; the `web-lint` job also lints
 `css/` (stylelint) and `scaffold/index.html` (html-validate).
@@ -85,12 +85,12 @@ runs the same battery centrally via cplieger/ci; the `web-lint` job also lints
 ### Conventions and gotchas
 
 - **ESM only.** Use `.js` extensions in relative imports (e.g.
-  `from "./predict.js"`) even though the files are `.ts` — required for the
+  `from "./predict.js"`) even though the files are `.ts`; required for the
   TS-source publish to resolve.
 - **Strict TypeScript + strict typed-linting.** `no-explicit-any` is an error,
   `eqeqeq` is enforced, types use inline `import type`. Test files get relaxed
   rules (see `eslint.config.mjs`, which imports the synced base and layers only
-  the `*.mjs` delta — never copy the base inline).
+  the `*.mjs` delta; never copy the base inline).
 - **`predict.ts` is the testable core.** When changing it, run the suite and add
   cases rather than weakening the bail rules.
 
@@ -105,7 +105,7 @@ is only a baseline; do not bump it by hand.
 ## Commits and PRs
 
 Branch from `main`, keep changes focused with tests, and open a PR. Commit
-messages follow [Conventional Commits](https://www.conventionalcommits.org/) —
+messages follow [Conventional Commits](https://www.conventionalcommits.org/):
 git-cliff parses them for the changelog and version bump, so write the subject
 as the changelog line you want (`feat: add a paste size cap`,
 `fix: clamp context menu above the keyboard inset`).
@@ -115,5 +115,5 @@ as the changelog line you want (`feat: add a paste size cap`,
 By participating you agree to the
 [Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md).
 Report security issues through the
-[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) —
+[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md),
 never in a public issue.
