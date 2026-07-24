@@ -8,15 +8,14 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/web-terminal-ui/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/web-terminal-ui)
 
 The reference touch-first browser UI for
-[`@cplieger/web-terminal-engine`](https://github.com/cplieger/web-terminal-engine) — the part
-that turns the engine's render/scroll/connection/keyboard modules into a
-usable terminal on a phone as well as a desktop.
+[`@cplieger/web-terminal-engine`](https://github.com/cplieger/web-terminal-engine).
+It turns the engine's render/scroll/connection/keyboard modules into a usable
+terminal on a phone as well as a desktop.
 
 One `createTerminal(root, { features })` call builds the entire terminal UI
 inside a single container element you provide. A small always-present kernel
-(the display output, the hidden keyboard textarea, IME, engine wiring, the
-sanitizing input funnel, connection-state, and named layout regions) composes
-with opt-in feature modules that own everything above the raw terminal:
+composes with opt-in feature modules that own everything above the raw
+terminal:
 
 - a **display-only** terminal output (native text selection survives redraws)
   and a hidden `<textarea>` that owns the keyboard and IME (the kernel)
@@ -44,7 +43,7 @@ depend on the engine directly and skip this package.
 npm install @cplieger/web-terminal-ui @cplieger/web-terminal-engine
 ```
 
-`@cplieger/web-terminal-engine` is a peer dependency — the UI is built on the
+`@cplieger/web-terminal-engine` is a peer dependency: the UI is built on the
 engine, so the consumer pins the engine version explicitly. Pairing compatibility
 is governed by the engine's
 [directional wire contract](https://github.com/cplieger/web-terminal-engine#wire-protocol),
@@ -57,14 +56,14 @@ Serve a CSS bundle matching how you embed the terminal, plus a minimal HTML
 page that has one empty container element, then call
 `createTerminal(root, { features })` from your entry module.
 
-**Full-page host** (the terminal IS the page — `web-terminal-server`,
+**Full-page host** (the terminal IS the page, as in `web-terminal-server` and
 `web-terminal-kiro`): concatenate `css/MANIFEST` into the `style.css` your page
 links. That reference bundle is `css/page.css` (the page kit: `html/body`
 reset + the terminal web font's `@font-face`, expecting the font files at
 `/vendor/fonts/`) plus the complete component set.
 
-**Embedder** (the terminal lives inside your app's layout — a panel, a pane):
-concatenate the per-preset manifest matching your composition instead —
+**Embedder** (the terminal lives inside your app's layout, as a panel or pane):
+concatenate the per-preset manifest matching your composition instead:
 `css/MANIFEST.single`, `css/MANIFEST.touch`, or `css/MANIFEST.tabbed`. These
 contain ONLY root-scoped component styles: no page reset, no fonts, no
 document-level rules, nothing to quarantine. Pass `layout: "container"` so the
@@ -99,7 +98,7 @@ entry modules beside it:
 ```
 
 `createTerminal(root, opts?)` builds the entire terminal subtree (the kernel
-plus every feature's chrome) inside `root` itself — there is no element-id
+plus every feature's chrome) inside `root` itself. There is no element-id
 contract for the host page to reproduce, and every style and CSS custom
 property is scoped to the `wt-root` class it stamps on your element (removed
 again by `destroy()`). Call it exactly once; the engine's
@@ -109,46 +108,43 @@ to copy and adapt.
 
 Four presets are provided; each is a plain feature-array factory, so you can
 spread and edit it. Import the barrel (`@cplieger/web-terminal-ui/presets`) for
-convenience, or a per-preset entry module for the minimal delivered import
-graph — `…/presets/single`, `…/presets/touch`, `…/presets/tabbed`,
-`…/presets/agent-tabbed` (the barrel statically reaches every feature; the
-touch entry, for example, never imports the tabs module). Individual features
+convenience, or a per-preset entry module (`…/presets/single`, `…/presets/touch`,
+`…/presets/tabbed`, `…/presets/agent-tabbed`) for the minimal delivered import
+graph; the barrel statically reaches every feature, while the touch entry, for
+example, never imports the tabs module. Individual features
 are importable from `…/features/<name>` (`clipboard`, `context-menu`,
 `scroll-to-bottom`, `predictive-echo`, `connection-banner`, `mobile-toolbar`,
 `tabs`, `activity-monitor`, `animations`) for hand-picked compositions:
 
-- `presetSingle()` — single-pane desktop UI (context menu, clipboard,
+- `presetSingle()`: single-pane desktop UI (context menu, clipboard,
   scroll-to-bottom, predictive echo, connection banner).
-- `presetTouch()` — `presetSingle()` plus the mobile key toolbar.
-- `presetTabbed()` — the generic tabbed UI: `presetTouch()` plus tabs, the
-  activity monitor, and animations. Each tab's title is OSC-first — it follows
+- `presetTouch()`: `presetSingle()` plus the mobile key toolbar.
+- `presetTabbed()`: the generic tabbed UI, `presetTouch()` plus tabs, the
+  activity monitor, and animations. Each tab's title is OSC-first: it follows
   the process window title (OSC 0/2) when the program sets one and keeps it
   updated, otherwise the last command submitted. The per-tab activity dot
   reveals itself only when a session reports OSC 9;4 progress, so a plain shell
   keeps clean, label-only tabs. Requires a server that speaks the session API
   (`/api/sessions` and `/ws?session=`), such as `web-terminal-server`.
-- `presetAgentTabbed()` — the same feature set as `presetTabbed()` (activity
-  monitor included), tuned for an agent shell such as `web-terminal-kiro`: with
-  `preferInputTitle`, each tab's label follows the latest submitted line
-  (persisted server-side and recovered on reload) and the program's non-empty
-  but useless OSC 0/2 title is ignored; and with `presumeReports`, the idle
-  activity dot shows from tab creation instead of waiting for the session's
-  first OSC 9;4 signal — every session is an agent, so there is nothing to
-  prove. Its status dots (idle / working / done / needs-input) come from the
-  same activity monitor, driven by the server's status SSE and its OSC-9
-  classifier.
+- `presetAgentTabbed()`: the same feature set as `presetTabbed()`, tuned for an
+  agent shell such as `web-terminal-kiro`. With `preferInputTitle`, each tab's
+  label follows the latest submitted line (persisted server-side and recovered
+  on reload) and the program's OSC 0/2 title is ignored. With `presumeReports`,
+  the idle activity dot shows from tab creation instead of waiting for the
+  session's first OSC 9;4 signal. Its status dots (idle / working / done /
+  needs-input) come from the same activity monitor.
 
 ### Options
 
-| Option         | Default                    | Purpose                                                                                                                                                                                                                                                                                                                                                            |
-| -------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `features`     | _(none — bare kernel)_     | The feature list. Omitted or empty builds only the terminal (no chrome). Use a preset from `./presets` or a hand-picked array.                                                                                                                                                                                                                                     |
-| `layout`       | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                                                                                     |
-| `wsPath`       | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                                                                                                    |
-| `fontReady`    | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                                                                                                                                        |
-| `loading`      | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                                                                                       |
-| `onFatalError` | _(built-in recovery)_      | Called after a fatal feature setup failure has stopped the connection, released the terminal runtime, and cleared the root. It receives `{ phase, feature, cause }`. Return `true` only after rendering replacement recovery UI into the root; otherwise the kernel shows its Reload page surface.                                                                 |
-| `theme`        | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input` (the working ripple and the input ring derive from their own tokens). The library ships neutral defaults. |
+| Option         | Default                    | Purpose                                                                                                                                                                                                                                                                                       |
+| -------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `features`     | _(none; bare kernel)_      | The feature list. Omitted or empty builds only the terminal (no chrome). Use a preset from `./presets` or a hand-picked array.                                                                                                                                                                |
+| `layout`       | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                |
+| `wsPath`       | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                               |
+| `fontReady`    | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                                                                   |
+| `loading`      | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                  |
+| `onFatalError` | _(built-in recovery)_      | Called with `{ phase, feature, cause }` after a fatal feature setup failure; behavior below.                                                                                                                                                                                                  |
+| `theme`        | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input`. The library ships neutral defaults. |
 
 `createTerminal()` returns a handle: `focus()` re-focuses the terminal input
 (and opens the soft keyboard on touch); `send(bytes)` sends bytes to the active
@@ -178,10 +174,10 @@ replacement recovery UI into the terminal root.
 
 The web-terminal family:
 
-- [`web-terminal-engine`](https://github.com/cplieger/web-terminal-engine) — the
+- [`web-terminal-engine`](https://github.com/cplieger/web-terminal-engine): the
   Go session engine + TypeScript browser renderer this UI is built on (peer
   dependency).
-- [`web-terminal-server`](https://github.com/cplieger/web-terminal-server) — a
+- [`web-terminal-server`](https://github.com/cplieger/web-terminal-server): a
   ready-to-run container that serves this UI over HTTP + WebSocket for any
   command.
 
