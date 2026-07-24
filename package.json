@@ -40,6 +40,9 @@
   "peerDependencies": {
     "@cplieger/web-terminal-engine": "^3.0.0"
   },
+  "overrides": {
+    "qs": "^6.15.2"
+  },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@stryker-mutator/core": "9.6.1",
