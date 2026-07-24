@@ -178,6 +178,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
+  /* Ink-centering trim, same as .wt-tab-label (see 30-tabs.css). */
+  text-box: trim-both cap alphabetic;
 }
 
 /* Keyboard button: hidden until a keyboardToggle is wired; filled while the key
@@ -418,6 +420,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Ink-centering trim, same as .wt-tab-label (see 30-tabs.css). */
+  text-box: trim-both cap alphabetic;
 }
 
 /* The close sits flush at the row's right edge (no gap), vertically centered. */

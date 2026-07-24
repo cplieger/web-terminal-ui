@@ -121,6 +121,17 @@
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  /* Center the INK, not the line box: UI fonts carry more ascent than descent
+     (Noto Sans at 13px: 14px over / 4px under the baseline), so the flex-
+     centered line box leaves the visible text ~1.5px low — reading as
+     baseline-aligned with the activity dot's bottom instead of its center.
+     Trimming the box to the cap-height/alphabetic band makes flexbox center
+     the glyphs themselves, on every platform font. Descender ink still paints
+     (verified: ink overflow survives the overflow: hidden ellipsis clip).
+     Non-supporting browsers simply keep the untrimmed box. Shared by all
+     three chip labels (this one + the two switcher labels in
+     31-switcher.css). */
+  text-box: trim-both cap alphabetic;
 }
 
 /* A little breathing room after the activity dot, before the label. */
@@ -401,15 +412,14 @@
   border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
 }
 
-/* Agent working: two INDEPENDENTLY animated layers on one element make the
-   "alive" read (the status-badge "processing" idiom — Ant Design's processing
-   badge, the classic CSS live-indicator ripple): the solid disc keeps full
-   opacity and gently GLOWS (its colors brighten mid-beat), while a ::after
-   ring — born exactly on the static 2px ring — RIPPLES outward and dissolves,
-   re-emitted each cycle. The static ring itself never moves, so working keeps
-   input's exact rest silhouette (a live turn ripples; a turn blocked on the
-   user is that same silhouette frozen — see input below). Motion separates
-   working from input; the ring separates both from done's bare disc. The old
+/* Agent working: a solid disc with two animated cues (the status-badge
+   "processing" idiom — Ant Design's processing badge, the classic CSS
+   live-indicator ripple): the disc keeps full opacity and gently GLOWS (its
+   colors brighten mid-beat), while a ::after ring RIPPLES outward off the
+   disc's edge and dissolves, re-emitted each cycle. No static ring at rest —
+   the disc + live ripple ARE the working read; input freezes that exact ping
+   at its birth frame (see input below), so motion separates working from
+   input, and the ring separates both from done's bare disc. The old
    single-layer pulse faded disc + ring together (opacity on the element),
    which read as a blink and coupled the layers — an element's opacity always
    multiplies onto its pseudos, so true independence requires animating disc
@@ -420,16 +430,15 @@
   position: relative;
   background: var(--status-working);
   border-color: var(--status-working);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
   animation: wt-working-glow 1.2s ease-in-out infinite;
 }
 
-/* The ripple layer: at scale(1) its 2px border overlays the static ring's
-   9->13px band exactly (inset -2px), then the wave detaches, expanding and
-   fading. transform + opacity only, so it composites without repaints. It
-   exists only in the working state — no stale layer to pin when a dot changes
-   status. (The switcher notification dot never shows working — input/done
-   only — so its position: absolute placement never meets this rule's
+/* The ripple layer: at scale(1) its 2px border hugs the disc's edge (inset
+   -2px, the 9->13px band), then the wave detaches, expanding and fading.
+   transform + opacity only, so it composites without repaints. It exists only
+   in the working state — no stale layer to pin when a dot changes status.
+   (The switcher notification dot never shows working — input/done only — so
+   its position: absolute placement never meets this rule's
    position: relative.) */
 :where(.wt-root) .wt-status-dot[data-status="working"]::after {
   content: "";
@@ -449,18 +458,19 @@
   border-color: var(--status-done);
 }
 
-/* User action required (permission / approval): working's exact silhouette —
-   solid dot + 2px ring — frozen and recolored (--status-input; the default
-   orange is shifted away from the old amber so it separates from both
-   default-lime working and green done). The stillness is the message: the
-   agent's turn is mid-flight but blocked on you. The ring keeps it distinct
-   from done's bare disc without leaning on hue; it derives from the same token
-   at 40% alpha, so a theme override recolors dot + ring together. It persists
-   until you act on or switch into the tab. */
+/* User action required (permission / approval): the working ping frozen at
+   its birth frame — solid dot + the same 2px ring at the ripple's 30% birth
+   opacity, motionless (--status-input; the default orange is shifted away
+   from the old amber so it separates from both default-lime working and green
+   done). The stillness is the message: the agent's turn is mid-flight but
+   blocked on you. The ring keeps it distinct from done's bare disc without
+   leaning on hue; it derives from the same token, so a theme override
+   recolors dot + ring together. It persists until you act on or switch into
+   the tab. */
 :where(.wt-root) .wt-status-dot[data-status="input"] {
   background: var(--status-input);
   border-color: var(--status-input);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-input) 40%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-input) 30%, transparent);
 }
 
 /* Exited: a dim hollow dot, static; distinct from idle by its lower opacity. */
@@ -490,13 +500,14 @@
   }
 }
 
-/* The ripple wave: one emission per cycle, launching off the static ring and
-   dissolving by ~2.1x. Opacity starts at the static ring's own 40% weight so
-   the wave reads as the ring letting go of a copy, not a new brighter object. */
+/* The ripple wave: one emission per cycle, launching off the disc's edge and
+   dissolving by ~2.1x. The 0.3 birth opacity matches the input ring's frozen
+   weight, so a live ping and a stuck one read as the same object — subtle
+   against the bar now that no static ring doubles it at birth. */
 @keyframes wt-working-ripple {
   0% {
     transform: scale(1);
-    opacity: 0.4;
+    opacity: 0.3;
   }
 
   100% {
@@ -509,13 +520,14 @@
 @media (prefers-reduced-motion: reduce) {
   :where(.wt-root) .wt-status-dot[data-status="working"] {
     animation: none;
-    /* Motion is what separates working from input's frozen silhouette; with
-       it removed, punch an inner hole (dot -> donut) so working differs from
-       input (solid ringed disc) and done (bare disc) by shape, not hue alone
-       (WCAG 1.4.1). The outer ring stays. */
+    /* Motion is what separates working from input's frozen ping; with it
+       removed, punch an inner hole (dot -> donut) and add a static ring so
+       working differs from input (solid ringed disc) and done (bare disc) by
+       shape, not hue alone (WCAG 1.4.1). The ring carries the same 30%
+       weight as input's. */
     box-shadow:
       inset 0 0 0 2px var(--bg),
-      0 0 0 2px color-mix(in srgb, var(--status-working) 40%, transparent);
+      0 0 0 2px color-mix(in srgb, var(--status-working) 30%, transparent);
   }
 
   /* The ripple layer disappears entirely (not just paused mid-wave). */
