@@ -104,6 +104,16 @@
   color: var(--tab-active-fg);
 }
 
+/* Press (mousedown / touch-hold): one rung past the hover lift — same recipe,
+   deeper mix — so hover -> press reads as a single dimension. After the hover
+   rule so it wins while both apply. Scoped like hover: clicking the active tab
+   selects nothing (it is already active), so it presses like the static surface
+   it is. */
+:where(.wt-root) .wt-tab:not(.wt-tab-active):active {
+  background: color-mix(in oklch, var(--tab-bg), var(--text) 25%);
+  color: var(--tab-active-fg);
+}
+
 /* The active tab reads clearly above the inactive chips: a stronger fill plus an
    accent-coloured edge (inactive chips carry a faint white --border; the active
    one gets the accent equivalent). Themeable via --accent (web-terminal-kiro -> purple). */
@@ -166,6 +176,13 @@
   color: var(--text);
 }
 
+/* Press: deepen the hover box (--text-active is a 15% --text wash; press doubles
+   it to 30%) so mousedown visibly registers before the tab disappears. */
+:where(.wt-root) .wt-tab-close:active {
+  background: color-mix(in oklch, var(--text) 30%, transparent);
+  color: var(--text);
+}
+
 /* On an inactive tab the close appears only on hover, kept in the layout via
    visibility so the tab width never jumps; on the active tab it is always shown. */
 :where(.wt-root) .wt-tab:not(.wt-tab-active) .wt-tab-close {
@@ -219,6 +236,13 @@
   /* Keep the accent glyph on hover (no colour override) so the "+" stays the
      accent colour like the mobile "+"; hover only adds the fill. */
   background: var(--tab-active-bg);
+}
+
+/* Press: brighten the hover fill with the active-tab fg (the
+   .wt-switcher-current press recipe — a lighter press over an already-filled
+   control), keeping the accent glyph. */
+:where(.wt-root) .wt-tab-new:active {
+  background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 12%);
 }
 
 /* The +/x icons are inline SVG so they center exactly in their flex-centered
@@ -338,6 +362,12 @@
    stylelint budget alongside the zero-specificity scope. */
 :where(.wt-root) .wt-tab-menu button:enabled:hover {
   background: var(--text-active);
+}
+
+/* Press: deepen the hover wash to 30% --text (the .wt-tab-close press rung) so
+   the click registers before the menu closes. */
+:where(.wt-root) .wt-tab-menu button:enabled:active {
+  background: color-mix(in oklch, var(--text) 30%, transparent);
 }
 
 :where(.wt-root) .wt-tab-menu button:disabled {
