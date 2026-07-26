@@ -520,9 +520,16 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     });
     await tick();
     expect(seen).toHaveLength(1);
-    expect(seen[0]?.phase).toBe("feature-setup");
-    expect(seen[0]?.feature).toBe("boom");
-    expect(seen[0]?.cause).toBeInstanceOf(Error);
+    // Narrow on the discriminant before reading feature: only the
+    // feature-setup member names one, because kernel-init fails before any
+    // feature composition begins. This is the pattern a consumer follows.
+    const failure = seen[0];
+    expect(failure?.phase).toBe("feature-setup");
+    if (failure?.phase !== "feature-setup") {
+      throw new Error("expected a feature-setup failure");
+    }
+    expect(failure.feature).toBe("boom");
+    expect(failure.cause).toBeInstanceOf(Error);
     // The handler claimed the surface, so the built-in panel never rendered.
     expect(root.querySelector(".wt-fatal")).toBeNull();
     expect(root.querySelector(".host-recovery")).not.toBeNull();
@@ -570,6 +577,98 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     // An intentional destroy during setup is cancellation, not failure.
     expect(root.querySelector(".wt-fatal")).toBeNull();
     expect(root.childElementCount).toBe(0);
+  });
+});
+
+describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
+  // The multiple-session-owner guard is the one synchronous throw the kernel
+  // raises itself, and it fires deliberately BEFORE any DOM work, so it is also
+  // the worst case for the recovery surface: nothing has been built or stamped.
+  const twoOwners = (): TerminalFeature[] =>
+    ["a", "b"].map((name) => ({
+      name,
+      sessionOwner: { resolveInitialSession: () => Promise.resolve(null) },
+      setup() {
+        return { teardown: () => undefined };
+      },
+    }));
+
+  it("still rethrows to the caller", () => {
+    const root = rootIn();
+    expect(() => createTerminal(root, { features: twoOwners() })).toThrow(
+      /multiple session-owning features/,
+    );
+  });
+
+  it("renders the recovery surface and lowers the overlay instead of leaving a stuck spinner", () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+
+    expect(() => createTerminal(root, { features: twoOwners(), loading })).toThrow();
+
+    // The pre-JS overlay came down. Before this phase was wired, nothing ever
+    // lowered it on a synchronous throw: the page kept spinning forever.
+    expect(loading.classList.contains("fade")).toBe(true);
+    const fatal = root.querySelector(".wt-fatal");
+    expect(fatal).not.toBeNull();
+    expect(fatal?.getAttribute("role")).toBe("alertdialog");
+    expect(fatal?.getAttribute("aria-modal")).toBe("true");
+    expect(root.querySelector(".wt-fatal-title")?.textContent).toBe("Terminal failed to start");
+    expect(root.querySelector(".wt-fatal-reload")).not.toBeNull();
+  });
+
+  it("stamps the boundary classes even though the throw preceded the normal stamping", () => {
+    const root = rootIn();
+    expect(() => createTerminal(root, { features: twoOwners() })).toThrow();
+    // Load-bearing, not cosmetic: every .wt-fatal rule is scoped
+    // :where(.wt-root), so without these the surface renders unstyled.
+    expect(root.classList.contains("wt-root")).toBe(true);
+    expect(root.classList.contains("wt-viewport")).toBe(true);
+  });
+
+  it("is non-modal in container layout, like the async phase", () => {
+    const root = rootIn();
+    expect(() => createTerminal(root, { features: twoOwners(), layout: "container" })).toThrow();
+    expect(root.classList.contains("wt-container")).toBe(true);
+    expect(root.querySelector(".wt-fatal")?.hasAttribute("aria-modal")).toBe(false);
+  });
+
+  it("delivers the failure as phase kernel-init and lets a handler take over", () => {
+    const root = rootIn();
+    const seen: TerminalStartupFailure[] = [];
+    expect(() =>
+      createTerminal(root, {
+        features: twoOwners(),
+        onFatalError(failure) {
+          seen.push(failure);
+          root.replaceChildren(document.createElement("main"));
+          return true;
+        },
+      }),
+    ).toThrow();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.phase).toBe("kernel-init");
+    expect(seen[0]?.cause).toBeInstanceOf(Error);
+    // Claimed: the built-in surface must not overwrite the handler's own UI.
+    expect(root.querySelector(".wt-fatal")).toBeNull();
+    expect(root.querySelector("main")).not.toBeNull();
+  });
+
+  it("falls back to the built-in surface when the handler itself throws", () => {
+    const root = rootIn();
+    expect(() =>
+      createTerminal(root, {
+        features: twoOwners(),
+        onFatalError() {
+          throw new Error("reporting broke");
+        },
+      }),
+    ).toThrow(/multiple session-owning features/);
+    // The ORIGINAL cause reaches the caller, not the handler's error, and a
+    // reporting failure never leaves the page blank.
+    expect(root.querySelector(".wt-fatal")).not.toBeNull();
   });
 });
 

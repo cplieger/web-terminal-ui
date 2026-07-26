@@ -164,10 +164,17 @@ let tabs: (typeof TabsModule)["tabs"];
 // tests (destroy() runs the feature teardown that clears it).
 let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
 
-function jsonResponse(body: unknown, status = 200): Response {
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return {
     ok: status >= 200 && status < 300,
     status,
+    // A real Response always has headers, and the session API reads Retry-After
+    // off a failed one. Without this the fake would throw a TypeError that the
+    // call sites' catch blocks swallow, so a retry test would pass for the wrong
+    // reason.
+    headers: {
+      get: (name: string) => headers[name] ?? headers[name.toLowerCase()] ?? null,
+    },
     json: () => Promise.resolve(body),
   } as unknown as Response;
 }
@@ -213,6 +220,38 @@ async function until(pred: () => boolean, tries = 20): Promise<void> {
   for (let i = 0; i < tries && !pred(); i++) {
     await new Promise((r) => setTimeout(r, 0));
   }
+}
+
+// A minimal DataTransfer stand-in recording what the strip's drag handlers put
+// on it, plus a synthetic DragEvent (happy-dom has no drag event constructors).
+interface FakeDataTransfer {
+  effectAllowed: string;
+  dropEffect: string;
+  data: Record<string, string>;
+  image: Element | null;
+  setData(type: string, value: string): void;
+  setDragImage(node: Element, x: number, y: number): void;
+}
+function fakeDataTransfer(): FakeDataTransfer {
+  return {
+    effectAllowed: "",
+    dropEffect: "",
+    data: {},
+    image: null,
+    setData(type, value) {
+      this.data[type] = value;
+    },
+    setDragImage(node) {
+      this.image = node;
+    },
+  };
+}
+function dragEvent(type: string, dt: FakeDataTransfer): Event {
+  const e = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(e, "dataTransfer", { value: dt });
+  Object.defineProperty(e, "clientX", { value: 0 });
+  Object.defineProperty(e, "clientY", { value: 0 });
+  return e;
 }
 
 describe("tabs feature", () => {
@@ -500,6 +539,8 @@ describe("tabs feature", () => {
     const items = openTabMenu(root, 0);
     expect(menu?.classList.contains("visible")).toBe(true);
     expect(items.map((b) => b.textContent)).toEqual([
+      "Rename\u2026",
+      "Use automatic name",
       "Move left",
       "Move right",
       "Close",
@@ -508,6 +549,12 @@ describe("tabs feature", () => {
       "Close to the left",
       "Close all",
     ]);
+    // The naming pair sits above a separator, away from the close items.
+    expect(menu?.querySelectorAll(".wt-tab-menu-sep").length).toBe(1);
+    // With no pinned name there is nothing to revert to, so the item is present
+    // but inert — the menu's item positions never shift.
+    expect(menuItem(items, "Use automatic name")?.disabled).toBe(true);
+    expect(menuItem(items, "Rename\u2026")?.disabled).toBe(false);
     // On the first of two tabs, the leftward actions are disabled; the rest enabled.
     expect(menuItem(items, "Move left")?.disabled).toBe(true);
     expect(menuItem(items, "Move right")?.disabled).toBe(false);
@@ -624,6 +671,43 @@ describe("tabs feature", () => {
     expect(fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") !== "GET")).toBe(false);
   });
 
+  it("swallows a tab drop rather than letting the browser act on the payload", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const tabEl = root.querySelector<HTMLElement>(".wt-tab");
+    const surface = root.querySelector(".term");
+    const dt = fakeDataTransfer();
+    tabEl?.dispatchEvent(dragEvent("dragstart", dt));
+
+    // The id rides a PRIVATE type. WebKit loads dropped text/plain as a URL, so a
+    // bare session id there navigated iPadOS to /<session-id> mid-reorder.
+    expect(dt.data["text/plain"]).toBeUndefined();
+    expect(dt.data["application/x-web-terminal-tab"]).toBe("s1");
+    // And an EXPLICIT drag image: WebKit renders none of its own for an element
+    // under the strip's backdrop-filter (webkit.org/b/22787).
+    expect(dt.image?.classList.contains("wt-tab-ghost")).toBe(true);
+
+    // The drop is cancelled on the strip AND anywhere else it may land.
+    const onStrip = dragEvent("drop", dt);
+    tabEl?.dispatchEvent(onStrip);
+    expect(onStrip.defaultPrevented).toBe(true);
+    const offStrip = dragEvent("drop", dt);
+    surface?.dispatchEvent(offStrip);
+    expect(offStrip.defaultPrevented).toBe(true);
+    // Order still follows the DOM, and nothing was closed or created.
+    expect(fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") !== "GET")).toBe(false);
+
+    // The document guard lasts only as long as the tab drag: an unrelated drop
+    // (a file onto the page) is left entirely to the browser.
+    tabEl?.dispatchEvent(dragEvent("dragend", dt));
+    const unrelated = dragEvent("drop", dt);
+    surface?.dispatchEvent(unrelated);
+    expect(unrelated.defaultPrevented).toBe(false);
+  });
+
   it("announces a tab move on the polite live region", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -681,130 +765,51 @@ describe("tabs feature", () => {
     expect(root.querySelector(".wt-tab-label")?.textContent).toBe("two");
   });
 
-  it("preferInputTitle: shows the client title, ignoring the unreliable OSC title", async () => {
-    // An agent shell whose program emits a non-empty but useless OSC title: the
-    // label follows the persisted client title (the server clientTitle wire
-    // field), NOT the OSC `title`, so a reload recovers the latest submitted line.
-    listBody = [
-      {
-        id: "s1",
-        title: "crap-osc-title",
-        clientTitle: "hello world",
-        createdAt: "1",
-        status: "idle",
-      },
-    ];
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs({ preferInputTitle: true })] });
-    await until(() => root.querySelectorAll(".wt-tab").length === 1);
-    expect(root.querySelector(".wt-tab-label")?.textContent).toBe("hello world");
-  });
-
-  it("default title mode: the OSC title wins over the client title", async () => {
-    // Without preferInputTitle a program that sets its own OSC window title wins;
-    // the client title is only a fallback used when the OSC title is empty.
-    listBody = [
-      {
-        id: "s1",
-        title: "osc-title",
-        clientTitle: "typed line",
-        createdAt: "1",
-        status: "idle",
-      },
-    ];
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
-    await until(() => root.querySelectorAll(".wt-tab").length === 1);
-    expect(root.querySelector(".wt-tab-label")?.textContent).toBe("osc-title");
-  });
-
-  it("recovers the persisted client title when the SSE snapshot beats the initial list", async () => {
-    // The reload race: the status SSE pushes its snapshot as tabs.setup
-    // subscribes, BEFORE the awaited GET /api/sessions resolves. adoptSession
-    // then dedups the list's entries and never re-applies their fields, so the
-    // snapshot itself is the only carrier of the persisted clientTitle. The
-    // monitor path used to drop it (clientTitle: undefined), reverting every
-    // tab to "New tab" after a reload in preferInputTitle mode.
-    const monitor = snapshotMonitor([
-      {
-        id: "s1",
-        status: "idle",
-        title: "crap-osc",
-        clientTitle: "build the thing",
-        createdAt: "1",
-      },
-    ]);
-    listBody = [
-      {
-        id: "s1",
-        title: "crap-osc",
-        clientTitle: "build the thing",
-        createdAt: "1",
-        status: "idle",
-      },
-    ];
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = createTerminal(root, {
-      features: [monitor, tabs({ activityMonitor: monitor, preferInputTitle: true })],
-    });
-    await until(() => root.querySelectorAll(".wt-tab").length === 1);
-    // Give the initial list loop a turn (it must not be needed for the title).
-    await new Promise((r) => setTimeout(r, 0));
-    expect(root.querySelector(".wt-tab-label")?.textContent).toBe("build the thing");
-  });
-
-  it("applies a clientTitle pushed on the status stream (a PUT from another device)", async () => {
-    // A title PUT on another device reaches this client only via the status
-    // stream's clientTitle field; the monitor path must apply it live.
+  // Title RESOLUTION now lives entirely in the engine: the input-derived name and
+  // its eligibility filter and session-scoped latch are Go code
+  // (terminal/inputtitle.go), and the precedence between pinned / derived / OSC /
+  // client-pushed / process-inferred is resolved server-side into one `title`
+  // field. Seven tests here used to cover the browser's own version of that; the
+  // server is the source of truth for a session's name, because a browser can only
+  // ever derive from ITS OWN keyboard and so disagreed with every other client.
+  //
+  // What the UI still owes is rendering what the server resolved — including a
+  // name that arrives MID-SESSION, which is exactly what a server-side deriver
+  // produces and what no earlier test covered.
+  it("renders the title the server resolved, including one that arrives later", async () => {
     const monitor = fakeMonitor();
+    listBody = [{ id: "s1", title: "", createdAt: "1", status: "idle" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [
-        monitor.feature,
-        tabs({ activityMonitor: monitor.feature, preferInputTitle: true }),
-      ],
+      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
-    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    const labels = (): (string | null)[] =>
+      [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
+    expect(labels()).toEqual(["New tab"]);
 
+    // The engine latched a name from the input stream and pushed it.
     monitor.emit({
       id: "s1",
       status: "idle",
-      title: "crap-osc",
-      clientTitle: "from the other device",
+      title: "refactor the auth module",
       createdAt: "1",
+      reportsActivity: false,
     });
-    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("from the other device");
-  });
+    await until(() => labels()[0] === "refactor the auth module");
 
-  it("derived title: plain multi-word typed input is captured verbatim", async () => {
-    // Regression guard for the input-derived tab title: typing a normal
-    // multi-word line (insertText input events) then Enter must reconstruct the
-    // line exactly. Previously the derived path was only tested via the server
-    // clientTitle, never via the real per-keystroke input observer.
-    listBody = [{ id: "s1", title: "crap-osc", clientTitle: "", createdAt: "1", status: "idle" }];
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs({ preferInputTitle: true })] });
-    await until(() => root.querySelectorAll(".wt-tab").length === 1);
-    const input = root.querySelector<HTMLTextAreaElement>(".term-input");
-    if (!input) {
-      throw new Error("no .term-input");
-    }
-    const msg = "push and merge please";
-    for (const ch of msg) {
-      input.dispatchEvent(
-        new InputEvent("input", { data: ch, inputType: "insertText", bubbles: true }),
-      );
-    }
-    input.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
-    );
-    await Promise.resolve();
-    expect(root.querySelector(".wt-tab-label")?.textContent).toBe(msg);
+    // A blank title never overwrites a good one (a program clearing its own OSC
+    // title reports ""), so the name holds.
+    monitor.emit({
+      id: "s1",
+      status: "working",
+      title: "",
+      createdAt: "1",
+      reportsActivity: false,
+    });
+    await until(() => false, 5);
+    expect(labels()).toEqual(["refactor the auth module"]);
   });
 
   it("closes tabs to the right from the context menu", async () => {
@@ -1357,6 +1362,277 @@ describe("tabs feature", () => {
     expect(mobKb?.getAttribute("aria-expanded")).toBe("true");
     expect(deskKb?.classList.contains("wt-active")).toBe(true);
     expect(mobKb?.classList.contains("wt-active")).toBe(true);
+  });
+
+  // --- Persisted tab arrangement ---
+  //
+  // A reorder is a user decision about their own workspace, so it has to outlive
+  // a reload. It cannot come from the server: GET /api/sessions is sorted by
+  // creation time, which is exactly the order the user rearranged away from.
+  // These pin the client-side arrangement end to end — written on a reorder,
+  // honoured on the next load, and not corrupted by the things that legitimately
+  // change the tab set.
+
+  // The strip's labels in DOM order. Scoped to the scroller, which holds ONLY
+  // tabs: a drag's ghost is a chip clone parked under .wt-root until the next
+  // frame, so a root-wide query would count the dragged tab twice.
+  function idsOf(root: HTMLElement): string[] {
+    return [
+      ...(root.querySelector(".wt-tab-scroll")?.querySelectorAll<HTMLElement>(".wt-tab-label") ??
+        []),
+    ].map((e) => e.textContent ?? "");
+  }
+  function storedOrder(): unknown {
+    const raw = localStorage.getItem("wt-tab-order");
+    return raw === null ? null : JSON.parse(raw);
+  }
+
+  it("persists a reorder so it survives a reload", async () => {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    menuItem(openTabMenu(root, 2), "Move left")?.click();
+    expect(idsOf(root)).toEqual(["one", "three", "two"]);
+    expect(storedOrder()).toEqual(["s1", "s3", "s2"]);
+
+    // Reload: same server listing (creation order), a fresh feature instance.
+    term.destroy();
+    root.remove();
+    const root2 = document.createElement("div");
+    document.body.appendChild(root2);
+    term = createTerminal(root2, { features: [tabs()] });
+    await until(() => root2.querySelectorAll(".wt-tab").length === 3);
+    expect(idsOf(root2)).toEqual(["one", "three", "two"]);
+  });
+
+  it("restores the arrangement no matter which source delivers the sessions first", async () => {
+    // The status stream pushes a snapshot on open and the bootstrap's list lands
+    // separately, so arrival order is a race — and it is the SERVER's order, not
+    // the user's. Placement must not depend on it.
+    localStorage.setItem("wt-tab-order", JSON.stringify(["s3", "s1", "s2"]));
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const snapshot = listBody as unknown as SessionStatus[];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const monitor = snapshotMonitor(snapshot);
+    term = createTerminal(root, { features: [monitor, tabs({ activityMonitor: monitor })] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    expect(idsOf(root)).toEqual(["three", "one", "two"]);
+    // The list order and the DOM order agree, so positions, the switcher rows
+    // and close-to-the-side all read the same strip.
+    expect(
+      root.querySelector(".wt-tab-scroll")?.querySelectorAll(":scope > :not(.wt-tab)").length,
+    ).toBe(0);
+  });
+
+  it("puts a session the arrangement does not know at the end, and prunes closed ones", async () => {
+    localStorage.setItem("wt-tab-order", JSON.stringify(["s2", "s1", "gone-long-ago"]));
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    expect(idsOf(root)).toEqual(["two", "one"]);
+
+    // A new session lands last (it predates no arrangement), and the stored
+    // arrangement is rewritten from the live strip — so the id of a session that
+    // no longer exists does not accumulate forever.
+    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+    expect(storedOrder()).toEqual(["s2", "s1", "s-new"]);
+  });
+
+  it("keeps the stored arrangement when the strip transiently empties", async () => {
+    // 'Close all' drops every tab before its replacement lands. An empty strip
+    // carries no arrangement, so persisting it would erase the user's order.
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    menuItem(openTabMenu(root, 1), "Move left")?.click();
+    expect(storedOrder()).toEqual(["s2", "s1"]);
+
+    vi.stubGlobal(
+      "confirm",
+      vi.fn(() => true),
+    );
+    menuItem(openTabMenu(root, 0), "Close all")?.click();
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    expect(storedOrder()).not.toEqual([]);
+  });
+
+  it("persists a DRAG reorder too, not only the menu's move commands", async () => {
+    // The strip's drag-and-drop is the primary reorder gesture; Move left/right
+    // is the pointer/keyboard alternative. Both commit through syncOrderFromDom,
+    // which is why persistence hangs off syncChrome rather than off either call
+    // site — this pins that the drag really reaches storage.
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const first = root.querySelector<HTMLElement>(".wt-tab");
+    const bar = root.querySelector(".wt-tab-bar");
+    const dt = fakeDataTransfer();
+    first?.dispatchEvent(dragEvent("dragstart", dt));
+    // Every rect is zero-sized under happy-dom, so dragTargetBefore finds no
+    // midpoint past clientX=0 and the dragged chip goes to the end.
+    bar?.dispatchEvent(dragEvent("dragover", dt));
+    first?.dispatchEvent(dragEvent("drop", dt));
+
+    expect(idsOf(root)).toEqual(["two", "one"]);
+    expect(storedOrder()).toEqual(["s2", "s1"]);
+  });
+
+  it("never persists a partial arrangement while the strip is still filling", async () => {
+    // The initial population grows the strip one tab at a time, so each
+    // intermediate state is a PARTIAL arrangement. Persisting those meant a
+    // reload landing mid-population stored a one-tab order — and, worse, the
+    // partial write became the arrangement the rest of the population was placed
+    // by, so the restore destroyed the very order it was reading. Pruning the one
+    // COMPLETE strip at the end of the bootstrap is fine and wanted.
+    localStorage.setItem("wt-tab-order", JSON.stringify(["s3", "s1", "s2", "closed-elsewhere"]));
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const writes: string[][] = [];
+    const realSet = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+      this: Storage,
+      k: string,
+      v: string,
+    ) {
+      if (k === "wt-tab-order") {
+        writes.push(JSON.parse(v) as string[]);
+      }
+      realSet.call(this, k, v);
+    });
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const monitor = snapshotMonitor(listBody as unknown as SessionStatus[]);
+    term = createTerminal(root, { features: [monitor, tabs({ activityMonitor: monitor })] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    expect(idsOf(root)).toEqual(["three", "one", "two"]);
+    // Whatever was written must describe the WHOLE strip, never a prefix of it.
+    for (const w of writes) {
+      expect(w, JSON.stringify(writes)).toEqual(["s3", "s1", "s2"]);
+    }
+  });
+
+  it("survives storage that throws (Safari private mode) without losing the reorder", async () => {
+    const boom = (): never => {
+      throw new Error("storage disabled");
+    };
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(boom);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(boom);
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    menuItem(openTabMenu(root, 1), "Move left")?.click();
+    // The reorder still applies for this page; only its persistence is lost.
+    expect(idsOf(root)).toEqual(["two", "one"]);
+  });
+});
+
+describe("tabs feature: a host that temporarily refuses session creation (503)", () => {
+  // web-terminal-kiro holds session creation with 503 + Retry-After while its
+  // tool engine installs the manifest's tools on first boot, a window its own
+  // HEALTHCHECK budgets 20 minutes for. That used to surface as the same fixed
+  // "Couldn't open a terminal" toast as a 500, with no retry: an empty tab bar
+  // and a page that read as broken while the server was deliberately waiting
+  // (and /api/health reported healthy at the same time).
+  it("retries on the server's own hint and opens the terminal once it is ready", async () => {
+    listBody = []; // nothing live, so the bootstrap must create
+    let posts = 0;
+    fetchMock.mockImplementation((_url: string | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "POST") {
+        posts++;
+        // Refuse twice with a 0s hint (keeps the test fast; the parse itself is
+        // covered in model.test.ts), then succeed.
+        if (posts <= 2) {
+          return Promise.resolve(
+            jsonResponse({ error: "tools installing" }, 503, { "Retry-After": "0" }),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse({ id: "s-new", title: "", createdAt: "3", status: "idle" }, 201),
+        );
+      }
+      return Promise.resolve(jsonResponse(listBody, 200));
+    });
+
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+
+    await until(() => root.querySelectorAll(".wt-tab").length === 1, 200);
+    expect(posts).toBe(3);
+    expect(setSession).toHaveBeenCalledWith("s-new");
+  });
+
+  it("repeats the server's explanation rather than inventing library wording", async () => {
+    listBody = [];
+    fetchMock.mockImplementation((_url: string | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "POST") {
+        return Promise.resolve(
+          jsonResponse({ error: "tools installing" }, 503, { "Retry-After": "0" }),
+        );
+      }
+      return Promise.resolve(jsonResponse(listBody, 200));
+    });
+
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+
+    // The host's own words reach the page; the library never hardcodes "tools",
+    // which is a web-terminal-kiro concept it knows nothing about.
+    await until(() => root.textContent?.includes("tools installing") === true, 200);
+    expect(root.textContent).toContain("tools installing");
+  });
+
+  it("does NOT retry a 500: that is not 'come back shortly'", async () => {
+    listBody = [];
+    let posts = 0;
+    fetchMock.mockImplementation((_url: string | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "POST") {
+        posts++;
+        return Promise.resolve(jsonResponse({ error: "boom" }, 500));
+      }
+      return Promise.resolve(jsonResponse(listBody, 200));
+    });
+
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+
+    await until(() => posts > 0, 200);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(posts).toBe(1);
   });
 });
 

@@ -86,10 +86,74 @@ function pick(root: ParentNode, selector: string): HTMLElement {
   return el;
 }
 
-export function createTerminal(
-  root: HTMLElement,
-  opts: CreateTerminalOptions = {},
-): TerminalHandle {
+/** Fade out and remove a consumer-supplied loading overlay.
+ *
+ *  Module scope because BOTH startup-failure phases need it and they live on
+ *  opposite sides of createTerminal's closure: the async `feature-setup` path
+ *  reaches it through dismissLoadingOverlay (which adds the once-only guard),
+ *  the synchronous `kernel-init` path calls it directly from the catch, where
+ *  no kernel state exists yet. */
+function fadeOutOverlay(ld: HTMLElement | undefined): void {
+  if (!ld) {
+    return;
+  }
+  ld.classList.add("fade");
+  const removeOverlay = (): void => {
+    ld.remove();
+  };
+  ld.addEventListener("transitionend", removeOverlay, { once: true });
+  window.setTimeout(removeOverlay, 1500);
+}
+
+/** Render the kernel-owned "Terminal failed to start" recovery surface into root.
+ *
+ *  Module scope for the same reason as fadeOutOverlay: it is the ONE
+ *  implementation of this surface, shared by the async `feature-setup` phase and
+ *  the synchronous `kernel-init` phase, so the two can never drift apart. It
+ *  depends on nothing but its two arguments. */
+function renderFatalStartupInto(root: HTMLElement, layoutMode: "viewport" | "container"): void {
+  const surface = document.createElement("section");
+  surface.className = "wt-fatal";
+  surface.setAttribute("role", "alertdialog");
+  surface.setAttribute("aria-labelledby", "wt-fatal-title");
+  surface.setAttribute("aria-describedby", "wt-fatal-message");
+  if (layoutMode === "viewport") {
+    // A full-page terminal has no usable host UI behind it, so this is the
+    // page's modal recovery state. An embedded terminal is only one panel in
+    // a larger app and must not claim that the rest of the app is inert.
+    surface.setAttribute("aria-modal", "true");
+  }
+
+  const card = document.createElement("div");
+  card.className = "wt-fatal-card";
+  const title = document.createElement("h2");
+  title.id = "wt-fatal-title";
+  title.className = "wt-fatal-title";
+  title.textContent = "Terminal failed to start";
+  const message = document.createElement("p");
+  message.id = "wt-fatal-message";
+  message.className = "wt-fatal-message";
+  message.textContent = "A required interface could not be loaded. Reload the page to try again.";
+  const reloadButton = document.createElement("button");
+  reloadButton.className = "wt-btn wt-fatal-reload";
+  reloadButton.type = "button";
+  reloadButton.textContent = "Reload page";
+  reloadButton.addEventListener("click", () => {
+    window.location.reload();
+  });
+  card.append(title, message, reloadButton);
+  surface.appendChild(card);
+  root.replaceChildren(surface);
+
+  // The terminal input held focus before setup failed. Move that focus to the
+  // only recovery action; container mode remains non-modal because no trap or
+  // aria-modal claim prevents the user from leaving the terminal panel.
+  reloadButton.focus();
+}
+
+/** Build the terminal. See createTerminal, which wraps this to give a
+ *  SYNCHRONOUS failure the same recovery surface an async one already gets. */
+function buildTerminal(root: HTMLElement, opts: CreateTerminalOptions = {}): TerminalHandle {
   const wsPath = opts.wsPath ?? DEFAULT_WS_PATH;
   const fontReady = opts.fontReady ?? DEFAULT_FONT_READY;
   const featureList = opts.features ?? [];
@@ -267,12 +331,7 @@ export function createTerminal(
       return;
     }
     overlayDismissed = true;
-    ld.classList.add("fade");
-    const removeOverlay = (): void => {
-      ld.remove();
-    };
-    ld.addEventListener("transitionend", removeOverlay, { once: true });
-    window.setTimeout(removeOverlay, 1500);
+    fadeOutOverlay(ld);
   }
   function markReady(): void {
     if (ready) {
@@ -873,43 +932,7 @@ export function createTerminal(
   }
 
   function renderFatalStartup(): void {
-    const surface = document.createElement("section");
-    surface.className = "wt-fatal";
-    surface.setAttribute("role", "alertdialog");
-    surface.setAttribute("aria-labelledby", "wt-fatal-title");
-    surface.setAttribute("aria-describedby", "wt-fatal-message");
-    if (layoutMode === "viewport") {
-      // A full-page terminal has no usable host UI behind it, so this is the
-      // page's modal recovery state. An embedded terminal is only one panel in
-      // a larger app and must not claim that the rest of the app is inert.
-      surface.setAttribute("aria-modal", "true");
-    }
-
-    const card = document.createElement("div");
-    card.className = "wt-fatal-card";
-    const title = document.createElement("h2");
-    title.id = "wt-fatal-title";
-    title.className = "wt-fatal-title";
-    title.textContent = "Terminal failed to start";
-    const message = document.createElement("p");
-    message.id = "wt-fatal-message";
-    message.className = "wt-fatal-message";
-    message.textContent = "A required interface could not be loaded. Reload the page to try again.";
-    const reloadButton = document.createElement("button");
-    reloadButton.className = "wt-btn wt-fatal-reload";
-    reloadButton.type = "button";
-    reloadButton.textContent = "Reload page";
-    reloadButton.addEventListener("click", () => {
-      window.location.reload();
-    });
-    card.append(title, message, reloadButton);
-    surface.appendChild(card);
-    root.replaceChildren(surface);
-
-    // The terminal input held focus before setup failed. Move that focus to the
-    // only recovery action; container mode remains non-modal because no trap or
-    // aria-modal claim prevents the user from leaving the terminal panel.
-    reloadButton.focus();
+    renderFatalStartupInto(root, layoutMode);
   }
 
   function enterFatalStartup(feature: string, cause: unknown): void {
@@ -1059,4 +1082,53 @@ export function createTerminal(
       root.replaceChildren();
     },
   };
+}
+
+/** Build the terminal UI inside `root`. Call exactly once.
+ *
+ *  Wraps buildTerminal so that a SYNCHRONOUS startup failure gets the same
+ *  treatment an asynchronous one already got. Before this, the two halves of
+ *  "the terminal did not start" were handled inconsistently: an async
+ *  feature-setup rejection ran enterFatalStartup (overlay dismissed,
+ *  onFatalError delivered, recovery surface rendered), while a synchronous throw
+ *  propagated bare, leaving the consumer's loading overlay spinning forever over
+ *  a page with no terminal and no explanation. Consumers were left hand-building
+ *  their own surface to cover the gap, diverging from this one in shape and copy.
+ *
+ *  The error still propagates: a consumer with its own handling sees it exactly
+ *  as before, only now against a page that is no longer stuck on a spinner. A
+ *  handler returning `true` suppresses the built-in surface, same contract as the
+ *  async phase. */
+export function createTerminal(
+  root: HTMLElement,
+  opts: CreateTerminalOptions = {},
+): TerminalHandle {
+  try {
+    return buildTerminal(root, opts);
+  } catch (cause) {
+    const layoutMode = opts.layout ?? "viewport";
+    // Stamp the boundary classes before rendering. buildTerminal normally does
+    // this early, but a throw can precede it (the multiple-session-owner guard
+    // fires before any DOM work by design), and every .wt-fatal rule is scoped
+    // :where(.wt-root) -- so without this the recovery surface would render
+    // completely unstyled exactly when it matters most. Idempotent when
+    // buildTerminal already stamped them.
+    root.classList.add("wt-root", layoutMode === "container" ? "wt-container" : "wt-viewport");
+    // The overlay must come down even though nothing was built: it is the
+    // consumer's pre-JS spinner, and leaving it up hides the surface below it.
+    fadeOutOverlay(opts.loading);
+
+    let handled = false;
+    try {
+      handled = opts.onFatalError?.({ phase: "kernel-init", cause }) === true;
+    } catch (handlerErr) {
+      // Same posture as the async phase: a reporting failure must not leave the
+      // page blank, so fall through to the built-in surface.
+      console.error("web-terminal-ui: onFatalError handler failed", handlerErr);
+    }
+    if (!handled) {
+      renderFatalStartupInto(root, layoutMode);
+    }
+    throw cause;
+  }
 }

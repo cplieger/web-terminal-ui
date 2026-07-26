@@ -113,6 +113,22 @@ export function createTablist(panel: HTMLElement): TablistController {
       setLabel(text: string): void {
         tab.setAttribute("aria-label", text);
       },
+      setEditing(editing: boolean, selected: boolean): void {
+        if (editing) {
+          // Drop the tab semantics while a textbox lives inside the chip, and
+          // take the chip out of the roving sequence so Tab moves past it to the
+          // field rather than onto a role-less container. aria-controls and the
+          // panel's aria-labelledby stay: the panel still describes this session,
+          // and clearing them would flap the panel's accessible name mid-edit.
+          tab.removeAttribute("role");
+          tab.removeAttribute("aria-selected");
+          tab.tabIndex = -1;
+          return;
+        }
+        tab.setAttribute("role", "tab");
+        tab.setAttribute("aria-selected", selected ? "true" : "false");
+        tab.tabIndex = selected ? 0 : -1;
+      },
       remove(): void {
         tab.removeAttribute("role");
         tab.removeAttribute("aria-controls");

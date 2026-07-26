@@ -208,6 +208,15 @@
   overflow: hidden;
 }
 
+/* Hover wash like the switch and "+" buttons beside it; gated to real hover
+   pointers for the same reason they are (a sticky :hover after a tap). Before
+   .wt-active / .wt-armed so those fills win on a hovered button. */
+@media (hover: hover) {
+  :where(.wt-root) .wt-switcher-kb:hover {
+    background: var(--tab-hover-bg);
+  }
+}
+
 :where(.wt-root) .wt-switcher-kb[hidden] {
   display: none;
 }

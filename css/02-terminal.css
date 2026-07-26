@@ -24,10 +24,15 @@
   scrollbar-gutter: stable;
   /* The scroll controller (vterm scroll.ts) is the single owner of
      scrollTop: it pins to the bottom only while the user is following,
-     and does nothing while they are scrolled up reading. New output
-     always appends at the tail (the absolute-index model never inserts
-     above the viewport), so native scroll anchoring is safe to leave on
-     and keeps the read position steady on the rare insert-above. */
+     and does nothing while they are scrolled up reading.
+     Content ABOVE the reading position DOES change: rows are evicted
+     from the top of history at the retention cap, and the trim marker
+     is inserted there. Native scroll anchoring compensates for that on
+     Chrome and Firefox, so it stays enabled here — but WebKit has never
+     implemented it, which is why the renderer also corrects the drift
+     itself (render.ts captureReadAnchor / restoreReadAnchor). That
+     correction measures residual drift, so it is a no-op wherever this
+     declaration already did the job. */
   overflow-anchor: auto;
   /* .term is the scroll container, so the touch-action intersection for a
      touch on the output stops here (the html/body pan-x pan-y does not reach
