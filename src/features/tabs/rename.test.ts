@@ -631,4 +631,44 @@ describe("inline rename", () => {
     expect(chip?.getAttribute("role")).toBe("tab");
     expect(chip?.getAttribute("aria-selected")).toBe("false");
   });
+
+  it("keeps a long-pressed tab menu open through the release click (iPadOS)", async () => {
+    const root = document.createElement("div");
+    await mount(root);
+    const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[0];
+    const visible = (): boolean =>
+      root.querySelector(".wt-tab-menu")?.classList.contains("visible") ?? false;
+
+    // iPadOS Safari raises a context menu from a LONG-PRESS, and the release of
+    // that same press emits a click. Reading it as a click-away closed the menu
+    // the instant the finger came up, so the tab menu was unusable by touch on
+    // the one platform where the desktop strip is the chrome you touch.
+    const touchDown = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
+    Object.defineProperty(touchDown, "pointerType", { value: "touch" });
+    chip?.dispatchEvent(touchDown);
+    chip?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    expect(visible()).toBe(true);
+    document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(visible()).toBe(true);
+  });
+
+  // Its own mount, because the swallow window is a real elapsed-time window: a
+  // mouse assertion sharing the touch test's mount would still be inside it.
+  it("still dismisses a mouse-opened tab menu on a click away", async () => {
+    const root = document.createElement("div");
+    await mount(root);
+    const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[0];
+    const visible = (): boolean =>
+      root.querySelector(".wt-tab-menu")?.classList.contains("visible") ?? false;
+
+    // A mouse right-click emits no trailing click, so nothing may be swallowed
+    // there — the swallow must be armed by pointer type, not by every open.
+    const mouseDown = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
+    Object.defineProperty(mouseDown, "pointerType", { value: "mouse" });
+    chip?.dispatchEvent(mouseDown);
+    chip?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    expect(visible()).toBe(true);
+    document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(visible()).toBe(false);
+  });
 });

@@ -13,7 +13,7 @@ import type { SessionRef, TerminalContext, TerminalFeature } from "../../kernel/
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { fromHTML } from "../dom.js";
-import { placeMenuAt } from "../menu-position.js";
+import { createClickSwallow, placeMenuAt } from "../menu-position.js";
 import type { SessionInfo, Tab } from "./model.js";
 import {
   ACTIVE_TAB_KEY,
@@ -2029,6 +2029,27 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // the items for the target tab (disabled states reflect its position) and
       // clamps into the visible viewport, flipping above the pointer near the
       // bottom edge (mirrors context-menu.ts).
+      //
+      // menuSwallow covers the contextmenu-then-touchend race: iPadOS Safari
+      // raises a context menu from a LONG-PRESS, and the same gesture emits a
+      // click on release which onDocClickMenu would read as a click-away. The
+      // terminal menu has guarded this since it shipped; this one did not, so a
+      // long-pressed tab menu closed itself on release — on the one platform
+      // where the desktop strip is the chrome you touch. menuTouch records
+      // whether the press that raised the menu was a finger, since only touch
+      // emits that trailing click.
+      const menuSwallow = createClickSwallow();
+      let menuTouch = false;
+      // One listener on the bar rather than one per chip: chips are created and
+      // destroyed as sessions come and go, and the pointer type belongs to the
+      // gesture, not to a chip.
+      bar.addEventListener(
+        "pointerdown",
+        (e) => {
+          menuTouch = e.pointerType === "touch";
+        },
+        { passive: true },
+      );
       function hideTabMenu(): void {
         tabMenu.classList.remove("visible");
         tabMenu.replaceChildren();
@@ -2102,6 +2123,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // the visual viewport; flip above the pointer near the bottom edge).
         tabMenu.classList.add("visible");
         placeMenuAt(tabMenu, x, y);
+        if (menuTouch) {
+          menuSwallow.arm();
+        }
       }
 
       // One-time "swipe to switch" hint on first multi-tab state, mobile only.
@@ -2336,6 +2360,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // Dismiss the tab context menu on an outside click, on Escape, and on
       // scroll (it is anchored to a viewport point, so a scroll would detach it).
       const onDocClickMenu = (): void => {
+        // The trailing click of the long-press that just opened the menu is that
+        // gesture's own release, not a click-away.
+        if (menuSwallow.swallowing()) {
+          return;
+        }
         hideTabMenu();
       };
       document.addEventListener("click", onDocClickMenu);
