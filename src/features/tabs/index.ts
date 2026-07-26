@@ -17,12 +17,19 @@ import { placeMenuAt } from "../menu-position.js";
 import type { SessionInfo, Tab } from "./model.js";
 import {
   ACTIVE_TAB_KEY,
+  MAX_PINNED_NAME,
   STATUS_EXITED,
   SWIPE_HINT_KEY,
+  SessionAPIError,
+  TAB_ORDER_KEY,
   baseLabel,
-  createInputTitleDeriver,
   createSessionAPI,
   createTombstones,
+  hasPinnedName,
+  orderedInsertIndex,
+  parseTabOrder,
+  sanitizePinnedName,
+  serializeTabOrder,
 } from "./model.js";
 import {
   TAB_HTML,
@@ -59,6 +66,14 @@ const DEFAULT_API_BASE = "/api/sessions";
 // (pointer: coarse) where touch matters.
 // Default cadence for the no-activityMonitor polling fallback.
 const DEFAULT_POLL_MS = 4000;
+// The drag data type carrying a reordered tab's session id. A PRIVATE type, not
+// text/plain, deliberately: WebKit resolves dropped plain text as a URL and
+// NAVIGATES to it when no handler cancels the drop, so a bare session id read as
+// a relative path — dropping a tab on iPadOS loaded /<session-id> instead of
+// reordering. A custom type also keeps the id out of the system pasteboard when
+// the drag leaves the browser, which is what MDN's recommended-drag-types
+// guidance prescribes for data specific to one application.
+const TAB_DRAG_TYPE = "application/x-web-terminal-tab";
 // Tab context-menu viewport clamping + the flip-above-the-pointer gap live in
 // the shared point-anchored positioner (menu-position.ts), shared with the
 // terminal context menu (formerly two hand-synced copies of the same math).
@@ -92,14 +107,6 @@ export interface TabsOptions {
    *  toolbar should be built with { externalToggle: true } so its own top-right
    *  toggle is hidden and the grid opens above the bar. */
   keyboardToggle?: TerminalFeature<MobileToolbarApi>;
-  /** Prefer the input-derived title over the process OSC 0/2 title. Default
-   *  false (OSC-first: a program that sets its own window title wins, else the
-   *  last submitted line). Set true for an agent shell whose program emits a
-   *  non-empty but useless OSC title (kiro-cli under web-terminal-kiro): the label then
-   *  follows the latest submitted line (live) or the persisted client title (on
-   *  reload), and the unreliable OSC title is ignored entirely. presetAgentTabbed
-   *  enables this. */
-  preferInputTitle?: boolean;
   /** Presume every session reports activity (an agent shell, where the program
    *  always emits OSC 9;4 progress): each tab's dot is visible as idle from
    *  creation instead of popping in seconds later when the agent has booted
@@ -118,6 +125,105 @@ export interface TabsOptions {
 // to latch a "physical keyboard present" flag that also covers a keyboard-only
 // Smart Keyboard Folio (which, unlike a Magic Keyboard, adds no trackpad and so
 // does not match `any-pointer: fine`).
+/** Session creation can be legitimately and TEMPORARILY refused, which is not the
+ *  same event as a broken server. web-terminal-kiro answers 503 with
+ *  `Retry-After: 5` and a body message while its tool engine installs the
+ *  manifest's tools on first boot, a window its own HEALTHCHECK budgets 20
+ *  minutes for. That state used to reach the user as the same fixed "Couldn't
+ *  open a terminal" toast as a 500, with no retry: the page looked broken while
+ *  the server was deliberately waiting, and `/api/health` reported healthy at the
+ *  same time, so the two channels contradicted each other.
+ *
+ *  So honour what the server published: retry on its own schedule, and repeat its
+ *  own explanation rather than inventing library wording for a host-specific
+ *  condition. Only 503 retries; a 429 rate limit, a 4xx, or a 500 still fails
+ *  fast, because those are not "come back shortly".
+ *
+ *  The bound is ELAPSED TIME, not an attempt count. An attempt cap interacts
+ *  badly with the server's hint: at web-terminal-kiro's `Retry-After: 5` a dozen
+ *  attempts is only a minute, while the window this exists for can run twenty
+ *  (toolbelt's boot job is bounded at 30 minutes, which is why that app's
+ *  HEALTHCHECK carries --start-period=20m), so the retry would give up long
+ *  before the server was ready and the whole fix would miss its case. Waiting is
+ *  cheap here because every iteration sleeps at least the server's hint, so this
+ *  is never a hot loop. The user is re-told periodically rather than once,
+ *  because a page that silently retries for twenty minutes is its own kind of
+ *  broken. */
+const CREATE_RETRY_MAX_TOTAL_MS = 1200000;
+const CREATE_RETRY_FALLBACK_MS = 5000;
+const CREATE_RETRY_REANNOUNCE_MS = 60000;
+
+/** orderSignature collapses an arrangement into one comparable string, so the
+ *  persist path can decide "did the order change?" with a string compare instead
+ *  of re-serializing and re-writing on every status tick. NUL is the separator
+ *  because a session id can never contain one. */
+function orderSignature(ids: readonly string[]): string {
+  return ids.join("\u0000");
+}
+
+/** readSavedOrder loads the persisted tab arrangement, or [] when there is none
+ *  to trust. Storage itself can throw — Safari in private mode, a disabled
+ *  third-party context, an embedder's iframe — and an unreadable arrangement is
+ *  never fatal: the strip falls back to the server's creation order, exactly as
+ *  it behaved before arrangements were persisted. */
+function readSavedOrder(): string[] {
+  try {
+    return parseTabOrder(localStorage.getItem(TAB_ORDER_KEY));
+  } catch {
+    return [];
+  }
+}
+
+/** writeSavedOrder persists an arrangement, best-effort: a full quota or an
+ *  unavailable store must not break a reorder the user just performed on screen.
+ *  The in-memory arrangement stays authoritative for this page either way. */
+function writeSavedOrder(ids: readonly string[]): void {
+  try {
+    localStorage.setItem(TAB_ORDER_KEY, serializeTabOrder(ids));
+  } catch {
+    /* storage unavailable or full — the order still holds for this page */
+  }
+}
+
+async function createSessionHonouringRetry(
+  api: { create: () => Promise<SessionInfo> },
+  ctx: TerminalContext,
+  isTornDown: () => boolean,
+): Promise<SessionInfo> {
+  const startedAt = Date.now();
+  let lastAnnouncedAt = 0;
+  for (;;) {
+    try {
+      return await api.create();
+    } catch (err) {
+      const elapsed = Date.now() - startedAt;
+      if (
+        !(err instanceof SessionAPIError) ||
+        err.status !== 503 ||
+        elapsed >= CREATE_RETRY_MAX_TOTAL_MS
+      ) {
+        throw err;
+      }
+      // First refusal always speaks; after that only every
+      // CREATE_RETRY_REANNOUNCE_MS, so a multi-minute wait is neither silent nor
+      // a toast storm.
+      if (lastAnnouncedAt === 0 || elapsed - lastAnnouncedAt >= CREATE_RETRY_REANNOUNCE_MS) {
+        lastAnnouncedAt = elapsed;
+        const waiting = err.serverMessage ?? "Server is not ready yet";
+        ctx.toast(`${waiting}; retrying`, 8000);
+        ctx.announce(`${waiting}; retrying`);
+      }
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, err.retryAfterMs ?? CREATE_RETRY_FALLBACK_MS);
+      });
+      // A reload or destroy during the wait must not resurrect a create.
+      if (isTornDown()) {
+        throw err;
+      }
+    }
+  }
+}
+
 function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
   if (ev.ctrlKey || ev.metaKey || ev.altKey) {
     return true;
@@ -141,7 +247,6 @@ function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
 
 export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
-  const preferInputTitle = opts.preferInputTitle ?? false;
   const presumeReports = opts.presumeReports ?? false;
   // reportsOf floors the server's per-session reportsActivity flag with the
   // consumer's presumption (see TabsOptions.presumeReports): an agent shell
@@ -160,6 +265,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   // setup), while the bootstrap needs setup-scoped state — so it delegates to
   // a closure setup() wires. resolveImpl is nulled on teardown.
   let resolveImpl: (() => Promise<SessionRef | null>) | null = null;
+  // Set on teardown so an in-flight create RETRY (which sleeps between attempts,
+  // potentially across a multi-minute install window) cannot resurrect a session
+  // for a feature that is already gone.
+  let tornDown = false;
   return {
     name: "tabs",
     sessionOwner: {
@@ -463,6 +572,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // /api/sessions) that predates the server reaping the session does not
       // re-adopt (flash back) a closed tab.
       const tombstones = createTombstones();
+      // The user's persisted tab arrangement (model.ts TAB_ORDER_KEY): read ONCE
+      // at setup, before any session can be adopted, so every adopt — from the
+      // status-stream snapshot or from the bootstrap's list, in either order —
+      // can place its tab at the saved position. Read-only for the life of the
+      // page: it is the arrangement to RESTORE, and the live strip must not
+      // overwrite it (see persistOrder).
+      const savedOrder: readonly string[] = readSavedOrder();
+      // Signature of the arrangement currently on disk, so persistOrder can run
+      // from syncChrome (which fires on every status tick) and still write only
+      // when the sequence actually changed. Seeded from what was read, so a
+      // window that simply restored an arrangement writes nothing.
+      let persistedSig = orderSignature(savedOrder);
       // The expanded mobile list's row elements, keyed by tab id. Rows are
       // reused across re-renders (reconcile, not rebuild) so a swipe can FLIP the
       // same elements from their old slots to their new ones (the rotation).
@@ -514,14 +635,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // read "New tab" without a numeric suffix.
         const counts = new Map<string, number>();
         for (const t of tabList) {
-          const { text, fallback } = baseLabel(t, preferInputTitle);
+          const { text, fallback } = baseLabel(t);
           if (!fallback) {
             counts.set(text, (counts.get(text) ?? 0) + 1);
           }
         }
         const seen = new Map<string, number>();
         for (const t of tabList) {
-          const { text, fallback } = baseLabel(t, preferInputTitle);
+          const { text, fallback } = baseLabel(t);
           let display = text;
           if (!fallback && (counts.get(text) ?? 0) > 1) {
             const k = (seen.get(text) ?? 0) + 1;
@@ -535,26 +656,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           t.aria.setLabel(display);
         }
       }
-
-      // --- Fallback title derivation from the user's submitted lines ---
-      // The line-editor state machine lives in model.ts
-      // (createInputTitleDeriver); this wires its submissions to the active
-      // tab. Used only when the process sets no OSC window title of its own
-      // (baseLabel prefers tab.title). The kernel routes input to the active
-      // session, so an input observer's bytes belong to activeId. Every
-      // non-empty submitted line updates the fallback title (the last one
-      // wins) and is persisted server-side (engine PUT .../title) so a reload
-      // and other devices recover this "latest message" label; the engine uses
-      // it only when the program emits no OSC title.
-      const titleDeriver = createInputTitleDeriver((line) => {
-        const t = tabList.find((x) => x.id === activeId);
-        if (!t) {
-          return; // no active tab
-        }
-        t.derived = line;
-        void api.setTitle(t.id, t.derived);
-        syncChrome();
-      });
 
       function focusInput(): void {
         ctx.surface().querySelector<HTMLElement>(".term-input")?.focus({ preventScroll: true });
@@ -572,7 +673,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         for (const t of tabList) {
           const on = t.id === activeId;
           t.el.classList.toggle("wt-tab-active", on);
-          t.aria.setSelected(on);
+          // setSelected re-adds aria-selected and the roving tabindex, which would
+          // undo setEditing(true) on the chip hosting the rename field — and
+          // syncChrome runs on every status event, so that happens within a tick.
+          // The chip regains its semantics from endEdit's setEditing(false), which
+          // reads the CURRENT selected state.
+          if (t.id !== editingId) {
+            t.aria.setSelected(on);
+          }
         }
         if (activeId && activeId !== lastRevealedActive) {
           lastRevealedActive = activeId;
@@ -832,6 +940,44 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           renderSwitcherList();
         }
         maybeSwipeHint();
+        persistOrder();
+      }
+
+      // persistOrder stores the strip's current arrangement so it survives a
+      // reload. It hangs off syncChrome — the one function every list mutation
+      // already ends with (reorder, create, adopt, close, reconcile) — rather than
+      // off the two reorder call sites, so a future path that rearranges tabs
+      // cannot forget to persist. Three guards make that safe:
+      //
+      //  - `started`: nothing is written while the initial population runs. The
+      //    strip grows one tab at a time there, and each intermediate state is a
+      //    partial arrangement, NOT a user decision — writing them meant a reload
+      //    landing mid-population could store a one-tab order and lose the real
+      //    one. After the bootstrap every change is a genuine change.
+      //  - the signature compare: syncChrome also runs on every status tick, so
+      //    only a changed id sequence reaches storage.
+      //  - a non-empty list: an empty strip carries no arrangement, and a
+      //    transient empty state (the last tab closed just before its replacement
+      //    lands, a reconcile against a restarted server) must not erase the
+      //    stored order.
+      //
+      // savedOrder is deliberately NOT reassigned here. It is the ARRANGEMENT
+      // READ AT LOAD, which is what adoption places tabs by; overwriting it with
+      // the live strip discards the position of every session that has not been
+      // adopted yet — which is precisely what a strip still filling up is full of.
+      function persistOrder(): void {
+        if (!started || tabList.length === 0) {
+          return;
+        }
+        const ids = tabList.map((t) => t.id);
+        const sig = orderSignature(ids);
+        if (sig === persistedSig) {
+          return;
+        }
+        persistedSig = sig;
+        // Writing the LIVE strip also prunes: ids whose sessions are gone never
+        // reach storage again, so the stored arrangement cannot grow forever.
+        writeSavedOrder(ids);
       }
 
       // closeKeyGrid closes the mobile key grid (if a keyboardToggle is wired and
@@ -944,7 +1090,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           id: info.id,
           born: ++tabEpoch,
           title: info.title,
-          clientTitle: info.clientTitle,
+          pinnedTitle: info.pinnedTitle,
+          nameSeq: 0,
           display: "",
           createdAt: info.createdAt,
           store: new LineStore(),
@@ -958,22 +1105,51 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         };
         // Set an initial label immediately (relabelAll refines it with de-dup
         // once the tab is in tabList and syncChrome runs).
-        tab.display = baseLabel(tab, preferInputTitle).text;
+        tab.display = baseLabel(tab).text;
         label.textContent = tab.display;
         aria.setLabel(tab.display);
         el.addEventListener("click", (e) => {
           if ((e.target as HTMLElement).closest(".wt-tab-close")) {
             return; // handled by the close button
           }
+          if (editingId === tab.id) {
+            return; // the rename field owns this chip
+          }
           switchTo(tab.id);
+        });
+        // Double-click renames, which is also the TOUCH entry path (a double-tap):
+        // a long-press on a chip starts a reorder drag on iPadOS rather than
+        // opening the context menu, because the chip is draggable — so the menu is
+        // not reachable by touch and this is. The chip's touch-action:manipulation
+        // (CSS) is what stops iOS eating the second tap as double-tap-to-zoom.
+        // The leading click switches to the tab first; Finder selects before
+        // renaming too, so that matches expectation.
+        el.addEventListener("dblclick", (e) => {
+          if ((e.target as HTMLElement).closest(".wt-tab-close")) {
+            return;
+          }
+          e.preventDefault();
+          beginEdit(tab.id, "pointer");
         });
         // Keyboard interaction for the ARIA tabs pattern (WCAG 2.1.1): arrows
         // move selection (wrapping), Home/End jump to the boundaries, Delete
-        // closes the focused tab. Pairs with the roving tabindex the kernel's
-        // registerTab manages (selected tab is tabIndex 0, others -1).
+        // closes the focused tab, F2 renames (the Explorer convention). Pairs with
+        // the roving tabindex the kernel's registerTab manages (selected tab is
+        // tabIndex 0, others -1).
         el.addEventListener("keydown", (e) => {
           const current = tabList.indexOf(tab);
           if (current < 0) {
+            return;
+          }
+          // While this chip hosts the rename field, every key belongs to the field
+          // (belt-and-braces with the field's own stopPropagation).
+          if (editingId === tab.id) {
+            return;
+          }
+
+          if (e.key === "F2") {
+            e.preventDefault();
+            beginEdit(tab.id, "keyboard");
             return;
           }
 
@@ -1021,6 +1197,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
         });
         el.addEventListener("auxclick", (e) => {
+          if (editingId === tab.id) {
+            return; // middle-click in a text field pastes on X11; it must not close the tab
+          }
           if (e.button === 1) {
             e.preventDefault();
             void close_(tab.id);
@@ -1030,25 +1209,39 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // the browser's own menu; the strip is hidden on a coarse pointer, so
         // this is desktop-only in practice.
         el.addEventListener("contextmenu", (e) => {
+          if (editingId === tab.id) {
+            // Let the browser's own text menu open: it is where Paste, Select All
+            // and Undo live, and the tab menu would offer Close and Move mid-edit.
+            return;
+          }
           e.preventDefault();
           showTabMenu(e.clientX, e.clientY, tab.id);
         });
         // Drag-and-drop reorder on the desktop strip. The bar's dragover moves
-        // this element live; dragend commits the new order into tabList.
+        // this element live; drop/dragend commit the new order into tabList.
         el.draggable = true;
         el.addEventListener("dragstart", (e) => {
+          if (editingId === tab.id) {
+            e.preventDefault(); // renaming: a drag would fight caret selection
+            return;
+          }
           draggingEl = el;
+          // Snapshot the preview from the PRISTINE chip, before the dim class.
+          setDragGhost(e, el);
           el.classList.add("wt-tab-dragging");
           if (e.dataTransfer) {
             e.dataTransfer.effectAllowed = "move";
-            // Firefox requires drag data to be set for the drag to start.
-            e.dataTransfer.setData("text/plain", tab.id);
+            // Firefox requires drag data to be set for the drag to start; the
+            // private type keeps the payload undroppable everywhere else (see
+            // TAB_DRAG_TYPE).
+            e.dataTransfer.setData(TAB_DRAG_TYPE, tab.id);
           }
           hideTabMenu();
         });
         el.addEventListener("dragend", () => {
           el.classList.remove("wt-tab-dragging");
           draggingEl = null;
+          clearDragGhost(); // belt-and-braces: the rAF normally got there first
           syncOrderFromDom();
         });
         return tab;
@@ -1114,7 +1307,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         } catch {
           /* storage unavailable (private mode / disabled) — non-fatal */
         }
-        titleDeriver.reset(); // a partial line typed in the old tab does not carry over
         ctx.render.bind(next.store);
         ctx.notifySwitch({ id: next.id });
         armCatchup();
@@ -1147,11 +1339,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
         });
         ctx.announce(`Switched to ${next.display}`);
-        if (physicalKeyboardLikely()) {
+        if (physicalKeyboardLikely() && editingId === null) {
           // A physical keyboard is (likely) present, so focus the input on
           // switch — switch and type immediately (the iPad + Magic Keyboard
           // ask). On a keyboard-less touchscreen this is skipped, or every
-          // switch would pop the virtual keyboard (#7).
+          // switch would pop the virtual keyboard (#7). Skipped entirely while a
+          // rename field is open: a switch (e.g. the leading click of a
+          // double-click, or a remote-driven ensureActive) would otherwise yank
+          // the caret out of the field the user is typing in.
           focusInput();
         }
       }
@@ -1270,12 +1465,59 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
+      // --- Drag preview (the ghost) ---
+      // WebKit renders NO automatic drag image for an element whose ancestor
+      // carries a filter or transform (webkit.org/b/22787) — and the strip's own
+      // backdrop-filter is exactly such an ancestor, so on iPadOS the preview
+      // came out as broken white geometry instead of the chip (desktop Chrome,
+      // which snapshots the element regardless, always looked right). An EXPLICIT
+      // drag image fixes it: a clone parked directly under .wt-root, outside the
+      // bar's filtered subtree yet still inside the styling boundary so the
+      // scoped .wt-tab rules paint it. It is laid exactly over the real chip, so
+      // it is indistinguishable from it in the unlikely event it ever paints, and
+      // dropped on the next frame — the browser has already snapshotted it by
+      // then (the snapshot is taken when the dragstart handler returns).
+      let dragGhost: HTMLElement | null = null;
+      function clearDragGhost(): void {
+        dragGhost?.remove();
+        dragGhost = null;
+      }
+      function setDragGhost(e: DragEvent, el: HTMLElement): void {
+        clearDragGhost();
+        const rect = el.getBoundingClientRect();
+        const rootRect = varRoot.getBoundingClientRect();
+        const ghost = el.cloneNode(true) as HTMLElement;
+        ghost.classList.add("wt-tab-ghost");
+        // A duplicated role="tab" must not reach assistive tech for the frame the
+        // clone exists (CSS keeps it non-interactive).
+        ghost.setAttribute("aria-hidden", "true");
+        ghost.style.left = `${String(rect.left - rootRect.left)}px`;
+        ghost.style.top = `${String(rect.top - rootRect.top)}px`;
+        // The chip's width comes from a flex-shrink in the strip; out of that
+        // flex context the clone would snap back to the unshrunk 300px.
+        ghost.style.width = `${String(rect.width)}px`;
+        ghost.style.height = `${String(rect.height)}px`;
+        varRoot.appendChild(ghost);
+        dragGhost = ghost;
+        // Offset from the chip's own box, not e.offsetX/offsetY: those are
+        // relative to the event TARGET, which is the label or the close button
+        // when the drag starts on one of them.
+        e.dataTransfer?.setDragImage(ghost, e.clientX - rect.left, e.clientY - rect.top);
+        requestAnimationFrame(clearDragGhost);
+      }
+
       // moveTab shifts a tab one slot left or right in tabList and re-appends
       // every tab element in list order so the DOM matches.
       // It is the single-pointer / non-drag alternative to the drag-and-drop
       // reorder (WCAG 2.5.7), surfaced as Move left / Move right in the tab
       // context menu.
       function moveTab(id: string, delta: -1 | 1): void {
+        // Reordering re-appends every chip, and reparenting the focused field blurs
+        // it — so an open edit would be committed as a side effect of moving some
+        // OTHER tab, via a blur the user never performed. Resolve it here instead,
+        // so the outcome is chosen and testable rather than emergent (happy-dom
+        // does not reproduce the reparent-blur, so no test could catch it).
+        resolveEdit("blur", false);
         const from = tabList.findIndex((t) => t.id === id);
         const to = from + delta;
         if (from < 0 || to < 0 || to >= tabList.length) {
@@ -1305,7 +1547,26 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (tombstones.active(info.id)) {
           return; // just closed here; ignore a stale listing until the server reaps it
         }
-        tabList.push(addTabChrome(info));
+        const tab = addTabChrome(info);
+        // Place the tab where the user's stored arrangement says it goes, not
+        // where it happened to arrive: the status-stream snapshot and the
+        // bootstrap's GET /api/sessions race each other, so arrival order is not
+        // the user's order (and is not even stable between loads). A session the
+        // arrangement does not know is appended, which is what a genuinely new
+        // tab wants.
+        const at = orderedInsertIndex(
+          tabList.map((t) => t.id),
+          savedOrder,
+          info.id,
+        );
+        tabList.splice(at, 0, tab);
+        // addTabChrome appended the chip to the scroller's end; move it to match
+        // the list when the arrangement put it earlier, so the DOM, the switcher
+        // rows, and the position announcements all read the same order.
+        const after = tabList[at + 1];
+        if (after) {
+          scroller.insertBefore(tab.el, after.el);
+        }
       }
 
       // Activate the first tab when nothing is active. The bootstrap normally
@@ -1332,11 +1593,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       async function create(): Promise<void> {
         let info: SessionInfo;
         try {
-          info = await api.create();
-        } catch {
+          info = await createSessionHonouringRetry(api, ctx, () => tornDown);
+        } catch (err) {
           // A create can still fail transiently (network, server error); tell
-          // the user rather than throwing.
-          ctx.toast("Couldn't open a terminal");
+          // the user rather than throwing. A 503 has already been retried on the
+          // server's own schedule by this point, so reaching here means it never
+          // became ready -- say so with the server's own words when it gave any,
+          // rather than the generic message that used to cover both cases.
+          ctx.toast(
+            err instanceof SessionAPIError && err.serverMessage !== undefined
+              ? `Couldn't open a terminal: ${err.serverMessage}`
+              : "Couldn't open a terminal",
+          );
           return;
         }
         // The status SSE may have adopted this session during the POST round-trip
@@ -1386,6 +1654,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const [tab] = tabList.splice(idx, 1);
         if (!tab) {
           return;
+        }
+        // A tab removed mid-edit (a user close, an SSE removal, or the list
+        // reconcile dropping it) abandons the edit with no request: the field
+        // lives inside the chip and goes away with it, so the state must not
+        // outlive it.
+        if (editingId === id) {
+          endEdit();
         }
         // Tombstone this id briefly so a stale status snapshot/poll that predates
         // the server reaping it cannot re-adopt the just-closed tab.
@@ -1448,6 +1723,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         const closingActive = activeId !== null && ids.includes(activeId);
+        // The bulk-close path drops tabs itself rather than through dropTab, so it
+        // needs the same mid-edit guard: an open editor on a tab being removed must
+        // be abandoned, or editingId outlives its chip and permanently suppresses
+        // focus-on-switch.
+        if (editingId !== null && ids.includes(editingId)) {
+          endEdit();
+        }
         for (const t of victims) {
           const idx = tabList.indexOf(t);
           if (idx >= 0) {
@@ -1504,6 +1786,245 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return closeMany(tabList.map((t) => t.id));
       }
 
+      // --- Inline rename (R5) ---
+      // The edit surface is the label's OWN box, so the width the user types into
+      // is the width the label will have. An <input>, not contenteditable: real
+      // text-input semantics, IME support, a mobile keyboard, and no rich-HTML
+      // paste surface.
+      //
+      // editingId is also the stand-down flag for every chip handler that would
+      // otherwise fight the field (click-to-switch, the arrow/Delete keys,
+      // focus-on-switch, the drag) — see the guards at each site.
+      let editingId: string | null = null;
+      let editInput: HTMLInputElement | null = null;
+      // Where focus goes when the edit ends. R9: back to the chip when the user
+      // arrived from the keyboard (F2 — they were navigating the strip and should
+      // still be), to the terminal otherwise. Recorded at entry because the exit
+      // paths cannot tell them apart.
+      let editFrom: "keyboard" | "pointer" = "pointer";
+      // Tab ids with a pinned-name request in flight. While an id is here, a status
+      // record carrying a DIFFERENT value is applied for display but does not
+      // supersede the request: SSE delivery order and REST mutation order are not
+      // one total order, so a record sampled BEFORE our PUT can arrive after it,
+      // and treating it as newer authority would suppress the request's own
+      // rollback and its failure toast.
+      const namesInFlight = new Set<string>();
+
+      /** restoreFocusAfterEdit sends focus where the entry path implies. The
+       *  terminal branch is gated exactly like switchTo's focus-on-switch: on a
+       *  keyboard-less touchscreen, focusing the hidden textarea pops the soft
+       *  keyboard, which is not what finishing a rename by double-tap should do. */
+      function restoreFocusAfterEdit(el: HTMLElement | undefined): void {
+        if (editFrom === "keyboard" && el) {
+          el.focus();
+          return;
+        }
+        if (physicalKeyboardLikely()) {
+          focusInput();
+        }
+      }
+
+      /** endEdit tears the field down and restores the chip. It never issues a
+       *  request; each caller decides what to commit first. */
+      function endEdit(): void {
+        const id = editingId;
+        editingId = null;
+        const input = editInput;
+        editInput = null;
+        if (id === null) {
+          return;
+        }
+        const t = tabList.find((x) => x.id === id);
+        input?.remove();
+        if (!t) {
+          return; // the tab went away mid-edit; its chrome is already gone
+        }
+        t.label.hidden = false;
+        t.el.classList.remove("wt-tab-editing");
+        t.el.draggable = true;
+        // Restore the tab semantics from the CURRENT selected state: the active
+        // tab can change while an edit is open on a different chip.
+        t.aria.setEditing(false, t.id === activeId);
+      }
+
+      /** commitRename applies a finished edit. An empty value CLEARS the pin, but
+       *  only on an explicit confirm — see beginEdit's Enter/blur split. */
+      function commitRename(id: string, raw: string): boolean {
+        const t = tabList.find((x) => x.id === id);
+        if (!t) {
+          return false;
+        }
+        // Sanitize client-side rather than trusting the round-trip: strip control
+        // characters and bound the length exactly as the server does.
+        const name = sanitizePinnedName(raw);
+        const before = t.pinnedTitle ?? "";
+        if (name === before) {
+          return false; // nothing to do; no request, no toast
+        }
+        // Optimistic: paint it now, guarded by a monotonic counter AND the tab's
+        // birth epoch so a slow response cannot roll back a newer rename, a later
+        // clear, a remote update, or — if this id were ever reused by a fresh
+        // session — a different tab entirely.
+        const seq = ++t.nameSeq;
+        const born = t.born;
+        t.pinnedTitle = name;
+        syncChrome();
+        // Announce the OUTCOME, which for a clear is whatever the automatic
+        // sources now yield — and that can be the "New tab" fallback, in which
+        // case claiming an automatic name would be false.
+        if (name !== "") {
+          ctx.announce(`Renamed to ${name}`);
+        } else {
+          const { text, fallback } = baseLabel(t);
+          ctx.announce(fallback ? "Custom name removed" : `Using automatic name: ${text}`);
+        }
+        namesInFlight.add(id);
+        const request = name === "" ? api.clearPinnedTitle(id) : api.setPinnedTitle(id, name);
+        void request
+          .catch(() => {
+            const cur = tabList.find((x) => x.id === id);
+            if (cur?.born !== born || cur.nameSeq !== seq) {
+              return; // gone, reused, or superseded: the newer state stands
+            }
+            cur.pinnedTitle = before;
+            syncChrome();
+            ctx.toast("Couldn't save the terminal name");
+          })
+          .finally(() => {
+            namesInFlight.delete(id);
+          });
+        return true;
+      }
+
+      /** beginEdit swaps a chip's label for a text field. Idempotent per tab; a
+       *  second tab entering edit commits the first. */
+      function beginEdit(id: string, from: "keyboard" | "pointer"): void {
+        if (editingId === id) {
+          return;
+        }
+        if (editingId !== null) {
+          // Entering edit elsewhere resolves the open one under the blur rules —
+          // this is not an Enter, so it must not be able to CLEAR a pin from a
+          // field the user happened to empty. Focus is about to move to the new
+          // field, so it is not restored here.
+          resolveEdit("blur", false);
+        }
+        editFrom = from;
+        const t = tabList.find((x) => x.id === id);
+        if (!t) {
+          return;
+        }
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "wt-tab-rename";
+        input.setAttribute("aria-label", "Rename terminal");
+        // Prefill with the PIN, not the rendered label. t.display is presentation
+        // output: for an unpinned tab it is the automatic title, the "New tab"
+        // fallback, or a de-duplication suffix relabelAll generated (`auth (2)`).
+        // Since a blur commits a non-empty value, prefilling it meant opening the
+        // editor and clicking away silently pinned presentation text as the user's
+        // chosen name. An unpinned tab therefore starts EMPTY, with the current
+        // label as the placeholder so the user still sees what they are replacing.
+        input.value = t.pinnedTitle ?? "";
+        input.placeholder = t.display;
+        // maxLength is a UI affordance only, in UTF-16 code units; the server
+        // counts runes, so sanitizePinnedName (code points) is the real bound.
+        input.maxLength = MAX_PINNED_NAME;
+        // iPadOS is the device this affordance was designed for, and its defaults
+        // are wrong for a short identifier: autocapitalize would upper-case the
+        // first letter of every tab name and autocorrect would rewrite it on
+        // commit. enterkeyhint labels the soft keyboard's action key.
+        input.autocapitalize = "off";
+        input.spellcheck = false;
+        input.setAttribute("autocorrect", "off");
+        input.enterKeyHint = "done";
+        // A tab shrinks toward a 100px floor once the strip is full, and a 100px
+        // edit box is unusable, so the edited chip is given its full width for the
+        // duration — on ENTRY only, never per keystroke, so the strip does not
+        // jitter as the user types.
+        t.el.classList.add("wt-tab-editing");
+        t.label.hidden = true;
+        t.el.insertBefore(input, t.label.nextSibling);
+        // Drop the tab semantics while a textbox lives in the chip, and stop the
+        // chip being draggable: a draggable ancestor interferes with drag-selecting
+        // text, and dragging the tab you are renaming is meaningless.
+        t.aria.setEditing(true, t.id === activeId);
+        t.el.draggable = false;
+        editingId = id;
+        editInput = input;
+        if (typeof t.el.scrollIntoView === "function") {
+          t.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+        }
+        input.focus();
+        input.select();
+        ctx.announce(`Renaming ${t.display}`);
+
+        input.addEventListener("keydown", (e) => {
+          // The chip's own keydown handler treats arrows as tab switching and
+          // Delete as close; the field must own them. stopPropagation is the
+          // narrowest fix and keeps the chip's handler unaware of edit mode.
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            e.preventDefault();
+            resolveEdit("confirm");
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            resolveEdit("cancel");
+          }
+        });
+        // A click inside the field must not reach the chip's switch-on-click.
+        input.addEventListener("click", (e) => {
+          e.stopPropagation();
+        });
+        input.addEventListener("blur", () => {
+          if (editingId !== id) {
+            return; // already resolved by Enter/Escape/teardown
+          }
+          // A blur is not the user asking for focus to go anywhere in particular,
+          // so it does not move it.
+          resolveEdit("blur", false);
+        });
+      }
+
+      /** resolveEdit closes the open edit and applies its value under the rules for
+       *  HOW it was closed. One function rather than a commit path per caller,
+       *  because the empty-value rule differs and every caller that got it wrong
+       *  did so by hand-inlining a variant:
+       *
+       *  - `"confirm"` (Enter) is the only deliberate confirmation, so it is the
+       *    only mode that may CLEAR a pin from an emptied field.
+       *  - `"blur"` commits a non-empty value (Finder and Explorer both do;
+       *    discarding on a stray click is hostile) and reverts an empty one — a
+       *    blur is loss of focus, not destructive intent, and on a tablet
+       *    dismissing the soft keyboard IS a blur.
+       *  - `"cancel"` (Escape) applies nothing.
+       *
+       *  `focus` is opt-out for the callers that are not a user finishing an edit
+       *  (a reorder, a pre-empting second edit): they should not move focus. */
+      function resolveEdit(mode: "confirm" | "blur" | "cancel", focus = true): void {
+        const id = editingId;
+        if (id === null) {
+          return;
+        }
+        const value = editInput?.value ?? "";
+        const t = tabList.find((x) => x.id === id);
+        const label = t?.display ?? "";
+        endEdit();
+        if (mode === "cancel") {
+          ctx.announce(`Rename cancelled, keeping ${label}`);
+        } else if (mode === "confirm" || value.trim() !== "") {
+          // A confirm that changes nothing must still close the narrative: without
+          // this a screen reader hears "Renaming X" and then silence, which is
+          // indistinguishable from the edit still being open.
+          if (!commitRename(id, value) && mode === "confirm") {
+            ctx.announce(`Rename finished, keeping ${label}`);
+          }
+        }
+        if (focus) {
+          restoreFocusAfterEdit(t?.el);
+        }
+      }
+
       // hideTabMenu / showTabMenu drive the right-click menu. showTabMenu rebuilds
       // the items for the target tab (disabled states reflect its position) and
       // clamps into the visible viewport, flipping above the pointer near the
@@ -1527,13 +2048,34 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         tabMenu.appendChild(b);
       }
+      function tabMenuSeparator(): void {
+        const hr = document.createElement("div");
+        hr.className = "wt-tab-menu-sep";
+        hr.setAttribute("role", "separator");
+        tabMenu.appendChild(hr);
+      }
       function showTabMenu(x: number, y: number, id: string): void {
         hideTabMenu();
         const idx = tabList.findIndex((t) => t.id === id);
-        if (idx < 0) {
+        const target = tabList[idx];
+        if (idx < 0 || !target) {
           return;
         }
         const n = tabList.length;
+        // The naming pair goes FIRST, farthest from the accidental-close zone.
+        tabMenuItem("Rename\u2026", false, () => {
+          beginEdit(id, "pointer");
+        });
+        // Always present, disabled when there is no pin — matching the menu's
+        // existing rule for Move left / Close to the right. Not for consistency's
+        // own sake: an item that appeared only sometimes would shift every close
+        // item up or down by a row depending on whether the tab happens to be
+        // renamed, so right-clicking two tabs and clicking the same point could
+        // reset a name on one and close tabs on the other.
+        tabMenuItem("Use automatic name", !hasPinnedName(target), () => {
+          commitRename(id, ""); // the same operation an emptied, confirmed edit performs
+        });
+        tabMenuSeparator();
         tabMenuItem("Move left", idx <= 0, () => {
           moveTab(id, -1);
         });
@@ -1589,22 +2131,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ctx.toast("Swipe to switch terminals");
       }
 
-      // applyStatus updates one tab's dot (status + reveal) + title from a status
-      // record (shared by the SSE monitor and the polling fallback). reports is
-      // the server's sticky reportsActivity flag; it gates the dot's visibility.
-      function applyStatus(
-        id: string,
-        status: string,
-        title: string | undefined,
-        clientTitle: string | undefined,
-        reports: boolean,
-      ): void {
-        const t = tabList.find((tab) => tab.id === id);
+      // applyStatus updates one tab's dot (status + reveal) + titles from a status
+      // record (shared by the SSE monitor and the polling fallback). It takes the
+      // record whole rather than as positional fields: both callers already hold
+      // one, and its title fields are interchangeable strings that as positional
+      // parameters would be trivially swappable. reports is the server's sticky reportsActivity flag, passed
+      // separately because it is normalised (reportsOf) before it gets here.
+      function applyStatus(rec: SessionInfo, reports: boolean): void {
+        const t = tabList.find((tab) => tab.id === rec.id);
         if (!t) {
           return;
         }
         t.reports = reports;
-        paintStatusDot(t.dot, status, reports);
+        paintStatusDot(t.dot, rec.status, reports);
         // Latest-wins background-tab notification for the switch button's dot: a
         // background tab (not the active one) reaching "input" (needs you) or
         // "done" (turn finished) raises the cue in that colour; each qualifying
@@ -1612,9 +2151,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // list opens. The active surface keeps its own needs-input cue (see
         // syncMobile); this is the moved + upgraded, glanceable version on the
         // dedicated button.
-        if (id !== activeId && (status === "input" || status === "done")) {
-          switchNotify = status;
-          switchNotifyId = id;
+        if (rec.id !== activeId && (rec.status === "input" || rec.status === "done")) {
+          switchNotify = rec.status;
+          switchNotifyId = rec.id;
           paintSwitchDot();
         }
         // Record the raw server title; the displayed label (fallback + de-dup)
@@ -1624,15 +2163,31 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // and overwriting a good label with it dropped an idle tab back to "New
         // tab". Hold the last known title until a genuine (non-blank) one
         // arrives; the derived-from-input fallback is likewise sticky.
-        if (title !== undefined && title.trim() !== "") {
-          t.title = title;
+        // The typeof check is not redundant with the type: rec comes from
+        // unvalidated server JSON, and a missing title would make .trim() throw
+        // here and abort the caller's whole reconcile loop.
+        if (typeof rec.title === "string" && rec.title.trim() !== "") {
+          t.title = rec.title;
         }
-        // The persisted client title is authoritative from the server (set via
-        // PUT .../title); apply it as-is, including "" for a fresh session, so the
-        // preferInputTitle label recovers it on reload. No blank-guard: unlike the
-        // OSC title it does not flicker (it changes only on an explicit push).
-        if (clientTitle !== undefined) {
-          t.clientTitle = clientTitle;
+        // The pinned name is likewise authoritative and un-guarded, and "" is the
+        // meaningful value: it is how a clear made in ANOTHER browser reaches this
+        // one. A blank-guard here would make a remote un-rename invisible.
+        //
+        // The nameSeq bump is gated on the value actually DIFFERING from what we
+        // believe. The wire carries pinnedTitle on every status event, so bumping
+        // unconditionally would mark an in-flight local rename as superseded by
+        // the server's echo of that same rename — and its failure handler would
+        // then decline to roll back or explain itself. A differing value really is
+        // newer authority (a remote rename or clear), and supersedes.
+        if (rec.pinnedTitle !== undefined && rec.pinnedTitle !== (t.pinnedTitle ?? "")) {
+          t.pinnedTitle = rec.pinnedTitle;
+          // Only a value arriving with no request of ours in flight is newer
+          // AUTHORITY. During a pending request the record may predate our own PUT
+          // (SSE delivery and REST mutation are not one total order), and bumping
+          // would suppress that request's rollback and its failure toast.
+          if (!namesInFlight.has(rec.id)) {
+            t.nameSeq++;
+          }
         }
       }
 
@@ -1677,13 +2232,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           const seen = new Set(list.map((s) => s.id));
           for (const info of list) {
             adoptSession(info); // add sessions created elsewhere (no local tab)
-            applyStatus(
-              info.id,
-              info.status,
-              info.title,
-              info.clientTitle,
-              reportsOf(info.reportsActivity),
-            );
+            applyStatus(info, reportsOf(info.reportsActivity));
           }
           // A tab the server no longer lists was reaped/closed elsewhere (or
           // died with a restarted manager): drop it locally (no DELETE — it
@@ -1708,15 +2257,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             return;
           }
           // Adopt a session created in another browser so all clients converge.
-          // The status record IS the session's wire shape (SessionStatus
-          // extends SessionInfo), so it flows through whole — which also
-          // carries the persisted clientTitle: the SSE snapshot usually beats
-          // the initial GET /api/sessions (whose adoptSession then dedups and
-          // never re-applies its fields), so dropping it here left every
-          // SSE-adopted tab without its persisted title — in preferInputTitle
-          // mode the label then fell back to "New tab" on reload.
+          // The status record IS the session's wire shape (SessionStatus extends
+          // SessionInfo), so it flows through whole.
           adoptSession(s);
-          applyStatus(s.id, s.status, s.title, s.clientTitle, reportsOf(s.reportsActivity));
+          applyStatus(s, reportsOf(s.reportsActivity));
           ensureActive();
           syncChrome();
         });
@@ -1731,10 +2275,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // --- Event wiring ---
-      // Derive each tab's title from the lines the user submits into it.
-      const offInput = ctx.registerInputObserver((bytes) => {
-        titleDeriver.observe(bytes);
-      });
+      // No input observer. The ENGINE derives a session's name from the input
+      // stream when its host asked for that (terminal.WithInputTitle), so no preset
+      // does per-keystroke title work in the browser, and the name is identical for
+      // every client attached to the session — including one that attaches later.
       // Observe (never consume) keydowns to detect a physical keyboard: a
       // hardware-only key latches sawHardwareKey, which upgrades focus-on-switch
       // for a keyboard folio with no trackpad (no fine pointer to key off).
@@ -1744,7 +2288,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         return false;
       });
-      // Live reorder while dragging a tab over the strip (dragend commits it).
+      // Live reorder while dragging a tab over the strip (drop/dragend commit it).
       bar.addEventListener("dragover", (e) => {
         if (!draggingEl) {
           return;
@@ -1755,6 +2299,32 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         scroller.insertBefore(draggingEl, dragTargetBefore(e.clientX));
       });
+      // Commit on drop — and, load-bearing, CANCEL the drop's default action. An
+      // uncancelled drop leaves the browser free to act on the drag payload
+      // itself, and WebKit's action is to LOAD it as a URL: with no drop handler
+      // at all, dropping a tab on iPadOS navigated the page to /<session-id>
+      // instead of reordering. Chrome and Firefox ignore an unhandled reorder
+      // drop, which is why the strip looked fine on the desktop.
+      bar.addEventListener("drop", (e) => {
+        if (!draggingEl) {
+          return;
+        }
+        e.preventDefault();
+        syncOrderFromDom();
+      });
+      // A tab released anywhere OTHER than the strip — over the terminal, over
+      // any other chrome — must be inert as well, not a navigation, so claim the
+      // whole document as a drop target for the life of a tab drag and swallow
+      // the drop there too. dragend still commits whatever order the strip was
+      // previewing. Gated on draggingEl so an unrelated drag (a file dropped on
+      // the page) is left entirely to the browser.
+      const onDocTabDrop = (e: DragEvent): void => {
+        if (draggingEl) {
+          e.preventDefault();
+        }
+      };
+      document.addEventListener("dragover", onDocTabDrop);
+      document.addEventListener("drop", onDocTabDrop);
       // Active-row close (x): closes the current tab (mirrors a listed row's x).
       // stopPropagation so it is not read as a tap/swipe on the row surface.
       swClose.addEventListener("click", (e) => {
@@ -2214,14 +2784,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // them by hand).
         if (!sessions.some((s) => s.status !== STATUS_EXITED)) {
           try {
-            sessions = [...sessions, await api.create()];
-          } catch {
+            sessions = [...sessions, await createSessionHonouringRetry(api, ctx, () => tornDown)];
+          } catch (err) {
             // Match the runtime create() path: toast and leave the chrome up so
             // "+" can retry. Any exited sessions stay adopted (frozen screen +
             // "Session ended" is still better than a blank page). A throw here
             // would also be survivable (the kernel treats a rejected resolver
-            // as null), but the toast is the better UX.
-            ctx.toast("Couldn't open a terminal");
+            // as null), but the toast is the better UX. A 503 was already
+            // retried on the server's schedule, so this is the give-up path;
+            // carry the server's explanation when it gave one.
+            ctx.toast(
+              err instanceof SessionAPIError && err.serverMessage !== undefined
+                ? `Couldn't open a terminal: ${err.serverMessage}`
+                : "Couldn't open a terminal",
+            );
           }
         }
         // Adopt (dedup) rather than blindly push. The status SSE pushes a
@@ -2292,16 +2868,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             tabList.map((t) => ({ id: t.id, title: t.display, active: t.id === activeId })),
         },
         teardown() {
+          tornDown = true;
           resolveImpl = null;
           offStatus?.();
           offStreamOpen?.();
-          offInput();
           offHwKey();
           offArmed?.();
           offMenuKey();
           document.removeEventListener("click", onDocClickMenu);
           document.removeEventListener("contextmenu", onDocContextMenu);
           document.removeEventListener("pointerup", onDocTapDismiss, true);
+          document.removeEventListener("dragover", onDocTabDrop);
+          document.removeEventListener("drop", onDocTabDrop);
           window.removeEventListener("scroll", onScrollMenu, true);
           if (pollTimer !== null) {
             clearInterval(pollTimer);
@@ -2320,6 +2898,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
           endReelNow();
           gestureAbort?.abort(); // drop any in-flight gesture's window listeners
+          endEdit(); // abandon an open rename without issuing a request
+          clearDragGhost();
           clearCatchup();
           hideTabMenu();
           for (const t of tabList) {

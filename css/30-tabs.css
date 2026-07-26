@@ -86,6 +86,12 @@
   cursor: pointer;
   white-space: nowrap;
   user-select: none;
+  /* Kills the 300ms double-tap-to-zoom delay, which is what makes a double-TAP
+     usable as the touch rename entry: on iPadOS a long-press on this chip starts
+     a reorder drag (it is draggable), so the context menu is unreachable by touch
+     and the double-tap is the only path in. Also removes the tap delay for the
+     ordinary switch tap. */
+  touch-action: manipulation;
 }
 
 /* Inactive tabs read as outlined chips with a subtle dark fill (so adjacent tabs
@@ -294,6 +300,20 @@
   margin-left: auto;
 }
 
+/* Hover wash, matching every other bar control (.wt-tab-new, the switcher's
+   buttons) — without it this was the one control in the chrome that gave no
+   pointer feedback at all. Gated to real hover pointers because the button only
+   SHOWS on a coarse pointer (the iPad strip): a plain touchscreen has no
+   pointer-leave, so :hover would stick after a tap and the wash would linger;
+   the feedback there is :active, from .wt-btn. Before .wt-active / .wt-armed so
+   those toggled fills win on a hovered button (equal specificity, source order
+   decides). */
+@media (hover: hover) {
+  :where(.wt-root) .wt-tab-kb:hover {
+    background: var(--tab-hover-bg);
+  }
+}
+
 /* Grid open: filled so the toggled state reads at a glance (mirrors the
    switcher keyboard button). */
 :where(.wt-root) .wt-tab-kb.wt-active {
@@ -320,6 +340,66 @@
 /* The tab being dragged (reorder) dims while it moves. */
 :where(.wt-root) .wt-tab-dragging {
   opacity: 0.5;
+}
+
+/* ===== Inline rename (tabs feature) =====
+   The edit surface is the LABEL's own box, so the width the user types into is
+   the width the label will have. The field takes the label's flex slot exactly;
+   the label is [hidden] and the close button is hidden for the duration (a 44px
+   destructive target next to a live text field is a mis-click waiting to happen,
+   and the freed width goes to the field). */
+:where(.wt-root) .wt-tab-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--tab-active-fg);
+  font: inherit;
+  /* .wt-tab sets user-select: none, and WebKit CASCADES that into descendants
+     even though the property is non-inherited per spec (the same deviation the
+     touch model documents for .term-output). Without this, caret placement and
+     text selection break inside the field in Safari — i.e. on the iPad. */
+  user-select: text;
+  /* The chip is cursor: pointer; a text field must not inherit that. */
+  cursor: text;
+}
+
+/* The family focus ring is scoped to button:focus-visible in 10-primitives.css,
+   so the field needs its own. It is focused programmatically the instant it
+   appears, so :focus (not :focus-visible) is correct here — the ring IS the
+   affordance that says "type here". */
+:where(.wt-root) .wt-tab-rename:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* While editing, hide the close button: a 44px destructive target adjacent to a
+   live text field is a mis-click waiting to happen, and the freed width goes to
+   the field.
+
+   The chip is NOT widened. An earlier draft gave the edited chip its full 300px
+   so a crowded strip (tabs shrink toward a 100px floor) would not offer a 100px
+   edit box — but nothing in this design system transitions `width` on a tab, so
+   that was an instant ~200px shove of every neighbouring tab plus a scroll jump,
+   at the exact moment the user is trying to read what they are typing. A cramped
+   field on a crowded strip is the lesser problem. */
+:where(.wt-root) .wt-tab-editing .wt-tab-close {
+  display: none;
+}
+
+/* The drag preview clone (setDragGhost): a full-opacity copy of the chip parked
+   under .wt-root — OUTSIDE the bar's backdrop-filter, which is what stops WebKit
+   from rendering the automatic drag image (webkit.org/b/22787) — and laid exactly
+   over the real chip via inline left/top/width/height. It exists for less than a
+   frame (the browser snapshots it, then a rAF removes it), so it must not be
+   hidden (an invisible element makes no snapshot) and must not intercept the
+   pointer. z-index clears the bar so the copy, not the dimmed original, is what
+   would show if it ever painted. */
+:where(.wt-root) .wt-tab-ghost {
+  position: absolute;
+  z-index: 16;
+  pointer-events: none;
 }
 
 /* Tab context menu (tabs feature, desktop right-click): Close / Close others /
@@ -373,6 +453,16 @@
 :where(.wt-root) .wt-tab-menu button:disabled {
   color: color-mix(in oklch, var(--text) 35%, transparent);
   cursor: default;
+}
+
+/* Group separator: the naming pair (Rename / Use automatic name) sits above the
+   move and close groups, so a hairline keeps the non-destructive actions visually
+   apart from the destructive ones. The menu is otherwise a flat flex column of
+   buttons with no separator vocabulary. */
+:where(.wt-root) .wt-tab-menu-sep {
+  height: 1px;
+  margin: var(--sp-1) 0;
+  background: var(--border);
 }
 
 /* Pull the terminal surface up off the docked BOTTOM tab strip so it does not

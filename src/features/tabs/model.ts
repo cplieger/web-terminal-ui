@@ -1,6 +1,6 @@
 // tabs/model.ts — the session MODEL half of the tabs feature: the wire type,
 // the per-tab record, the session REST client, the close-tombstone set, and the
-// input-derived-title state machine. No DOM, no chrome, no kernel context —
+// pinned-name helpers. No DOM, no chrome, no kernel context —
 // everything here is factory/pure and unit-testable in isolation. The chrome
 // halves are strip.ts (desktop) and switcher.ts (mobile); index.ts wires all
 // three over the kernel context.
@@ -27,6 +27,97 @@ export const ACTIVE_TAB_KEY = "wt-active-session";
 // One-time "swipe to switch" hint, remembered across loads.
 export const SWIPE_HINT_KEY = "wt-swipe-hint-seen";
 
+/** localStorage key for the user's tab ARRANGEMENT: the strip's session ids in
+ *  the order they are shown, so a drag-reorder (or a Move left/right) survives a
+ *  reload instead of snapping back to the server's creation order.
+ *
+ *  Deliberately client-side, alongside ACTIVE_TAB_KEY: the arrangement is a
+ *  per-viewer preference, not a property of the session. Keeping it here costs
+ *  no engine API — the session REST surface is a fixed four routes, and adding a
+ *  fifth for cosmetics would be a release-noted change to every consumer. The
+ *  tradeoff is that two devices do not share an arrangement (each keeps its own),
+ *  and that when several windows of the same browser are open the last order
+ *  change written wins. */
+export const TAB_ORDER_KEY = "wt-tab-order";
+
+/** Bound on the persisted arrangement. Every id is a live PTY server-side, so a
+ *  real strip is nowhere near this; the cap is there so a corrupted or hostile
+ *  stored value cannot make the restore path do unbounded work. */
+export const MAX_PERSISTED_TAB_ORDER = 200;
+
+/** parseTabOrder reads a stored arrangement into a clean id list. Anything the
+ *  restore path cannot trust yields [] (or is dropped), because falling back to
+ *  the server's creation order is always a valid arrangement: a non-JSON or
+ *  non-array value, a non-string or empty entry, and a duplicate id (which would
+ *  make the insert position ambiguous) are all discarded rather than repaired.
+ *  Pure, so it is testable without a storage backend; the caller owns the
+ *  localStorage read and its try/catch. */
+export function parseTabOrder(raw: string | null): string[] {
+  if (raw === null || raw === "") {
+    return [];
+  }
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(data)) {
+    return [];
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of data) {
+    if (typeof entry !== "string" || entry === "" || seen.has(entry)) {
+      continue;
+    }
+    seen.add(entry);
+    out.push(entry);
+    if (out.length >= MAX_PERSISTED_TAB_ORDER) {
+      break;
+    }
+  }
+  return out;
+}
+
+/** serializeTabOrder encodes an arrangement for storage, capped the same way the
+ *  read is so a write can never produce a value its own parser would truncate
+ *  differently. */
+export function serializeTabOrder(ids: readonly string[]): string {
+  return JSON.stringify(ids.slice(0, MAX_PERSISTED_TAB_ORDER));
+}
+
+/** orderedInsertIndex returns where `id` belongs in `current` (a list of tab ids
+ *  in display order) to honour the stored arrangement `saved`.
+ *
+ *  This is what makes the restore independent of the order tabs ARRIVE in, which
+ *  matters because they arrive from two racing sources: the status stream pushes
+ *  a snapshot of the existing sessions on open, and the bootstrap's
+ *  GET /api/sessions lands separately — whichever wins, each session is placed
+ *  by the saved arrangement rather than by arrival.
+ *
+ *  An id absent from `saved` goes last: it is a session created after the
+ *  arrangement was stored (here or in another browser), and a new tab belongs at
+ *  the end. Ids in `current` that are absent from `saved` are transparent to the
+ *  scan, so a saved tab can still slot ahead of them. */
+export function orderedInsertIndex(
+  current: readonly string[],
+  saved: readonly string[],
+  id: string,
+): number {
+  const rank = saved.indexOf(id);
+  if (rank < 0) {
+    return current.length;
+  }
+  for (let i = 0; i < current.length; i++) {
+    const other = saved.indexOf(current[i] ?? "");
+    if (other > rank) {
+      return i;
+    }
+  }
+  return current.length;
+}
+
 export interface Tab {
   id: string;
   /** Local mutation epoch at which this tab was adopted (a monotonic counter,
@@ -37,9 +128,12 @@ export interface Tab {
    *  listing, and dropping it would cascade into a duplicate replacement
    *  session (the boot double-create bug). */
   born: number;
-  /** The raw server title (the OSC 0/2 window title the process set), possibly
-   *  empty before the process sets one. The displayed label is derived from it
-   *  with a numbered fallback and de-duplication (see relabelAll in index.ts). */
+  /** The title the SERVER resolved for this session: its pinned name, else the
+   *  input-derived name, else the program's OSC 0/2 window title, else a
+   *  client-pushed label, else the engine's own foreground-process/cwd inference.
+   *  Possibly empty only against an engine that has none of those. The displayed
+   *  label adds a numbered fallback and de-duplication (see relabelAll in
+   *  index.ts). */
   title: string;
   /** The computed, de-duplicated label actually shown in the chrome. */
   display: string;
@@ -56,44 +150,48 @@ export interface Tab {
    *  activity (a plain shell) keeps a clean, dot-less tab. Fed from the server's
    *  reportsActivity via applyStatus. */
   reports: boolean;
-  /** A fallback title derived from the LAST non-empty line the user submitted
-   *  into this tab (updated on every Enter). Used only when the process sets no
-   *  window title of its own: the OSC 0/2 title (`title` above) takes precedence
-   *  when present and keeps updating, and this is what the tab reads as when it
-   *  does not — a plain shell with no PROMPT_COMMAND title, or kiro-cli with its
-   *  cwd-only title disabled. Undefined until the first non-empty submission; see
-   *  baseLabel. */
-  derived?: string;
-  /** The persisted client title reported by the server (its `clientTitle` wire
-   *  field): the last derived title pushed via PUT .../title, surviving reloads.
-   *  In `preferInputTitle` mode this is the reload-recovery source (the live
-   *  `derived` is lost on reload, and `title` is the unreliable OSC value there).
-   *  In the default mode it is the lowest-priority fallback after title/derived. */
-  clientTitle?: string | undefined;
+  /** The user's pinned name (the server's `pinnedTitle` wire field). Outranks
+   *  every automatic source in `baseLabel`, and its presence is what enables the
+   *  tab menu's "use the automatic name" action. Undefined or empty means the tab
+   *  has no user-set name. */
+  pinnedTitle?: string | undefined;
+  /** Monotonic per-tab rename counter. A rename or clear increments it and
+   *  captures the value; the response is applied only if it is still current when
+   *  it lands, so a slow failure cannot roll back a newer rename, a later clear,
+   *  or a status-stream update from another client. */
+  nameSeq: number;
 }
 
-/** baseLabel is a tab's label before de-duplication. Preference order: the
- *  process window title (OSC 0/2, e.g. a shell's PROMPT_COMMAND title), which
- *  takes precedence whenever the program sets one and keeps updating as it
- *  changes (the status SSE re-pushes it); then a fallback derived from the last
- *  line the user submitted, for a program that sets no title (a bare shell, or
- *  kiro-cli with its cwd-only title disabled); then a plain "New tab".
- *  fallback=true marks that last case so relabelAll leaves untitled tabs as
- *  "New tab" with no numeric suffix.
+/** baseLabel is a tab's label before de-duplication: the user's pinned name if
+ *  there is one, otherwise the title the SERVER resolved.
  *
- *  preferInputTitle (agent shell with an unreliable OSC title): show the live
- *  submitted line, then the persisted client title on reload — the process OSC
- *  `title` is ignored. Default: OSC title first, then the live derived line,
- *  then the persisted client title (the latter two are the "latest user
- *  message" fallback when the program sets no OSC title). */
-export function baseLabel(
-  tab: Tab,
-  preferInputTitle: boolean,
-): { text: string; fallback: boolean } {
-  const derived = tab.derived?.trim() ?? "";
-  const persisted = tab.clientTitle?.trim() ?? "";
-  const real = preferInputTitle ? derived || persisted : tab.title.trim() || derived || persisted;
+ *  Only two rungs, because the engine now owns every automatic source and folds
+ *  them into `title` in precedence order (pinned, input-derived, the program's OSC
+ *  window title, a client-pushed label, then its own foreground-process/cwd
+ *  inference). A client that re-implemented that ladder could only disagree with
+ *  the server and with every other client.
+ *
+ *  The pin is still checked here, even though the server also folds it into
+ *  `title`, so a rename paints immediately instead of waiting for the round trip.
+ *
+ *  fallback=true marks the "New tab" case so relabelAll leaves untitled tabs
+ *  unnumbered. */
+export function baseLabel(tab: Tab): { text: string; fallback: boolean } {
+  const real = pinnedNameOf(tab) || tab.title.trim();
   return real ? { text: real, fallback: false } : { text: "New tab", fallback: true };
+}
+
+/** pinnedNameOf normalizes a tab's pin: trimmed, with a whitespace-only value
+ *  reading as absent. One definition, so baseLabel's precedence and the menu's
+ *  enabled state can never disagree about whether a tab is pinned. */
+function pinnedNameOf(tab: Tab): string {
+  return tab.pinnedTitle?.trim() ?? "";
+}
+
+/** hasPinnedName reports whether a tab carries a user-set name, which is what
+ *  gates the tab menu's "use the automatic name" item. */
+export function hasPinnedName(tab: Tab): boolean {
+  return pinnedNameOf(tab) !== "";
 }
 
 /** The session REST client (GET/POST/DELETE /api/sessions + PUT .../title),
@@ -106,12 +204,109 @@ export interface SessionAPI {
   list(): Promise<SessionInfo[]>;
   create(): Promise<SessionInfo>;
   close(id: string): Promise<void>;
-  /** Best-effort and fire-and-forget: a failure never disrupts the terminal —
-   *  the locally-derived title still displays, it just is not persisted. */
-  setTitle(id: string, title: string): Promise<void>;
+  /** Set the user's pinned name for a session. UNLIKE setTitle this THROWS on
+   *  failure: a rename the user typed and that silently did not persist looks
+   *  correct until the next reload, so the caller must be able to surface it. */
+  setPinnedTitle(id: string, title: string): Promise<void>;
+  /** Remove a session's pinned name so its label falls back to the automatic
+   *  sources. Throws on failure, for the same reason as setPinnedTitle. */
+  clearPinnedTitle(id: string): Promise<void>;
 }
 
 const SESSION_API_TIMEOUT_MS = 15000;
+
+/** A non-2xx response from the session API, carrying what the server actually
+ *  said instead of flattening it into a message string.
+ *
+ *  The motivating case is a host that legitimately and TEMPORARILY refuses
+ *  session creation: web-terminal-kiro answers 503 with `Retry-After: 5` and a
+ *  body message while its tool engine installs the manifest's tools on first
+ *  boot. Callers that only saw an `Error` could not tell that apart from a 500,
+ *  could not honour the retry hint, and could not repeat the server's
+ *  explanation — so the page read as broken while the server was deliberately
+ *  waiting. Everything needed to do better is on this error. */
+export class SessionAPIError extends Error {
+  /** HTTP status, so a caller can branch on 503 (retry) vs 429 vs 5xx. */
+  readonly status: number;
+  /** Retry-After in milliseconds, or undefined when the server sent no usable
+   *  hint. */
+  readonly retryAfterMs: number | undefined;
+  /** The human-readable message from the error envelope, when the server sent
+   *  one (webhttp's `error` field, or `message` elsewhere), so the host's own
+   *  explanation can reach the user verbatim. Length-capped because it is
+   *  server-controlled text destined for UI chrome. */
+  readonly serverMessage: string | undefined;
+
+  constructor(operation: string, status: number, retryAfterMs?: number, serverMessage?: string) {
+    super(`web-terminal-ui: session ${operation} failed (${String(status)})`);
+    this.name = "SessionAPIError";
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+    this.serverMessage = serverMessage;
+  }
+}
+
+const RETRY_AFTER_MAX_MS = 60000;
+const SERVER_MESSAGE_MAX_CHARS = 120;
+
+/** Parse Retry-After (RFC 9110): delta-seconds, or an HTTP-date. Undefined for a
+ *  missing or unparseable value. Clamped so a buggy or hostile header cannot
+ *  park the UI for hours, and floored at 0 so a date already in the past retries
+ *  immediately rather than never. */
+function parseRetryAfter(header: string | null): number | undefined {
+  if (header === null) {
+    return undefined;
+  }
+  const raw = header.trim();
+  if (raw === "") {
+    return undefined;
+  }
+  if (/^\d+$/.test(raw)) {
+    return Math.min(Number(raw) * 1000, RETRY_AFTER_MAX_MS);
+  }
+  const when = Date.parse(raw);
+  if (Number.isNaN(when)) {
+    return undefined;
+  }
+  return Math.min(Math.max(when - Date.now(), 0), RETRY_AFTER_MAX_MS);
+}
+
+/** Pull the error envelope's human-readable message out of a failed response,
+ *  without letting a non-JSON body, a hostile payload, or a slow read break the
+ *  caller: the status and retry hint matter more than the prose, so every failure
+ *  here is simply "no server message".
+ *
+ *  Two field names are accepted. `error` is the field the first-party Go envelope
+ *  writes (webhttp's ErrorResponse, `json:"error"`), which is what every server in
+ *  this family returns; `message` is the common alternative elsewhere. Preferring
+ *  `error` keeps the family's own hosts authoritative. */
+async function readServerMessage(r: Response): Promise<string | undefined> {
+  try {
+    const body: unknown = await r.json();
+    if (typeof body !== "object" || body === null) {
+      return undefined;
+    }
+    const fields = body as { error?: unknown; message?: unknown };
+    for (const candidate of [fields.error, fields.message]) {
+      if (typeof candidate === "string" && candidate.trim() !== "") {
+        return candidate.trim().slice(0, SERVER_MESSAGE_MAX_CHARS);
+      }
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build the error for a failed session-API response. */
+async function sessionError(operation: string, r: Response): Promise<SessionAPIError> {
+  return new SessionAPIError(
+    operation,
+    r.status,
+    parseRetryAfter(r.headers.get("Retry-After")),
+    await readServerMessage(r),
+  );
+}
 
 export function createSessionAPI(apiBase: string): SessionAPI {
   return {
@@ -121,7 +316,7 @@ export function createSessionAPI(apiBase: string): SessionAPI {
         signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
-        throw new Error(`web-terminal-ui: session list failed (${String(r.status)})`);
+        throw await sessionError("list", r);
       }
       const data: unknown = await r.json();
       // A 200 with a non-array body -- a proxy error object, or a Go server
@@ -140,7 +335,7 @@ export function createSessionAPI(apiBase: string): SessionAPI {
         signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
-        throw new Error(`web-terminal-ui: session create failed (${String(r.status)})`);
+        throw await sessionError("create", r);
       }
       return (await r.json()) as SessionInfo;
     },
@@ -150,22 +345,29 @@ export function createSessionAPI(apiBase: string): SessionAPI {
         signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
-        throw new Error(`web-terminal-ui: session close failed (${String(r.status)})`);
+        throw await sessionError("close", r);
       }
     },
-    // Persist the input-derived tab title server-side so it survives a page
-    // reload and shows on other devices. The engine stores it as the session's
-    // fallback title and uses it only when the program emits no OSC title.
-    async setTitle(id: string, title: string): Promise<void> {
-      try {
-        await fetch(`${apiBase}/${encodeURIComponent(id)}/title`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title }),
-          signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
-        });
-      } catch {
-        /* best-effort persistence; ignore network/timeout errors */
+    // The user's pinned name. Not best-effort: the caller shows a failure and
+    // rolls the optimistic label back, so both of these propagate.
+    async setPinnedTitle(id: string, title: string): Promise<void> {
+      const r = await fetch(`${apiBase}/${encodeURIComponent(id)}/pinned-title`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
+      });
+      if (!r.ok) {
+        throw await sessionError("set pinned title", r);
+      }
+    },
+    async clearPinnedTitle(id: string): Promise<void> {
+      const r = await fetch(`${apiBase}/${encodeURIComponent(id)}/pinned-title`, {
+        method: "DELETE",
+        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
+      });
+      if (!r.ok) {
+        throw await sessionError("clear pinned title", r);
       }
     },
   };
@@ -213,130 +415,30 @@ export function createTombstones(ttlMs: number = CLOSE_TOMBSTONE_MS): Tombstones
   };
 }
 
-// A generous storage bound for the fallback (input-derived) title. The tab
-// label truncates it visually with max-width + ellipsis in EVERY view — the
-// desktop strip, the mobile active bar, and the mobile list — so this is only a
-// guard against storing a huge paste, not a display cut.
-const MAX_DERIVED = 512;
+/** MAX_PINNED_NAME bounds a user-typed tab name, mirroring the engine's own
+ *  pinned-title cap so the field cannot accept text the server would silently
+ *  truncate. A hand-typed label past ~40 characters is never visible in a 300px
+ *  chip; 128 is generous. Counted in CODE POINTS, matching the server's runes —
+ *  a naive `slice` would count UTF-16 code units and could cut a surrogate pair in
+ *  half, sending a lone surrogate to the server. Neither bound is a count of
+ *  user-perceived characters (a grapheme cluster is neither, per UAX #29); both
+ *  are defensive limits, not display promises. */
+export const MAX_PINNED_NAME = 128;
 
-/** The input-derived-title state machine: a tiny line editor over the kernel's
- *  accepted outbound bytes. It tracks the current input line (handling
- *  backspace and skipping the escape sequences arrow keys and bracketed paste
- *  emit) and reports every non-empty submitted line through `submit`. The
- *  caller owns what a submission means (update the active tab's derived title,
- *  persist it, refresh chrome). Best-effort: an odd editing sequence just
- *  yields no derived title. */
-export interface InputTitleDeriver {
-  /** Feed one accepted outbound byte chunk (a ctx.registerInputObserver hook). */
-  observe(bytes: Uint8Array): void;
-  /** Drop the partial line (a tab switch: a line typed in the old tab must not
-   *  carry over). */
-  reset(): void;
-}
-
-export function createInputTitleDeriver(submit: (line: string) => void): InputTitleDeriver {
-  let lineBytes: number[] = [];
-  let escState = 0; // 0 normal, 1 saw ESC, 2 in CSI, 3 in SS3 (one more byte)
-  let csiParams = ""; // accumulated CSI parameter bytes, to spot paste guards
-  let inPaste = false; // inside a bracketed paste (ESC[200~ … ESC[201~)
-  return {
-    reset(): void {
-      lineBytes = [];
-      escState = 0;
-      csiParams = "";
-      inPaste = false;
-    },
-    observe(bytes: Uint8Array): void {
-      for (let i = 0; i < bytes.length; i++) {
-        const b = bytes[i];
-        if (b === undefined) {
-          continue;
-        }
-        if (escState === 1) {
-          escState = b === 0x5b ? 2 : b === 0x4f ? 3 : 0; // ESC [ = CSI, ESC O = SS3
-          continue;
-        }
-        if (escState === 2) {
-          if (b >= 0x40 && b <= 0x7e) {
-            // CSI final byte. Recognize the bracketed-paste guards ESC[200~
-            // (start) and ESC[201~ (end) so embedded newlines in a pasted,
-            // often multi-line, message are not read as line submissions.
-            if (b === 0x7e) {
-              if (csiParams === "200") {
-                inPaste = true;
-              } else if (csiParams === "201") {
-                inPaste = false;
-              }
-            }
-            csiParams = "";
-            escState = 0; // CSI final byte
-          } else if (b >= 0x30 && b <= 0x3f) {
-            csiParams += String.fromCharCode(b); // parameter byte (digits, ; ? etc.)
-          }
-          continue;
-        }
-        if (escState === 3) {
-          escState = 0; // SS3 final byte
-          continue;
-        }
-        if (b === 0x1b) {
-          escState = 1; // ESC: start of an escape sequence
-        } else if (b === 0x0d || b === 0x0a) {
-          // A newline is a line SUBMIT only when it terminates the input. It is
-          // folded to a single space (keeping the current line going) when it is
-          // instead a paste-internal break, so a multi-line message becomes one
-          // logical line whose title reflects its START rather than only its
-          // LAST line. Two cases fold:
-          //   - inside a bracketed paste (ESC[200~ … ESC[201~), and
-          //   - a newline FOLLOWED by more printable input in this SAME chunk:
-          //     a human pressing Enter sends the newline as the end of its own
-          //     input event, whereas a paste (even one sent WITHOUT bracketed-
-          //     paste guards — e.g. an agent shell like kiro-cli that keeps a
-          //     pasted multi-line message as one prompt) delivers
-          //     text + newline + text together, so trailing content marks the
-          //     newline as a soft break, not a submit. Without this, such a
-          //     paste left only its last line as the title (the reported
-          //     "the title cut off the start of my message").
-          let softBreak = inPaste;
-          if (!softBreak) {
-            for (let j = i + 1; j < bytes.length; j++) {
-              const nb = bytes[j];
-              if (nb !== undefined && nb >= 0x20) {
-                softBreak = true;
-                break;
-              }
-            }
-          }
-          if (softBreak) {
-            if (lineBytes.length > 0 && lineBytes[lineBytes.length - 1] !== 0x20) {
-              lineBytes.push(0x20);
-            }
-            continue;
-          }
-          const line = new TextDecoder().decode(new Uint8Array(lineBytes)).trim();
-          lineBytes = [];
-          // Every non-empty submitted line updates the fallback title (the
-          // last one wins); a leading "/" counts, since it is a valid shell
-          // command path.
-          if (line) {
-            submit(line.slice(0, MAX_DERIVED));
-          }
-        } else if (b === 0x7f || b === 0x08) {
-          // Backspace: drop one codepoint (pop UTF-8 continuation bytes + lead).
-          while (lineBytes.length > 0) {
-            const last = lineBytes[lineBytes.length - 1];
-            if (last === undefined || (last & 0xc0) !== 0x80) {
-              break;
-            }
-            lineBytes.pop();
-          }
-          lineBytes.pop();
-        } else if (b === 0x03) {
-          lineBytes = []; // Ctrl-C: cancel the current line
-        } else if (b >= 0x20) {
-          lineBytes.push(b); // printable ASCII or a UTF-8 byte
-        }
-      }
-    },
-  };
+/** sanitizePinnedName cleans a user-typed tab name before it is displayed or
+ *  sent: control characters and DEL out (they would inject newlines or escape
+ *  sequences into the label and into logs, CWE-117), trimmed, bounded by code
+ *  point. Applied client-side rather than trusting the server's round-trip, so
+ *  the optimistic label matches what the server will store. */
+export function sanitizePinnedName(s: string): string {
+  const kept: string[] = [];
+  for (const ch of s) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) {
+      continue;
+    }
+    kept.push(ch);
+  }
+  // Trim first, then bound: leading whitespace must not consume the budget.
+  return Array.from(kept.join("").trim()).slice(0, MAX_PINNED_NAME).join("");
 }

@@ -19,8 +19,14 @@ import { presetSingle } from "./single.js";
  *  included; a plain shell under presetTabbed just never shows a dot. The
  *  toolbar and monitor are ordered before tabs because tabs reads their APIs
  *  via ctx.use. Shared by presetTabbed and presetAgentTabbed (agent-tabbed.ts),
- *  which differ only in the agent-shell tuning: input-derived titles
- *  (preferInputTitle) + presumed activity reporting (presumeReports). */
+ *  which now differ only in presumed activity reporting (presumeReports).
+ *
+ *  Titles are no longer a preset concern. The ENGINE resolves a session's name —
+ *  its pinned name, an input-derived name when the host asked for one
+ *  (terminal.WithInputTitle), the program's OSC window title, or its own
+ *  foreground-process/cwd inference — and both presets render what it reports. A
+ *  browser that re-derived any of that could only disagree with the server and
+ *  with every other client attached to the same session. */
 export function buildTabbed(agentShell: boolean): TerminalFeature<unknown>[] {
   const kb = mobileToolbar({ externalToggle: true });
   const monitor = activityMonitor();
@@ -31,7 +37,6 @@ export function buildTabbed(agentShell: boolean): TerminalFeature<unknown>[] {
     tabs({
       keyboardToggle: kb,
       activityMonitor: monitor,
-      preferInputTitle: agentShell,
       presumeReports: agentShell,
     }),
     animations(),

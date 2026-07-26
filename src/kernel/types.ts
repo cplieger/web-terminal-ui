@@ -147,6 +147,18 @@ export interface TabHandle {
   setSelected(selected: boolean): void;
   /** Set the accessible label (used for aria-labelledby on the panel). */
   setLabel(text: string): void;
+  /** Enter or leave inline-edit mode. A textbox is not valid content for
+   *  `role="tab"` (ARIA marks a tab's children presentational, so a focusable
+   *  descendant may get no accessibility-tree node at all), so a feature that
+   *  puts an input inside its chip drops the tab semantics for the duration.
+   *
+   *  One atomic transition each way. On: `role` and `aria-selected` are removed
+   *  and the chip leaves the roving sequence while the field owns focus. Off: the
+   *  role is restored along with `aria-selected` and the roving tabindex derived
+   *  from `selected` AS OF NOW — the active tab can change while an edit is open
+   *  on a different chip, so the caller passes the current state rather than the
+   *  handle replaying the state it saw at entry. */
+  setEditing(editing: boolean, selected: boolean): void;
   /** Deregister this tab. */
   remove(): void;
 }
@@ -303,17 +315,35 @@ export interface FeatureInstance<Api = void> {
 
 // --- Entry point ---
 
-/** A fatal failure while createTerminal is starting its feature composition.
- *  The kernel has already stopped the connection, released every listener and
- *  singleton, torn down completed features, and cleared the terminal root when
- *  it delivers this value to `onFatalError`. */
-export interface TerminalStartupFailure {
-  readonly phase: "feature-setup";
-  /** Name of the feature whose setup threw or rejected. */
-  readonly feature: string;
-  /** The original thrown or rejected value. */
-  readonly cause: unknown;
-}
+/** A fatal failure while createTerminal is starting up.
+ *
+ *  Two phases can fail, and both are delivered here so a consumer never has to
+ *  hand-build its own startup-failure surface:
+ *
+ *  - `kernel-init`: a SYNCHRONOUS throw out of createTerminal (an invalid
+ *    feature list, a DOM invariant, a feature constructor). The kernel renders
+ *    the recovery surface and then RETHROWS, so a caller with its own handling
+ *    still sees the error.
+ *  - `feature-setup`: an async feature-composition failure. The kernel has
+ *    already stopped the connection, released every listener and singleton,
+ *    torn down completed features, and cleared the terminal root when it
+ *    delivers this value. Nothing is rethrown; the failure is asynchronous.
+ *
+ *  Discriminate on `phase`: `feature-setup` names the offending feature,
+ *  `kernel-init` has no feature to name because composition never began. */
+export type TerminalStartupFailure =
+  | {
+      readonly phase: "feature-setup";
+      /** Name of the feature whose setup threw or rejected. */
+      readonly feature: string;
+      /** The original thrown or rejected value. */
+      readonly cause: unknown;
+    }
+  | {
+      readonly phase: "kernel-init";
+      /** The original thrown value, rethrown to the caller after this returns. */
+      readonly cause: unknown;
+    };
 
 /** Options for createTerminal. */
 export interface CreateTerminalOptions {
