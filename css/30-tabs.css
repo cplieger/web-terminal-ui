@@ -137,17 +137,37 @@
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  /* Center the INK, not the line box: UI fonts carry more ascent than descent
-     (Noto Sans at 13px: 14px over / 4px under the baseline), so the flex-
-     centered line box leaves the visible text ~1.5px low — reading as
-     baseline-aligned with the activity dot's bottom instead of its center.
-     Trimming the box to the cap-height/alphabetic band makes flexbox center
-     the glyphs themselves, on every platform font. Descender ink still paints
-     (verified: ink overflow survives the overflow: hidden ellipsis clip).
-     Non-supporting browsers simply keep the untrimmed box. Shared by all
-     three chip labels (this one + the two switcher labels in
+  /* Center the INK, not the line box: UI fonts carry far more ascent than
+     descent (the -apple-system/Noto Sans stack at 13px: 14px over / 4px under
+     the baseline), so the flex-centered line box leaves the visible text ~1.5px
+     low — reading as baseline-aligned with the activity dot's bottom instead of
+     its center. Trimming the box makes flexbox center the glyph band instead of
+     the font's metrics box.
+
+     `ex`, not `cap`, is the over edge, because a tab title is sentence case and
+     lowercase-dominant ("workspace", "refactor the auth module"). Centering the
+     x-height/baseline band centers the total ink of such a string, since a
+     Latin font's ascender overshoot above x-height is about its descender depth
+     below the baseline (measured on this stack at 13px: 3.0px over vs 3.0px
+     under, ink center 0.02px off the chip's center). `cap alphabetic` — the
+     right choice for an ALL-CAPS label — leaves lowercase text 1.14px low,
+     which is the original complaint barely moved.
+
+     padding-block is LOAD-BEARING, not spacing: trimming puts the box's under
+     edge ON the baseline, and `overflow: hidden` clips at the padding edge, so
+     with no padding every descender and every tall diacritic is cut off (
+     measured: 3.3px of p/y/g/j tail and 2.3px of an acute accent, i.e. "pygmy
+     jaguar Ápple" rendered as "pyqmy iaquar Apple"). 0.5em restores the ink
+     overhang the trim removes from the box; being symmetric it does not move
+     the centered band, and being em-relative it tracks the font size. The
+     grown box (~20px) still sits inside the close button's 1.5rem, so the tab
+     height is unchanged. A browser without text-box support keeps the untrimmed
+     box, where the padding is harmless slack.
+
+     Shared by all three chip labels (this one + the two switcher labels in
      31-switcher.css). */
-  text-box: trim-both cap alphabetic;
+  text-box: trim-both ex alphabetic;
+  padding-block: 0.5em;
 }
 
 /* A little breathing room after the activity dot, before the label. */
