@@ -178,8 +178,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
-  /* Ink-centering trim, same as .wt-tab-label (see 30-tabs.css). */
-  text-box: trim-both cap alphabetic;
+  /* Ink-centering trim + its mandatory descender allowance, same as
+     .wt-tab-label (see 30-tabs.css for why `ex` and why the padding is not
+     optional). */
+  text-box: trim-both ex alphabetic;
+  padding-block: 0.5em;
 }
 
 /* Keyboard button: hidden until a keyboardToggle is wired; filled while the key
@@ -429,8 +432,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* Ink-centering trim, same as .wt-tab-label (see 30-tabs.css). */
-  text-box: trim-both cap alphabetic;
+  /* Ink-centering trim + its mandatory descender allowance, same as
+     .wt-tab-label (see 30-tabs.css for why `ex` and why the padding is not
+     optional). */
+  text-box: trim-both ex alphabetic;
+  padding-block: 0.5em;
 }
 
 /* The close sits flush at the row's right edge (no gap), vertically centered. */
