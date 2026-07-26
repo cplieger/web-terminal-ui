@@ -38,19 +38,16 @@
 
 import type { TerminalFeature } from "../kernel/types.js";
 import type { ClipboardApi } from "./clipboard.js";
-import { placeMenuAt } from "./menu-position.js";
+import { createClickSwallow, placeMenuAt } from "./menu-position.js";
 
 // Slightly longer than the browser's ~500ms native long-press so a native word
 // selection (which we defer to) has registered — and fired selectionchange —
 // before this fires.
 const LONG_PRESS_MS = 550;
 const LONG_PRESS_MOVE_PX = 10;
-// Viewport clamping + the flip-above-the-fingertip gap live in the shared
-// point-anchored positioner (menu-position.ts), shared with the tab menu.
-// After a touch long-press opens the menu, swallow the trailing click/tap that
-// the same gesture emits on finger-release for this window, so the menu does not
-// immediately dismiss itself (the classic contextmenu-then-touchend race).
-const SWALLOW_MS = 350;
+// Viewport clamping, the flip-above-the-fingertip gap, and the trailing-click
+// swallow all live in the shared point-anchored menu module (menu-position.ts),
+// shared with the tab menu.
 
 export interface ContextMenuOptions {
   /** The clipboard feature value, so the menu can offer Copy/Paste through its
@@ -98,8 +95,8 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
       // Computed once: on an Apple touch device, defer a touch contextmenu to
       // native text selection (see isAppleTouchDevice).
       const appleTouch = isAppleTouchDevice();
-      // Timestamp until which a document click is swallowed (see SWALLOW_MS).
-      let swallowUntil = 0;
+      // Swallows the trailing click a touch long-press emits on release.
+      const swallow = createClickSwallow();
       // A native selection was made during the current touch press (tracked via
       // selectionchange). Gates the touch menu: a selected long-press belongs to
       // the native callout, an empty one to us (Paste).
@@ -212,9 +209,9 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         menu.classList.add("visible");
         placeMenuAt(menu, x, y);
         // A touch long-press is immediately followed by a synthetic click on
-        // release; swallow it so the menu stays open (see SWALLOW_MS).
+        // release; swallow it so the menu stays open.
         if (touch) {
-          swallowUntil = performance.now() + SWALLOW_MS;
+          swallow.arm();
         }
       }
 
@@ -295,7 +292,7 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
 
       const onDocClick = (): void => {
         // Swallow the release click of the long-press that just opened the menu.
-        if (performance.now() < swallowUntil) {
+        if (swallow.swallowing()) {
           return;
         }
         hide();
