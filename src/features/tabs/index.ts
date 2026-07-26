@@ -79,7 +79,8 @@ const TAB_DRAG_TYPE = "application/x-web-terminal-tab";
 // terminal context menu (formerly two hand-synced copies of the same math).
 
 export interface TabsApi {
-  /** Spawn a fresh session and switch to it. */
+  /** Spawn a fresh session and switch to it. Calls made while a create is in
+   *  flight share that create, so one gesture opens exactly one terminal. */
   create(): Promise<void>;
   /** Close a session (kills its process) and drop its tab + cache. */
   close(id: string): Promise<void>;
@@ -297,7 +298,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // the FIRST tap to blur the input (so "+" only fired create on the second
         // tap — the reported double-tap). preventDefault on pointerdown fires the
         // action on the first tap; switchTo then re-focuses the input for the new
-        // tab on a physical-keyboard device.
+        // tab (see focusAfterSwitch). It does NOT make one press one activation —
+        // that is create()'s in-flight coalescing, for the opposite failure.
         btn.addEventListener("pointerdown", (e) => {
           e.preventDefault();
         });
@@ -657,8 +659,58 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
+      const termInput = (): HTMLElement | null =>
+        ctx.surface().querySelector<HTMLElement>(".term-input");
       function focusInput(): void {
-        ctx.surface().querySelector<HTMLElement>(".term-input")?.focus({ preventScroll: true });
+        termInput()?.focus({ preventScroll: true });
+      }
+
+      // Did the terminal input own the keyboard when the pointer press now being
+      // handled began? A press on tab chrome focuses the control it landed on
+      // (the browser's mousedown default action), so by the time the click
+      // handler runs the input is already blurred and only a pointerdown-time
+      // snapshot still knows where the keyboard came from. Recorded for the whole
+      // chrome by the two pointerdown listeners below (the strip and the
+      // switcher), not per control: chips come and go with sessions, and the fact
+      // belongs to the gesture rather than to what it hit.
+      let inputFocusedAtPress = false;
+      function noteChromePress(): void {
+        const el = termInput();
+        inputFocusedAtPress = el !== null && document.activeElement === el;
+      }
+      function keyboardParkedOnChrome(): boolean {
+        const active = document.activeElement;
+        return active !== null && (bar.contains(active) || switcher.contains(active));
+      }
+
+      // focusAfterSwitch applies the tab-switch focus rule. Two independent
+      // reasons to hand the keyboard to the terminal input:
+      //
+      //  - A physical keyboard is (likely) present, so a switch should leave you
+      //    able to type at once, with no extra tap (the iPad + Magic Keyboard
+      //    ask). Skipped on a keyboard-less touchscreen, or every switch would
+      //    pop the virtual keyboard (#7).
+      //  - The press that drove this switch took the keyboard OFF the terminal —
+      //    it focused the chip (or the x, or a switcher row) it pressed, and the
+      //    keyboard is still parked there. Handing it back is not NEW focus, so
+      //    it pops no soft keyboard: it restores what the press displaced. Both
+      //    halves are required for exactly that reason — a switch with no press
+      //    behind it (a remote adopt, ensureActive), or a press on a device where
+      //    the input was not focused to begin with, must not summon a keyboard.
+      //    Leaving the keyboard parked on a chip is not neutral either: the
+      //    strip's own keydown handling reads arrows as "switch tab" and Delete
+      //    as "close tab", so every keystroke meant for the terminal is eaten.
+      //
+      // Never while a rename field is open: it owns the keyboard until it closes,
+      // and a switch (the leading click of a double-click, a remote-driven
+      // ensureActive) would otherwise yank the caret out of the field.
+      function focusAfterSwitch(): void {
+        if (editingId !== null) {
+          return;
+        }
+        if (physicalKeyboardLikely() || (inputFocusedAtPress && keyboardParkedOnChrome())) {
+          focusInput();
+        }
       }
 
       // paintActive updates the desktop strip's active state. When the ACTIVE
@@ -1249,6 +1301,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       function switchTo(id: string, dir?: "next" | "prev"): void {
         if (id === activeId) {
+          // Already active, so there is no switch to perform — but the FOCUS rule
+          // still owes an answer, because the press that delivered this click has
+          // already moved the keyboard onto the chip. Two pointer paths land here:
+          // clicking the tab that is already active, and the SECOND activation of
+          // one press on another tab (see create() for the evidence that this
+          // device delivers those). The first activation switches and focuses the
+          // terminal; the second one's mousedown re-focuses the chip and then fell
+          // out here with the keyboard stranded on it — the reported "the
+          // invisible input loses focus when I click another tab", and the same
+          // hole a plain mouse click on the active tab hit on every platform.
+          focusAfterSwitch();
           return;
         }
         const next = tabList.find((t) => t.id === id);
@@ -1339,16 +1402,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
         });
         ctx.announce(`Switched to ${next.display}`);
-        if (physicalKeyboardLikely() && editingId === null) {
-          // A physical keyboard is (likely) present, so focus the input on
-          // switch — switch and type immediately (the iPad + Magic Keyboard
-          // ask). On a keyboard-less touchscreen this is skipped, or every
-          // switch would pop the virtual keyboard (#7). Skipped entirely while a
-          // rename field is open: a switch (e.g. the leading click of a
-          // double-click, or a remote-driven ensureActive) would otherwise yank
-          // the caret out of the field the user is typing in.
-          focusInput();
-        }
+        focusAfterSwitch();
       }
 
       // armCatchup shows the "catching up" cue only if the resume delta has not
@@ -1590,7 +1644,28 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      async function create(): Promise<void> {
+      // create is the coalesced door: while one create is in flight, every caller
+      // asking for another gets THAT one, so a single gesture can only ever open
+      // one terminal. Spawning a session is expensive and non-idempotent, and one
+      // press does not reliably arrive as one activation — the web-terminal-kiro
+      // server logged two POST /api/sessions 0-3ms apart (three times in one
+      // afternoon, both answered 201) for single "+" taps from an iPad + Magic
+      // Keyboard, so the user got two terminals and had to close one. Sharing the
+      // in-flight promise needs no threshold to make that decision, unlike a
+      // click-level debounce: a duplicate activation lands while the POST is still
+      // open and collapses into it, while a deliberate second tap (the POST
+      // resolves in milliseconds) still opens a second terminal. It also stops "+"
+      // mashing from queueing sessions across the server's 503 install window,
+      // where createSessionHonouringRetry legitimately waits minutes.
+      let creating: Promise<void> | null = null;
+      function create(): Promise<void> {
+        creating ??= openNewSession().finally(() => {
+          creating = null;
+        });
+        return creating;
+      }
+
+      async function openNewSession(): Promise<void> {
         let info: SessionInfo;
         try {
           info = await createSessionHonouringRetry(api, ctx, () => tornDown);
@@ -2041,15 +2116,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const menuSwallow = createClickSwallow();
       let menuTouch = false;
       // One listener on the bar rather than one per chip: chips are created and
-      // destroyed as sessions come and go, and the pointer type belongs to the
-      // gesture, not to a chip.
+      // destroyed as sessions come and go, and both facts recorded here (the
+      // gesture's pointer type, and whether it took the keyboard off the
+      // terminal) belong to the gesture, not to a chip.
       bar.addEventListener(
         "pointerdown",
         (e) => {
           menuTouch = e.pointerType === "touch";
+          noteChromePress();
         },
         { passive: true },
       );
+      // The switcher's half of that snapshot (its rows and the x are buttons, so
+      // pressing one focuses it and blurs the terminal exactly as a chip does).
+      switcher.addEventListener("pointerdown", noteChromePress, { passive: true });
       function hideTabMenu(): void {
         tabMenu.classList.remove("visible");
         tabMenu.replaceChildren();

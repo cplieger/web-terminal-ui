@@ -396,6 +396,112 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s-new");
   });
 
+  it("opens one terminal when one press delivers two + activations", async () => {
+    // iPadOS can deliver two activations for a single press on the strip (the
+    // web-terminal-kiro server logged two POST /api/sessions 0-3ms apart for one
+    // "+" tap), which used to spawn two sessions. Unique POST ids so a second
+    // create cannot hide behind the shared-id dedup in create().
+    let posts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string | URL, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (method === "POST") {
+          posts += 1;
+          return Promise.resolve(
+            jsonResponse(
+              { id: `s-dup${String(posts)}`, title: "", createdAt: "3", status: "idle" },
+              201,
+            ),
+          );
+        }
+        if (method === "DELETE") {
+          return Promise.resolve(jsonResponse(null, 204));
+        }
+        return Promise.resolve(jsonResponse(listBody, 200));
+      }),
+    );
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const plus = root.querySelector<HTMLElement>(".wt-tab-new");
+    plus?.click();
+    plus?.click();
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+    // Let any second create that slipped the guard land before asserting.
+    await until(() => posts > 1, 5);
+
+    expect(posts).toBe(1);
+    expect(root.querySelectorAll(".wt-tab").length).toBe(3);
+
+    // A deliberate second press, once the first create has resolved, still opens
+    // a second terminal: the guard is the in-flight window, not a rate limit.
+    plus?.click();
+    await until(() => root.querySelectorAll(".wt-tab").length === 4);
+    expect(posts).toBe(2);
+  });
+
+  it("hands the keyboard back to the terminal when a press re-selects the active tab", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const input = root.querySelector<HTMLElement>(".term-input");
+    const active = root.querySelector<HTMLElement>(".wt-tab-active");
+    expect(input).toBeTruthy();
+    expect(active).toBeTruthy();
+    input?.focus();
+    // happy-dom runs no browser default actions, so play the one that matters:
+    // a pointer press focuses the chip it lands on, blurring the terminal input.
+    active?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    active?.focus();
+    expect(document.activeElement).toBe(active);
+
+    active?.click(); // switchTo bails (already active) — the focus rule must not
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("restores keyboard focus a chip press displaced, without summoning it", async () => {
+    // A coarse-pointer device with no keyboard attached: focus-on-switch is off
+    // (it would pop the soft keyboard), so the only thing that may move the
+    // keyboard is putting back what the press itself took.
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+      })),
+    );
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const input = root.querySelector<HTMLElement>(".term-input");
+    const [first, second] = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
+    expect(second).toBeTruthy();
+
+    // Press with the terminal focused: the switch hands the keyboard back.
+    input?.focus();
+    second?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    second?.focus();
+    second?.click();
+    expect(document.activeElement).toBe(input);
+
+    // Press with the terminal NOT focused (nothing to restore): the switch
+    // leaves the keyboard alone rather than opening the soft keyboard.
+    document.body.focus();
+    first?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    first?.focus();
+    first?.click();
+    expect(document.activeElement).toBe(first);
+  });
+
   it("renders the + button as a fixed bar item outside the scrolling tab list", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
