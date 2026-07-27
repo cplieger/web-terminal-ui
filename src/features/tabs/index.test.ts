@@ -843,6 +843,27 @@ describe("tabs feature", () => {
     expect(menuItem(items, "Close to the left")?.disabled).toBe(false);
   });
 
+  it("survives the terminal auto-scrolling under it, and closes when the strip scrolls", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const menu = root.querySelector(".wt-tab-menu");
+    openTabMenu(root, 0);
+    expect(menu?.classList.contains("visible")).toBe(true);
+
+    // A background agent printing into the TUI scrolls the terminal surface to
+    // the bottom on every chunk. That scroll moves neither the menu (placed
+    // root-relative) nor the chip it is anchored to, so it must not dismiss.
+    root.querySelector(".term")?.dispatchEvent(new Event("scroll"));
+    expect(menu?.classList.contains("visible")).toBe(true);
+
+    // The strip's own scroller DOES move the anchor chip out from under the menu.
+    root.querySelector(".wt-tab-scroll")?.dispatchEvent(new Event("scroll"));
+    expect(menu?.classList.contains("visible")).toBe(false);
+  });
+
   it("closes all other tabs from the context menu (Close others)", async () => {
     vi.stubGlobal("confirm", () => true);
     listBody = [

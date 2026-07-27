@@ -2445,8 +2445,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           void close_(activeId);
         }
       });
-      // Dismiss the tab context menu on an outside click, on Escape, and on
-      // scroll (it is anchored to a viewport point, so a scroll would detach it).
+      // Dismiss the tab context menu on an outside click, on Escape, and on a
+      // scroll of the strip itself (which moves the chip the menu is anchored to).
       const onDocClickMenu = (): void => {
         // The trailing click of the long-press that just opened the menu is that
         // gesture's own release, not a click-away.
@@ -2466,8 +2466,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       };
       document.addEventListener("contextmenu", onDocContextMenu);
-      const onScrollMenu = (): void => {
-        hideTabMenu();
+      // Only a scroll that moves the menu's ANCHOR dismisses it, which is the
+      // strip's own horizontal scroller and nothing else: the menu is placed
+      // root-relative (menu-position.ts rebases onto the offsetParent), so any
+      // scroll that moves .wt-root moves the menu with it, and the terminal's
+      // scroller does not move the chip at all.
+      //
+      // The target check is load-bearing, not a micro-optimization. This listener
+      // is capture-phase on window, so it sees EVERY scroll in the document —
+      // including the terminal surface auto-scrolling to the bottom on each chunk
+      // of output. Without the check, an agent printing into the TUI closed the
+      // tab menu within a frame of it opening, which is unusable on exactly the
+      // screen the menu exists for (a busy multi-agent strip).
+      const onScrollMenu = (e: Event): void => {
+        const target = e.target;
+        if (target instanceof Element && target.closest(".wt-tab-scroll")) {
+          hideTabMenu();
+        }
       };
       window.addEventListener("scroll", onScrollMenu, true);
       const offMenuKey = ctx.registerKeydown((ev) => {
