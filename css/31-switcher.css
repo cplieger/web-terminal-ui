@@ -148,7 +148,7 @@
   color: color-mix(in oklch, var(--text) 55%, transparent);
 }
 
-@media (hover: hover) {
+@media (any-hover: hover) {
   :where(.wt-root) .wt-switcher-current-close:hover {
     color: var(--text);
   }
@@ -216,10 +216,11 @@
   overflow: hidden;
 }
 
-/* Hover wash like the switch and "+" buttons beside it; gated to real hover
-   pointers for the same reason they are (a sticky :hover after a tap). Before
-   .wt-active / .wt-armed so those fills win on a hovered button. */
-@media (hover: hover) {
+/* Hover wash like the switch and "+" buttons beside it; gated on any-hover for
+   the same reason they are (see the note in 10-primitives.css — this whole
+   subtree renders only on a coarse pointer, where hover: hover is always false).
+   Before .wt-active / .wt-armed so those fills win on a hovered button. */
+@media (any-hover: hover) {
   :where(.wt-root) .wt-switcher-kb:hover {
     background: var(--tab-hover-bg);
   }
@@ -292,7 +293,7 @@
   pointer-events: none;
 }
 
-@media (hover: hover) {
+@media (any-hover: hover) {
   :where(.wt-root) .wt-switcher-switch:hover {
     background: var(--tab-hover-bg);
   }
@@ -320,15 +321,17 @@
 }
 
 /* Mobile "+": the primary action, carried in the accent colour so it reads as
-   permanent and prominent. Hover fill is gated to real hover pointers: on touch,
-   :hover sticks after a tap (no pointer-leave), so the purple would linger — the
-   press feedback there comes from :active, which clears on release. */
+   permanent and prominent. Hover fill is gated on any-hover (see the note in
+   10-primitives.css): on a bare touchscreen any-hover is none, so the purple
+   cannot linger after a tap and the press feedback comes from :active; a trackpad
+   or Pencil reports hover and gets the wash, which a (hover: hover) gate denied it.
+   */
 :where(.wt-root) .wt-switcher-new {
   flex: none;
   color: var(--accent);
 }
 
-@media (hover: hover) {
+@media (any-hover: hover) {
   :where(.wt-root) .wt-switcher-new:hover {
     background: var(--tab-hover-bg);
   }
@@ -418,7 +421,7 @@
   overflow: hidden;
 }
 
-@media (hover: hover) {
+@media (any-hover: hover) {
   :where(.wt-root) .wt-switcher-row-select:hover {
     background: color-mix(in oklch, var(--tab-bg), var(--text) 15%);
   }
@@ -458,10 +461,13 @@
   color: color-mix(in oklch, var(--text) 55%, transparent);
 }
 
-/* Hover only on real hover pointers: on touch, :hover sticks after a tap, so
-   when closing a tab shifts the list under the finger the newly-under close
-   would latch white. Touch feedback comes from the surrounding row's :active. */
-@media (hover: hover) {
+/* Hover gated on any-hover (see the note in 10-primitives.css): on a bare
+   touchscreen any-hover is none, so when closing a tab shifts the list under the
+   finger the newly-under close cannot latch white, and the feedback comes from the
+   surrounding row's :active. A trackpad or Pencil reports hover and gets the
+   brighten, which a (hover: hover) gate denied it — this subtree only ever renders
+   on a coarse-primary device. */
+@media (any-hover: hover) {
   :where(.wt-root) .wt-switcher-row-close:hover {
     color: var(--text);
   }

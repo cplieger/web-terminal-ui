@@ -42,6 +42,33 @@
   background: var(--text-active);
 }
 
+/* ===== Hover gating: any-hover, never hover =====
+   Every gated hover rule in this package uses @media (any-hover: hover). Do not
+   write @media (hover: hover) here.
+
+   What the gate is for: a bare touchscreen fires no pointer-leave, so a tapped
+   control keeps its :hover wash until the next tap somewhere else. What went
+   wrong: `hover` and `pointer` describe only the PRIMARY input, and iPadOS
+   reports hover: none / pointer: coarse whether or not a Magic Keyboard trackpad
+   is attached. So (hover: hover) is false on every touch-primary device,
+   INCLUDING the ones driving a real pointer.
+
+   For the coarse-only controls that made the gate not a tradeoff but a deletion,
+   and it shipped that way: .wt-tab-kb renders only under @media (pointer: coarse)
+   (30-tabs.css) and the whole .wt-switcher subtree only under (pointer: coarse)
+   plus .wt-narrow (31-switcher.css). Pairing either with (hover: hover) makes the
+   two conditions complementary, so the hover rule was unreachable on every device
+   that exists. Measured against the deployed bundle at iPad width: the keyboard
+   button is a visible 44x44 while a forced :hover leaves its background at
+   rgba(0, 0, 0, 0), where the ungated .wt-tab-new beside it resolves to
+   --tab-active-bg.
+
+   `any-hover` asks the question the gate meant to ask — can ANY attached device
+   hover — so a bare iPhone/iPad still answers none (no wash, nothing to stick)
+   while a trackpad or Pencil answers hover and brings a real pointer-leave with
+   it. Same defect class as Tailwind's hoverOnlyWhenSupported
+   (tailwindlabs/tailwindcss#11109). */
+
 /* Keyboard-focus ring for every chrome control (all interactive chrome is a
    real <button>: tabs, +, keyboard, switcher rows, menu items, the FAB).
    :focus-visible only — a tap/click never shows the ring (the UA heuristic),
@@ -147,7 +174,7 @@
   font-weight: 600;
 }
 
-@media (hover: hover) {
+@media (any-hover: hover) {
   :where(.wt-root) .wt-fatal-reload:hover {
     background: color-mix(in oklch, var(--accent), var(--text) 12%);
   }
