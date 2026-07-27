@@ -12,7 +12,7 @@ The reference touch-first browser UI for
 It turns the engine's render/scroll/connection/keyboard modules into a usable
 terminal on a phone as well as a desktop.
 
-One `createTerminal(root, { features })` call builds the entire terminal UI
+One `createTerminal(target, { features })` call builds the entire terminal UI
 inside a single container element you provide. A small always-present kernel
 composes with opt-in feature modules that own everything above the raw
 terminal:
@@ -54,7 +54,7 @@ through its connection banner.
 
 Serve a CSS bundle matching how you embed the terminal, plus a minimal HTML
 page that has one empty container element, then call
-`createTerminal(root, { features })` from your entry module.
+`createTerminal(target, { features })` from your entry module.
 
 **Full-page host** (the terminal IS the page, as in `web-terminal-server` and
 `web-terminal-kiro`): concatenate `css/MANIFEST` into the `style.css` your page
@@ -88,17 +88,20 @@ entry modules beside it:
 <script type="module">
   import { createTerminal } from "@cplieger/web-terminal-ui";
   import { presetTabbed } from "@cplieger/web-terminal-ui/presets";
-  createTerminal(document.getElementById("terminal"), {
-    features: presetTabbed(),
+  createTerminal("#terminal", {
+    features: presetTabbed,
     loading: document.getElementById("loading"),
   });
   // or, for a server that exposes the WebSocket elsewhere / a custom font:
-  // createTerminal(root, { features: presetTabbed(), wsPath: "/api/shell/ws", fontReady: '14px "MyMono"' });
+  // createTerminal("#terminal", { features: presetTabbed, wsPath: "/api/shell/ws", fontReady: '14px "MyMono"' });
 </script>
 ```
 
-`createTerminal(root, opts?)` builds the entire terminal subtree (the kernel
-plus every feature's chrome) inside `root` itself. There is no element-id
+`createTerminal(target, opts?)` builds the entire terminal subtree (the kernel
+plus every feature's chrome) inside the target element itself. `target` is a CSS
+selector or an element: pass a **selector** from a page (`"#terminal"`) and pass
+an **element** only when you already hold one you created yourself. The
+difference matters — see "Startup failures" below. There is no element-id
 contract for the host page to reproduce, and every style and CSS custom
 property is scoped to the `wt-root` class it stamps on your element (removed
 again by `destroy()`). Call it exactly once; the engine's
@@ -138,7 +141,7 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
 
 | Option         | Default                    | Purpose                                                                                                                                                                                                                                                                                       |
 | -------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `features`     | _(none; bare kernel)_      | The feature list. Omitted or empty builds only the terminal (no chrome). Use a preset from `./presets` or a hand-picked array.                                                                                                                                                                |
+| `features`     | _(none; bare kernel)_      | A FUNCTION returning the feature list. Omitted builds only the terminal (no chrome). Pass a preset by name (`features: presetTabbed`) or a factory of your own; it is called inside the startup-failure boundary, so a preset that throws is handled rather than escaping.                    |
 | `layout`       | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                |
 | `wsPath`       | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                               |
 | `fontReady`    | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                                                                   |
@@ -154,20 +157,49 @@ screen without injecting keystrokes (send a redraw keystroke yourself if you
 want one, for example Ctrl+L); and `destroy()` tears every feature down and
 releases the kernel.
 
-Startup can fail in two phases, and both end at the same recovery surface. If a
-feature's setup throws or rejects (`phase: "feature-setup"`), the kernel stops the
-connection, tears down every completed feature and core listener, clears the
-broken subtree, and shows a reload surface. If `createTerminal` itself throws
-(`phase: "kernel-init"` — an invalid feature list, a DOM invariant), it shows the
-same surface, lowers your loading overlay so the surface is visible, and then
-rethrows, so a caller with its own error handling still sees the error. Either
-way the surface is modal when the terminal owns the viewport and non-modal when
-it fills an embedded container.
+### Startup failures
+
+You do not need your own startup-failure UI. Every way starting up can fail ends
+at one recovery surface this package owns — a "Terminal failed to start" panel
+with a Reload button — and your loading overlay is lowered so that panel is
+visible.
+
+Two phases can fail. If a feature's setup throws or rejects
+(`phase: "feature-setup"`), the kernel stops the connection, tears down every
+completed feature and core listener, clears the broken subtree, and shows the
+panel. If `createTerminal` itself throws (`phase: "kernel-init"` — an
+unresolvable mount selector, a preset that throws, an invalid feature list, a DOM
+invariant), it shows the same panel and then rethrows, so a caller with its own
+error handling still sees the error. Either way the panel is modal when the
+terminal owns the viewport and non-modal when it fills an embedded container.
+
+**This is why `target` takes a selector and `features` takes a function.** Both
+are resolved INSIDE that boundary. Written the other way round —
+`createTerminal(document.getElementById("terminal"), { features: presetTabbed() })`
+— the lookup and the preset call both happen at your call site, before
+`createTerminal` is entered, so a missing element or a throwing preset escapes
+the library entirely and leaves the page spinning under your overlay with nothing
+but a console error. Those were the two failures every consumer used to
+hand-build its own dialog for.
+
+One case has no panel by design: an embedded terminal (`layout: "container"`)
+whose mount target does not exist. It is one panel inside a host application that
+is otherwise working, so claiming the viewport to report its own failure would
+break a healthy page. The failure is still delivered to `onFatalError` and still
+rethrown, with `surface: undefined` to say there is nowhere to render.
 
 `onFatalError` receives the failure after cleanup. Discriminate on `phase`:
 `feature-setup` names the offending `feature`, `kernel-init` does not, because
-feature composition never began. Return `true` only when the host has rendered
-replacement recovery UI into the terminal root.
+feature composition never began. `surface` names the element the built-in panel
+would fill, and is the element to render into if you claim it. Return `true` only
+when you have rendered replacement recovery UI there.
+
+If your page also carries an inline bootstrap watchdog — a script that reports
+"the JS bundle never loaded at all", a rung below `import` — it cannot import
+anything by definition. Take its wording from `STARTUP_FAILURE_COPY` (exported at
+the package root and at `@cplieger/web-terminal-ui/startup-copy`, which imports
+nothing and touches no DOM so a build script can read it) and substitute the
+strings into your HTML at build time, rather than restating them by hand.
 
 ## What ships
 

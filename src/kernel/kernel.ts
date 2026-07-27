@@ -28,6 +28,7 @@ import { createBus } from "./bus.js";
 import { createRegions } from "./regions.js";
 import { createAnnouncer, createTablist } from "./a11y.js";
 import { createConnState } from "./conn-state.js";
+import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
 import type {
   CreateTerminalOptions,
   FeatureInstance,
@@ -111,7 +112,11 @@ function fadeOutOverlay(ld: HTMLElement | undefined): void {
  *  implementation of this surface, shared by the async `feature-setup` phase and
  *  the synchronous `kernel-init` phase, so the two can never drift apart. It
  *  depends on nothing but its two arguments. */
-function renderFatalStartupInto(root: HTMLElement, layoutMode: "viewport" | "container"): void {
+function renderFatalStartupInto(
+  root: HTMLElement,
+  layoutMode: "viewport" | "container",
+  message: string = STARTUP_FAILURE_COPY.message,
+): void {
   const surface = document.createElement("section");
   surface.className = "wt-fatal";
   surface.setAttribute("role", "alertdialog");
@@ -129,19 +134,19 @@ function renderFatalStartupInto(root: HTMLElement, layoutMode: "viewport" | "con
   const title = document.createElement("h2");
   title.id = "wt-fatal-title";
   title.className = "wt-fatal-title";
-  title.textContent = "Terminal failed to start";
-  const message = document.createElement("p");
-  message.id = "wt-fatal-message";
-  message.className = "wt-fatal-message";
-  message.textContent = "A required interface could not be loaded. Reload the page to try again.";
+  title.textContent = STARTUP_FAILURE_COPY.title;
+  const messageEl = document.createElement("p");
+  messageEl.id = "wt-fatal-message";
+  messageEl.className = "wt-fatal-message";
+  messageEl.textContent = message;
   const reloadButton = document.createElement("button");
   reloadButton.className = "wt-btn wt-fatal-reload";
   reloadButton.type = "button";
-  reloadButton.textContent = "Reload page";
+  reloadButton.textContent = STARTUP_FAILURE_COPY.reloadLabel;
   reloadButton.addEventListener("click", () => {
     window.location.reload();
   });
-  card.append(title, message, reloadButton);
+  card.append(title, messageEl, reloadButton);
   surface.appendChild(card);
   root.replaceChildren(surface);
 
@@ -153,10 +158,13 @@ function renderFatalStartupInto(root: HTMLElement, layoutMode: "viewport" | "con
 
 /** Build the terminal. See createTerminal, which wraps this to give a
  *  SYNCHRONOUS failure the same recovery surface an async one already gets. */
-function buildTerminal(root: HTMLElement, opts: CreateTerminalOptions = {}): TerminalHandle {
+function buildTerminal(
+  root: HTMLElement,
+  opts: CreateTerminalOptions,
+  featureList: readonly TerminalFeature<unknown>[],
+): TerminalHandle {
   const wsPath = opts.wsPath ?? DEFAULT_WS_PATH;
   const fontReady = opts.fontReady ?? DEFAULT_FONT_READY;
-  const featureList = opts.features ?? [];
   // At most one feature owns session selection (fail fast, before any DOM
   // work): the kernel drives the first connect through its registration.
   const owners = featureList.filter((f) => f.sessionOwner !== undefined);
@@ -945,7 +953,8 @@ function buildTerminal(root: HTMLElement, opts: CreateTerminalOptions = {}): Ter
 
     let handled = false;
     try {
-      handled = opts.onFatalError?.({ phase: "feature-setup", feature, cause }) === true;
+      handled =
+        opts.onFatalError?.({ phase: "feature-setup", feature, cause, surface: root }) === true;
     } catch (handlerErr) {
       console.error("web-terminal-ui: onFatalError handler failed", handlerErr);
     }
@@ -1099,35 +1108,113 @@ function buildTerminal(root: HTMLElement, opts: CreateTerminalOptions = {}): Ter
  *  as before, only now against a page that is no longer stuck on a spinner. A
  *  handler returning `true` suppresses the built-in surface, same contract as the
  *  async phase. */
+/** Resolve the mount target. A selector is looked up here, INSIDE
+ *  createTerminal's try, which is the whole point: a consumer that passed
+ *  `document.getElementById("terminal")` had to null-check it first (tsc forces
+ *  that), and the only thing it could do in the null branch was hand-build a
+ *  startup-failure surface this library already owns. Taking the selector moves
+ *  that failure inside the boundary and deletes the consumer's branch.
+ *
+ *  An element is still accepted, because an embedder that CREATED the element
+ *  already holds a non-null reference and asking it to invent a selector for its
+ *  own div would be worse. The trap was never "passing an element", it was
+ *  "passing the result of a lookup". */
+function resolveRoot(target: HTMLElement | string): HTMLElement {
+  if (typeof target !== "string") {
+    return target;
+  }
+  const found = document.querySelector(target);
+  if (found === null) {
+    throw new Error(`web-terminal-ui: no element matches the mount selector ${target}`);
+  }
+  if (!(found instanceof HTMLElement)) {
+    // An SVG or MathML element can match a selector but cannot host the terminal
+    // (no style/classList contract this kernel relies on). Fail with the reason
+    // rather than crashing later on a missing property.
+    throw new Error(`web-terminal-ui: the mount selector ${target} matched a non-HTML element`);
+  }
+  return found;
+}
+
+/** Build the feature list. `features` is a FUNCTION so a preset that throws does
+ *  so inside createTerminal's try. As an eagerly-evaluated array argument
+ *  (`features: presetTabbed()`) the throw happened at the CALL SITE, before this
+ *  function's boundary existed, which is why a consumer had to wrap the preset
+ *  call in its own try/catch and render its own surface. One character of
+ *  laziness moves that failure inside. */
+function resolveFeatures(
+  features: CreateTerminalOptions["features"],
+): readonly TerminalFeature<unknown>[] {
+  return features === undefined ? [] : features();
+}
+
+/** Create the host element the recovery surface uses when the mount target could
+ *  not be resolved at all.
+ *
+ *  It is a NEW element appended to the body, never the body itself: .wt-root
+ *  carries the token defaults, box-sizing, color-scheme and scrollbar treatment,
+ *  and .wt-viewport carries `position: fixed; inset: 0` — stamping those on a
+ *  host application's own body would reformat a page that is otherwise perfectly
+ *  healthy. A dedicated element gets the styling boundary the surface needs
+ *  without touching anything the consumer owns. */
+function createFallbackHost(): HTMLElement {
+  const host = document.createElement("div");
+  host.className = "wt-root wt-viewport";
+  document.body.appendChild(host);
+  return host;
+}
+
 export function createTerminal(
-  root: HTMLElement,
+  target: HTMLElement | string,
   opts: CreateTerminalOptions = {},
 ): TerminalHandle {
+  const layoutMode = opts.layout ?? "viewport";
+  // Declared outside the try so the catch can tell "we never resolved a root"
+  // from "we had one and the build failed". The old code read the root straight
+  // from its parameter, so a caller who passed a null root (reachable from any
+  // untyped call site — an inline <script type="module"> never sees tsc) threw a
+  // SECOND error out of the catch itself, losing the real cause and rendering no
+  // surface at all. There is no null root to pass now, and the unresolved case
+  // has an explicit branch below.
+  let root: HTMLElement | undefined;
   try {
-    return buildTerminal(root, opts);
+    root = resolveRoot(target);
+    return buildTerminal(root, opts, resolveFeatures(opts.features));
   } catch (cause) {
-    const layoutMode = opts.layout ?? "viewport";
-    // Stamp the boundary classes before rendering. buildTerminal normally does
-    // this early, but a throw can precede it (the multiple-session-owner guard
-    // fires before any DOM work by design), and every .wt-fatal rule is scoped
-    // :where(.wt-root) -- so without this the recovery surface would render
-    // completely unstyled exactly when it matters most. Idempotent when
-    // buildTerminal already stamped them.
-    root.classList.add("wt-root", layoutMode === "container" ? "wt-container" : "wt-viewport");
+    // Container mode declines the fallback on purpose. An embedded terminal is
+    // one panel inside someone else's working application; if its mount target
+    // is missing, claiming the viewport to say so would break a page that is
+    // otherwise fine — strictly worse than the host app reporting the failure in
+    // the space it owns. The failure is still delivered and still rethrown, so an
+    // embedder is informed, just not overruled. A full-page consumer is the
+    // opposite case: the page IS the terminal, so a blank page with nothing but a
+    // console error is the worst outcome available.
+    const surface = root ?? (layoutMode === "viewport" ? createFallbackHost() : undefined);
+    if (surface !== undefined) {
+      // Stamp the boundary classes before rendering. buildTerminal normally does
+      // this early, but a throw can precede it (the multiple-session-owner guard
+      // fires before any DOM work by design), and every .wt-fatal rule is scoped
+      // :where(.wt-root) -- so without this the recovery surface would render
+      // completely unstyled exactly when it matters most. Idempotent when
+      // buildTerminal already stamped them, and when createFallbackHost did.
+      surface.classList.add("wt-root", layoutMode === "container" ? "wt-container" : "wt-viewport");
+    }
     // The overlay must come down even though nothing was built: it is the
     // consumer's pre-JS spinner, and leaving it up hides the surface below it.
+    // This runs even when no surface is rendered — a spinner over an embedder's
+    // broken panel is a lie either way.
     fadeOutOverlay(opts.loading);
 
     let handled = false;
     try {
-      handled = opts.onFatalError?.({ phase: "kernel-init", cause }) === true;
+      handled = opts.onFatalError?.({ phase: "kernel-init", cause, surface }) === true;
     } catch (handlerErr) {
       // Same posture as the async phase: a reporting failure must not leave the
       // page blank, so fall through to the built-in surface.
       console.error("web-terminal-ui: onFatalError handler failed", handlerErr);
     }
-    if (!handled) {
-      renderFatalStartupInto(root, layoutMode);
+    if (!handled && surface !== undefined) {
+      renderFatalStartupInto(surface, layoutMode);
     }
     throw cause;
   }
