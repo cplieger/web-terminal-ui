@@ -58,10 +58,27 @@
      coincidence of taste, not a dependency.
 
      Working shares the accent's hue family, so on the ACTIVE tab it sits on an
-     accent-derived fill (--tab-active-bg): measured 5.2:1 against it, and 8.0:1
-     against the bar, both clear of the 3:1 non-text minimum. Hue still never
-     carries state on its own (the wave's motion, and the donut it becomes under
-     prefers-reduced-motion, are the non-hue cues per WCAG 1.4.1). */
+     accent-derived fill (--tab-active-bg) rather than on the bar. Measured
+     (sRGB, WCAG 1.4.3 formula, each layer composited over the page's #000):
+     8.0:1 against the bar, but only 2.6:1 against the active-tab fill -- under
+     the 3:1 non-text minimum. This comment previously claimed 5.2:1 for the
+     active-tab case, which was wrong by ~2x; a consumer's code review quoted the
+     figure back as its baseline and built a finding on it, so treat the number
+     here as load-bearing and re-measure rather than adjust it by eye.
+
+     Why it is nevertheless not a 1.4.1 failure, and why the fill is not simply
+     darkened: hue never carries state on its own here -- working is a travelling
+     wave, input a hard 2px ring, done a bare disc, and under
+     prefers-reduced-motion working becomes a donut -- so every state stays
+     distinguishable by shape and motion at any of these ratios. Reaching 3:1 on
+     the fill means dropping the accent fraction below ~25%, which visibly
+     de-themes the active tab; that is a design call for a future release, not a
+     silent token tweak. The dot's contrast against the fill does NOT vary with
+     terminal output: the tabs feature publishes --wt-reserve-bottom and
+     viewport.ts folds it into the terminal's bottom inset, so content stops
+     above the bar and #000 is what composites behind it. The one exception is
+     the mobile switcher tray while EXPANDED, which overlays the terminal by
+     design. */
   --status-working: #52a9fe; /* agent working (waves): the same blue as the default --accent */
   --status-done: #22c55e; /* turn finished: solid green */
   --status-input: #fb923c; /* action required: solid orange + ring */
