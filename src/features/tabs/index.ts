@@ -214,6 +214,14 @@ async function createSessionHonouringRetry(
         ctx.toast(`${waiting}; retrying`, 8000);
         ctx.announce(`${waiting}; retrying`);
       }
+      // Separate from the throttled pair above, and unthrottled: this writes the
+      // reason onto the loading OVERLAY, which is the only surface a user can
+      // actually see before the first frame -- the toast and the banner both live
+      // inside .wt-root and paint under it. It replaces text in place rather than
+      // stacking notifications, so there is no storm to throttle, and repeating
+      // the same string is idempotent. This is what turns the black screen of a
+      // twenty-minute tools install into a screen that says why it is waiting.
+      ctx.loadingReason(`${err.serverMessage ?? "Server is not ready yet"} — retrying…`);
       await new Promise((resolve) => {
         window.setTimeout(resolve, err.retryAfterMs ?? CREATE_RETRY_FALLBACK_MS);
       });
