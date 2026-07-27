@@ -12,26 +12,25 @@
      set). An embedder serves a per-preset manifest (css/MANIFEST.single/
      .touch/.tabbed) instead and passes layout: "container". -->
 <link rel="stylesheet" href="/style.css">
-<!-- [html-validate-disable-next no-style-tag -- critical CSS for instant loading indicator] -->
-<style>
-#loading{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;background:#000;color:var(--accent,#6ea8ff);transition:opacity .3s ease}
-#loading.fade{opacity:0}
-#loading .bar{position:relative;inline-size:min(220px,62vw);block-size:5px;overflow:hidden;border-radius:999px;background:color-mix(in oklch,currentColor 16%,transparent)}
-#loading .bar::before{content:"";position:absolute;inset-block:0;inline-size:42%;border-radius:inherit;background:linear-gradient(90deg,transparent,currentColor 28%,color-mix(in oklch,currentColor,#fff 45%) 50%,currentColor 72%,transparent);filter:drop-shadow(0 0 4px color-mix(in oklch,currentColor 55%,transparent));animation:wt-loading-slide 1.5s cubic-bezier(.65,0,.35,1) infinite}
-@keyframes wt-loading-slide{0%{transform:translateX(-110%)}100%{transform:translateX(250%)}}
-@keyframes wt-loading-pulse{0%,100%{opacity:1}50%{opacity:.55}}
-/* Reduced motion: no translation sweep (the vestibular-trigger class). The bar
-   becomes a full-width solid fill whose only animation is a gentle opacity
-   pulse — liveness stays signaled, nothing moves. */
-@media (prefers-reduced-motion:reduce){#loading .bar::before{inline-size:100%;background:currentColor;filter:none;animation:wt-loading-pulse 2s ease-in-out infinite}}
-</style>
+<!-- No critical CSS for the loading overlay: css/page.css owns .wt-loading and
+     arrives with /style.css above, which is render-blocking, so nothing paints
+     before it either way. A consumer that also wants a failure surface for the
+     case where /style.css itself fails to load adds its own minimal inline block
+     for that (web-terminal-kiro does); a bare host does not need one. -->
 </head>
 <body>
 <!-- createTerminal() builds the entire terminal UI inside this single root
      element. The loading overlay is a sibling (not a child of the root) so it is
-     never cleared; it is faded out once the first frame renders. -->
+     never cleared; it is faded out once the first frame renders.
+     The overlay is styled by css/page.css through the wt-loading* CLASSES, not
+     by its id — recolor it by setting the tokens (--wt-loading-accent,
+     --wt-loading-bg, ...) on this element in your own CSS. role="status" is
+     load-bearing: the kernel writes a progressive status line into it if startup
+     drags on, and that is the channel a screen reader reads. -->
 <div id="terminal"></div>
-<div id="loading" role="status" aria-label="Loading"><div class="bar" aria-hidden="true"></div></div>
+<div id="loading" class="wt-loading" role="status" aria-label="Loading">
+  <div class="wt-loading-bar" aria-hidden="true"></div>
+</div>
 <!-- Deployment-specific: the importmap resolves the bare package specifiers to
      the compiled JS your build emits. Adjust the paths to your build layout. -->
 <script type="importmap">

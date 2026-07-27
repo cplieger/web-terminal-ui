@@ -7,6 +7,7 @@
 // capability lookup) so a feature's public API is held by reference and a peer
 // reads it through a typed token.
 
+import type { LoadingMessages } from "./loading-status.js";
 import type { ScreenMessage, ModesMessage, LineStore } from "@cplieger/web-terminal-engine";
 
 /** Cancels a subscription or registration. Idempotent by convention. */
@@ -220,6 +221,19 @@ export interface TerminalContext {
   /** Announce a message on the single kernel-owned polite (or assertive) live
    *  region, so features do not spawn competing aria-live regions. */
   announce(message: string, politeness?: "polite" | "assertive"): void;
+  /** Report WHY startup is still waiting, onto the consumer's loading overlay.
+   *
+   *  For the window before the first frame, when the overlay covers every
+   *  surface a feature could otherwise speak through: the toast layer and the
+   *  connection banner both live inside .wt-root and paint UNDER it, so a
+   *  feature that retries for minutes has no visible channel without this.
+   *  Supersedes the kernel's own scripted wording (and stops its rotation),
+   *  because a reason the SERVER gave is always better than a guess -- pass the
+   *  server's own message where there is one. Safe to call on every tick of a
+   *  retry loop: an unchanged message is a no-op, so a screen reader is not
+   *  re-read the same sentence every few seconds. Also a no-op once the overlay
+   *  has been dismissed, so a late retry cannot resurrect it. */
+  loadingReason(message: string): void;
   /** The kernel's tablist/tabpanel ARIA controller (used by tabs). */
   tablist(): TablistController;
 
@@ -392,8 +406,17 @@ export interface CreateTerminalOptions {
   wsPath?: string;
   /** CSS font shorthand awaited before the first resize. */
   fontReady?: string;
-  /** Optional pre-JS loading overlay the kernel fades out on first paint. */
+  /** Optional pre-JS loading overlay the kernel fades out on first paint. Give
+   *  it the `wt-loading` class and a `wt-loading-bar` child and css/page.css
+   *  styles it; the kernel also writes a progressive status line into it while
+   *  startup drags on (see kernel/loading-status.ts). */
   loading?: HTMLElement;
+  /** Reword the loading overlay's progressive status text. Partial: anything
+   *  omitted keeps the library default. The wording only ever appears on a SLOW
+   *  start (nothing is written for the first few seconds), so this is about what
+   *  a waiting user reads, not about branding the normal case. A live reason
+   *  pushed by a feature via `ctx.loadingReason` supersedes all of it. */
+  loadingMessages?: Partial<LoadingMessages>;
   /** Observe or replace the kernel's fatal feature-setup surface. Called only
    *  after the live terminal has been completely torn down and its root
    *  cleared. Return true after rendering a replacement recovery surface into

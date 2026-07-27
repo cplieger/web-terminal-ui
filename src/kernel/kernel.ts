@@ -29,6 +29,7 @@ import { createRegions } from "./regions.js";
 import { createAnnouncer, createTablist } from "./a11y.js";
 import { createConnState } from "./conn-state.js";
 import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
+import { attachLoadingStatus, DEFAULT_LOADING_MESSAGES } from "./loading-status.js";
 import type {
   CreateTerminalOptions,
   FeatureInstance,
@@ -333,7 +334,16 @@ function buildTerminal(
   let fontsLoaded = false;
   let wsOpen = false;
   let overlayDismissed = false;
+  // Progressive status text on the consumer's overlay. Attached unconditionally
+  // (inert when no overlay was supplied) and torn down by the same function that
+  // lowers the overlay, so there is exactly one place where the loading screen's
+  // life ends and no timer can outlive the thing it was writing into.
+  const loadingStatus = attachLoadingStatus(opts.loading, {
+    ...DEFAULT_LOADING_MESSAGES,
+    ...opts.loadingMessages,
+  });
   function dismissLoadingOverlay(): void {
+    loadingStatus.stop();
     const ld = opts.loading;
     if (!ld || overlayDismissed) {
       return;
@@ -851,6 +861,13 @@ function buildTerminal(
       toast,
       announce: (message, politeness) => {
         announcer.announce(message, politeness);
+      },
+      loadingReason: (message) => {
+        // No overlayDismissed guard needed: loadingStatus.stop() runs in
+        // dismissLoadingOverlay and every method is inert afterwards, so the
+        // "a late retry cannot resurrect the overlay" contract holds in ONE
+        // place rather than at each caller.
+        loadingStatus.reason(message);
       },
       tablist: () => tablistController,
       layout: () => ({

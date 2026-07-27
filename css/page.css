@@ -39,6 +39,173 @@ body {
   touch-action: pan-x pan-y;
 }
 
+/* ===== The pre-JS loading overlay =====
+   ONE definition of the loading screen, owned here. Before this, the library
+   only PRESCRIBED it in scaffold/index.html and every full-page consumer carried
+   its own copy in an inline <style> — web-terminal-server's was byte-identical to
+   the scaffold's, web-terminal-kiro's had drifted (renamed keyframe, extra
+   states) — so the "one" loading screen existed three times and none of them
+   could be improved without editing three files.
+
+   Why it can live in a stylesheet at all, since the overlay's whole job is to be
+   on screen before the app is: a full-page host loads this bundle through a plain
+   render-blocking <link rel="stylesheet"> in <head>, so NOTHING paints until it
+   arrives. An inline copy buys no earlier paint. What an inline copy does buy is
+   the case where this stylesheet FAILS to load, which a consumer's own bootstrap
+   watchdog reports — so a consumer keeps a deliberately minimal inline fallback
+   for that failure surface only, not a second copy of everything below.
+
+   Consumer overrides work the same way the component tokens do, except simpler:
+   the overlay is the consumer's OWN element, so it sets the tokens on #loading in
+   its own CSS and needs no JS. web-terminal-kiro already did exactly this with
+   --accent before any of this was tokenised.
+
+   Selected by CLASS, never by the consumer's `id`: the library owns .wt-loading*
+   and must not reach into a host document's own identifiers (the same
+   no-element-id-contract rule the kernel follows for the terminal subtree), and
+   an unnamespaced `.bar` in a host page would collide with anything. */
+.wt-loading {
+  /* The overlay's accent: the bar and the status text derive from it, so one
+     override recolors the whole screen. Defaults to the component --accent
+     (00-tokens.css), restated as a literal because the component tokens are
+     scoped to .wt-root and the overlay is deliberately OUTSIDE it. */
+  --wt-loading-accent: oklch(72% 0.15 250deg);
+  --wt-loading-bg: #000;
+  --wt-loading-bar-inline-size: min(220px, 62vw);
+  --wt-loading-bar-block-size: 5px;
+  /* Symmetric ease-in-out-cubic, deliberately NOT one of the component easing
+     tokens: those are all asymmetric (they settle at one end), which reads as a
+     stutter on a looping indeterminate sweep. */
+  --wt-loading-sweep-easing: cubic-bezier(0.65, 0, 0.35, 1);
+  --wt-loading-sweep-duration: 1.5s;
+
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  /* Column, so the status line the kernel writes after a few seconds sits under
+     the bar instead of beside it. It is the only child that can appear, and it
+     is absent on a fast boot, so the column costs nothing when unused. */
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+    max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  background: var(--wt-loading-bg);
+  color: var(--wt-loading-accent);
+  font-family:
+    system-ui,
+    -apple-system,
+    sans-serif;
+  text-align: center;
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 1, 1);
+}
+
+/* `fade` (not a wt- name) is the state class the kernel's fadeOutOverlay has always
+   added; it stays as-is so a consumer's own watchdog guards that read it keep
+   working. Compounding it with .wt-loading is what keeps a generic name safe. */
+.wt-loading.fade {
+  opacity: 0;
+  /* The kernel removes the node on transitionend (with a 1.5s fallback); until
+     then this invisible full-viewport box must not swallow the first
+     tap-to-focus on the freshly rendered terminal. */
+  pointer-events: none;
+}
+
+.wt-loading-bar {
+  position: relative;
+  inline-size: var(--wt-loading-bar-inline-size);
+  block-size: var(--wt-loading-bar-block-size);
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklch, currentcolor 16%, transparent);
+  /* The bar is the fixed element of the screen; a status line appearing below it
+     must not shove it off centre, so it never shrinks. */
+  flex: none;
+}
+
+.wt-loading-bar::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inline-size: 42%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    currentcolor 28%,
+    color-mix(in oklch, currentcolor, #fff 45%) 50%,
+    currentcolor 72%,
+    transparent
+  );
+  filter: drop-shadow(0 0 4px color-mix(in oklch, currentcolor 55%, transparent));
+  animation: wt-loading-slide var(--wt-loading-sweep-duration) var(--wt-loading-sweep-easing)
+    infinite;
+}
+
+/* The progressive status line (kernel/loading-status.ts writes it; see that
+   module for WHY it is delayed and why the rotating half is aria-hidden).
+   Hidden until it has something to say, so a fast boot shows the bar alone. */
+.wt-loading-text:empty {
+  display: none;
+}
+
+.wt-loading-text {
+  margin: 0;
+  max-inline-size: 34rem;
+  color: color-mix(in oklch, currentcolor, #fff 25%);
+  font-size: 0.9375rem;
+  line-height: 1.4;
+  /* Fade each message in rather than snapping it: the whole point of the delayed
+     and rotating text is to read as a system that is alive, and a hard swap reads
+     as a glitch. */
+  transition: opacity 0.4s cubic-bezier(0.4, 0, 1, 1);
+}
+
+.wt-loading-text.wt-loading-text-out {
+  opacity: 0;
+}
+
+@keyframes wt-loading-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wt-loading {
+    transition-duration: 0.01s;
+  }
+
+  /* A travelling sweep is the motion a reduced-motion user asked not to see, but
+     the screen still has to read as busy — so the bar becomes a slow symmetric
+     pulse of the whole track instead of a moving highlight. */
+  .wt-loading-bar::before {
+    inline-size: 100%;
+    background: currentcolor;
+    filter: none;
+    animation: wt-loading-pulse 2s ease-in-out infinite;
+  }
+
+  .wt-loading-text {
+    transition-duration: 0.01s;
+  }
+}
+
+@keyframes wt-loading-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* ===== Fonts =====
    The terminal web font, served by the full-page host at /vendor/fonts (both
    web-terminal-server and web-terminal-kiro ship these files there; see their
