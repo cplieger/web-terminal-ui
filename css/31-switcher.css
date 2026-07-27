@@ -178,11 +178,16 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
-  /* Ink-centering trim + its mandatory descender allowance, same as
-     .wt-tab-label (see 30-tabs.css for why `ex` and why the padding is not
-     optional). */
-  text-box: trim-both ex alphabetic;
-  padding-block: 0.5em;
+}
+
+/* Ink-centering trim + its mandatory descender allowance, same as .wt-tab-label
+   (see 30-tabs.css for why `ex`, why the padding is not optional, and why the
+   pair is @supports-gated rather than left to fall back). */
+@supports (text-box: trim-both ex alphabetic) {
+  :where(.wt-root) .wt-switcher-label {
+    text-box: trim-both ex alphabetic;
+    padding-block: 0.5em;
+  }
 }
 
 /* Keyboard button: hidden until a keyboardToggle is wired; filled while the key
@@ -432,11 +437,16 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* Ink-centering trim + its mandatory descender allowance, same as
-     .wt-tab-label (see 30-tabs.css for why `ex` and why the padding is not
-     optional). */
-  text-box: trim-both ex alphabetic;
-  padding-block: 0.5em;
+}
+
+/* Ink-centering trim + its mandatory descender allowance, same as .wt-tab-label
+   (see 30-tabs.css for why `ex`, why the padding is not optional, and why the
+   pair is @supports-gated rather than left to fall back). */
+@supports (text-box: trim-both ex alphabetic) {
+  :where(.wt-root) .wt-switcher-row-label {
+    text-box: trim-both ex alphabetic;
+    padding-block: 0.5em;
+  }
 }
 
 /* The close sits flush at the row's right edge (no gap), vertically centered. */

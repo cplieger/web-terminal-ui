@@ -75,6 +75,22 @@
   width: 300px;
   flex: 0 1 auto;
   min-width: 100px;
+  /* ONE height for every control in the strip: the chip, the "+" and the
+     keyboard button all resolve to --touch-target, so a chip and a button can
+     never disagree about how tall the row is. Before this the chip's height was
+     whatever its tallest child happened to be, and the "+" hard-coded a COPY of
+     that arithmetic (close button + padding + border) — two sources of truth
+     for one row, which drifted the moment a child's box grew: a browser without
+     text-box support kept the label's untrimmed line box (31px, past the 24px
+     close button), so the chip rendered 49px tall next to a 42px "+" and a 44px
+     keyboard button. --touch-target is also the tap-target floor the rest of
+     the chrome already respects, including this chip's mobile counterpart
+     (.wt-switcher-current in 31-switcher.css, same declaration).
+
+     min-height, not height: the floor governs today (the tallest child is the
+     1.5rem close button, which fits with room to spare), and taller future
+     content grows the row rather than overflowing a fixed box. */
+  min-height: var(--touch-target);
   padding: var(--sp-2);
   /* A transparent border is reserved on every tab so toggling the inactive
      outline (below) never shifts the strip's layout. */
@@ -112,9 +128,8 @@
 
 /* Press (mousedown / touch-hold): one rung past the hover lift — same recipe,
    deeper mix — so hover -> press reads as a single dimension. After the hover
-   rule so it wins while both apply. Scoped like hover: clicking the active tab
-   selects nothing (it is already active), so it presses like the static surface
-   it is. */
+   rule so it wins while both apply. The active chip has its own pair (above),
+   mixed against the active fill instead of the inactive one. */
 :where(.wt-root) .wt-tab:not(.wt-tab-active):active {
   background: color-mix(in oklch, var(--tab-bg), var(--text) 25%);
   color: var(--tab-active-fg);
@@ -129,6 +144,34 @@
   color: var(--tab-active-fg);
 }
 
+/* The active tab answers a press too. Clicking it selects nothing, which is why
+   it was originally left inert — but selection is not the only thing a chip does:
+   it is a drag handle for reordering, a right-click target for the tab menu, a
+   double-tap target for rename, and it carries a close button. A control with
+   four affordances and no pointer feedback reads as decoration, and it was the
+   only chip in the strip that gave none (the same gap that got the keyboard
+   button its hover wash).
+
+   The lift is mixed with --tab-active-fg rather than --text: this is a lighter
+   press over an already-filled control (the .wt-switcher-current / .wt-tab-new
+   recipe), not a wash over a transparent one, so it follows the filled-surface
+   vocabulary and stays themeable through one token. It is a rung subtler than the
+   inactive chip's 15%/25% because it starts from an already-lifted fill.
+
+   Hover is gated to real hover pointers. Tapping an INACTIVE chip makes it
+   active, so a touchscreen's sticky :hover leaves with the class; tapping the
+   ACTIVE chip changes nothing, so an ungated hover would stay lit until the next
+   tap somewhere else. Touch feedback there is :active, which is correct. */
+@media (hover: hover) {
+  :where(.wt-root) .wt-tab-active:hover {
+    background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 12%);
+  }
+}
+
+:where(.wt-root) .wt-tab-active:active {
+  background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 22%);
+}
+
 /* The label flexes to fill the fixed-width tab and truncates with an ellipsis
    (min-width: 0 lets a flex item shrink below its content width). */
 :where(.wt-root) .wt-tab-label {
@@ -137,7 +180,9 @@
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  /* Center the INK, not the line box: UI fonts carry far more ascent than
+}
+
+/* Center the INK, not the line box: UI fonts carry far more ascent than
      descent (the -apple-system/Noto Sans stack at 13px: 14px over / 4px under
      the baseline), so the flex-centered line box leaves the visible text ~1.5px
      low — reading as baseline-aligned with the activity dot's bottom instead of
@@ -159,15 +204,26 @@
      measured: 3.3px of p/y/g/j tail and 2.3px of an acute accent, i.e. "pygmy
      jaguar Ápple" rendered as "pyqmy iaquar Apple"). 0.5em restores the ink
      overhang the trim removes from the box; being symmetric it does not move
-     the centered band, and being em-relative it tracks the font size. The
-     grown box (~20px) still sits inside the close button's 1.5rem, so the tab
-     height is unchanged. A browser without text-box support keeps the untrimmed
-     box, where the padding is harmless slack.
+     the centered band, and being em-relative it tracks the font size.
+
+     The pair is @supports-GATED because the padding is the trim's allowance and
+     nothing else: an untrimmed line box already contains that overhang, so
+     adding the padding there is not "harmless slack" (this comment used to
+     claim it was) — it grew the label's box to 31px, past the 24px close button,
+     and a browser without text-box support rendered 49px tab chips beside a
+     42px "+" and a 44px keyboard button. The chip's own --touch-target floor
+     pins the row height either way; the gate is what keeps the label from
+     pushing PAST it. Gating the shorthand (not the longhands) is deliberate: an
+     engine that ships text-box-trim without the shorthand does not apply the
+     declaration we actually write, so it must take the untrimmed branch too.
 
      Shared by all three chip labels (this one + the two switcher labels in
      31-switcher.css). */
-  text-box: trim-both ex alphabetic;
-  padding-block: 0.5em;
+@supports (text-box: trim-both ex alphabetic) {
+  :where(.wt-root) .wt-tab-label {
+    text-box: trim-both ex alphabetic;
+    padding-block: 0.5em;
+  }
 }
 
 /* A little breathing room after the activity dot, before the label. */
@@ -241,12 +297,16 @@
   align-items: center;
   justify-content: center;
   flex: none;
-  /* Square box that matches the tab height (a stretched flex item ignores
-     aspect-ratio against its SVG's intrinsic width, so size it explicitly). The
-     tab height is the close-button (1.5rem) + vertical padding (2×sp-2) +
-     border. */
-  width: calc(1.5rem + 2 * var(--sp-2) + 2px);
-  height: calc(1.5rem + 2 * var(--sp-2) + 2px);
+  /* A SQUARE box of exactly the strip's control height, so it lines up with the
+     tab chips beside it and with the keyboard button after it (the .wt-btn
+     primitive's 44px box, same token). Sized explicitly on both axes rather
+     than by aspect-ratio: a stretched flex item ignores aspect-ratio against
+     its SVG's intrinsic width. It used to restate the chip's height arithmetic
+     (close button + padding + border) as a calc(), which is how it ended up
+     7px short of a chip whose content grew — see the min-height note on
+     .wt-tab. */
+  width: var(--touch-target);
+  height: var(--touch-target);
   padding: 0;
   background: transparent;
   border: none;
