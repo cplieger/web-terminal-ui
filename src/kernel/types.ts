@@ -318,19 +318,26 @@ export interface FeatureInstance<Api = void> {
 /** A fatal failure while createTerminal is starting up.
  *
  *  Two phases can fail, and both are delivered here so a consumer never has to
- *  hand-build its own startup-failure surface:
+ *  hand-build its own startup-failure surface. That sentence used to be
+ *  aspirational: resolving the mount target and constructing the feature list
+ *  both happened at the CALL SITE, outside this boundary, so a consumer really
+ *  did need its own surface for those two — and every consumer that built one
+ *  restated this library's copy and re-decided its focus and ARIA behavior.
+ *  createTerminal now takes a selector and a feature THUNK, which pulls both
+ *  failures inside, and the promise holds literally.
  *
- *  - `kernel-init`: a SYNCHRONOUS throw out of createTerminal (an invalid
- *    feature list, a DOM invariant, a feature constructor). The kernel renders
- *    the recovery surface and then RETHROWS, so a caller with its own handling
- *    still sees the error.
+ *  - `kernel-init`: a SYNCHRONOUS throw out of createTerminal (an unresolvable
+ *    mount selector, a throwing preset or feature constructor, an invalid
+ *    feature list, a DOM invariant). The kernel renders the recovery surface and
+ *    then RETHROWS, so a caller with its own handling still sees the error.
  *  - `feature-setup`: an async feature-composition failure. The kernel has
  *    already stopped the connection, released every listener and singleton,
  *    torn down completed features, and cleared the terminal root when it
  *    delivers this value. Nothing is rethrown; the failure is asynchronous.
  *
  *  Discriminate on `phase`: `feature-setup` names the offending feature,
- *  `kernel-init` has no feature to name because composition never began. */
+ *  `kernel-init` has no feature to name because composition never began, and
+ *  only `kernel-init` can carry an undefined `surface`. */
 export type TerminalStartupFailure =
   | {
       readonly phase: "feature-setup";
@@ -338,19 +345,41 @@ export type TerminalStartupFailure =
       readonly feature: string;
       /** The original thrown or rejected value. */
       readonly cause: unknown;
+      /** The element the built-in surface would fill — always the terminal root
+       *  in this phase, since the terminal had already mounted. */
+      readonly surface: HTMLElement;
     }
   | {
       readonly phase: "kernel-init";
       /** The original thrown value, rethrown to the caller after this returns. */
       readonly cause: unknown;
+      /** The element the built-in surface would fill, and the element a handler
+       *  claiming the surface (returning true) must render into. Usually the
+       *  resolved root — but when the MOUNT TARGET itself could not be resolved
+       *  there is no root, so in `viewport` layout this is a fresh full-viewport
+       *  element the kernel appended to the body, and in `container` layout it is
+       *  `undefined`: an embedded terminal is one panel in a host application, so
+       *  a missing mount target is reported and rethrown but never answered by
+       *  seizing the host's page. A handler that renders its own UI must
+       *  therefore check for undefined. */
+      readonly surface: HTMLElement | undefined;
     };
 
 /** Options for createTerminal. */
 export interface CreateTerminalOptions {
-  /** The feature list; omitted or empty means the bare kernel (no chrome).
-   *  Heterogeneous feature APIs are held as unknown here; a consumer reads a
-   *  specific feature's api off the feature value it holds. */
-  features?: readonly TerminalFeature<unknown>[];
+  /** The feature list, as a FUNCTION that produces it; omitted means the bare
+   *  kernel (no chrome). Heterogeneous feature APIs are held as unknown here; a
+   *  consumer reads a specific feature's api off the feature value it holds.
+   *
+   *  It is a function, not an array, so that a preset or feature constructor
+   *  that throws does so INSIDE createTerminal's failure boundary. Passed as an
+   *  array (`features: presetTabbed()`) the call was evaluated as an argument —
+   *  before createTerminal was entered — so the throw escaped the library
+   *  entirely and every consumer had to wrap the preset call in its own
+   *  try/catch and hand-build a recovery surface. Write `features:
+   *  presetTabbed` when the preset takes no arguments, or `features: () =>
+   *  presetTabbed({...})` when it does. */
+  features?: () => readonly TerminalFeature<unknown>[];
   /** How the terminal claims space (default "viewport").
    *  "viewport": the root becomes a fixed full-viewport box — the full-page
    *  product (web-terminal-server, web-terminal-kiro, the scaffold page).

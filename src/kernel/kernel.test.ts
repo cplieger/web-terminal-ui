@@ -9,6 +9,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as KernelModule from "./kernel.js";
+import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
 import type { TerminalContext, TerminalFeature, TerminalStartupFailure } from "./types.js";
 
 const sendBinary = vi.fn<(buf: Uint8Array) => boolean>(() => true);
@@ -86,7 +87,7 @@ function rootIn(): HTMLElement {
 describe("bare kernel builds a working terminal with no chrome", () => {
   it("builds the display output and the hidden textarea, and no feature chrome", () => {
     const root = rootIn();
-    createTerminal(root, { features: [] });
+    createTerminal(root, { features: () => [] });
 
     expect(root.querySelector(".term-output")).not.toBeNull();
     expect(root.querySelector(".term-input")).not.toBeNull();
@@ -100,7 +101,7 @@ describe("bare kernel builds a working terminal with no chrome", () => {
 
   it("sends typed text raw through the funnel (insertText)", () => {
     const root = rootIn();
-    createTerminal(root, { features: [] });
+    createTerminal(root, { features: () => [] });
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "ab" }));
     expect(sentText()).toBe("ab");
@@ -109,7 +110,7 @@ describe("bare kernel builds a working terminal with no chrome", () => {
 
   it("brackets and sanitizes a paste (paste-jacking defense)", () => {
     const root = rootIn();
-    createTerminal(root, { features: [] });
+    createTerminal(root, { features: () => [] });
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(
       new InputEvent("input", { inputType: "insertFromPaste", data: "ls\n\x1b[201~rm -rf /" }),
@@ -124,7 +125,7 @@ describe("bare kernel builds a working terminal with no chrome", () => {
 
   it("normalizes a typed NBSP to a real space (iOS quirk)", () => {
     const root = rootIn();
-    createTerminal(root, { features: [] });
+    createTerminal(root, { features: () => [] });
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "a\u00A0b" }));
     expect(sentText()).toBe("a b");
@@ -132,7 +133,7 @@ describe("bare kernel builds a working terminal with no chrome", () => {
 
   it("destroy() clears the built DOM", () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: [] });
+    const term = createTerminal(root, { features: () => [] });
     expect(root.querySelector(".term-output")).not.toBeNull();
     term.destroy();
     expect(root.querySelector(".term-output")).toBeNull();
@@ -143,7 +144,7 @@ describe("bare kernel builds a working terminal with no chrome", () => {
 describe("startup connect gating (session-managed vs single-terminal)", () => {
   it("connects at startup for the single-terminal case (no session-managing feature)", () => {
     const root = rootIn();
-    createTerminal(root, { features: [] });
+    createTerminal(root, { features: () => [] });
     // No feature owns sessions, so the kernel opens the bare /ws itself.
     expect(connect).toHaveBeenCalledTimes(1);
   });
@@ -159,7 +160,7 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: [owner] });
+    createTerminal(root, { features: () => [owner] });
     // A bare /ws here would 404 against a SessionManager.
     expect(connect).not.toHaveBeenCalled();
     await tick(); // setup completes
@@ -181,7 +182,7 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: [owner], loading });
+    createTerminal(root, { features: () => [owner], loading });
     await tick();
     await tick();
     // No session could be listed or spawned: the kernel saw the null directly
@@ -206,7 +207,7 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: [owner], loading });
+    createTerminal(root, { features: () => [owner], loading });
     await tick();
     await tick();
     expect(loading.classList.contains("fade")).toBe(true);
@@ -222,7 +223,7 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
         return { teardown: () => undefined };
       },
     });
-    expect(() => createTerminal(root, { features: [mk("a"), mk("b")] })).toThrow(
+    expect(() => createTerminal(root, { features: () => [mk("a"), mk("b")] })).toThrow(
       /multiple session-owning features/,
     );
   });
@@ -231,7 +232,7 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
 describe("layout modes and root classes", () => {
   it("stamps wt-root + wt-viewport by default and removes them on destroy", () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: [] });
+    const term = createTerminal(root, { features: () => [] });
     expect(root.classList.contains("wt-root")).toBe(true);
     expect(root.classList.contains("wt-viewport")).toBe(true);
     expect(root.classList.contains("wt-container")).toBe(false);
@@ -242,7 +243,7 @@ describe("layout modes and root classes", () => {
 
   it("stamps wt-container for layout: container", () => {
     const root = rootIn();
-    createTerminal(root, { features: [], layout: "container" });
+    createTerminal(root, { features: () => [], layout: "container" });
     expect(root.classList.contains("wt-container")).toBe(true);
     expect(root.classList.contains("wt-viewport")).toBe(false);
   });
@@ -251,7 +252,7 @@ describe("layout modes and root classes", () => {
 describe("host handle send/reset", () => {
   it("send() routes through the sanitizing funnel and no-ops after destroy", () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: [] });
+    const term = createTerminal(root, { features: () => [] });
     term.send(new TextEncoder().encode("echo hi\n"));
     expect(sentText()).toContain("echo hi");
     sendBinary.mockClear();
@@ -262,7 +263,7 @@ describe("host handle send/reset", () => {
 
   it("reset() drops the local scrollback and screen without injecting keystrokes", () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: [] });
+    const term = createTerminal(root, { features: () => [] });
     sendBinary.mockClear();
     term.reset();
     expect(resetScrollback).toHaveBeenCalledTimes(1);
@@ -286,7 +287,7 @@ describe("process exit (the engine's definitive 4001 close)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: [watcher], loading });
+    createTerminal(root, { features: () => [watcher], loading });
     await tick(); // let feature setup complete
     expect(loading.classList.contains("fade")).toBe(false);
 
@@ -315,7 +316,7 @@ describe("process exit (the engine's definitive 4001 close)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: [watcher], loading });
+    createTerminal(root, { features: () => [watcher], loading });
     await tick();
 
     const cbs = connectionInit.mock.calls[0]![0]!;
@@ -353,7 +354,7 @@ describe("switch detach (design 5.1 switch safety)", () => {
         };
       },
     };
-    createTerminal(root, { features: [spy] });
+    createTerminal(root, { features: () => [spy] });
     await tick(); // setupFeatures runs in the background; let it capture ctx
 
     // Start an IME composition on the kernel's textarea, then switch.
@@ -401,7 +402,7 @@ describe("feature lifecycle", () => {
         };
       },
     };
-    createTerminal(root, { features: [fake, peerReader] });
+    createTerminal(root, { features: () => [fake, peerReader] });
     await tick();
 
     // Region chrome mounted.
@@ -421,7 +422,7 @@ describe("feature lifecycle", () => {
         return { teardown: off };
       },
     };
-    createTerminal(root, { features: [dropAll] });
+    createTerminal(root, { features: () => [dropAll] });
     await tick();
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "x" }));
@@ -438,7 +439,7 @@ describe("feature lifecycle", () => {
         return { teardown };
       },
     };
-    const term = createTerminal(root, { features: [f] });
+    const term = createTerminal(root, { features: () => [f] });
     await tick();
     term.destroy();
     expect(teardown).toHaveBeenCalledTimes(1);
@@ -464,7 +465,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
         return { teardown: peerTeardown };
       },
     };
-    createTerminal(root, { features: [peer, boom], loading });
+    createTerminal(root, { features: () => [peer, boom], loading });
     await tick();
 
     // The completed peer rolled back, the socket closed, the terminal DOM is
@@ -486,7 +487,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
 
   it("stays non-modal in container layout (the host app is not inert)", async () => {
     const root = rootIn();
-    createTerminal(root, { features: [boom], layout: "container" });
+    createTerminal(root, { features: () => [boom], layout: "container" });
     await tick();
     const fatal = root.querySelector(".wt-fatal");
     expect(fatal?.getAttribute("role")).toBe("alertdialog");
@@ -499,7 +500,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
       name: "async-boom",
       setup: () => Promise.reject(new Error("nope")),
     };
-    createTerminal(root, { features: [asyncBoom] });
+    createTerminal(root, { features: () => [asyncBoom] });
     await tick();
     await tick();
     expect(root.querySelector(".wt-fatal")).not.toBeNull();
@@ -509,7 +510,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     const root = rootIn();
     const seen: TerminalStartupFailure[] = [];
     createTerminal(root, {
-      features: [boom],
+      features: () => [boom],
       onFatalError(failure) {
         seen.push(failure);
         const own = document.createElement("p");
@@ -538,7 +539,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
   it("shows the built-in surface when the handler itself throws", async () => {
     const root = rootIn();
     createTerminal(root, {
-      features: [boom],
+      features: () => [boom],
       onFatalError() {
         throw new Error("reporter broke too");
       },
@@ -549,7 +550,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
 
   it("destroy() after a fatal removes the surface and boundary classes", async () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: [boom] });
+    const term = createTerminal(root, { features: () => [boom] });
     await tick();
     expect(root.querySelector(".wt-fatal")).not.toBeNull();
     term.destroy();
@@ -570,7 +571,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
           };
         }),
     };
-    const term = createTerminal(root, { features: [slow, boom] });
+    const term = createTerminal(root, { features: () => [slow, boom] });
     term.destroy();
     release?.();
     await tick();
@@ -595,7 +596,7 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
 
   it("still rethrows to the caller", () => {
     const root = rootIn();
-    expect(() => createTerminal(root, { features: twoOwners() })).toThrow(
+    expect(() => createTerminal(root, { features: () => twoOwners() })).toThrow(
       /multiple session-owning features/,
     );
   });
@@ -605,7 +606,7 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
     const loading = document.createElement("div");
     document.body.appendChild(loading);
 
-    expect(() => createTerminal(root, { features: twoOwners(), loading })).toThrow();
+    expect(() => createTerminal(root, { features: () => twoOwners(), loading })).toThrow();
 
     // The pre-JS overlay came down. Before this phase was wired, nothing ever
     // lowered it on a synchronous throw: the page kept spinning forever.
@@ -620,7 +621,7 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
 
   it("stamps the boundary classes even though the throw preceded the normal stamping", () => {
     const root = rootIn();
-    expect(() => createTerminal(root, { features: twoOwners() })).toThrow();
+    expect(() => createTerminal(root, { features: () => twoOwners() })).toThrow();
     // Load-bearing, not cosmetic: every .wt-fatal rule is scoped
     // :where(.wt-root), so without these the surface renders unstyled.
     expect(root.classList.contains("wt-root")).toBe(true);
@@ -629,7 +630,9 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
 
   it("is non-modal in container layout, like the async phase", () => {
     const root = rootIn();
-    expect(() => createTerminal(root, { features: twoOwners(), layout: "container" })).toThrow();
+    expect(() =>
+      createTerminal(root, { features: () => twoOwners(), layout: "container" }),
+    ).toThrow();
     expect(root.classList.contains("wt-container")).toBe(true);
     expect(root.querySelector(".wt-fatal")?.hasAttribute("aria-modal")).toBe(false);
   });
@@ -639,7 +642,7 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
     const seen: TerminalStartupFailure[] = [];
     expect(() =>
       createTerminal(root, {
-        features: twoOwners(),
+        features: () => twoOwners(),
         onFatalError(failure) {
           seen.push(failure);
           root.replaceChildren(document.createElement("main"));
@@ -660,7 +663,7 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
     const root = rootIn();
     expect(() =>
       createTerminal(root, {
-        features: twoOwners(),
+        features: () => twoOwners(),
         onFatalError() {
           throw new Error("reporting broke");
         },
@@ -672,11 +675,148 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
   });
 });
 
+// The two failures that used to happen OUTSIDE this boundary, which is why every
+// full-page consumer hand-built its own copy of the recovery surface: resolving
+// the mount target (the caller did the lookup and the null-check) and building
+// the feature list (evaluated as an argument, before createTerminal was
+// entered). Taking a selector and a thunk pulls both inside. These tests are the
+// contract that lets a consumer delete its own fatal dialog and not get it back.
+describe("startup failures that used to escape the boundary", () => {
+  it("resolves a mount selector so the caller never has to null-check one", () => {
+    const root = rootIn();
+    root.id = "terminal";
+    const term = createTerminal("#terminal", { features: () => [] });
+    // Mounted into the element the selector named, not somewhere invented.
+    expect(root.querySelector(".term-output")).not.toBeNull();
+    term.destroy();
+  });
+
+  it("accepts an element too, for an embedder that already holds one", () => {
+    // The trap was never "passing an element", it was "passing the result of a
+    // lookup". An embedder that created its own div must not be forced to invent
+    // a selector for it.
+    const root = rootIn();
+    const term = createTerminal(root, { features: () => [] });
+    expect(root.querySelector(".term-output")).not.toBeNull();
+    term.destroy();
+  });
+
+  it("shows the recovery surface when the mount selector matches nothing", () => {
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+
+    expect(() => createTerminal("#not-in-this-document", { features: () => [], loading })).toThrow(
+      /no element matches the mount selector/,
+    );
+
+    // There is no root to render into, so the kernel appends its own
+    // full-viewport host rather than restyling document.body. Before the
+    // boundary moved, this case could not even be reached through the library:
+    // the caller resolved the element, and a null one made the CATCH throw a
+    // second error, so the page stayed blank under a spinning overlay.
+    const fatal = document.querySelector(".wt-fatal");
+    expect(fatal).not.toBeNull();
+    expect(fatal?.getAttribute("role")).toBe("alertdialog");
+    expect(fatal?.closest(".wt-root")).not.toBeNull();
+    expect(document.querySelector(".wt-fatal-title")?.textContent).toBe(STARTUP_FAILURE_COPY.title);
+    expect(document.querySelector(".wt-fatal-reload")?.textContent).toBe(
+      STARTUP_FAILURE_COPY.reloadLabel,
+    );
+    // The spinner comes down even though nothing mounted.
+    expect(loading.classList.contains("fade")).toBe(true);
+  });
+
+  it("does NOT seize the page for an embedded terminal with a missing mount target", () => {
+    const before = document.body.className;
+    const seen: TerminalStartupFailure[] = [];
+
+    expect(() =>
+      createTerminal("#not-in-this-document", {
+        features: () => [],
+        layout: "container",
+        onFatalError(failure) {
+          seen.push(failure);
+        },
+      }),
+    ).toThrow(/no element matches the mount selector/);
+
+    // An embedded terminal is one panel in a host application that is otherwise
+    // working. Claiming the viewport to report its own panel's failure would
+    // break a healthy page, so the failure is reported and rethrown but no
+    // surface is rendered and nothing of the host's is touched.
+    expect(document.querySelector(".wt-fatal")).toBeNull();
+    expect(document.body.className).toBe(before);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.phase).toBe("kernel-init");
+    // A handler that wants to render its own UI is told there is nowhere to.
+    expect(seen[0]?.surface).toBeUndefined();
+  });
+
+  it("routes a throwing feature thunk through the recovery surface", () => {
+    const root = rootIn();
+    const boom = new Error("preset could not be built");
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+
+    expect(() =>
+      createTerminal(root, {
+        features: () => {
+          throw boom;
+        },
+        loading,
+      }),
+    ).toThrow(boom);
+
+    // As an eagerly-evaluated array argument this throw never reached the
+    // library at all: it happened at the call site, so the consumer's own
+    // try/catch and its own hand-built dialog were the only thing standing
+    // between the user and a page stuck on a spinner.
+    expect(root.querySelector(".wt-fatal")).not.toBeNull();
+    expect(loading.classList.contains("fade")).toBe(true);
+  });
+
+  it("names the resolved surface so a handler knows where to render", () => {
+    const root = rootIn();
+    root.id = "terminal";
+    const seen: TerminalStartupFailure[] = [];
+
+    expect(() =>
+      createTerminal("#terminal", {
+        features: (): never => {
+          throw new Error("nope");
+        },
+        onFatalError(failure) {
+          seen.push(failure);
+          failure.surface?.replaceChildren(document.createElement("main"));
+          return true;
+        },
+      }),
+    ).toThrow();
+
+    // The handler rendered into the element the failure named, and the built-in
+    // surface stood down.
+    expect(seen[0]?.surface).toBe(root);
+    expect(root.querySelector("main")).not.toBeNull();
+    expect(root.querySelector(".wt-fatal")).toBeNull();
+  });
+
+  it("rejects a selector that matches a non-HTML element with the reason", () => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.id = "mount";
+    document.body.appendChild(svg);
+    // Diagnosable at the boundary rather than as a missing-property crash deep
+    // inside the build.
+    expect(() => createTerminal("#mount", { features: () => [] })).toThrow(
+      /matched a non-HTML element/,
+    );
+  });
+});
+
 describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () => {
   it("snaps the viewport to the bottom after accepted input reaches the socket", async () => {
     const { scroll } = await import("@cplieger/web-terminal-engine");
     const root = rootIn();
-    createTerminal(root, { features: [] });
+    createTerminal(root, { features: () => [] });
     await tick();
     const snap = vi.mocked(scroll.scrollToBottom);
     snap.mockClear();
@@ -694,7 +834,7 @@ describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () 
       },
     };
     const root = rootIn();
-    createTerminal(root, { features: [dropAll] });
+    createTerminal(root, { features: () => [dropAll] });
     await tick();
     const snap = vi.mocked(scroll.scrollToBottom);
     snap.mockClear();
@@ -706,7 +846,7 @@ describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () 
   it("does NOT snap when sendBinary rejects the input", async () => {
     const { scroll, connection } = await import("@cplieger/web-terminal-engine");
     const root = rootIn();
-    createTerminal(root, { features: [] });
+    createTerminal(root, { features: () => [] });
     await tick();
     const snap = vi.mocked(scroll.scrollToBottom);
     snap.mockClear();

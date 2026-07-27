@@ -258,7 +258,7 @@ describe("tabs feature", () => {
   it("builds a tab per listed session with the first active and connects to it", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEls = root.querySelectorAll(".wt-tab");
@@ -275,7 +275,7 @@ describe("tabs feature", () => {
     localStorage.setItem("wt-active-session", "s2");
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEls = root.querySelectorAll(".wt-tab");
@@ -289,7 +289,7 @@ describe("tabs feature", () => {
     localStorage.setItem("wt-active-session", "s-gone");
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEls = root.querySelectorAll(".wt-tab");
@@ -304,7 +304,7 @@ describe("tabs feature", () => {
     listBody = [{ id: "s1", title: "", createdAt: "1", status: "exited" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     expect(setSession).toHaveBeenCalledWith("s-new");
@@ -320,7 +320,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     expect(setSession).toHaveBeenCalledWith("s2");
@@ -336,7 +336,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     expect(setSession).toHaveBeenCalledWith("s2");
@@ -360,7 +360,7 @@ describe("tabs feature", () => {
     );
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => setSession.mock.calls.length > 0);
 
     expect(setSession).toHaveBeenCalledWith("s1");
@@ -369,7 +369,7 @@ describe("tabs feature", () => {
   it("switches to another tab: re-points the renderer and reconnects the WS", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     setSession.mockClear();
     bind.mockClear();
@@ -386,7 +386,7 @@ describe("tabs feature", () => {
   it("creates a new tab via + and switches to it", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     root.querySelector<HTMLElement>(".wt-tab-new")?.click();
@@ -423,7 +423,7 @@ describe("tabs feature", () => {
     );
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const plus = root.querySelector<HTMLElement>(".wt-tab-new");
@@ -446,7 +446,7 @@ describe("tabs feature", () => {
   it("hands the keyboard back to the terminal when a press re-selects the active tab", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const input = root.querySelector<HTMLElement>(".term-input");
@@ -479,7 +479,7 @@ describe("tabs feature", () => {
     );
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const input = root.querySelector<HTMLElement>(".term-input");
@@ -505,7 +505,7 @@ describe("tabs feature", () => {
   it("renders the + button as a fixed bar item outside the scrolling tab list", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const scroller = root.querySelector(".wt-tab-scroll");
@@ -524,7 +524,7 @@ describe("tabs feature", () => {
   it("keeps a tab's dot hidden until its session reports activity (default)", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // The listed sessions carry no reportsActivity flag: evidence-driven
@@ -537,7 +537,7 @@ describe("tabs feature", () => {
   it("shows the idle dot from tab creation with presumeReports (agent shell)", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs({ presumeReports: true })] });
+    term = createTerminal(root, { features: () => [tabs({ presumeReports: true })] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // An agent shell presumes every session reports (presetAgentTabbed): the
@@ -552,7 +552,7 @@ describe("tabs feature", () => {
   it("closes a tab on middle-click", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
@@ -580,7 +580,7 @@ describe("tabs feature", () => {
     ]);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [monitor, tabs({ activityMonitor: monitor })] });
+    term = createTerminal(root, { features: () => [monitor, tabs({ activityMonitor: monitor })] });
     await until(() => root.querySelectorAll(".wt-tab").length >= 2);
     // Give the initial list loop a turn to (wrongly) add duplicates.
     await new Promise((r) => setTimeout(r, 0));
@@ -593,7 +593,7 @@ describe("tabs feature", () => {
     listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
 
     fetchMock.mockClear();
@@ -636,7 +636,7 @@ describe("tabs feature", () => {
   it("opens a right-click context menu on a tab with the move and close actions", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const menu = root.querySelector(".wt-tab-menu");
@@ -677,7 +677,7 @@ describe("tabs feature", () => {
   it("manages a roving tabindex: exactly the selected tab is in the Tab order", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEls = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
@@ -694,7 +694,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     const tabEls = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
@@ -721,7 +721,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     const tabEls = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
@@ -734,7 +734,7 @@ describe("tabs feature", () => {
   it("Delete closes the focused tab", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
@@ -753,7 +753,7 @@ describe("tabs feature", () => {
     const feature = tabs();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [feature] });
+    term = createTerminal(root, { features: () => [feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     // "Move right" on the first tab moves it exactly one slot.
@@ -780,7 +780,7 @@ describe("tabs feature", () => {
   it("swallows a tab drop rather than letting the browser act on the payload", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEl = root.querySelector<HTMLElement>(".wt-tab");
@@ -817,7 +817,7 @@ describe("tabs feature", () => {
   it("announces a tab move on the polite live region", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     menuItem(openTabMenu(root, 0), "Move right")?.click();
@@ -835,7 +835,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     const items = openTabMenu(root, 2);
@@ -852,7 +852,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     fetchMock.mockClear();
@@ -888,7 +888,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
     const labels = (): (string | null)[] =>
@@ -927,7 +927,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     fetchMock.mockClear();
@@ -948,7 +948,7 @@ describe("tabs feature", () => {
     vi.stubGlobal("confirm", () => true);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
@@ -967,7 +967,7 @@ describe("tabs feature", () => {
     vi.stubGlobal("confirm", () => false);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
@@ -984,7 +984,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
@@ -1000,7 +1000,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
@@ -1015,7 +1015,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
@@ -1027,7 +1027,7 @@ describe("tabs feature", () => {
     listBody = [];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
 
     expect(root.querySelectorAll(".wt-tab").length).toBe(1);
@@ -1039,7 +1039,7 @@ describe("tabs feature", () => {
   it("renders the mobile bar reflecting the active tab, with a close button and no position counter", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     expect(root.querySelector(".wt-switcher-label")?.textContent).toBe("one");
@@ -1057,7 +1057,7 @@ describe("tabs feature", () => {
   it("expands the bar to list the other tabs; a row selects it and collapses", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const switcher = root.querySelector(".wt-switcher");
@@ -1086,7 +1086,7 @@ describe("tabs feature", () => {
     const feature = tabs();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [feature] });
+    term = createTerminal(root, { features: () => [feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === 4);
 
     // Make s2 active, then open the list: it should read as the circular queue
@@ -1102,7 +1102,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
@@ -1124,7 +1124,7 @@ describe("tabs feature", () => {
   it("closes a tab from an expanded list row (DELETE)", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     root.querySelector<HTMLElement>(".wt-switcher-current")?.click(); // expand
@@ -1141,7 +1141,7 @@ describe("tabs feature", () => {
   it("collapses the expanded list on a second tap", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const switcher = root.querySelector(".wt-switcher");
@@ -1155,7 +1155,7 @@ describe("tabs feature", () => {
   it("switches tabs on a horizontal swipe of the switcher bar", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const cur = root.querySelector<HTMLElement>(".wt-switcher-current");
@@ -1171,7 +1171,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
@@ -1194,7 +1194,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
@@ -1220,7 +1220,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
@@ -1248,7 +1248,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const feature = tabs({ activityMonitor: monitor.feature });
-    term = createTerminal(root, { features: [monitor.feature, feature] });
+    term = createTerminal(root, { features: () => [monitor.feature, feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
@@ -1269,7 +1269,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
@@ -1288,7 +1288,7 @@ describe("tabs feature", () => {
   it("toggles the switcher list closed when the switch button is clicked while open", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const switcher = root.querySelector(".wt-switcher");
@@ -1310,7 +1310,7 @@ describe("tabs feature", () => {
   it("arms the catching-up cue after a switch (until a screen frame lands)", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const cue = root.querySelector(".wt-catchup");
@@ -1327,7 +1327,7 @@ describe("tabs feature", () => {
   it("polls the session list to update dots and drop reaped tabs without activityMonitor", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs({ pollMs: 10 })] });
+    term = createTerminal(root, { features: () => [tabs({ pollMs: 10 })] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const s2dot = (): HTMLElement | undefined =>
@@ -1352,7 +1352,7 @@ describe("tabs feature", () => {
   it("carries a desktop-strip keyboard button, hidden without a keyboardToggle", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // The desktop strip carries its own keyboard button (like the switcher's):
@@ -1375,7 +1375,7 @@ describe("tabs feature", () => {
   it("maps a vertical wheel over the bar to horizontal tab-list scrolling", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
@@ -1425,7 +1425,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
+      features: () => [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
@@ -1448,7 +1448,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
+      features: () => [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
@@ -1501,7 +1501,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     menuItem(openTabMenu(root, 2), "Move left")?.click();
@@ -1513,7 +1513,7 @@ describe("tabs feature", () => {
     root.remove();
     const root2 = document.createElement("div");
     document.body.appendChild(root2);
-    term = createTerminal(root2, { features: [tabs()] });
+    term = createTerminal(root2, { features: () => [tabs()] });
     await until(() => root2.querySelectorAll(".wt-tab").length === 3);
     expect(idsOf(root2)).toEqual(["one", "three", "two"]);
   });
@@ -1532,7 +1532,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const monitor = snapshotMonitor(snapshot);
-    term = createTerminal(root, { features: [monitor, tabs({ activityMonitor: monitor })] });
+    term = createTerminal(root, { features: () => [monitor, tabs({ activityMonitor: monitor })] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     expect(idsOf(root)).toEqual(["three", "one", "two"]);
@@ -1547,7 +1547,7 @@ describe("tabs feature", () => {
     localStorage.setItem("wt-tab-order", JSON.stringify(["s2", "s1", "gone-long-ago"]));
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     expect(idsOf(root)).toEqual(["two", "one"]);
 
@@ -1568,7 +1568,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     menuItem(openTabMenu(root, 1), "Move left")?.click();
     expect(storedOrder()).toEqual(["s2", "s1"]);
@@ -1589,7 +1589,7 @@ describe("tabs feature", () => {
     // site — this pins that the drag really reaches storage.
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const first = root.querySelector<HTMLElement>(".wt-tab");
@@ -1633,7 +1633,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const monitor = snapshotMonitor(listBody as unknown as SessionStatus[]);
-    term = createTerminal(root, { features: [monitor, tabs({ activityMonitor: monitor })] });
+    term = createTerminal(root, { features: () => [monitor, tabs({ activityMonitor: monitor })] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     expect(idsOf(root)).toEqual(["three", "one", "two"]);
@@ -1655,7 +1655,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     menuItem(openTabMenu(root, 1), "Move left")?.click();
@@ -1693,7 +1693,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
 
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 200);
     expect(posts).toBe(3);
@@ -1713,7 +1713,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
 
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
 
     // The host's own words reach the page; the library never hardcodes "tools",
     // which is a web-terminal-kiro concept it knows nothing about.
@@ -1734,7 +1734,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
 
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: [tabs()] });
+    term = createTerminal(root, { features: () => [tabs()] });
 
     await until(() => posts > 0, 200);
     await new Promise((r) => setTimeout(r, 20));
@@ -1753,7 +1753,7 @@ describe("tabs feature: stream-open reconcile (manager-restart zombie tabs)", ()
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
@@ -1820,7 +1820,7 @@ describe("tabs feature: boot race (stream-open reconcile vs bootstrap create)", 
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, {
-      features: [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
 
     // Bootstrap created + adopted its session while the reconcile's GET hangs.

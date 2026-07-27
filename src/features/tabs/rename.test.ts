@@ -128,7 +128,7 @@ async function until(pred: () => boolean, tries = 30): Promise<void> {
 
 async function mount(root: HTMLElement): Promise<void> {
   document.body.appendChild(root);
-  term = createTerminal(root, { features: [tabs()] });
+  term = createTerminal(root, { features: () => [tabs()] });
   await until(() => root.querySelectorAll(".wt-tab").length === listBody.length);
 }
 

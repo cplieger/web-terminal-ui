@@ -46,7 +46,14 @@
 <script type="module">
   import { createTerminal } from "@cplieger/web-terminal-ui";
   import { presetTabbed } from "@cplieger/web-terminal-ui/presets";
-  createTerminal(document.getElementById("terminal"), { features: presetTabbed(), loading: document.getElementById("loading") });
+  // The root is passed as a SELECTOR and the preset as a FUNCTION, and both
+  // matter: createTerminal resolves the selector and calls the preset inside its
+  // own failure boundary, so a missing root element or a preset that throws
+  // renders the library's "Terminal failed to start" surface and lowers the
+  // overlay. Resolving the element here instead (and calling presetTabbed() as
+  // an argument) moves both failures OUTSIDE that boundary, where the only
+  // outcome is a page stuck on the spinner and an error in the console.
+  createTerminal("#terminal", { features: presetTabbed, loading: document.getElementById("loading") });
 </script>
 </body>
 </html>

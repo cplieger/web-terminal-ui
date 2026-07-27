@@ -97,7 +97,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
   it("offers Paste and routes it to the clipboard feature on right-click / long-press", async () => {
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick(); // features set up in the background
 
     const surface = root.querySelector<HTMLElement>(".term");
@@ -116,7 +116,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
   it("opens the menu with Paste on a stationary touch long-press", async () => {
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick();
 
     const surface = root.querySelector<HTMLElement>(".term");
@@ -135,7 +135,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
   it("opens above the finger when the anchor is near the bottom (not clipped/under the touch)", async () => {
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick();
 
     const menu = root.querySelector<HTMLElement>(".wt-ctx-menu");
@@ -175,7 +175,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
     });
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick();
 
     const surface = root.querySelector<HTMLElement>(".term");
@@ -215,7 +215,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
     });
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick();
 
     const surface = root.querySelector<HTMLElement>(".term");
@@ -245,7 +245,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
   it("does not open the hold-timer menu when the long-press landed on rendered text", async () => {
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick();
 
     const surface = root.querySelector<HTMLElement>(".term");
@@ -273,7 +273,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
 
   it("omits Paste when no clipboard feature is present", async () => {
     const root = rootIn();
-    term = createTerminal(root, { features: [contextMenu()] });
+    term = createTerminal(root, { features: () => [contextMenu()] });
     await tick();
 
     const surface = root.querySelector<HTMLElement>(".term");
@@ -287,7 +287,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
   it("does not open on a touch long-press while text is selected (native selection owns it)", async () => {
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick();
     // Simulate a native word-selection made during the hold.
     const spy = vi.spyOn(window, "getSelection").mockReturnValue({
@@ -309,7 +309,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
   it("opens the paste menu on an Android touch long-press (contextmenu) over empty space, suppressing the native menu", async () => {
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick();
 
     const surface = root.querySelector<HTMLElement>(".term");
@@ -335,7 +335,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
   it("defers to native selection on an Android touch contextmenu when text is selected", async () => {
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick();
     const spy = vi.spyOn(window, "getSelection").mockReturnValue({
       isCollapsed: false,
@@ -364,7 +364,7 @@ describe("contextMenu Paste (iOS paste fix)", () => {
   it("keeps the menu open across the release click after a touch long-press", async () => {
     const root = rootIn();
     const clip = fakeClipboard();
-    term = createTerminal(root, { features: [clip, contextMenu({ clipboard: clip })] });
+    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
     await tick();
 
     const surface = root.querySelector<HTMLElement>(".term");

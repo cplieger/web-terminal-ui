@@ -12,6 +12,7 @@
 // their own DOM.
 
 export { createTerminal } from "./kernel/kernel.js";
+export { STARTUP_FAILURE_COPY } from "./kernel/startup-copy.js";
 export type {
   CreateTerminalOptions,
   TerminalStartupFailure,

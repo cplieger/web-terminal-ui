@@ -70,7 +70,7 @@ beforeEach(async () => {
 function mountTouch(): { root: HTMLElement; term: TerminalHandle } {
   const root = document.createElement("div");
   document.body.appendChild(root);
-  const term = createTerminal(root, { features: presetTouch() });
+  const term = createTerminal(root, { features: () => presetTouch() });
   return { root, term };
 }
 
