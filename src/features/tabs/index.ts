@@ -14,9 +14,11 @@ import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { fromHTML } from "../dom.js";
 import { createClickSwallow, placeMenuAt } from "../menu-position.js";
-import type { SessionInfo, Tab } from "./model.js";
+import type { CueStatus, SessionInfo, Tab } from "./model.js";
 import {
   ACTIVE_TAB_KEY,
+  CUE_SEEN_KEY,
+  MAX_PERSISTED_CUE_SEEN,
   MAX_PINNED_NAME,
   STATUS_EXITED,
   SWIPE_HINT_KEY,
@@ -26,9 +28,12 @@ import {
   createSessionAPI,
   createTombstones,
   hasPinnedName,
+  isCueStatus,
   orderedInsertIndex,
+  parseCueSeen,
   parseTabOrder,
   sanitizePinnedName,
+  serializeCueSeen,
   serializeTabOrder,
 } from "./model.js";
 import {
@@ -183,6 +188,29 @@ function writeSavedOrder(ids: readonly string[]): void {
     localStorage.setItem(TAB_ORDER_KEY, serializeTabOrder(ids));
   } catch {
     /* storage unavailable or full — the order still holds for this page */
+  }
+}
+
+/** readCueSeen loads the acknowledged background-tab cues, or an empty map when
+ *  there is none to trust. Storage itself can throw (Safari private mode, a
+ *  disabled third-party context, an embedder's iframe) and an unreadable map is
+ *  never fatal: the dot simply lights again, exactly as it behaved before
+ *  acknowledgements were remembered. */
+function readCueSeen(): Map<string, CueStatus> {
+  try {
+    return parseCueSeen(localStorage.getItem(CUE_SEEN_KEY));
+  } catch {
+    return new Map<string, CueStatus>();
+  }
+}
+
+/** writeCueSeen persists acknowledgements, best-effort: a full quota must not
+ *  break the dismissal the user just performed on screen. */
+function writeCueSeen(seen: ReadonlyMap<string, CueStatus>): void {
+  try {
+    localStorage.setItem(CUE_SEEN_KEY, serializeCueSeen(seen));
+  } catch {
+    /* storage unavailable or full — the dismissal still holds for this page */
   }
 }
 
@@ -468,6 +496,45 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // The session that raised the pending cue, so arriving on that tab (a
       // swipe or any switch) acknowledges it without opening the list.
       let switchNotifyId: string | null = null;
+      // Cues this viewer has already SEEN, per session (see CUE_SEEN_KEY).
+      // Loaded here so a reload starts from what the user already dismissed:
+      // input/done stay LATCHED server-side, and the status stream re-pushes the
+      // latch in the snapshot it sends on every open, so without this a
+      // dismissed dot came back on the next load — and on every SSE reconnect,
+      // which on a phone is just returning to a backgrounded page.
+      const cueSeen = readCueSeen();
+      // markCueSeen records that this viewer has seen `id` holding `status`:
+      // either because that tab is the one on screen, or because the tray listing
+      // every tab's dot was opened. A non-cue status is not an acknowledgeable
+      // event, so it is ignored rather than stored.
+      function markCueSeen(id: string, status: string): void {
+        if (!isCueStatus(status) || cueSeen.get(id) === status) {
+          return;
+        }
+        cueSeen.set(id, status);
+        // Evict the oldest entries so the live map obeys the same cap the parser
+        // does. dropTab prunes a session closed while this page was open, but one
+        // that vanished while the page was CLOSED leaves an entry nothing else
+        // collects; unbounded, that would eventually push the map past the cap and
+        // make the parser discard whatever it read last — dropping fresh
+        // acknowledgements to keep dead ones.
+        while (cueSeen.size > MAX_PERSISTED_CUE_SEEN) {
+          const oldest = cueSeen.keys().next().value;
+          if (oldest === undefined) {
+            break;
+          }
+          cueSeen.delete(oldest);
+        }
+        writeCueSeen(cueSeen);
+      }
+      // forgetCueSeen drops an acknowledgement, so the session's NEXT input/done
+      // is a fresh cue: called when its status moves off the acknowledged value
+      // (a new working phase, an exit) and when the session goes away.
+      function forgetCueSeen(id: string): void {
+        if (cueSeen.delete(id)) {
+          writeCueSeen(cueSeen);
+        }
+      }
       function paintSwitchDot(): void {
         // Reuse the per-tab status-dot colours (single source, css/05-tabs.css
         // .wt-status-dot[data-status="input"|"done"]) instead of re-declaring
@@ -1100,6 +1167,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         // Opening the list acknowledges any pending background-tab notification:
         // the user is now looking at the tabs, so clear the switch button's dot.
+        // The tray lists EVERY tab with its own status dot, so every latched tab
+        // is acknowledged here, not just the cue's latest subject — several tabs
+        // can be latched at once while the dot only ever showed the newest, and an
+        // unacknowledged sibling would re-raise it on the next load.
+        for (const t of tabList) {
+          markCueSeen(t.id, t.dot.dataset["status"] ?? "");
+        }
         clearSwitchNotify();
         renderSwitcherList();
         setExpandedState(true);
@@ -1371,8 +1445,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         activeId = next.id;
         // Arriving on the tab that raised the switch-button cue resolves it
         // (a swipe through the tabs must dismiss the dot, not only opening the
-        // list).
+        // list). Its current latch is acknowledged whether or not it was the
+        // cue's subject: the terminal is now on screen, so a reload must not
+        // notify about a state the user just looked at.
         acknowledgeSwitchNotify(next.id);
+        markCueSeen(next.id, next.dot.dataset["status"] ?? "");
         try {
           localStorage.setItem(ACTIVE_TAB_KEY, next.id);
         } catch {
@@ -1749,8 +1826,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // the server reaping it cannot re-adopt the just-closed tab.
         tombstones.add(id);
         // A pending switch-button cue whose subject just closed is moot: clear
-        // it rather than leaving a dot no tab visit can ever resolve.
+        // it rather than leaving a dot no tab visit can ever resolve. Its stored
+        // acknowledgement goes too — the session is gone, so the entry would only
+        // sit in storage forever.
         acknowledgeSwitchNotify(id);
+        forgetCueSeen(id);
         tab.aria.remove();
         // Remove immediately (no exit animation): a lingering element made the
         // "+" teleport after a delay, and made a last-tab replacement appear in
@@ -2263,7 +2343,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // list opens. The active surface keeps its own needs-input cue (see
         // syncMobile); this is the moved + upgraded, glanceable version on the
         // dedicated button.
-        if (rec.id !== activeId && (rec.status === "input" || rec.status === "done")) {
+        //
+        // Both statuses are LATCHED server-side, so this runs on re-delivered
+        // state as well as on genuine transitions: every SSE (re)open pushes a
+        // snapshot and the poll fallback re-lists every few seconds. What makes a
+        // dismissal stick across those is cueSeen — a latch this viewer already
+        // acknowledged raises nothing, while a status that moved on drops the
+        // acknowledgement so the next latch is a fresh cue.
+        if (!isCueStatus(rec.status)) {
+          forgetCueSeen(rec.id);
+        } else if (rec.id === activeId) {
+          // The user is looking at this terminal as it latches, so there is
+          // nothing to notify — and nothing to re-raise once they move away.
+          markCueSeen(rec.id, rec.status);
+        } else if (cueSeen.get(rec.id) !== rec.status) {
           switchNotify = rec.status;
           switchNotifyId = rec.id;
           paintSwitchDot();

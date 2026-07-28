@@ -14,6 +14,9 @@ import type * as TabsModule from "./index.js";
 import type { TerminalFeature } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
+// A plain string constant, so reading it through a separate module instance than
+// the (dynamically re-imported) feature under test is safe.
+import { CUE_SEEN_KEY } from "./model.js";
 
 // A fake activityMonitor feature: lets a test push status events into tabs
 // without the real SSE. tabs reads it via ctx.use, so passing the same feature
@@ -1281,6 +1284,134 @@ describe("tabs feature", () => {
     // Arriving on s3 does.
     feature.api?.switchTo("s3");
     expect(dot?.dataset["status"]).toBeUndefined();
+  });
+
+  it("does not re-raise the switch-button dot for a cue already dismissed (reload)", async () => {
+    // The reported bug: dismissing the dot, then reloading, brought it back.
+    // "input"/"done" are LATCHED server-side (cleared only by the session's next
+    // working phase) and the status stream re-pushes the latch in the snapshot it
+    // sends on every open, so the fresh page re-raised a cue the user had already
+    // resolved. A dismissal is therefore remembered in localStorage — this
+    // simulates the reload by pre-seeding what the previous page wrote.
+    localStorage.setItem(CUE_SEEN_KEY, JSON.stringify({ s2: "done" }));
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    // The re-delivered latch for s2 raises nothing: this viewer saw it already.
+    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    expect(dot?.dataset["status"]).toBeUndefined();
+    // A DIFFERENT latch on the same session is a new event and still notifies.
+    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    expect(dot?.dataset["status"]).toBe("input");
+  });
+
+  it("persists the dismissal of every listed tab when the switcher opens", async () => {
+    // The tray shows each tab's own dot, so opening it acknowledges all of them,
+    // not just the cue's latest subject: several tabs can hold a latch at once
+    // while the dot only ever shows the newest, and an unacknowledged sibling
+    // would re-raise it on the next load.
+    const monitor = fakeMonitor();
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+
+    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    monitor.emit({ id: "s3", status: "done", title: "three", createdAt: "3" });
+    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
+
+    expect(JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}")).toEqual({
+      s2: "input",
+      s3: "done",
+    });
+  });
+
+  it("persists the dismissal when a switch arrives on the raising tab", async () => {
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const feature = tabs({ activityMonitor: monitor.feature });
+    term = createTerminal(root, { features: () => [monitor.feature, feature] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    feature.api?.switchTo("s2");
+    expect(JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}")).toEqual({ s2: "done" });
+  });
+
+  it("does not notify about a latch that happened on the tab in front of the user", async () => {
+    // A turn finishing on the ACTIVE tab raises no cue (the user is watching it),
+    // so moving away and reloading must not invent one either.
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    // s1 is the active tab.
+    monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1" });
+    expect(root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"]).toBe(
+      undefined,
+    );
+    expect(JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}")).toEqual({ s1: "done" });
+  });
+
+  it("forgets the dismissal once the session's status moves on", async () => {
+    // The acknowledgement is on the (session, latch) pair: a new working phase
+    // clears the latch server-side, so the NEXT done is a fresh cue rather than a
+    // re-delivery of the dismissed one.
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
+    expect(dot?.dataset["status"]).toBeUndefined();
+
+    monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
+    expect(localStorage.getItem(CUE_SEEN_KEY)).toBe("{}");
+    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    expect(dot?.dataset["status"]).toBe("done");
+  });
+
+  it("drops a closed session's dismissal instead of leaving it in storage", async () => {
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
+    expect(localStorage.getItem(CUE_SEEN_KEY)).toContain("s2");
+
+    root
+      .querySelectorAll<HTMLElement>(".wt-tab")[1]
+      ?.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    expect(localStorage.getItem(CUE_SEEN_KEY)).toBe("{}");
   });
 
   it("clears the switch-button dot when the tab that raised it is closed", async () => {

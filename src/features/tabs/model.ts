@@ -87,6 +87,85 @@ export function serializeTabOrder(ids: readonly string[]): string {
   return JSON.stringify(ids.slice(0, MAX_PERSISTED_TAB_ORDER));
 }
 
+/** The two session statuses that raise the mobile switcher's aggregate attention
+ *  cue: a background terminal blocked on the user ("input") or one whose turn
+ *  finished ("done"). Declared once here so the raise test and the
+ *  acknowledgement store cannot disagree about which statuses are cue-worthy. */
+export type CueStatus = "input" | "done";
+
+/** isCueStatus narrows a raw server status to a cue-worthy one. */
+export function isCueStatus(status: string): status is CueStatus {
+  return status === "input" || status === "done";
+}
+
+/** localStorage key for the cues this viewer has already SEEN: session id -> the
+ *  latched status that was acknowledged.
+ *
+ *  It has to be remembered, because dismissing the cue does not change the
+ *  session: `input` and `done` are LATCHED server-side (the engine clears them
+ *  only on the session's next working phase) and the status stream re-delivers
+ *  the latch in the snapshot it pushes on every open. So a dismissed dot came
+ *  back on the next page load — and, since the snapshot is re-pushed on every
+ *  SSE reconnect, on a phone simply returning to a backgrounded page.
+ *
+ *  Client-side for the same reason as ACTIVE_TAB_KEY and TAB_ORDER_KEY: "I have
+ *  seen this" is a property of the VIEWER, not of the session. A phone
+ *  acknowledging a finished turn must not blank the dot on the desktop watching
+ *  the same server, so this needs no engine API and the session REST surface
+ *  stays the fixed four routes.
+ *
+ *  Keyed per session rather than as one latest-wins slot: several background tabs
+ *  can hold a latched status at once while the cue only ever shows the newest, so
+ *  a single-slot acknowledgement would let every other one re-raise the dot on
+ *  the next load. */
+export const CUE_SEEN_KEY = "wt-cue-seen";
+
+/** Bound on the acknowledgement map, same reasoning as MAX_PERSISTED_TAB_ORDER:
+ *  every key is a live session server-side, so a real one is nowhere near this,
+ *  and a corrupted or hostile stored value cannot make the restore path do
+ *  unbounded work. */
+export const MAX_PERSISTED_CUE_SEEN = 200;
+
+/** parseCueSeen reads stored acknowledgements into a clean map. Anything it
+ *  cannot trust is dropped (or, for a broken document, all of it): a lost
+ *  acknowledgement only re-lights a dot the user can dismiss again, so degrading
+ *  to "nothing acknowledged" is always safe. Pure, so it is testable without a
+ *  storage backend; the caller owns the localStorage read and its try/catch. */
+export function parseCueSeen(raw: string | null): Map<string, CueStatus> {
+  const out = new Map<string, CueStatus>();
+  if (raw === null || raw === "") {
+    return out;
+  }
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return out;
+  }
+  // Arrays and null are typeof "object" too, and neither is a cue map.
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return out;
+  }
+  for (const [id, status] of Object.entries(data)) {
+    if (id === "" || typeof status !== "string" || !isCueStatus(status)) {
+      continue;
+    }
+    out.set(id, status);
+    if (out.size >= MAX_PERSISTED_CUE_SEEN) {
+      break;
+    }
+  }
+  return out;
+}
+
+/** serializeCueSeen encodes acknowledgements for storage. The caller keeps the
+ *  live map within the cap (see markCueSeen), so this does not truncate: a silent
+ *  truncation here would drop whichever entries the parser happened to read last,
+ *  which is the opposite of what an eviction should discard. */
+export function serializeCueSeen(seen: ReadonlyMap<string, CueStatus>): string {
+  return JSON.stringify(Object.fromEntries(seen));
+}
+
 /** orderedInsertIndex returns where `id` belongs in `current` (a list of tab ids
  *  in display order) to honour the stored arrangement `saved`.
  *
