@@ -6,12 +6,17 @@
  *  tool engine installs on first boot). Flattening that into a message string
  *  made it indistinguishable from a 500 and threw away the retry hint. */
 import { describe, it, expect, afterEach, vi } from "vitest";
+import type { CueStatus } from "./model.js";
 import {
+  MAX_PERSISTED_CUE_SEEN,
   MAX_PERSISTED_TAB_ORDER,
   SessionAPIError,
   createSessionAPI,
+  isCueStatus,
   orderedInsertIndex,
+  parseCueSeen,
   parseTabOrder,
+  serializeCueSeen,
   serializeTabOrder,
 } from "./model.js";
 
@@ -228,6 +233,69 @@ describe("parseTabOrder rejects anything the restore path cannot trust", () => {
   it("round-trips through serializeTabOrder", () => {
     const ids = ["s3", "s1", "s2"];
     expect(parseTabOrder(serializeTabOrder(ids))).toEqual(ids);
+  });
+});
+
+/** Persisted cue acknowledgements.
+ *
+ *  The dot on the mobile switch button is dismissible, but `input` and `done` are
+ *  LATCHED server-side and re-pushed in every status-stream snapshot, so the
+ *  dismissal only survives a reload (or an SSE reconnect) because it is stored.
+ *  These pin the store's shape and its safe-degradation rule. */
+describe("parseCueSeen rejects anything the acknowledgement store cannot trust", () => {
+  it("reads a well-formed map back verbatim", () => {
+    expect([...parseCueSeen(JSON.stringify({ s1: "done", s2: "input" }))]).toEqual([
+      ["s1", "done"],
+      ["s2", "input"],
+    ]);
+  });
+
+  it("degrades to nothing acknowledged on unusable values", () => {
+    const cases: Record<string, string | null> = {
+      absent: null,
+      empty: "",
+      "not json": "{oh no",
+      "an array": JSON.stringify(["s1"]),
+      "a bare string": JSON.stringify("s1"),
+      "a number": JSON.stringify(7),
+      null_literal: JSON.stringify(null),
+    };
+    for (const [name, raw] of Object.entries(cases)) {
+      expect(parseCueSeen(raw).size, name).toBe(0);
+    }
+  });
+
+  it("drops entries whose value is not a cue status, keeping the rest", () => {
+    // Only the two cue-worthy statuses are acknowledgeable: "working"/"idle"/
+    // "exited" are states nothing ever notified about, and a stored one would
+    // silently suppress the NEXT real cue for that session.
+    const raw = JSON.stringify({ s1: "done", s2: "working", s3: 1, s4: "input", "": "done" });
+    expect([...parseCueSeen(raw)]).toEqual([
+      ["s1", "done"],
+      ["s4", "input"],
+    ]);
+  });
+
+  it("caps a hostile or corrupted map so the restore cannot do unbounded work", () => {
+    const huge = Object.fromEntries(
+      Array.from({ length: MAX_PERSISTED_CUE_SEEN + 500 }, (_, i) => [`s${String(i)}`, "done"]),
+    );
+    expect(parseCueSeen(JSON.stringify(huge)).size).toBe(MAX_PERSISTED_CUE_SEEN);
+  });
+
+  it("round-trips through serializeCueSeen", () => {
+    const seen = new Map<string, CueStatus>([
+      ["s3", "input"],
+      ["s1", "done"],
+    ]);
+    expect([...parseCueSeen(serializeCueSeen(seen))]).toEqual([...seen]);
+  });
+});
+
+describe("isCueStatus declares the cue-worthy statuses in one place", () => {
+  it("accepts exactly the two latched attention states", () => {
+    expect(["input", "done"].every(isCueStatus)).toBe(true);
+    expect(["working", "idle", "exited", "", "DONE"].some(isCueStatus)).toBe(false);
   });
 });
 
