@@ -16,8 +16,10 @@ import type { TerminalFeature, Unsubscribe } from "../kernel/types.js";
 const DEFAULT_EVENTS_PATH = "/api/sessions/events";
 
 export interface ActivityMonitorApi {
-  /** Subscribe to every status update (working/idle/input/exited, plus removed).
-   *  Fired for the initial snapshot and each change. */
+  /** Subscribe to every status update (idle/working/warning/failed/input/done/
+   *  exited/crashed, plus removed), including the OSC 9;4 percentage and any OSC
+   *  9 notification the event carries. Fired for the initial snapshot and each
+   *  change. */
   onStatus(cb: (s: SessionStatus) => void): Unsubscribe;
   /** The last known status for a session, or undefined. */
   current(id: string): SessionStatus | undefined;

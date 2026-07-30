@@ -6,6 +6,11 @@
 // (it closes over the feature state). The mobile chrome templates live in
 // switcher.ts; the session model in model.ts.
 
+// The status vocabulary itself (which statuses reveal a dot, and how each one is
+// worded for a human) lives in the DOM-free model, so the painters here and the
+// accessible names index.ts builds read one definition.
+import { statusPhrase, statusRevealsDot } from "./model.js";
+
 // The +/x/keyboard glyphs are inline SVG (not font glyphs) so they center
 // exactly in their flex-centered buttons and stay symmetric regardless of the UI
 // font's metrics. Each is defined ONCE here and shared by every chip site and
@@ -21,15 +26,22 @@ const KB_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" wi
 const SWITCH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="13" height="13" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3"/></svg>`;
 
 // chipContent is the ONE builder for a tab chip's content — a status dot, a
-// label, and a close (x) — shared by all three chip sites: the desktop strip
-// (.wt-tab), the mobile active row (.wt-switcher-current), and each expanded
-// mobile list row (.wt-switcher-row). Each site passes its OWN class set (never
-// renamed) so every existing selector — and thus all CSS and all tests — still
-// matches. The one structural difference is WHERE the close sits: the desktop
+// label, a determinate progress bar, and a close (x) — shared by all three chip
+// sites: the desktop strip (.wt-tab), the mobile active row
+// (.wt-switcher-current), and each expanded mobile list row (.wt-switcher-row).
+// Each site passes its OWN class set (never renamed) so every existing selector
+// — and thus all CSS and all tests — still matches. The one structural
+// difference is WHERE the close sits: the desktop
 // chip nests it flat inside .wt-tab, while the two mobile chips place it as a
 // sibling of the select/swipe button (a button can't nest in a button). So the
 // builder returns two fragments — the dot+label pair and the close — that each
 // site drops into its own structure.
+//
+// The progress bar rides in the dotLabel fragment rather than taking a per-site
+// class: it is positioned against the chip, not laid out in its flex row, so one
+// class (.wt-progress-bar) styles it everywhere and every chip site gets it for
+// free. It starts `hidden` — a session with no percentage must render NO bar
+// (paintProgress).
 export function chipContent(v: { dot: string; label: string; close: string; closeAttr?: string }): {
   dotLabel: string;
   close: string;
@@ -37,7 +49,8 @@ export function chipContent(v: { dot: string; label: string; close: string; clos
   return {
     dotLabel:
       `<span class="${v.dot} wt-status-dot" aria-hidden="true"></span>` +
-      `<span class="${v.label}"></span>`,
+      `<span class="${v.label}"></span>` +
+      `<span class="wt-progress-bar" aria-hidden="true" hidden></span>`,
     close: `<button type="button" class="${v.close}" aria-label="Close terminal"${v.closeAttr ?? ""}>${CLOSE_SVG}</button>`,
   };
 }
@@ -80,15 +93,44 @@ export const TAB_HTML = `
   ${TAB_CHIP.close}
 </div>`;
 
-/** paintStatusDot applies a status dot's two orthogonal bits: data-status drives
- *  its appearance (idle / working / done / input / exited via CSS), and the
- *  .wt-reports class controls its visibility — the dot is hidden by default and
- *  shown only once the session has reported activity (OSC 9;4 progress or a
- *  classified OSC 9 notification), so a plain shell's tabs stay clean and
- *  label-only while an agent's light up. */
+/** paintStatusDot applies a status dot's three orthogonal bits: data-status
+ *  drives its appearance (idle / working / warning / failed / done / input /
+ *  exited / crashed via CSS), the .wt-reports class controls its visibility, and
+ *  `title` gives it a hover tooltip naming the state — the dots are decoration
+ *  (aria-hidden), and a colour vocabulary that grew to eight states needs a way
+ *  to be read rather than memorised. The tooltip wording is statusPhrase, the
+ *  same source the tab's accessible name uses, so hover text and announced text
+ *  cannot drift.
+ *
+ *  Visibility: the dot is hidden by default and shown once the session has
+ *  reported activity (OSC 9;4 progress or a classified OSC 9 notification), so a
+ *  plain shell's tabs stay clean and label-only while an agent's light up. The
+ *  reveal is FLOORED by the status itself (statusRevealsDot) for the states that
+ *  are self-evidently news — a plain shell that crashes never reported activity
+ *  in its life, and hiding its red dot would hide the only signal it ever
+ *  produced. */
 export function paintStatusDot(el: HTMLElement, status: string, reports: boolean): void {
-  el.dataset["status"] = status || "idle";
-  el.classList.toggle("wt-reports", reports);
+  const value = status || "idle";
+  el.dataset["status"] = value;
+  el.classList.toggle("wt-reports", reports || statusRevealsDot(value));
+  el.title = statusPhrase(value);
+}
+
+/** paintProgress renders one chip's determinate progress bar from a percentage.
+ *
+ *  An absent percentage (PROGRESS_ABSENT / any negative) renders NO bar: the
+ *  element is `hidden` and its width is cleared, rather than left as a
+ *  zero-width or empty bar that would read as "0%, stalled". The width is the
+ *  only inline style — the percentage is data, and everything about how the bar
+ *  looks stays in .wt-progress-bar. */
+export function paintProgress(el: HTMLElement, progress: number): void {
+  if (progress < 0) {
+    el.hidden = true;
+    el.style.removeProperty("width");
+    return;
+  }
+  el.hidden = false;
+  el.style.width = `${String(progress)}%`;
 }
 
 /** pick returns a required descendant element or throws (static chrome only). */

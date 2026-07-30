@@ -1988,3 +1988,415 @@ describe("tabs feature: boot race (stream-open reconcile vs bootstrap create)", 
     expect(fetchMock.mock.calls.some((c) => c[1]?.method === "DELETE")).toBe(false);
   });
 });
+
+// OSC 9 chrome: the progress states, the percentage's two display modes, the
+// notification, the aggregate cue's allowed set, and the accessible name.
+// Driven through the real feature over happy-dom, so what is asserted is the DOM
+// a browser would paint.
+describe("tabs OSC 9 status chrome", () => {
+  /** Build a terminal with a fake status monitor and wait for both tabs. */
+  async function withMonitor(
+    opts: Parameters<typeof tabs>[0] = {},
+  ): Promise<{ root: HTMLElement; monitor: ReturnType<typeof fakeMonitor> }> {
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [monitor.feature, tabs({ ...opts, activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    return { root, monitor };
+  }
+  const tabDot = (root: HTMLElement, i: number): HTMLElement | null =>
+    root.querySelectorAll<HTMLElement>(".wt-tab .wt-tab-dot")[i] ?? null;
+  const tabLabel = (root: HTMLElement, i: number): HTMLElement | null =>
+    root.querySelectorAll<HTMLElement>(".wt-tab .wt-tab-label")[i] ?? null;
+  const tabBar = (root: HTMLElement, i: number): HTMLElement | null =>
+    root.querySelectorAll<HTMLElement>(".wt-tab .wt-progress-bar")[i] ?? null;
+
+  it("paints every new status onto the dot, tooltip included", async () => {
+    const { root, monitor } = await withMonitor();
+    for (const [status, phrase] of [
+      ["working", "working"],
+      ["warning", "warning reported"],
+      ["failed", "error reported"],
+      ["crashed", "process crashed"],
+      ["done", "turn finished"],
+      ["input", "waiting for you"],
+      ["exited", "session ended"],
+      ["idle", "idle"],
+    ] as const) {
+      monitor.emit({ id: "s1", status, title: "one", createdAt: "1" });
+      expect(tabDot(root, 0)?.dataset["status"], status).toBe(status);
+      // The dots are aria-hidden decoration, so a hover tooltip is how a sighted
+      // user reads an eight-state colour vocabulary they never memorised.
+      expect(tabDot(root, 0)?.title, status).toBe(phrase);
+    }
+  });
+
+  it("reveals warning, failed and crashed dots even with no reportsActivity flag", async () => {
+    const { root, monitor } = await withMonitor();
+    // None of these events carries reportsActivity: the reveal gate is floored by
+    // the status itself, or a plain shell that crashed would show nothing at all.
+    for (const status of ["warning", "failed", "crashed"] as const) {
+      monitor.emit({ id: "s1", status, title: "one", createdAt: "1" });
+      expect(tabDot(root, 0)?.classList.contains("wt-reports"), status).toBe(true);
+    }
+    // A clean exit stays gated (not news), as does plain idle.
+    for (const status of ["exited", "idle"] as const) {
+      monitor.emit({ id: "s1", status, title: "one", createdAt: "1" });
+      expect(tabDot(root, 0)?.classList.contains("wt-reports"), status).toBe(false);
+    }
+  });
+
+  it("renders a percentage as a title prefix and a determinate bar", async () => {
+    const { root, monitor } = await withMonitor();
+    monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 78 });
+
+    expect(tabLabel(root, 0)?.textContent).toBe("78% · one");
+    const bar = tabBar(root, 0);
+    expect(bar?.hidden).toBe(false);
+    expect(bar?.style.width).toBe("78%");
+    // Every chip site renders it from the one stored value: the mobile active row
+    // carries the same prefix and its own bar.
+    expect(root.querySelector<HTMLElement>(".wt-switcher-label")?.textContent).toBe("78% · one");
+    const swBar = root.querySelector<HTMLElement>(".wt-switcher-current .wt-progress-bar");
+    expect(swBar?.hidden).toBe(false);
+    expect(swBar?.style.width).toBe("78%");
+  });
+
+  it("renders NO bar when the percentage is absent (-1), not a zero-width one", async () => {
+    const { root, monitor } = await withMonitor();
+    monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 60 });
+    expect(tabBar(root, 0)?.hidden).toBe(false);
+
+    // The spec's own clear (OSC 9;4;0 / the abbreviated form) arrives as -1.
+    monitor.emit({ id: "s1", status: "idle", title: "one", createdAt: "1", progressValue: -1 });
+    const bar = tabBar(root, 0);
+    expect(bar?.hidden).toBe(true);
+    expect(bar?.style.width).toBe("");
+    expect(tabLabel(root, 0)?.textContent).toBe("one");
+  });
+
+  it("keeps 0% visible as a real bar (0 is not absence)", async () => {
+    const { root, monitor } = await withMonitor();
+    monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 0 });
+    expect(tabBar(root, 0)?.hidden).toBe(false);
+    expect(tabBar(root, 0)?.style.width).toBe("0%");
+    expect(tabLabel(root, 0)?.textContent).toBe("0% · one");
+  });
+
+  it("keeps 100% until the program clears it: no completion signal, no timeout", async () => {
+    // 100% is not a completion signal: state 1 at 100 is a STATE that persists,
+    // and the progress channel carries no "done" of its own (our done is a
+    // classified notification on a separate channel). So a program that pins 100
+    // and goes quiet keeps its bar — asserting otherwise would report a state
+    // change the program never made.
+    const { root, monitor } = await withMonitor();
+    monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 100 });
+    expect(tabLabel(root, 0)?.textContent).toBe("100% · one");
+    expect(tabBar(root, 0)?.style.width).toBe("100%");
+
+    // A done latch is not a clear either: it says something about the
+    // notification channel, not about the progress the program last reported.
+    monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1", progressValue: 100 });
+    expect(tabLabel(root, 0)?.textContent).toBe("100% · one");
+    expect(tabBar(root, 0)?.hidden).toBe(false);
+
+    // And NO timer clears it: five minutes of wall clock with the page left
+    // alone. A timeout would assert a state change the program never made.
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(tabLabel(root, 0)?.textContent).toBe("100% · one");
+    expect(tabBar(root, 0)?.hidden).toBe(false);
+    expect(tabBar(root, 0)?.style.width).toBe("100%");
+  });
+
+  it("clears the bar and the prefix when the process ends (the second clear)", async () => {
+    // The only clear the UI applies itself: a dead process's progress is
+    // meaningless, and nothing will ever arrive to clear it. Both ends count.
+    for (const ended of ["exited", "crashed"] as const) {
+      const { root, monitor } = await withMonitor();
+      monitor.emit({
+        id: "s1",
+        status: "working",
+        title: "one",
+        createdAt: "1",
+        progressValue: 70,
+      });
+      expect(tabBar(root, 0)?.hidden).toBe(false);
+
+      // The server keeps reporting the last percentage after the exit (the
+      // engine's screen still holds it); the UI drops it anyway.
+      monitor.emit({ id: "s1", status: ended, title: "one", createdAt: "1", progressValue: 70 });
+      expect(tabBar(root, 0)?.hidden, ended).toBe(true);
+      expect(tabLabel(root, 0)?.textContent, ended).toBe("one");
+
+      term?.destroy();
+      term = undefined;
+      root.remove();
+    }
+  });
+
+  it("does not clear a live percentage when a status source omits the field", async () => {
+    // The polling fallback lists SessionInfo, which has no percentage at all.
+    // Absence there means "no information", never "cleared".
+    const { root, monitor } = await withMonitor();
+    monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 45 });
+    monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1" });
+    expect(tabBar(root, 0)?.style.width).toBe("45%");
+  });
+
+  it("never writes the percentage into the browser document title", async () => {
+    // Deliberate product decision, not an oversight: a page has ONE title while
+    // this UI multiplexes many sessions, so whose percentage it would show is
+    // arbitrary — and the title doubles as the browser-tab label and the
+    // bookmark name. The per-chip prefix carries the same information without
+    // the conflict. This test is the guard against re-adding it.
+    document.title = "Host page";
+    const { root, monitor } = await withMonitor();
+
+    // The active tab's percentage renders on its own chip...
+    monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 40 });
+    expect(tabBar(root, 0)?.style.width).toBe("40%");
+    // ...and a background tab's too, but neither reaches the page title.
+    monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2", progressValue: 90 });
+    expect(document.title).toBe("Host page");
+
+    // Including across a destroy, which must leave no trace either way.
+    term?.destroy();
+    term = undefined;
+    expect(document.title).toBe("Host page");
+  });
+
+  it("raises the switcher's aggregate cue for exactly input, done and crashed", async () => {
+    const { root, monitor } = await withMonitor();
+    const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    // s2 is a BACKGROUND tab (s1 is active), which is what the aggregate is for.
+    for (const status of ["input", "done", "crashed"] as const) {
+      monitor.emit({ id: "s2", status, title: "two", createdAt: "2" });
+      expect(dot?.dataset["status"], status).toBe(status);
+      // Same wording map as the per-tab dots, so the aggregate cue explains
+      // itself on hover instead of being an unexplained coloured dot.
+      expect(dot?.title, status).toBe(
+        { input: "waiting for you", done: "turn finished", crashed: "process crashed" }[status],
+      );
+      // Reset via the tab's own acknowledgement path (a working phase drops it).
+      monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
+    }
+    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click(); // clear the cue
+    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click(); // collapse again
+    expect(dot?.dataset["status"]).toBeUndefined();
+
+    // The other five states never raise it: working/warning/failed are ongoing
+    // and informational (an animated dot pinned to the button would nag), and
+    // idle/exited ask nothing of anyone.
+    for (const status of ["working", "warning", "failed", "idle", "exited"] as const) {
+      monitor.emit({ id: "s2", status, title: "two", createdAt: "2" });
+      expect(dot?.dataset["status"], status).toBeUndefined();
+    }
+  });
+
+  it("carries the session state in each tab's accessible name, agreeing with the tooltip", async () => {
+    const { root, monitor } = await withMonitor();
+    const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[0];
+    monitor.emit({ id: "s1", status: "crashed", title: "one", createdAt: "1" });
+    expect(chip?.getAttribute("aria-label")).toBe("one — process crashed");
+
+    // The percentage rides along, so the announced name matches what is shown.
+    monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 30 });
+    expect(chip?.getAttribute("aria-label")).toBe("30% · one — working");
+
+    // Both halves come from ONE wording map, so hover text and announced text
+    // cannot drift apart. Asserted for every state, in both directions.
+    for (const status of [
+      "idle",
+      "working",
+      "warning",
+      "failed",
+      "input",
+      "done",
+      "exited",
+      "crashed",
+    ] as const) {
+      monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: -1 });
+      const phrase = tabDot(root, 0)?.title;
+      expect(phrase, status).toBeTruthy();
+      expect(chip?.getAttribute("aria-label"), status).toBe(`one — ${String(phrase)}`);
+    }
+  });
+});
+
+// The OSC 9 Form B notification, wired through the real feature. The policy
+// itself is unit-tested in notify.test.ts; these pin that the feature feeds it
+// the right session/visibility view and the right gesture.
+describe("tabs OSC 9 notifications", () => {
+  /** A stubbed browser Notification API: records constructions, and lets a test
+   *  choose the permission state and observe a permission request. */
+  function stubNotification(permission: string): {
+    posts: { title: string; body: string | undefined }[];
+    requestPermission: ReturnType<typeof vi.fn>;
+  } {
+    const posts: { title: string; body: string | undefined }[] = [];
+    const requestPermission = vi.fn();
+    class FakeNotification {
+      static permission = permission;
+      static requestPermission = requestPermission;
+      constructor(title: string, options?: { body?: string }) {
+        posts.push({ title, body: options?.body });
+      }
+    }
+    vi.stubGlobal("Notification", FakeNotification);
+    return { posts, requestPermission };
+  }
+  function setVisibility(state: "visible" | "hidden"): void {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+  }
+
+  afterEach(() => {
+    setVisibility("visible");
+  });
+
+  async function boot(): Promise<{ root: HTMLElement; monitor: ReturnType<typeof fakeMonitor> }> {
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    return { root, monitor };
+  }
+
+  it("posts a background session's notification", async () => {
+    const { posts } = stubNotification("granted");
+    const { monitor } = await boot();
+    monitor.emit({
+      id: "s2", // s1 is active
+      status: "done",
+      title: "two",
+      createdAt: "2",
+      notification: "Response complete",
+      notificationSeq: 1,
+    });
+    expect(posts).toEqual([{ title: "two", body: "Response complete" }]);
+  });
+
+  it("suppresses the ACTIVE session's notification while the page is visible", async () => {
+    const { posts } = stubNotification("granted");
+    setVisibility("visible");
+    const { monitor } = await boot();
+    monitor.emit({
+      id: "s1", // the active tab, on screen
+      status: "done",
+      title: "one",
+      createdAt: "1",
+      notification: "Response complete",
+      notificationSeq: 1,
+    });
+    expect(posts).toEqual([]);
+  });
+
+  it("posts the ACTIVE session's notification when the page is HIDDEN", async () => {
+    // The direction most likely to regress: a backgrounded browser tab or a
+    // locked phone is exactly when the user cannot see the terminal.
+    const { posts } = stubNotification("granted");
+    const { monitor } = await boot();
+    setVisibility("hidden");
+    monitor.emit({
+      id: "s1",
+      status: "done",
+      title: "one",
+      createdAt: "1",
+      notification: "Response complete",
+      notificationSeq: 1,
+    });
+    expect(posts).toEqual([{ title: "one", body: "Response complete" }]);
+  });
+
+  it("passes untrusted notification text as data, never into the DOM", async () => {
+    const { posts } = stubNotification("granted");
+    const { root, monitor } = await boot();
+    const hostile = `<img src=x onerror="globalThis.__pwned2 = true">`;
+    monitor.emit({
+      id: "s2",
+      status: "done",
+      title: "two",
+      createdAt: "2",
+      notification: hostile,
+      notificationSeq: 1,
+    });
+    expect(posts[0]?.body).toBe(hostile);
+    expect(root.querySelector("img")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
+    expect((globalThis as { __pwned2?: boolean }).__pwned2).toBeUndefined();
+  });
+
+  it("requests permission on a user gesture once a session reports activity", async () => {
+    const { requestPermission } = stubNotification("default");
+    const { root, monitor } = await boot();
+
+    // A press before any activity must not prompt: a plain shell's user can only
+    // answer such a prompt wrongly.
+    root
+      .querySelector(".wt-tab-bar")
+      ?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    expect(requestPermission).not.toHaveBeenCalled();
+
+    // A reporting session arms it; the next gesture asks, exactly once.
+    monitor.emit({
+      id: "s1",
+      status: "working",
+      title: "one",
+      createdAt: "1",
+      reportsActivity: true,
+    });
+    root
+      .querySelector(".wt-tab-bar")
+      ?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    root
+      .querySelector(".wt-tab-bar")
+      ?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    expect(requestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it("degrades to tab-only when permission is denied, without throwing", async () => {
+    const { posts } = stubNotification("denied");
+    const { root, monitor } = await boot();
+    expect(() => {
+      monitor.emit({
+        id: "s2",
+        status: "done",
+        title: "two",
+        createdAt: "2",
+        reportsActivity: true,
+        notification: "Response complete",
+        notificationSeq: 1,
+      });
+    }).not.toThrow();
+    expect(posts).toEqual([]);
+    // Tab-only: the session's own dot and the switcher's aggregate cue still say
+    // something happened.
+    expect(root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"]).toBe(
+      "done",
+    );
+  });
+
+  it("degrades to tab-only when the API is absent (no Notification global)", async () => {
+    const { monitor } = await boot();
+    expect(() => {
+      monitor.emit({
+        id: "s2",
+        status: "done",
+        title: "two",
+        createdAt: "2",
+        notification: "Response complete",
+        notificationSeq: 1,
+      });
+    }).not.toThrow();
+  });
+});

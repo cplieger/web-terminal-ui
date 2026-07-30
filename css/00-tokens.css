@@ -82,6 +82,28 @@
   --status-working: #52a9fe; /* agent working (waves): the same blue as the default --accent */
   --status-done: #22c55e; /* turn finished: solid green */
   --status-input: #fb923c; /* action required: solid orange + ring */
+  /* OSC 9;4 progress states 4 (warning) and 2 (error). Both render as the SAME
+     object as working -- identical glow + travelling wave, one shared rule and
+     one shared pair of keyframes (30-tabs.css) -- differing ONLY in hue, because
+     the escape code models one progress indicator with several states rather
+     than three unrelated dots. Neither wears a ring: the frozen hard ring is
+     --status-input's exclusive meaning ("blocked, waiting on you"), and neither
+     warning nor error asks the user to act.
+     LIGHTNESS SEPARATION IS LOAD-BEARING, NOT DECORATIVE. Three states that
+     differ only by hue collapse into one under deuteranopia and in greyscale, so
+     the three hues are also spread across lightness. Measured OKLab L (and WCAG
+     relative luminance Y, the greyscale read):
+       warning #facc15  L 86.1%  Y 63.6%
+       working #52a9fe  L 71.9%  Y 37.3%
+       failed  #dc2626  L 57.7%  Y 16.7%
+     ~14 L points and a wide Y gap between each neighbour, monotonic in both, so
+     the three stay ordered and distinguishable with hue discarded entirely. A
+     retheme MUST keep that spread: two animated states at the same lightness are
+     indistinguishable to a colour-blind user, whatever their hues. warning is
+     YELLOW, deliberately not amber -- amber would collide with --status-input's
+     orange (L 75.8%), which sits between working and warning. */
+  --status-warning: #facc15; /* OSC 9;4 state 4: yellow disc, working's wave */
+  --status-failed: #dc2626; /* OSC 9;4 state 2: red disc, working's wave; crashed reuses it solid and static */
   --radius: 0.75rem;
   --radius-inner: 0.5rem;
   /* Small square icon buttons (e.g. the 24px tab-close x): at that size the
@@ -102,8 +124,38 @@
   --sp-1: 0.25rem;
   --sp-2: 0.5rem;
   --sp-3: 0.75rem;
-  --font-ui: -apple-system, blinkmacsystemfont, "SF Pro Text", system-ui, sans-serif;
+  /* Chrome text uses the SAME bundled web font as the terminal, deliberately.
+     A system-font stack made the tab-title alignment unfixable: every entry of
+     the old stack (-apple-system, BlinkMacSystemFont, "SF Pro Text") resolves
+     only on Apple platforms, so everywhere else it fell through to system-ui —
+     which Chromium resolves through fontconfig and Firefox from the desktop UI
+     font setting. Two different typefaces, with two different vertical metrics,
+     on ONE machine. Optically centring text needs the font's ascent/descent
+     asymmetry as a known constant (--label-ink-shift below), and an unknown
+     font has no constant, so no value could ever be right on both.
+
+     MonaspiceNe NFM is already served at /vendor/fonts by every full-page host
+     (page.css declares the faces, the Dockerfiles ship the files), so this adds
+     no download. A consumer serving a component-only manifest has no face for
+     this family and falls back to the platform monospace — and also ships no tab
+     strip (MANIFEST.touch excludes 30-tabs.css), so nothing metric-dependent
+     rides on that fallback. */
+  --font-ui: "MonaspiceNe NFM", ui-monospace, monospace;
   --font-mono: "MonaspiceNe NFM", monospace;
+  /* How far a chip label's INK sits below its line box's centre, so flex
+     centring can be corrected by exactly that much (see .wt-tab-label in
+     30-tabs.css). Derived from MonaspiceNe NFM's own tables and outlines:
+
+       (ascent - descent) / 2      = (0.995 - 0.250) / 2   = 0.3725em
+       (cap ink - descender ink)/2 = (0.7344 - 0.2188) / 2 = 0.2578em
+       difference                                          = 0.1147em
+
+     A constant is safe here only because the bundled font leaves engines
+     nothing to disagree about: hhea, OS/2 typo and usWin all declare the same
+     0.995 / 0.250 with lineGap 0, and fsSelection sets USE_TYPO_METRICS, so
+     Chromium, Gecko and WebKit all compute the same line box. Re-derive this
+     number if the bundled font ever changes; do not nudge it by eye. */
+  --label-ink-shift: 0.1147em;
   --dur-micro: 0.1s;
   --dur-standard: 0.2s;
   --dur-enter: 0.25s;

@@ -75,15 +75,24 @@
   width: 300px;
   flex: 0 1 auto;
   min-width: 100px;
+  /* Positioning context for the chip's own overlay: the OSC 9;4 determinate
+     progress bar sits on its bottom edge (see .wt-progress-bar). Nothing else
+     inside a chip is absolutely positioned, and the strip's two root-level
+     overlays (.wt-tab-ghost, .wt-tab-menu) are children of .wt-root, not of a
+     chip, so this cannot capture them. */
+  position: relative;
   /* ONE height for every control in the strip: the chip, the "+" and the
      keyboard button all resolve to --touch-target, so a chip and a button can
      never disagree about how tall the row is. Before this the chip's height was
      whatever its tallest child happened to be, and the "+" hard-coded a COPY of
      that arithmetic (close button + padding + border) — two sources of truth
-     for one row, which drifted the moment a child's box grew: a browser without
-     text-box support kept the label's untrimmed line box (31px, past the 24px
-     close button), so the chip rendered 49px tall next to a 42px "+" and a 44px
-     keyboard button. --touch-target is also the tap-target floor the rest of
+     for one row, which drifted the moment a child's box grew: the label's own
+     box once reached 31px, past the 24px close button, and the chip rendered
+     49px tall next to a 42px "+" and a 44px keyboard button. (That growth came
+     from a text-box trim's descender padding being applied on the untrimmed
+     code path, which no longer exists -- the label's geometry is now one
+     unconditional rule; see .wt-tab-label. The two-sources-of-truth lesson is
+     what survives.) --touch-target is also the tap-target floor the rest of
      the chrome already respects, including this chip's mobile counterpart
      (.wt-switcher-current in 31-switcher.css, same declaration).
 
@@ -174,57 +183,58 @@
 }
 
 /* The label flexes to fill the fixed-width tab and truncates with an ellipsis
-   (min-width: 0 lets a flex item shrink below its content width). */
+   (min-width: 0 lets a flex item shrink below its content width), and it owns the
+   ink-centring geometry the two switcher labels in 31-switcher.css share verbatim.
+
+   Centre the INK, not the line box. A font's metrics box reaches far higher above
+   the baseline than below it (the bundled font: 0.995em over, 0.250em under),
+   while the ink of a mixed-case title runs 0.7344em over (cap height) to 0.2188em
+   under (descender). Flex centring centres the BOX, which leaves the visible text
+   --label-ink-shift low — 0.1147em, 1.5px at this size — reading as
+   baseline-aligned with the activity dot's bottom edge instead of level with its
+   centre. Two declarations, one job, and a third that must NOT be added:
+
+   - padding-block is the ink allowance, not spacing. `overflow: hidden` (which
+     the ellipsis requires) clips at the padding box, and the line box clears the
+     tallest ink by only 0.6px, so an unpadded label shaves the top off every
+     acute accent and caron. 0.125em per side buys 2.2px of clearance at 13px, and
+     being symmetric it does not move the centred text.
+   - margin-block hangs TWICE the shift below the box. Flex centring centres the
+     MARGIN box, so a bottom-heavy margin lifts the border box by half of it --
+     exactly one shift -- and unlike padding it does not enlarge the clipping box.
+   - line-height stays at `normal`, deliberately. Setting it looks like the
+     responsible thing to do and it is the trap: `normal` is the ONE value whose
+     half-leading is zero by definition, which is what makes the baseline sit at
+     exactly the engine's ascent below the box top. Any other value leaves
+     (line-height - font box) / 2 to be halved and rounded, and Chromium floors
+     it -- measured with an explicit 1.25 the 14px switcher labels came out a
+     FULL pixel high (line box 17.5 under an 18px font box, so half-leading
+     -0.25 floored to -1) while the 13px strip label was fine, which is exactly
+     the kind of works-where-I-looked bug this rule exists to end.
+
+   What this deliberately does NOT use is `text-box: trim-both`, which all three
+   previous attempts were built on. It ships in Blink and WebKit only (Firefox has
+   it in Nightly behind layout.css.text-box.enabled), so it can only be applied
+   behind an @supports gate, and a gate means two engines render two different
+   geometries of which only the one the author is looking at ever gets tuned.
+   Measured on the gated version: Chromium centred to 0.02px while Firefox sat
+   1.50px low with its baseline half a pixel BELOW the dot. The keyword vocabulary
+   is too coarse for this text besides -- `cap alphabetic` centres the cap band and
+   reads 1.14px low on lowercase, `ex alphabetic` centres the x-band and reads high
+   on capitals, and a mixed-case tab title wants neither edge.
+
+   The residual error is engines rounding ascent and descent to whole pixels, which
+   makes the ideal shift 0.127em at 13px and 0.099em at 14px; the one authored
+   0.1147em is the unrounded truth and lands within 0.22px at both sizes, in every
+   engine, with no fork. */
 :where(.wt-root) .wt-tab-label {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-}
-
-/* Center the INK, not the line box: UI fonts carry far more ascent than
-     descent (the -apple-system/Noto Sans stack at 13px: 14px over / 4px under
-     the baseline), so the flex-centered line box leaves the visible text ~1.5px
-     low — reading as baseline-aligned with the activity dot's bottom instead of
-     its center. Trimming the box makes flexbox center the glyph band instead of
-     the font's metrics box.
-
-     `ex`, not `cap`, is the over edge, because a tab title is sentence case and
-     lowercase-dominant ("workspace", "refactor the auth module"). Centering the
-     x-height/baseline band centers the total ink of such a string, since a
-     Latin font's ascender overshoot above x-height is about its descender depth
-     below the baseline (measured on this stack at 13px: 3.0px over vs 3.0px
-     under, ink center 0.02px off the chip's center). `cap alphabetic` — the
-     right choice for an ALL-CAPS label — leaves lowercase text 1.14px low,
-     which is the original complaint barely moved.
-
-     padding-block is LOAD-BEARING, not spacing: trimming puts the box's under
-     edge ON the baseline, and `overflow: hidden` clips at the padding edge, so
-     with no padding every descender and every tall diacritic is cut off (
-     measured: 3.3px of p/y/g/j tail and 2.3px of an acute accent, i.e. "pygmy
-     jaguar Ápple" rendered as "pyqmy iaquar Apple"). 0.5em restores the ink
-     overhang the trim removes from the box; being symmetric it does not move
-     the centered band, and being em-relative it tracks the font size.
-
-     The pair is @supports-GATED because the padding is the trim's allowance and
-     nothing else: an untrimmed line box already contains that overhang, so
-     adding the padding there is not "harmless slack" (this comment used to
-     claim it was) — it grew the label's box to 31px, past the 24px close button,
-     and a browser without text-box support rendered 49px tab chips beside a
-     42px "+" and a 44px keyboard button. The chip's own --touch-target floor
-     pins the row height either way; the gate is what keeps the label from
-     pushing PAST it. Gating the shorthand (not the longhands) is deliberate: an
-     engine that ships text-box-trim without the shorthand does not apply the
-     declaration we actually write, so it must take the untrimmed branch too.
-
-     Shared by all three chip labels (this one + the two switcher labels in
-     31-switcher.css). */
-@supports (text-box: trim-both ex alphabetic) {
-  :where(.wt-root) .wt-tab-label {
-    text-box: trim-both ex alphabetic;
-    padding-block: 0.5em;
-  }
+  padding-block: 0.125em;
+  margin-block: 0 calc(2 * var(--label-ink-shift));
 }
 
 /* A little breathing room after the activity dot, before the label. */
@@ -569,9 +579,13 @@
 }
 
 /* ===== Activity dots (activityMonitor via tabs) =====
-   Four-state, distinguishable without color (shape + motion, not hue alone),
-   per section 12 / WCAG 1.4.1. The one .wt-status-dot vocabulary is shared by
-   the desktop strip, the mobile switcher, and the overview sheet rows.
+   Eight-state, distinguishable without color (shape + motion, not hue alone),
+   per section 12 / WCAG 1.4.1: three ANIMATED progress states (working /
+   warning / failed — one object, three hues, spread across lightness so they
+   survive greyscale and deuteranopia), a frozen ringed disc (input), two static
+   discs (green done, red crashed), and two hollow ones (idle, dim exited).
+   The one .wt-status-dot vocabulary is shared by the desktop strip, the mobile
+   switcher, and the overview sheet rows.
 
    Revealed PER TAB: the dot is hidden until its own session reports activity
    (OSC 9;4 progress, or a classified OSC 9 notification), at which point the
@@ -595,12 +609,40 @@
      from the filled done/working/input states (WCAG 1.4.1). */
   background: transparent;
   border: 1.5px solid color-mix(in oklch, var(--text) 45%, transparent);
+
   /* Reset every transient visual owned by a status. In particular, a dot that
      leaves working must stop its pulse, and a dot that enters working must not
      carry the input ring or an exited opacity into the animated paint layer. */
   box-shadow: none;
   opacity: 1;
   animation: none;
+}
+
+/* ===== Determinate progress bar (OSC 9;4 percentage) =====
+   The second display mode the specs name for a progress report (iTerm2 calls it
+   a progress bar; ConEmu also puts the value on the taskbar, which is the
+   document-title prefix's job). One 2px line on the chip's bottom edge, shared
+   by all three chip sites (desktop strip chip, mobile active row, expanded list
+   row) because it ships in the one chipContent builder.
+
+   The ACCENT colour, not a per-state tint: the bar answers "how far", the dot
+   answers "in what state", and tinting the bar per state would say the same
+   thing twice while making a 2px line carry hue it cannot carry legibly.
+
+   Painted only while a percentage actually exists: the element carries the
+   `hidden` attribute otherwise (paintProgress), so an absent value (-1) renders
+   NO bar rather than a zero-width or empty one. Its width is the only inline
+   style — the percentage is data, not styling. */
+:where(.wt-root) .wt-progress-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  max-width: 100%;
+  background: var(--accent);
+  /* Follow the chip's rounded bottom-left corner instead of poking out of it. */
+  border-bottom-left-radius: inherit;
+  pointer-events: none;
 }
 
 /* Reveal a dot only once its session has reported activity (the tabs feature
@@ -629,12 +671,42 @@
    opacity always multiplies onto its pseudos, so true independence requires
    animating disc COLORS, not element opacity. Server-side this is driven by the
    OSC 9;4 progress signal, so it tracks agent activity, not the user typing at
-   the prompt. */
-:where(.wt-root) .wt-status-dot[data-status="working"] {
+   the prompt.
+
+   WORKING, WARNING AND FAILED SHARE THIS RULE, AND BOTH KEYFRAMES, VERBATIM.
+   OSC 9;4 models ONE progress indicator with several states (1/3 active,
+   4 warning, 2 error), so it renders as one visual object whose HUE carries the
+   state — not three unrelated dots. Each state therefore sets --dot-color and
+   changes nothing else: same disc, same glow beat, same travelling wave, same
+   period. Do NOT give warning or failed a ring — the frozen hard ring is
+   input's exclusive meaning ("blocked, waiting on you"), and neither of these
+   asks the user to act (see the input rule). Hue alone would not be enough on
+   its own, which is why the three tokens are also spread across lightness
+   (measured OKLab L: warning 86.1%, working 71.9%, failed 57.7% — see the
+   load-bearing note in 00-tokens.css). */
+:where(.wt-root) .wt-status-dot[data-status="working"],
+:where(.wt-root) .wt-status-dot[data-status="warning"],
+:where(.wt-root) .wt-status-dot[data-status="failed"] {
   position: relative;
-  background: var(--status-working);
-  border-color: var(--status-working);
+  background: var(--dot-color);
+  border-color: var(--dot-color);
   animation: wt-working-glow 1.2s ease-in-out infinite;
+}
+
+/* The one difference between the three animated states. Kept as three
+   single-declaration rules so the shared paint above reads as literally shared:
+   a future change to the disc, the glow or the wave cannot land on one hue and
+   miss the other two. */
+:where(.wt-root) .wt-status-dot[data-status="working"] {
+  --dot-color: var(--status-working);
+}
+
+:where(.wt-root) .wt-status-dot[data-status="warning"] {
+  --dot-color: var(--status-warning);
+}
+
+:where(.wt-root) .wt-status-dot[data-status="failed"] {
+  --dot-color: var(--status-failed);
 }
 
 /* The ripple layer: a feathered radial BAND (not a hairline border) that starts
@@ -645,16 +717,18 @@
    which is what makes the wave visibly dissipate as it grows. transform +
    opacity only, so it composites without repaints (a gradient background is
    rasterized once, unlike an animated box-shadow spread, which repaints every
-   frame). It exists only in the working state — no stale layer to pin when a
-   dot changes status. (The switcher notification dot never shows working —
-   input/done only — so its position: absolute placement never meets this
-   rule's position: relative.)
+   frame). It exists only in the three animated states — no stale layer to pin
+   when a dot changes status. (The switcher notification dot never shows any of
+   them — input/done/crashed only — so its position: absolute placement never
+   meets this rule's position: relative.)
 
    The final scale is deliberately capped at today's 27px footprint: the mobile
    overview row (.wt-switcher-row-select) clips at overflow: hidden 12.5px from
    the dot's center, and a wave wider than ~25px picks up a visible straight
    edge there. Visibility comes from the band's weight and timing, not size. */
-:where(.wt-root) .wt-status-dot[data-status="working"]::after {
+:where(.wt-root) .wt-status-dot[data-status="working"]::after,
+:where(.wt-root) .wt-status-dot[data-status="warning"]::after,
+:where(.wt-root) .wt-status-dot[data-status="failed"]::after {
   content: "";
   position: absolute;
   inset: -2px;
@@ -662,7 +736,7 @@
   background: radial-gradient(
     closest-side,
     transparent 44%,
-    var(--status-working) 76%,
+    var(--dot-color) 76%,
     transparent 100%
   );
   animation: wt-working-ripple 1.2s linear infinite;
@@ -702,23 +776,46 @@
   opacity: 0.5;
 }
 
+/* Crashed (a non-zero exit status, or a signal the program was not asked for;
+   a server-initiated end is "exited", so a routine restart never paints red):
+   a SOLID dot in the failed red, static.
+
+   Solid, not hollow. There is no "hollow means no process" invariant to honour —
+   idle is hollow with a perfectly live process — so hollowness would only say
+   "unremarkable", and a crash is the least unremarkable thing this vocabulary
+   reports. It uses the SAME token as failed, because "the program reported an
+   error" and "the program died badly" are one family, and it separates from
+   failed by MOTION: failed pulses and emits the travelling wave, crashed is
+   completely still (no glow, no wave, no ring — nothing clears it, so any
+   animation would nag forever). That is the same axis that already separates
+   working from done. Under prefers-reduced-motion the separation survives as
+   SHAPE: failed degrades to a ringed donut (see the reduced-motion block), while
+   crashed stays a bare solid disc. */
+:where(.wt-root) .wt-status-dot[data-status="crashed"] {
+  background: var(--status-failed);
+  border-color: var(--status-failed);
+}
+
 /* The disc's glow beat: base -> brighter -> base, then a rest until the next
    cycle. Colors are set at EVERY frame, which both drives the glow and pins
    the paint — a dot entering working in the same frame input/done ends can
    never re-pulse the previously rasterized paint (the hazard the old
    opacity-only pulse had to pin box-shadow against). Element opacity stays 1
-   throughout; see the layer-independence note on the working rule. */
+   throughout; see the layer-independence note on the working rule.
+
+   --dot-color, not --status-working: this beat is shared verbatim by working,
+   warning and failed, each of which supplies its own hue. */
 @keyframes wt-working-glow {
   0%,
   70%,
   100% {
-    background-color: var(--status-working);
-    border-color: var(--status-working);
+    background-color: var(--dot-color);
+    border-color: var(--dot-color);
   }
 
   35% {
-    background-color: color-mix(in oklch, var(--status-working) 78%, #fff);
-    border-color: color-mix(in oklch, var(--status-working) 78%, #fff);
+    background-color: color-mix(in oklch, var(--dot-color) 78%, #fff);
+    border-color: color-mix(in oklch, var(--dot-color) 78%, #fff);
   }
 }
 
@@ -758,22 +855,27 @@
   }
 }
 
-/* Reduced-motion: drop the working motion (glow + ripple), keep color. */
+/* Reduced-motion: drop the animated states' motion (glow + ripple), keep color.
+   All three degrade the same way, since they are one object with three hues. */
 @media (prefers-reduced-motion: reduce) {
-  :where(.wt-root) .wt-status-dot[data-status="working"] {
+  :where(.wt-root) .wt-status-dot[data-status="working"],
+  :where(.wt-root) .wt-status-dot[data-status="warning"],
+  :where(.wt-root) .wt-status-dot[data-status="failed"] {
     animation: none;
-    /* Motion is what separates working from input's frozen ping; with it
-       removed, punch an inner hole (dot -> donut) and add a static ring so
-       working differs from input (solid ringed disc) and done (bare disc) by
-       shape, not hue alone (WCAG 1.4.1). The ring carries the same 30%
-       weight as input's. */
+    /* Motion is what separates the animated states from input's frozen ping;
+       with it removed, punch an inner hole (dot -> donut) and add a static ring
+       so they differ from input (solid ringed disc) and done (bare disc) by
+       shape, not hue alone (WCAG 1.4.1). The ring carries the same 30% weight as
+       input's, from whichever hue the state supplied. */
     box-shadow:
       inset 0 0 0 2px var(--bg),
-      0 0 0 2px color-mix(in srgb, var(--status-working) 30%, transparent);
+      0 0 0 2px color-mix(in srgb, var(--dot-color) 30%, transparent);
   }
 
   /* The ripple layer disappears entirely (not just paused mid-wave). */
-  :where(.wt-root) .wt-status-dot[data-status="working"]::after {
+  :where(.wt-root) .wt-status-dot[data-status="working"]::after,
+  :where(.wt-root) .wt-status-dot[data-status="warning"]::after,
+  :where(.wt-root) .wt-status-dot[data-status="failed"]::after {
     content: none;
   }
 }

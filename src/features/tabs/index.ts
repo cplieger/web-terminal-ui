@@ -14,13 +14,13 @@ import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { fromHTML } from "../dom.js";
 import { createClickSwallow, placeMenuAt } from "../menu-position.js";
-import type { CueStatus, SessionInfo, Tab } from "./model.js";
+import type { CueStatus, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
   ACTIVE_TAB_KEY,
   CUE_SEEN_KEY,
   MAX_PERSISTED_CUE_SEEN,
   MAX_PINNED_NAME,
-  STATUS_EXITED,
+  PROGRESS_ABSENT,
   SWIPE_HINT_KEY,
   SessionAPIError,
   TAB_ORDER_KEY,
@@ -29,17 +29,25 @@ import {
   createTombstones,
   hasPinnedName,
   isCueStatus,
+  isEndedStatus,
+  normalizeProgress,
   orderedInsertIndex,
   parseCueSeen,
   parseTabOrder,
+  progressLabel,
+  renderedProgress,
   sanitizePinnedName,
   serializeCueSeen,
   serializeTabOrder,
+  statusPhrase,
+  tabAccessibleName,
 } from "./model.js";
+import { browserNotifierEnv, createNotifier } from "./notify.js";
 import {
   TAB_HTML,
   kbButtonHTML,
   newButtonHTML,
+  paintProgress,
   paintStatusDot,
   pick,
   switchButtonHTML,
@@ -472,6 +480,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const swInner = pick(switcher, ".wt-switcher-current-inner");
       const swDot = pick(switcher, ".wt-switcher-dot");
       const swLabel = pick(switcher, ".wt-switcher-label");
+      // The active row's determinate progress bar. Scoped to the current chip:
+      // every expanded list row carries a .wt-progress-bar of its own, so an
+      // unscoped pick would be ambiguous the moment the list is populated.
+      const swProgress = pick(switcher, ".wt-switcher-current .wt-progress-bar");
       const swClose = pick(switcher, ".wt-switcher-current-close");
       // The active-tab elements that translate together during a horizontal
       // swipe: the content (dot + label) and the close (x). Moving both keeps the
@@ -491,8 +503,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // Latest-wins notification state for the switch button's dot: overwritten
       // by each qualifying background-tab event (applyStatus) and cleared when
       // the list opens (expandSwitcher) or the raising tab is visited or closed
-      // (acknowledgeSwitchNotify). "" = no pending cue; the dot is hidden.
-      let switchNotify: "" | "input" | "done" = "";
+      // (acknowledgeSwitchNotify). "" = no pending cue; the dot is hidden. The
+      // cue-worthy set is CueStatus (input / done / crashed — the states that
+      // want the user), declared once in model.ts beside isCueStatus.
+      let switchNotify: "" | CueStatus = "";
       // The session that raised the pending cue, so arriving on that tab (a
       // swipe or any switch) acknowledges it without opening the list.
       let switchNotifyId: string | null = null;
@@ -535,15 +549,26 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           writeCueSeen(cueSeen);
         }
       }
+      // OSC 9 Form B notifications: the one signal the specs say to surface
+      // OUTSIDE the page ("post a notification"), so a finished turn can reach a
+      // user who is looking at another app. All the policy — the suppression
+      // rule, the gesture-gated permission request, the silent tab-only
+      // degradation — lives in notify.ts; this feature only feeds it events and
+      // gestures.
+      const notifier = createNotifier(browserNotifierEnv());
       function paintSwitchDot(): void {
         // Reuse the per-tab status-dot colours (single source, css/05-tabs.css
-        // .wt-status-dot[data-status="input"|"done"]) instead of re-declaring
-        // them: the dot has the .wt-status-dot class, so data-status colours it
-        // exactly like the tabs' own dots.
+        // .wt-status-dot[data-status="input"|"done"|"crashed"]) instead of
+        // re-declaring them: the dot has the .wt-status-dot class, so data-status
+        // colours it exactly like the tabs' own dots. Its tooltip comes from the
+        // same wording map as theirs, so the aggregate cue names the state it is
+        // showing rather than being a coloured dot with no explanation.
         if (switchNotify === "") {
           delete swSwitchDot.dataset["status"];
+          swSwitchDot.removeAttribute("title");
         } else {
           swSwitchDot.dataset["status"] = switchNotify;
+          swSwitchDot.title = statusPhrase(switchNotify);
         }
       }
       function clearSwitchNotify(): void {
@@ -707,6 +732,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // same window title, or two tabs whose last submitted line was identical),
       // the second and later get a " (k)" suffix in creation order, so the strip
       // never shows two identical labels.
+      //
+      // The OSC 9;4 percentage prefix ("78% · one") is applied HERE, at render
+      // time, and stored nowhere: `display` stays the plain de-duplicated label,
+      // so de-duplication compares real names, the rename field opens on the real
+      // name, `list()` reports the real name, and clearing the progress needs no
+      // cleanup — the next paint simply stops adding it.
       function relabelAll(): void {
         // Count only real (non-fallback) labels, so multiple untitled tabs all
         // read "New tab" without a numeric suffix.
@@ -729,9 +760,29 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             }
           }
           t.display = display;
-          t.label.textContent = display;
-          t.aria.setLabel(display);
+          const rendered = progressLabel(display, shownProgress(t));
+          t.label.textContent = rendered;
+          // The accessible name carries the state as well as the label: the dots
+          // are aria-hidden decoration, so without this a screen-reader user
+          // cannot tell a working tab from a crashed one.
+          t.aria.setLabel(tabAccessibleName(rendered, statusOf(t)));
         }
+      }
+
+      /** statusOf reads a tab's current status back off its dot, which is where
+       *  applyStatus records it (the dot is the one element that always has it,
+       *  on every chip site). */
+      function statusOf(t: Tab): string {
+        return t.dot.dataset["status"] ?? "idle";
+      }
+
+      /** shownProgress is a tab's percentage as it may currently be DISPLAYED:
+       *  the last value the server reported, dropped once the process is gone.
+       *  Those are the only two ways a percentage stops showing — the program's
+       *  own OSC 9;4;0 (an explicit -1) and the process ending; see
+       *  renderedProgress for why there is no third. */
+      function shownProgress(t: Tab): number {
+        return renderedProgress(statusOf(t), t.progress);
       }
 
       const termInput = (): HTMLElement | null =>
@@ -825,8 +876,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       function syncMobile(): void {
         const idx = tabList.findIndex((t) => t.id === activeId);
         const active = idx >= 0 ? tabList[idx] : undefined;
-        swLabel.textContent = active ? active.display : "";
-        paintStatusDot(swDot, active?.dot.dataset["status"] ?? "idle", active?.reports ?? false);
+        swLabel.textContent = active ? progressLabel(active.display, shownProgress(active)) : "";
+        paintStatusDot(swDot, active ? statusOf(active) : "idle", active?.reports ?? false);
+        paintProgress(swProgress, active ? shownProgress(active) : PROGRESS_ABSENT);
         // The aggregate background-notification cue rides the dedicated switch
         // button's dot (paintSwitchDot), not the active surface (it did not fit
         // there).
@@ -847,14 +899,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         });
         return row;
       }
-      // updateRow refreshes a reused row's live bits (status dot + label).
+      // updateRow refreshes a reused row's live bits (status dot + label +
+      // progress bar).
       function updateRow(row: HTMLElement, t: Tab): void {
-        paintStatusDot(
-          pick(row, ".wt-switcher-row-dot"),
-          t.dot.dataset["status"] ?? "idle",
-          t.reports,
+        paintStatusDot(pick(row, ".wt-switcher-row-dot"), statusOf(t), t.reports);
+        paintProgress(pick(row, ".wt-progress-bar"), shownProgress(t));
+        pick(row, ".wt-switcher-row-label").textContent = progressLabel(
+          t.display,
+          shownProgress(t),
         );
-        pick(row, ".wt-switcher-row-label").textContent = t.display;
       }
       // renderSwitcherList reconciles the expanded list to a row per OTHER tab
       // (the active tab lives in the bar row), REUSING existing row elements
@@ -1070,6 +1123,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         persistOrder();
       }
 
+      // The percentage is deliberately NOT written into the browser document
+      // title. ConEmu's spec names the taskbar/title as a display site, and a
+      // page's document title is the nearest analogue — but a page has exactly
+      // ONE title while this UI multiplexes many sessions, so any rule for
+      // choosing whose percentage it shows is arbitrary. Even restricted to the
+      // active tab it churns a surface that doubles as the browser-tab label and
+      // the bookmark name, and it invites reading one session's progress as the
+      // window's. The per-chip prefix carries the same information without the
+      // conflict, because each chip shows its own session. Do not add it back.
+
       // persistOrder stores the strip's current arrangement so it survives a
       // reload. It hangs off syncChrome — the one function every list mutation
       // already ends with (reorder, create, adopt, close, reconcile) — rather than
@@ -1197,12 +1260,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      function addTabChrome(info: SessionInfo): Tab {
+      function addTabChrome(info: StatusRecord): Tab {
         const el = fromHTML(TAB_HTML);
         const label = el.querySelector<HTMLElement>(".wt-tab-label");
         const dot = el.querySelector<HTMLElement>(".wt-tab-dot");
+        const progressEl = el.querySelector<HTMLElement>(".wt-progress-bar");
         const close = el.querySelector<HTMLButtonElement>(".wt-tab-close");
-        if (!label || !dot || !close) {
+        if (!label || !dot || !progressEl || !close) {
           throw new Error("web-terminal-ui: tab chrome missing parts");
         }
         paintStatusDot(dot, info.status, reportsOf(info.reportsActivity));
@@ -1232,16 +1296,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           el,
           label,
           dot,
+          progressEl,
+          // A percentage exists only on the status STREAM, so a tab adopted from
+          // the REST list starts with none; the first status event fills it in.
+          progress: normalizeProgress(info.progressValue),
           aria,
           scrollTop: 0,
           following: true,
           reports: reportsOf(info.reportsActivity),
         };
+        paintProgress(progressEl, renderedProgress(info.status, tab.progress));
         // Set an initial label immediately (relabelAll refines it with de-dup
         // once the tab is in tabList and syncChrome runs).
         tab.display = baseLabel(tab).text;
-        label.textContent = tab.display;
-        aria.setLabel(tab.display);
+        label.textContent = progressLabel(tab.display, renderedProgress(info.status, tab.progress));
+        aria.setLabel(tabAccessibleName(label.textContent, info.status));
         el.addEventListener("click", (e) => {
           if ((e.target as HTMLElement).closest(".wt-tab-close")) {
             return; // handled by the close button
@@ -1716,14 +1785,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // stream / poll adopt the existing sessions below; without this they would
       // render inert (blank, never connecting) until the user taps a tab. This
       // is the sibling of the '+'-retry recovery the bootstrap already handles.
-      // A live tab outranks an exited one (its dot status is fed by the same
+      // A live tab outranks an ENDED one (its dot status is fed by the same
       // SSE/poll that adopted it); a corpse is only auto-activated when nothing
-      // else exists.
+      // else exists. "Ended" covers both ways a process goes (exited and
+      // crashed) — a crashed session is exactly as unable to produce output as a
+      // cleanly exited one, so activating it would wedge the page the same way.
       function ensureActive(): void {
         if (activeId !== null) {
           return;
         }
-        const first = tabList.find((t) => t.dot.dataset["status"] !== STATUS_EXITED) ?? tabList[0];
+        const first = tabList.find((t) => !isEndedStatus(statusOf(t))) ?? tabList[0];
         if (first) {
           switchTo(first.id);
         }
@@ -1831,6 +1902,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // sit in storage forever.
         acknowledgeSwitchNotify(id);
         forgetCueSeen(id);
+        notifier.forget(id); // no more notifications can arrive for a gone session
         tab.aria.remove();
         // Remove immediately (no exit animation): a lingering element made the
         // "+" teleport after a delay, and made a last-tab replacement appear in
@@ -2212,12 +2284,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         (e) => {
           menuTouch = e.pointerType === "touch";
           noteChromePress();
+          notifier.gesture();
         },
         { passive: true },
       );
       // The switcher's half of that snapshot (its rows and the x are buttons, so
       // pressing one focuses it and blurs the terminal exactly as a chip does).
-      switcher.addEventListener("pointerdown", noteChromePress, { passive: true });
+      // It is also the mobile half of the notification-permission gesture.
+      switcher.addEventListener(
+        "pointerdown",
+        () => {
+          noteChromePress();
+          notifier.gesture();
+        },
+        { passive: true },
+      );
       function hideTabMenu(): void {
         tabMenu.classList.remove("visible");
         tabMenu.replaceChildren();
@@ -2329,13 +2410,30 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // one, and its title fields are interchangeable strings that as positional
       // parameters would be trivially swappable. reports is the server's sticky reportsActivity flag, passed
       // separately because it is normalised (reportsOf) before it gets here.
-      function applyStatus(rec: SessionInfo, reports: boolean): void {
+      function applyStatus(rec: StatusRecord, reports: boolean): void {
         const t = tabList.find((tab) => tab.id === rec.id);
         if (!t) {
           return;
         }
         t.reports = reports;
         paintStatusDot(t.dot, rec.status, reports);
+        // The OSC 9;4 percentage. Only an explicitly PRESENT value updates the
+        // tab: the polling fallback lists SessionInfo, which carries no
+        // percentage at all, and reading that absence as "cleared" would blank a
+        // live bar on every poll tick. The spec's own clear (OSC 9;4;0, or the
+        // abbreviated form) arrives as an explicit -1; the only other clear is
+        // the process ending, applied at render time (renderedProgress). No
+        // timer, and nothing special about 100%.
+        if (rec.progressValue !== undefined) {
+          t.progress = normalizeProgress(rec.progressValue);
+        }
+        paintProgress(t.progressEl, shownProgress(t));
+        // A session that reports activity is a session whose program speaks OSC 9,
+        // so it is also one that may post a notification: arm the permission
+        // request for the next user gesture (see notify.ts).
+        if (reports) {
+          notifier.arm();
+        }
         // Latest-wins background-tab notification for the switch button's dot: a
         // background tab (not the active one) reaching "input" (needs you) or
         // "done" (turn finished) raises the cue in that colour; each qualifying
@@ -2468,6 +2566,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           applyStatus(s, reportsOf(s.reportsActivity));
           ensureActive();
           syncChrome();
+          // A notification is an EVENT the engine delivers once, on the sweep
+          // that first observes it, so it is handled here rather than in
+          // applyStatus (which also runs on re-delivered STATE). Delivered after
+          // syncChrome so the notification's title is the label the user would
+          // see. The status record is the notification's carrier whether or not
+          // the server has a classifier installed.
+          notifier.deliver(s, {
+            sessionIsActive: s.id === activeId,
+            label: tabList.find((t) => t.id === s.id)?.display ?? s.title,
+          });
         });
         offStreamOpen = monitor.onStreamOpen?.(() => {
           void reconcileOnce();
@@ -3001,13 +3109,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         } catch {
           sessions = [];
         }
-        // Spawn a fresh session unless a LIVE one is listed. An exited session
-        // is viewable history, not a working terminal — booting a page whose
-        // every session has died (the agent exited: a sign-in dead end, a
-        // crash) onto a corpse was the stuck-loading wedge. The exited ones are
-        // still adopted below (switch to them to read their final screen; close
-        // them by hand).
-        if (!sessions.some((s) => s.status !== STATUS_EXITED)) {
+        // Spawn a fresh session unless a LIVE one is listed. An ended session
+        // (exited cleanly OR crashed) is viewable history, not a working
+        // terminal — booting a page whose every session has died (the agent
+        // exited: a sign-in dead end, a crash) onto a corpse was the
+        // stuck-loading wedge. The dead ones are still adopted below (switch to
+        // them to read their final screen; close them by hand).
+        if (!sessions.some((s) => !isEndedStatus(s.status))) {
           try {
             sessions = [...sessions, await createSessionHonouringRetry(api, ctx, () => tornDown)];
           } catch (err) {
@@ -3047,15 +3155,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Activate the previously-active session if it still exists, else the
         // first (oldest). Session ids are stable server-side, so a page reload
         // reconnects to the tab the user left on instead of always the oldest.
-        // Live sessions outrank exited ones: the saved id is honored only while
-        // its session is still live (a reload used to restore straight onto the
-        // corpse of a died-while-away session and wedge there), and the default
-        // is the oldest LIVE tab. Only when nothing is live (the fresh-spawn
-        // above failed too) does an exited tab start — a frozen final screen
-        // with the "Session ended" banner beats a blank page.
-        const liveIds = new Set(
-          sessions.filter((s) => s.status !== STATUS_EXITED).map((s) => s.id),
-        );
+        // Live sessions outrank ended ones (exited or crashed): the saved id is
+        // honored only while its session is still live (a reload used to restore
+        // straight onto the corpse of a died-while-away session and wedge
+        // there), and the default is the oldest LIVE tab. Only when nothing is
+        // live (the fresh-spawn above failed too) does a dead tab start — a
+        // frozen final screen with the "Session ended" banner beats a blank
+        // page.
+        const liveIds = new Set(sessions.filter((s) => !isEndedStatus(s.status)).map((s) => s.id));
         const oldestLive = tabList.find((t) => liveIds.has(t.id));
         let startTab = oldestLive ?? tabList[0];
         try {
