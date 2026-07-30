@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./startup-copy": "./src/kernel/startup-copy.ts",
+    "./style-contract": "./src/kernel/style-contract.ts",
     "./presets": "./src/presets.ts",
     "./presets/single": "./src/presets/single.ts",
     "./presets/touch": "./src/presets/touch.ts",
@@ -39,7 +40,7 @@
     "verify": "bash scripts/verify.sh"
   },
   "peerDependencies": {
-    "@cplieger/web-terminal-engine": "^3.2.0"
+    "@cplieger/web-terminal-engine": "^3.3.0"
   },
   "overrides": {
     "qs": "^6.15.2"

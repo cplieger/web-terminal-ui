@@ -4,6 +4,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./startup-copy": "./src/kernel/startup-copy.ts",
+    "./style-contract": "./src/kernel/style-contract.ts",
     "./presets": "./src/presets.ts",
     "./presets/single": "./src/presets/single.ts",
     "./presets/touch": "./src/presets/touch.ts",

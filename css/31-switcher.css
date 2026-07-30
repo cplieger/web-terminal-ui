@@ -172,22 +172,20 @@
   min-width: 0;
 }
 
+/* Ink-centring geometry, identical to .wt-tab-label: a symmetric ink allowance
+   the ellipsis clipping needs, plus a bottom margin of twice --label-ink-shift
+   that lifts the ink to the row centre. See 30-tabs.css for the derivation, for
+   why line-height must stay `normal` here, and for why this is margin arithmetic
+   over the bundled font rather than a text-box trim behind an @supports gate that
+   only one engine ever takes. */
 :where(.wt-root) .wt-switcher-label {
   flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
-}
-
-/* Ink-centering trim + its mandatory descender allowance, same as .wt-tab-label
-   (see 30-tabs.css for why `ex`, why the padding is not optional, and why the
-   pair is @supports-gated rather than left to fall back). */
-@supports (text-box: trim-both ex alphabetic) {
-  :where(.wt-root) .wt-switcher-label {
-    text-box: trim-both ex alphabetic;
-    padding-block: 0.5em;
-  }
+  padding-block: 0.125em;
+  margin-block: 0 calc(2 * var(--label-ink-shift));
 }
 
 /* Keyboard button: hidden until a keyboardToggle is wired; filled while the key
@@ -301,9 +299,12 @@
 
 /* Latest-wins background-tab notification dot on the switch button — the moved
    attention cue: the input colour when a background terminal needs input, the
-   done colour when a background turn finished. Reuses the exact .wt-status-dot
-   rules (30-tabs.css, --status-* tokens) so it matches the per-tab dots. Hidden
-   until the tabs feature sets data-status; cleared when the list opens
+   done colour when a background turn finished, the failed red when a background
+   process crashed. Those three only — the rule the user set is "only states that
+   want the user, like a notification", so the ongoing progress states (working /
+   warning / failed) never raise it. Reuses the exact .wt-status-dot rules
+   (30-tabs.css, --status-* tokens) so it matches the per-tab dots. Hidden until
+   the tabs feature sets data-status; cleared when the list opens
    (expandSwitcher). */
 :where(.wt-root) .wt-switcher-switch-dot {
   position: absolute;
@@ -312,8 +313,9 @@
 }
 
 /* The dot carries the .wt-status-dot class, so its size, shape, and colour come
-   straight from the shared .wt-status-dot[data-status="input"|"done"] rules
-   (30-tabs.css) — the SAME dot colours every tab already uses, defined once.
+   straight from the shared .wt-status-dot[data-status="input"|"done"|"crashed"]
+   rules (30-tabs.css) — the SAME dot colours every tab already uses, defined
+   once. None of the three animates, so nothing here can pin a wave layer.
    .wt-status-dot is display:none by default; force it visible only while a
    notification is set (data-status present). */
 :where(.wt-root) .wt-switcher-switch-dot[data-status] {
@@ -407,6 +409,10 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  /* Positioning context for this row's progress bar (.wt-progress-bar, defined
+     once with the shared dot vocabulary in 30-tabs.css), which rides the row's
+     own bottom edge. */
+  position: relative;
   min-height: var(--touch-target);
   /* Right padding reserves room for the close (x) overlaid inside the box. */
   padding: 0 var(--touch-target) 0 var(--sp-2);
@@ -435,21 +441,19 @@
   background: color-mix(in oklch, var(--tab-bg), var(--text) 15%);
 }
 
+/* Ink-centring geometry, identical to .wt-tab-label: a symmetric ink allowance
+   the ellipsis clipping needs, plus a bottom margin of twice --label-ink-shift
+   that lifts the ink to the row centre. See 30-tabs.css for the derivation, for
+   why line-height must stay `normal` here, and for why this is margin arithmetic
+   over the bundled font rather than a text-box trim behind an @supports gate that
+   only one engine ever takes. */
 :where(.wt-root) .wt-switcher-row-label {
   flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Ink-centering trim + its mandatory descender allowance, same as .wt-tab-label
-   (see 30-tabs.css for why `ex`, why the padding is not optional, and why the
-   pair is @supports-gated rather than left to fall back). */
-@supports (text-box: trim-both ex alphabetic) {
-  :where(.wt-root) .wt-switcher-row-label {
-    text-box: trim-both ex alphabetic;
-    padding-block: 0.5em;
-  }
+  padding-block: 0.125em;
+  margin-block: 0 calc(2 * var(--label-ink-shift));
 }
 
 /* The close sits flush at the row's right edge (no gap), vertically centered. */

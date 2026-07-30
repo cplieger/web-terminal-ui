@@ -59,15 +59,19 @@ page that has one empty container element, then call
 **Full-page host** (the terminal IS the page, as in `web-terminal-server` and
 `web-terminal-kiro`): concatenate `css/MANIFEST` into the `style.css` your page
 links. That reference bundle is `css/page.css` (the page kit: `html/body`
-reset + the terminal web font's `@font-face`, expecting the font files at
-`/vendor/fonts/`) plus the complete component set.
+reset + the bundled web font's `@font-face`, expecting the font files at
+`/vendor/fonts/`) plus the complete component set. The bundled font backs both
+the terminal display and the chrome text, so serving those files is not
+optional for a full-page host.
 
 **Embedder** (the terminal lives inside your app's layout, as a panel or pane):
 concatenate the per-preset manifest matching your composition instead:
 `css/MANIFEST.single`, `css/MANIFEST.touch`, or `css/MANIFEST.tabbed`. These
 contain ONLY root-scoped component styles: no page reset, no fonts, no
-document-level rules, nothing to quarantine. Pass `layout: "container"` so the
-terminal fills (and positions its chrome against) your container element
+document-level rules, nothing to quarantine. Chrome text then falls back to your
+platform's monospace unless you declare the `@font-face` yourself; ship it if you
+want the terminal panel to match the full-page product. Pass `layout: "container"`
+so the terminal fills (and positions its chrome against) your container element
 instead of the viewport.
 
 Feature bundles (presets) live at the `./presets` sub-path, with per-preset
@@ -134,20 +138,29 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
   label follows the latest submitted line (persisted server-side and recovered
   on reload) and the program's OSC 0/2 title is ignored. With `presumeReports`,
   the idle activity dot shows from tab creation instead of waiting for the
-  session's first OSC 9;4 signal. Its status dots (idle / working / done /
-  needs-input) come from the same activity monitor.
+  session's first OSC 9;4 signal. Its status dots come from the same activity
+  monitor and cover eight states: the three animated OSC 9;4 progress states
+  (working, warning, error), the frozen ringed needs-input dot, two static discs
+  (a green finished turn, a red crashed process), and two hollow ones (idle and a
+  dim ended session). A
+  reported percentage additionally renders a 2px determinate bar on the chip and
+  a `78% ·` prefix on the tab label; it is deliberately never written to the
+  browser document title, since one page title cannot represent several
+  sessions. An OSC 9 notification is posted as a browser
+  notification when the user is not already looking at that terminal (permission
+  is requested on a user gesture; a denial degrades silently to the tab dots).
 
 ### Options
 
-| Option         | Default                    | Purpose                                                                                                                                                                                                                                                                                       |
-| -------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `features`     | _(none; bare kernel)_      | A FUNCTION returning the feature list. Omitted builds only the terminal (no chrome). Pass a preset by name (`features: presetTabbed`) or a factory of your own; it is called inside the startup-failure boundary, so a preset that throws is handled rather than escaping.                    |
-| `layout`       | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                |
-| `wsPath`       | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                               |
-| `fontReady`    | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                                                                   |
-| `loading`      | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                  |
-| `onFatalError` | _(built-in recovery)_      | Called with a `TerminalStartupFailure` after a fatal startup failure, in either phase (`feature-setup` or `kernel-init`); behavior below.                                                                                                                                                     |
-| `theme`        | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input`. The library ships neutral defaults. |
+| Option         | Default                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `features`     | _(none; bare kernel)_      | A FUNCTION returning the feature list. Omitted builds only the terminal (no chrome). Pass a preset by name (`features: presetTabbed`) or a factory of your own; it is called inside the startup-failure boundary, so a preset that throws is handled rather than escaping.                                                                                                                                                                                                                                                                                                                |
+| `layout`       | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                                                                                                                                                                                                                                                                                                            |
+| `wsPath`       | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `fontReady`    | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `loading`      | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `onFatalError` | _(built-in recovery)_      | Called with a `TerminalStartupFailure` after a fatal startup failure, in either phase (`feature-setup` or `kernel-init`); behavior below.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `theme`        | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input`, `--status-warning`, `--status-failed`. The library ships neutral defaults. If you retheme the animated trio (`--status-working` / `--status-warning` / `--status-failed`), keep their LIGHTNESS spread: they differ only in hue, so equal-lightness replacements collapse into one another in greyscale and under deuteranopia. |
 
 `createTerminal()` returns a handle: `focus()` re-focuses the terminal input
 (and opens the soft keyboard on touch); `send(bytes)` sends bytes to the active
@@ -156,6 +169,33 @@ for a "type this command" affordance); `reset()` drops the local scrollback and
 screen without injecting keystrokes (send a redraw keystroke yourself if you
 want one, for example Ctrl+L); and `destroy()` tears every feature down and
 releases the kernel.
+
+### Themes that provably apply
+
+`theme` is an open `Record<string, string>` — the kernel sets every key on the
+terminal root verbatim — so a key this library renamed or retired becomes a live
+declaration nothing reads: no error, just the library's neutral defaults where
+your brand should be. The supported keys are therefore published as data:
+
+```ts
+import { PUBLIC_THEME_TOKENS } from "@cplieger/web-terminal-ui/style-contract";
+// or from the package root; the subpath imports nothing and touches no DOM,
+// so a Node script can read it too.
+
+for (const key of Object.keys(MY_THEME)) {
+  expect(PUBLIC_THEME_TOKENS).toContain(key); // your test, our list
+}
+```
+
+Every token on that list is guaranteed by this package's own suite to be both
+declared AND read by a shipped rule, so setting it changes what renders. The
+second half is the one you cannot check from outside: a token that is declared
+but that no rule reads accepts your override and applies it to nothing. Anything
+NOT on the list is internal and may be renamed without a release note.
+
+`LOADING_OVERLAY_CLASSES` is published from the same module for the same reason:
+your pre-JS overlay markup opts into `css/page.css`'s styling by class name, and
+that markup usually lives in a static HTML file no compiler reads.
 
 ### Startup failures
 

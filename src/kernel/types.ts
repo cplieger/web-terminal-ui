@@ -426,12 +426,19 @@ export interface CreateTerminalOptions {
   // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- an observing handler returns nothing; only a literal `true` claims the recovery surface, so forcing `return undefined` on every observer is worse than the union
   onFatalError?: (failure: TerminalStartupFailure) => boolean | void;
   /** Theme overrides: CSS custom properties set on the terminal root so a
-   *  consumer recolors the UI (accent, tab hover/active) without shipping CSS.
-   *  Keys must be CSS custom-property names (start with "--"); values are any
-   *  CSS value. The library ships the defaults (css/00-tokens.css) — the
-   *  "template"; these are the consumer's "settings" and override them for this
-   *  instance. Known tokens: --accent, --tab-bg, --tab-hover-bg,
-   *  --tab-active-bg, --tab-active-fg, --tab-active-border. */
+   *  consumer recolors the UI (accent, tab hover/active, the activity-dot
+   *  palette) without shipping CSS. Keys must be CSS custom-property names
+   *  (start with "--"); values are any CSS value. The library ships the defaults
+   *  (css/00-tokens.css) — the "template"; these are the consumer's "settings"
+   *  and override them for this instance.
+   *
+   *  The supported keys are published as DATA, not prose: `PUBLIC_THEME_TOKENS`
+   *  (exported at the package root and at "@cplieger/web-terminal-ui/style-contract").
+   *  This type stays an open Record so a consumer may build its theme
+   *  dynamically, which means nothing here rejects a key the library renamed or
+   *  retired — the override would simply apply to nothing. Assert your keys
+   *  against that list rather than trusting a comment; the library's own suite
+   *  guarantees every token on it is both declared and read by a rule. */
   theme?: Readonly<Record<string, string>>;
 }
 

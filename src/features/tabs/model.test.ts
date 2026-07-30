@@ -10,14 +10,22 @@ import type { CueStatus } from "./model.js";
 import {
   MAX_PERSISTED_CUE_SEEN,
   MAX_PERSISTED_TAB_ORDER,
+  PROGRESS_ABSENT,
   SessionAPIError,
   createSessionAPI,
   isCueStatus,
+  isEndedStatus,
+  normalizeProgress,
   orderedInsertIndex,
   parseCueSeen,
   parseTabOrder,
+  progressLabel,
+  renderedProgress,
   serializeCueSeen,
   serializeTabOrder,
+  statusPhrase,
+  statusRevealsDot,
+  tabAccessibleName,
 } from "./model.js";
 
 function response(
@@ -293,9 +301,14 @@ describe("parseCueSeen rejects anything the acknowledgement store cannot trust",
 });
 
 describe("isCueStatus declares the cue-worthy statuses in one place", () => {
-  it("accepts exactly the two latched attention states", () => {
-    expect(["input", "done"].every(isCueStatus)).toBe(true);
-    expect(["working", "idle", "exited", "", "DONE"].some(isCueStatus)).toBe(false);
+  it("accepts exactly the three states that want the user, and nothing else", () => {
+    // The switcher's aggregate dot is "like a notification": it shows only the
+    // states that ask something of the user. The five it must NOT show are the
+    // three ongoing/informational progress states plus idle and a clean exit.
+    expect(["input", "done", "crashed"].every(isCueStatus)).toBe(true);
+    expect(["working", "warning", "failed", "idle", "exited", "", "DONE"].some(isCueStatus)).toBe(
+      false,
+    );
   });
 });
 
@@ -329,5 +342,106 @@ describe("orderedInsertIndex places a tab by the arrangement, not by arrival", (
     // "x" is unknown to the arrangement and already at the head; "a" (rank 1)
     // still lands before "b" (rank 2) rather than being pushed to the end.
     expect(orderedInsertIndex(["x", "b"], ["c", "a", "b"], "a")).toBe(1);
+  });
+});
+
+describe("the status vocabulary (the OSC 9 states)", () => {
+  it("treats both ways a process ENDS as ended", () => {
+    // A crashed session is exactly as unable to produce output as an exited one,
+    // so session selection must not read it as live (reloading onto a corpse was
+    // the stuck-loading wedge).
+    expect(isEndedStatus("exited")).toBe(true);
+    expect(isEndedStatus("crashed")).toBe(true);
+    for (const live of ["idle", "working", "warning", "failed", "input", "done", ""]) {
+      expect(isEndedStatus(live), live).toBe(false);
+    }
+  });
+
+  it("floors the dot reveal for the states that are self-evidently news", () => {
+    // A plain shell that dies badly never reported activity in its life, so the
+    // server's sticky reportsActivity flag is not set for it — and its red dot is
+    // the only signal it ever produced. A clean exit stays gated: not news.
+    expect(["warning", "failed", "crashed"].every(statusRevealsDot)).toBe(true);
+    expect(["idle", "working", "input", "done", "exited", ""].some(statusRevealsDot)).toBe(false);
+  });
+
+  it("words every status once, for both the tooltip and the accessible name", () => {
+    expect(statusPhrase("working")).toBe("working");
+    expect(statusPhrase("warning")).toBe("warning reported");
+    expect(statusPhrase("failed")).toBe("error reported");
+    expect(statusPhrase("input")).toBe("waiting for you");
+    expect(statusPhrase("done")).toBe("turn finished");
+    expect(statusPhrase("exited")).toBe("session ended");
+    expect(statusPhrase("crashed")).toBe("process crashed");
+    expect(statusPhrase("idle")).toBe("idle");
+    expect(statusPhrase("")).toBe("idle");
+    // A newer server's unknown status is surfaced raw rather than hidden: the
+    // wire is parsed, not validated.
+    expect(statusPhrase("hibernating")).toBe("hibernating");
+  });
+
+  it("puts the state into a tab's accessible name", () => {
+    expect(tabAccessibleName("agent", "crashed")).toBe("agent — process crashed");
+    expect(tabAccessibleName("78% · agent", "working")).toBe("78% · agent — working");
+  });
+});
+
+describe("the OSC 9;4 percentage", () => {
+  it("reads an absent or untrustworthy value as absent, never as 0%", () => {
+    // -1 is the engine's own absence marker, and absence must render NO bar
+    // rather than an empty one, so it may never be normalised to 0.
+    expect(normalizeProgress(-1)).toBe(PROGRESS_ABSENT);
+    expect(normalizeProgress(undefined)).toBe(PROGRESS_ABSENT);
+    expect(normalizeProgress(null)).toBe(PROGRESS_ABSENT);
+    expect(normalizeProgress("50")).toBe(PROGRESS_ABSENT);
+    expect(normalizeProgress(Number.NaN)).toBe(PROGRESS_ABSENT);
+    expect(normalizeProgress(Number.POSITIVE_INFINITY)).toBe(PROGRESS_ABSENT);
+    expect(normalizeProgress(-7)).toBe(PROGRESS_ABSENT);
+  });
+
+  it("keeps 0 distinct from absent, and clamps an out-of-range high value", () => {
+    expect(normalizeProgress(0)).toBe(0);
+    expect(normalizeProgress(100)).toBe(100);
+    expect(normalizeProgress(140)).toBe(100);
+    expect(normalizeProgress(37.6)).toBe(38);
+  });
+
+  it("prefixes a label at render time, and adds nothing when absent", () => {
+    expect(progressLabel("agent", 78)).toBe("78% · agent");
+    expect(progressLabel("agent", 0)).toBe("0% · agent");
+    expect(progressLabel("agent", PROGRESS_ABSENT)).toBe("agent");
+  });
+
+  it("clears a percentage on exactly two things, and nothing else", () => {
+    // Clear 1 is the program's own OSC 9;4;0 (the value arrives as -1), so it
+    // needs no status rule at all — it is simply carried through.
+    expect(renderedProgress("working", PROGRESS_ABSENT)).toBe(PROGRESS_ABSENT);
+    // Clear 2: the process is gone, whichever way it went.
+    expect(renderedProgress("exited", 100)).toBe(PROGRESS_ABSENT);
+    expect(renderedProgress("crashed", 60)).toBe(PROGRESS_ABSENT);
+
+    // NOTHING else clears it. 100% is not a completion signal (state 1 at 100 is
+    // a state that persists), the progress channel carries no "done" at all, and
+    // a latch belongs to the notification channel — so a done/input latch, and a
+    // return to idle without a fresh value, keep showing what the program last
+    // reported rather than asserting a change it never made.
+    expect(renderedProgress("working", 100)).toBe(100);
+    expect(renderedProgress("failed", 42)).toBe(42);
+    expect(renderedProgress("warning", 25)).toBe(25);
+    expect(renderedProgress("done", 100)).toBe(100);
+    expect(renderedProgress("input", 60)).toBe(60);
+    expect(renderedProgress("idle", 100)).toBe(100);
+  });
+});
+
+describe("parseCueSeen accepts the cue statuses and nothing else", () => {
+  it("stores a crashed acknowledgement and rejects a non-cue status", () => {
+    const seen = parseCueSeen(
+      JSON.stringify({ s1: "crashed", s2: "done", s3: "working", s4: "exited" }),
+    );
+    expect([...seen.entries()]).toEqual([
+      ["s1", "crashed"],
+      ["s2", "done"],
+    ]);
   });
 });

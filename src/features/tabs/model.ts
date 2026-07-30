@@ -14,11 +14,157 @@ import type { TabHandle } from "../../kernel/types.js";
 // contract has one home. Type-only import: erases at compile, no runtime dep.
 export type { SessionInfo };
 
+/** A status record as the tabs feature consumes it: the session's REST wire
+ *  shape plus the percentage that exists only on the status STREAM
+ *  (SessionStatus.progressValue). Both status sources flow through one code path
+ *  this way, and the optionality is meaningful: the polling fallback lists
+ *  SessionInfo with no percentage at all, which means "no information" and must
+ *  not be read as "the percentage was cleared". */
+export type StatusRecord = SessionInfo & { readonly progressValue?: number };
+
+// The status vocabulary, module-private on purpose: every consumer asks one of
+// the predicates below (isEndedStatus / statusRevealsDot / isCueStatus /
+// statusPhrase) instead of comparing strings itself, so a status's
+// MEANING has exactly one home. Adding a status means adding it to the
+// predicates that should include it, not to a comparison at each call site.
+//
 // The server-side status of a session whose process has exited (mirrors the
 // engine's terminal.StatusExited). Such a session is viewable history — its
 // final screen replays and the kernel shows "Session ended" — but it can never
 // produce output again, so session selection prefers live sessions everywhere.
-export const STATUS_EXITED = "exited";
+const STATUS_EXITED = "exited";
+
+/** The other end-of-process status (engine terminal.StatusCrashed): a non-zero
+ *  exit status, or a terminating signal the program was not asked for. A
+ *  server-initiated end (a closed tab, the idle reaper, a server shutdown) is
+ *  reported as "exited", so a routine restart never paints as a failure. Like
+ *  "exited" it is terminal: nothing clears it, and it outranks every progress
+ *  state. */
+const STATUS_CRASHED = "crashed";
+
+/** OSC 9;4 progress state 2, the error state (iTerm2 semantics). A STATE, not an
+ *  event: it persists until the program reports another progress state, or the
+ *  process dies (which outranks it). */
+const STATUS_FAILED = "failed";
+
+/** OSC 9;4 progress state 4, the warning state (iTerm2 semantics; ConEmu calls
+ *  the same state paused). Same persistence rules as STATUS_FAILED. */
+const STATUS_WARNING = "warning";
+
+/** isEndedStatus reports whether a status means the session's process is GONE,
+ *  whichever way it went. Session selection asks this — not `=== "exited"` —
+ *  because a crashed session is exactly as dead as an exited one: reloading onto
+ *  either is the stuck-loading wedge the bootstrap's live-session preference
+ *  exists to avoid. */
+export function isEndedStatus(status: string): boolean {
+  return status === STATUS_EXITED || status === STATUS_CRASHED;
+}
+
+/** The statuses whose dot must be visible even if the server never set the
+ *  session's sticky reportsActivity flag. `warning` and `failed` are OSC 9;4
+ *  states, so the flag is set for them in practice and this only floors it;
+ *  `crashed` is the case that needs it — a plain shell that dies badly has
+ *  reported no activity in its life, and its red dot is the one thing the user
+ *  most needs to see. An ordinary `exited` deliberately stays gated: a clean end
+ *  is not news. */
+export function statusRevealsDot(status: string): boolean {
+  return status === STATUS_WARNING || status === STATUS_FAILED || status === STATUS_CRASHED;
+}
+
+/** statusPhrase is the human wording for a status, used for BOTH the dot's hover
+ *  tooltip and the suffix in a tab's accessible name — one definition, so what a
+ *  sighted user reads on hover and what a screen reader announces cannot
+ *  disagree. An unknown status (a newer server: the wire is parsed, not
+ *  validated) falls back to the raw value rather than being hidden. */
+export function statusPhrase(status: string): string {
+  switch (status) {
+    case "working":
+      return "working";
+    case STATUS_WARNING:
+      return "warning reported";
+    case STATUS_FAILED:
+      return "error reported";
+    case "input":
+      return "waiting for you";
+    case "done":
+      return "turn finished";
+    case STATUS_EXITED:
+      return "session ended";
+    case STATUS_CRASHED:
+      return "process crashed";
+    case "idle":
+    case "":
+      return "idle";
+    default:
+      return status;
+  }
+}
+
+/** PROGRESS_ABSENT is "no percentage" (the engine's own marker). Absence is -1,
+ *  never 0: a session that reported nothing is not a session at 0%, and the two
+ *  must render differently (no bar at all vs an empty bar). */
+export const PROGRESS_ABSENT = -1;
+
+/** normalizeProgress cleans a percentage off the wire into PROGRESS_ABSENT or
+ *  0-100. The engine already clamps, so this is the untrusted-JSON guard: a
+ *  string, a NaN, an Infinity or a negative all mean "absent" rather than
+ *  throwing or rendering a nonsense bar, and an out-of-range high value clamps
+ *  rather than overflowing the chip. */
+export function normalizeProgress(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return PROGRESS_ABSENT;
+  }
+  return Math.min(100, Math.round(value));
+}
+
+/** renderedProgress is the percentage a status may actually SHOW. The tab keeps
+ *  the last value the server reported; this is the one place that decides whether
+ *  it is still meaningful, so the clearing rule has a single home.
+ *
+ *  There are exactly TWO clears, and both are honest — neither invents a state
+ *  change the program never made:
+ *
+ *   1. The program's own clear: OSC 9;4;0, or the abbreviated OSC 9;4, which the
+ *      engine reports as percentage -1. That is the spec path, and the value
+ *      arriving as PROGRESS_ABSENT is all it takes.
+ *   2. The process is GONE (exited or crashed) — checked here. A dead process's
+ *      progress is meaningless, and nothing will ever clear it, so the bar and
+ *      the title prefix drop with the process.
+ *
+ *  There is deliberately NO third clear. 100% is not special: state 1 at 100 is a
+ *  STATE that persists, and the progress channel carries no "done" signal at all
+ *  (our `done` comes from the notification channel, a separate mechanism), so a
+ *  program that pins 100 and goes quiet keeps its bar — the same "persists until
+ *  the program says otherwise" property the indeterminate state already has.
+ *  There is also no TIMEOUT: a timer would assert a change the program never
+ *  reported. And a `done`/`input` latch does not clear it either, because a latch
+ *  says something about the notification channel, not about the progress the
+ *  program last reported. (In practice this is not a stale-bar risk for the one
+ *  agent that drives it: kiro-cli never sends state 1, and sends state 0 when it
+ *  goes idle.) */
+export function renderedProgress(status: string, progress: number): number {
+  return isEndedStatus(status) ? PROGRESS_ABSENT : progress;
+}
+
+/** progressLabel prefixes a rendered label with its percentage ("78% · one").
+ *
+ *  Applied at RENDER time and never stored: `Tab.title`, `Tab.pinnedTitle` and
+ *  `Tab.display` stay the plain name, so a manual rename round-trips unprefixed,
+ *  an automatic title is untouched, de-duplication still compares real labels,
+ *  and clearing the progress needs no cleanup — the next paint simply stops
+ *  adding the prefix. */
+export function progressLabel(display: string, progress: number): string {
+  return progress < 0 ? display : `${String(progress)}% · ${display}`;
+}
+
+/** tabAccessibleName is a tab's announced name: its rendered label plus the
+ *  session's state. The dots are aria-hidden="true" (they are decoration with no
+ *  text), so before this the status was invisible to a screen reader — a fact a
+ *  red crashed state makes worse. This deliberately changes the announced text
+ *  for the existing states too. */
+export function tabAccessibleName(renderedLabel: string, status: string): string {
+  return `${renderedLabel} — ${statusPhrase(status)}`;
+}
 
 // localStorage key for the last active session id, so a page reload reopens the
 // tab the user left on rather than always defaulting to the oldest one.
@@ -87,15 +233,20 @@ export function serializeTabOrder(ids: readonly string[]): string {
   return JSON.stringify(ids.slice(0, MAX_PERSISTED_TAB_ORDER));
 }
 
-/** The two session statuses that raise the mobile switcher's aggregate attention
- *  cue: a background terminal blocked on the user ("input") or one whose turn
- *  finished ("done"). Declared once here so the raise test and the
- *  acknowledgement store cannot disagree about which statuses are cue-worthy. */
-export type CueStatus = "input" | "done";
+/** The session statuses that raise the mobile switcher's aggregate attention
+ *  cue. The rule is "only states that want the user — it's like a notification":
+ *  a background terminal blocked on the user ("input"), one whose turn finished
+ *  ("done"), and one whose process died badly ("crashed"). The three animated
+ *  progress states are deliberately excluded — working / warning / failed are
+ *  ongoing and informational, and an animated dot pinned to the switch button
+ *  would nag with nothing to act on. Declared once here so the raise test and
+ *  the acknowledgement store cannot disagree about which statuses are
+ *  cue-worthy. */
+export type CueStatus = "input" | "done" | "crashed";
 
 /** isCueStatus narrows a raw server status to a cue-worthy one. */
 export function isCueStatus(status: string): status is CueStatus {
-  return status === "input" || status === "done";
+  return status === "input" || status === "done" || status === STATUS_CRASHED;
 }
 
 /** localStorage key for the cues this viewer has already SEEN: session id -> the
@@ -221,6 +372,14 @@ export interface Tab {
   el: HTMLElement;
   label: HTMLElement;
   dot: HTMLElement;
+  /** The chip's determinate progress bar (the 2px line on its bottom edge).
+   *  Present on every chip, hidden until a percentage exists. */
+  progressEl: HTMLElement;
+  /** The last OSC 9;4 percentage the server reported for this session, or
+   *  PROGRESS_ABSENT. Held raw: whether it is currently SHOWN is a render-time
+   *  question (renderedProgress), and the prefix it produces is never stored on
+   *  any title field. */
+  progress: number;
   aria: TabHandle;
   scrollTop: number;
   following: boolean;
