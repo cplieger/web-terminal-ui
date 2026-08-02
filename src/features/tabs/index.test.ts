@@ -2049,17 +2049,21 @@ describe("tabs OSC 9 status chrome", () => {
     }
   });
 
-  it("renders a percentage as a title prefix and a determinate bar", async () => {
+  it("renders a percentage as a determinate bar, and never as visible text", async () => {
     const { root, monitor } = await withMonitor();
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 78 });
 
-    expect(tabLabel(root, 0)?.textContent).toBe("78% · one");
+    // The label stays the plain name. No terminal emulator puts a number next to
+    // a tab label, and a chip that shrinks toward a 100px floor cannot spare the
+    // width; the bar is the affordance, and the accessible name carries the value
+    // for a reader who cannot see it.
+    expect(tabLabel(root, 0)?.textContent).toBe("one");
     const bar = tabBar(root, 0);
     expect(bar?.hidden).toBe(false);
     expect(bar?.style.width).toBe("78%");
     // Every chip site renders it from the one stored value: the mobile active row
-    // carries the same prefix and its own bar.
-    expect(root.querySelector<HTMLElement>(".wt-switcher-label")?.textContent).toBe("78% · one");
+    // carries its own bar and the same unprefixed label.
+    expect(root.querySelector<HTMLElement>(".wt-switcher-label")?.textContent).toBe("one");
     const swBar = root.querySelector<HTMLElement>(".wt-switcher-current .wt-progress-bar");
     expect(swBar?.hidden).toBe(false);
     expect(swBar?.style.width).toBe("78%");
@@ -2083,7 +2087,6 @@ describe("tabs OSC 9 status chrome", () => {
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 0 });
     expect(tabBar(root, 0)?.hidden).toBe(false);
     expect(tabBar(root, 0)?.style.width).toBe("0%");
-    expect(tabLabel(root, 0)?.textContent).toBe("0% · one");
   });
 
   it("keeps 100% until the program clears it: no completion signal, no timeout", async () => {
@@ -2094,14 +2097,7 @@ describe("tabs OSC 9 status chrome", () => {
     // change the program never made.
     const { root, monitor } = await withMonitor();
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 100 });
-    expect(tabLabel(root, 0)?.textContent).toBe("100% · one");
     expect(tabBar(root, 0)?.style.width).toBe("100%");
-
-    // A done latch is not a clear either: it says something about the
-    // notification channel, not about the progress the program last reported.
-    monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1", progressValue: 100 });
-    expect(tabLabel(root, 0)?.textContent).toBe("100% · one");
-    expect(tabBar(root, 0)?.hidden).toBe(false);
 
     // And NO timer clears it: five minutes of wall clock with the page left
     // alone. A timeout would assert a state change the program never made.
@@ -2111,9 +2107,46 @@ describe("tabs OSC 9 status chrome", () => {
     } finally {
       vi.useRealTimers();
     }
-    expect(tabLabel(root, 0)?.textContent).toBe("100% · one");
     expect(tabBar(root, 0)?.hidden).toBe(false);
     expect(tabBar(root, 0)?.style.width).toBe("100%");
+  });
+
+  it("hides the bar under a status the progress channel does not own", async () => {
+    // A latch is the NOTIFICATION channel talking, so a percentage retained from
+    // the progress channel must not be painted underneath it. Measured against
+    // kiro-cli, which parks progress state 4 at its context-window usage once
+    // idle: a finished turn painted a green done dot beside a 72% bar, and a
+    // pending approval a full one, neither of which was how far along anything
+    // was. The engine is right to keep sending the value (a progress state
+    // persists); this is the consumer deciding it is not the current word.
+    for (const status of ["done", "input", "idle"] as const) {
+      const { root, monitor } = await withMonitor();
+      monitor.emit({
+        id: "s1",
+        status: "working",
+        title: "one",
+        createdAt: "1",
+        progressValue: 72,
+      });
+      expect(tabBar(root, 0)?.hidden, `working precondition for ${status}`).toBe(false);
+
+      monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: 72 });
+      expect(tabBar(root, 0)?.hidden, status).toBe(true);
+      expect(tabLabel(root, 0)?.textContent, status).toBe("one");
+      // The value is not forgotten, only unshown: the program's own progress
+      // states paint it again without needing a fresh report.
+      monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1" });
+      expect(tabBar(root, 0)?.style.width, status).toBe("72%");
+    }
+  });
+
+  it("keeps the bar under the three statuses the progress channel does own", async () => {
+    for (const status of ["working", "warning", "failed"] as const) {
+      const { root, monitor } = await withMonitor();
+      monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: 40 });
+      expect(tabBar(root, 0)?.hidden, status).toBe(false);
+      expect(tabBar(root, 0)?.style.width, status).toBe("40%");
+    }
   });
 
   it("clears the bar and the prefix when the process ends (the second clear)", async () => {
@@ -2155,7 +2188,7 @@ describe("tabs OSC 9 status chrome", () => {
     // Deliberate product decision, not an oversight: a page has ONE title while
     // this UI multiplexes many sessions, so whose percentage it would show is
     // arbitrary — and the title doubles as the browser-tab label and the
-    // bookmark name. The per-chip prefix carries the same information without
+    // bookmark name. The per-chip bar carries the same information without
     // the conflict. This test is the guard against re-adding it.
     document.title = "Host page";
     const { root, monitor } = await withMonitor();
@@ -2207,9 +2240,17 @@ describe("tabs OSC 9 status chrome", () => {
     monitor.emit({ id: "s1", status: "crashed", title: "one", createdAt: "1" });
     expect(chip?.getAttribute("aria-label")).toBe("one — process crashed");
 
-    // The percentage rides along, so the announced name matches what is shown.
+    // The percentage rides along in the ANNOUNCED name only. It is the one place
+    // it appears as text: a screen reader cannot see the 2px bar, and the visible
+    // label must not spend chip width on it.
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 30 });
-    expect(chip?.getAttribute("aria-label")).toBe("30% · one — working");
+    expect(chip?.getAttribute("aria-label")).toBe("one — working, 30%");
+    expect(tabLabel(root, 0)?.textContent).toBe("one");
+
+    // A percentage the tab is not SHOWING is not announced either: the announced
+    // name follows the same statusOwnsProgress rule the bar does.
+    monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1", progressValue: 30 });
+    expect(chip?.getAttribute("aria-label")).toBe("one — turn finished");
 
     // Both halves come from ONE wording map, so hover text and announced text
     // cannot drift apart. Asserted for every state, in both directions.

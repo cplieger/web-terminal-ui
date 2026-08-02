@@ -19,10 +19,10 @@ import {
   orderedInsertIndex,
   parseCueSeen,
   parseTabOrder,
-  progressLabel,
   renderedProgress,
   serializeCueSeen,
   serializeTabOrder,
+  statusOwnsProgress,
   statusPhrase,
   statusRevealsDot,
   tabAccessibleName,
@@ -406,31 +406,52 @@ describe("the OSC 9;4 percentage", () => {
     expect(normalizeProgress(37.6)).toBe(38);
   });
 
-  it("prefixes a label at render time, and adds nothing when absent", () => {
-    expect(progressLabel("agent", 78)).toBe("78% · agent");
-    expect(progressLabel("agent", 0)).toBe("0% · agent");
-    expect(progressLabel("agent", PROGRESS_ABSENT)).toBe("agent");
+  it("announces a percentage in the accessible name and never as visible text", () => {
+    // The number reaches a screen reader, which cannot see the 2px bar, and
+    // reaches nothing that costs label width. No terminal draws it as text.
+    expect(tabAccessibleName("agent", "working", 78)).toBe("agent — working, 78%");
+    expect(tabAccessibleName("agent", "working", 0)).toBe("agent — working, 0%");
+    // Absent, or omitted entirely, announces the state alone.
+    expect(tabAccessibleName("agent", "working", PROGRESS_ABSENT)).toBe("agent — working");
+    expect(tabAccessibleName("agent", "working")).toBe("agent — working");
+  });
+
+  it("shows a percentage only under a status the progress channel owns", () => {
+    // The three statuses the OSC 9;4 channel itself produces.
+    expect(statusOwnsProgress("working")).toBe(true);
+    expect(statusOwnsProgress("failed")).toBe(true);
+    expect(statusOwnsProgress("warning")).toBe(true);
+    // Everything else comes from somewhere else: the notification channel
+    // (done/input), the absence of a progress state (idle), or the process
+    // (exited/crashed).
+    for (const status of ["done", "input", "idle", "exited", "crashed", "bogus"]) {
+      expect(statusOwnsProgress(status), status).toBe(false);
+    }
   });
 
   it("clears a percentage on exactly two things, and nothing else", () => {
     // Clear 1 is the program's own OSC 9;4;0 (the value arrives as -1), so it
     // needs no status rule at all — it is simply carried through.
     expect(renderedProgress("working", PROGRESS_ABSENT)).toBe(PROGRESS_ABSENT);
-    // Clear 2: the process is gone, whichever way it went.
+    // Clear 2: the status is not one the progress channel owns. A dead process,
+    // and equally a latch or a return to idle — a percentage under any of those
+    // is a claim about a different channel than the reader is looking at.
+    // Measured: kiro-cli parks state 4 at its context-usage percentage when
+    // idle, so a finished turn painted a green done dot beside a 72% bar.
     expect(renderedProgress("exited", 100)).toBe(PROGRESS_ABSENT);
     expect(renderedProgress("crashed", 60)).toBe(PROGRESS_ABSENT);
+    expect(renderedProgress("done", 72)).toBe(PROGRESS_ABSENT);
+    expect(renderedProgress("input", 100)).toBe(PROGRESS_ABSENT);
+    expect(renderedProgress("idle", 100)).toBe(PROGRESS_ABSENT);
 
     // NOTHING else clears it. 100% is not a completion signal (state 1 at 100 is
     // a state that persists), the progress channel carries no "done" at all, and
-    // a latch belongs to the notification channel — so a done/input latch, and a
-    // return to idle without a fresh value, keep showing what the program last
-    // reported rather than asserting a change it never made.
+    // there is no timeout — so a program that pins a value and goes quiet keeps
+    // its bar rather than having a change asserted it never made.
     expect(renderedProgress("working", 100)).toBe(100);
     expect(renderedProgress("failed", 42)).toBe(42);
     expect(renderedProgress("warning", 25)).toBe(25);
-    expect(renderedProgress("done", 100)).toBe(100);
-    expect(renderedProgress("input", 60)).toBe(60);
-    expect(renderedProgress("idle", 100)).toBe(100);
+    expect(renderedProgress("working", 0)).toBe(0);
   });
 });
 
