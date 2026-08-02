@@ -81,6 +81,16 @@
      overlays (.wt-tab-ghost, .wt-tab-menu) are children of .wt-root, not of a
      chip, so this cannot capture them. */
   position: relative;
+  /* ...and the clip that keeps that bar inside the chip. A 2px line at
+     `left: 0; bottom: 0` has square ends, so without this it pokes out through
+     both rounded bottom corners and reads as running edge to edge. The clip is
+     applied to the PADDING box with the chip's inner radius (--radius-inner less
+     the 1px border), which is exactly the shape the bar must follow, and it is
+     what the other two chip sites already do (.wt-switcher-current,
+     .wt-switcher-row-select). Nothing else in the chip needs to escape: the
+     dot's ripple stays within the --sp-2 padding at its visible amplitude, and
+     the rename field's 2px/1px-offset focus ring sits well inside it. */
+  overflow: hidden;
   /* ONE height for every control in the strip: the chip, the "+" and the
      keyboard button all resolve to --touch-target, so a chip and a button can
      never disagree about how tall the row is. Before this the chip's height was
@@ -632,7 +642,15 @@
    Painted only while a percentage actually exists: the element carries the
    `hidden` attribute otherwise (paintProgress), so an absent value (-1) renders
    NO bar rather than a zero-width or empty one. Its width is the only inline
-   style — the percentage is data, not styling. */
+   style — the percentage is data, not styling.
+
+   The rounded ENDS are the chip's job, not this rule's: each chip site clips its
+   own overflow (.wt-tab here, .wt-switcher-current and .wt-switcher-row-select in
+   31-switcher.css), so the bar is cut to the chip's inner corner radius at both
+   ends. A radius on the bar itself cannot do that job — a 2px-tall box scales
+   every radius down to 2px under the CSS overlap rule, so it would trace a 2px
+   curve against the chip's --radius-inner one and still square off wherever the
+   percentage stops short of the edge. */
 :where(.wt-root) .wt-progress-bar {
   position: absolute;
   left: 0;
@@ -640,8 +658,6 @@
   height: 2px;
   max-width: 100%;
   background: var(--accent);
-  /* Follow the chip's rounded bottom-left corner instead of poking out of it. */
-  border-bottom-left-radius: inherit;
   pointer-events: none;
 }
 

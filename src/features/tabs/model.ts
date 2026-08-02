@@ -117,53 +117,71 @@ export function normalizeProgress(value: unknown): number {
   return Math.min(100, Math.round(value));
 }
 
+/** statusOwnsProgress reports whether a status is one the program's OSC 9;4
+ *  progress channel is currently speaking through. Only these may show a bar.
+ *
+ *  The tab keeps the last percentage the server reported, and the server keeps
+ *  sending it (correctly — a progress state persists until the program changes
+ *  it), so this predicate is what stops that value from being painted underneath a
+ *  status that came from somewhere else entirely. `input` and `done` come from the
+ *  NOTIFICATION channel; `idle` is the absence of a progress state; `exited` and
+ *  `crashed` are process facts. A percentage under any of those is a claim about
+ *  a different channel than the one the reader is looking at. */
+export function statusOwnsProgress(status: string): boolean {
+  return status === "working" || status === STATUS_FAILED || status === STATUS_WARNING;
+}
+
 /** renderedProgress is the percentage a status may actually SHOW. The tab keeps
  *  the last value the server reported; this is the one place that decides whether
  *  it is still meaningful, so the clearing rule has a single home.
  *
- *  There are exactly TWO clears, and both are honest — neither invents a state
- *  change the program never made:
+ *  Two things clear it, and both are honest — neither invents a state change the
+ *  program never made:
  *
  *   1. The program's own clear: OSC 9;4;0, or the abbreviated OSC 9;4, which the
  *      engine reports as percentage -1. That is the spec path, and the value
  *      arriving as PROGRESS_ABSENT is all it takes.
- *   2. The process is GONE (exited or crashed) — checked here. A dead process's
- *      progress is meaningless, and nothing will ever clear it, so the bar and
- *      the title prefix drop with the process.
+ *   2. The status is not one the progress channel owns (statusOwnsProgress) —
+ *      checked here. That covers a dead process, whose progress is meaningless
+ *      and which nothing will ever clear, and equally a `done` or `input` latch,
+ *      which is the notification channel talking. Measured: kiro-cli parks
+ *      progress state 4 at its context-usage percentage when idle, so a finished
+ *      turn used to paint a green done dot beside a 72% bar — a number about the
+ *      context window, rendered as how far along the work was.
  *
  *  There is deliberately NO third clear. 100% is not special: state 1 at 100 is a
- *  STATE that persists, and the progress channel carries no "done" signal at all
- *  (our `done` comes from the notification channel, a separate mechanism), so a
- *  program that pins 100 and goes quiet keeps its bar — the same "persists until
- *  the program says otherwise" property the indeterminate state already has.
+ *  STATE that persists, and the progress channel carries no "done" signal at all,
+ *  so a program that pins 100 and goes quiet keeps its bar — the same "persists
+ *  until the program says otherwise" property the indeterminate state already has.
  *  There is also no TIMEOUT: a timer would assert a change the program never
- *  reported. And a `done`/`input` latch does not clear it either, because a latch
- *  says something about the notification channel, not about the progress the
- *  program last reported. (In practice this is not a stale-bar risk for the one
- *  agent that drives it: kiro-cli never sends state 1, and sends state 0 when it
- *  goes idle.) */
+ *  reported (Ghostty's ~15s one does, which is why it also asks emitters to
+ *  refresh once a second; nothing here requires a keep-alive). */
 export function renderedProgress(status: string, progress: number): number {
-  return isEndedStatus(status) ? PROGRESS_ABSENT : progress;
-}
-
-/** progressLabel prefixes a rendered label with its percentage ("78% · one").
- *
- *  Applied at RENDER time and never stored: `Tab.title`, `Tab.pinnedTitle` and
- *  `Tab.display` stay the plain name, so a manual rename round-trips unprefixed,
- *  an automatic title is untouched, de-duplication still compares real labels,
- *  and clearing the progress needs no cleanup — the next paint simply stops
- *  adding the prefix. */
-export function progressLabel(display: string, progress: number): string {
-  return progress < 0 ? display : `${String(progress)}% · ${display}`;
+  return statusOwnsProgress(status) ? progress : PROGRESS_ABSENT;
 }
 
 /** tabAccessibleName is a tab's announced name: its rendered label plus the
- *  session's state. The dots are aria-hidden="true" (they are decoration with no
- *  text), so before this the status was invisible to a screen reader — a fact a
- *  red crashed state makes worse. This deliberately changes the announced text
- *  for the existing states too. */
-export function tabAccessibleName(renderedLabel: string, status: string): string {
-  return `${renderedLabel} — ${statusPhrase(status)}`;
+ *  session's state, and the percentage when one is showing.
+ *
+ *  The percentage is announced but never DRAWN as text. No terminal emulator puts
+ *  a number next to a tab label — Windows Terminal draws a ring over the tab icon,
+ *  Ghostty and kitty a bar on a window edge, ConEmu a percentage in the WINDOW
+ *  title — and the visible number cost label width in a chip that already shrinks
+ *  to a 100px floor. The bar answers "how far" for the eye; this answers it for a
+ *  screen reader, which cannot see the bar at all (it is decoration with no text).
+ *
+ *  Pass PROGRESS_ABSENT for progress to announce the state alone. Callers hand in
+ *  renderedProgress's output, so a percentage the tab is not showing is not
+ *  announced either. */
+export function tabAccessibleName(
+  renderedLabel: string,
+  status: string,
+  progress: number = PROGRESS_ABSENT,
+): string {
+  const state = statusPhrase(status);
+  return progress < 0
+    ? `${renderedLabel} — ${state}`
+    : `${renderedLabel} — ${state}, ${String(progress)}%`;
 }
 
 // localStorage key for the last active session id, so a page reload reopens the

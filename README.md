@@ -143,10 +143,13 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
   (working, warning, error), the frozen ringed needs-input dot, two static discs
   (a green finished turn, a red crashed process), and two hollow ones (idle and a
   dim ended session). A
-  reported percentage additionally renders a 2px determinate bar on the chip and
-  a `78% ·` prefix on the tab label; it is deliberately never written to the
-  browser document title, since one page title cannot represent several
-  sessions. An OSC 9 notification is posted as a browser
+  reported percentage additionally renders a 2px determinate bar on the chip,
+  shown only while one of those three progress states is the session's current
+  status. The number itself is announced in the tab's accessible name and drawn
+  nowhere: no terminal emulator puts a percentage next to a tab label, and a chip
+  that shrinks toward a 100px floor has no width to spare. It is likewise never
+  written to the browser document title, since one page title cannot represent
+  several sessions. An OSC 9 notification is posted as a browser
   notification when the user is not already looking at that terminal (permission
   is requested on a user gesture; a denial degrades silently to the tab dots).
 

@@ -34,7 +34,6 @@ import {
   orderedInsertIndex,
   parseCueSeen,
   parseTabOrder,
-  progressLabel,
   renderedProgress,
   sanitizePinnedName,
   serializeCueSeen,
@@ -760,12 +759,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             }
           }
           t.display = display;
-          const rendered = progressLabel(display, shownProgress(t));
-          t.label.textContent = rendered;
-          // The accessible name carries the state as well as the label: the dots
-          // are aria-hidden decoration, so without this a screen-reader user
-          // cannot tell a working tab from a crashed one.
-          t.aria.setLabel(tabAccessibleName(rendered, statusOf(t)));
+          t.label.textContent = display;
+          // The accessible name carries the state and the percentage as well as
+          // the label: the dots are aria-hidden decoration and the progress bar
+          // is a 2px line with no text, so without this a screen-reader user
+          // cannot tell a working tab from a crashed one, or hear how far along
+          // a determinate one is.
+          t.aria.setLabel(tabAccessibleName(display, statusOf(t), shownProgress(t)));
         }
       }
 
@@ -777,10 +777,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       /** shownProgress is a tab's percentage as it may currently be DISPLAYED:
-       *  the last value the server reported, dropped once the process is gone.
-       *  Those are the only two ways a percentage stops showing — the program's
-       *  own OSC 9;4;0 (an explicit -1) and the process ending; see
-       *  renderedProgress for why there is no third. */
+       *  the last value the server reported, dropped unless the current status is
+       *  one the progress channel owns. Those are the only two ways a percentage
+       *  stops showing — the program's own OSC 9;4;0 (an explicit -1) and a status
+       *  from another channel; see renderedProgress for why there is no third. */
       function shownProgress(t: Tab): number {
         return renderedProgress(statusOf(t), t.progress);
       }
@@ -876,7 +876,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       function syncMobile(): void {
         const idx = tabList.findIndex((t) => t.id === activeId);
         const active = idx >= 0 ? tabList[idx] : undefined;
-        swLabel.textContent = active ? progressLabel(active.display, shownProgress(active)) : "";
+        swLabel.textContent = active ? active.display : "";
         paintStatusDot(swDot, active ? statusOf(active) : "idle", active?.reports ?? false);
         paintProgress(swProgress, active ? shownProgress(active) : PROGRESS_ABSENT);
         // The aggregate background-notification cue rides the dedicated switch
@@ -904,10 +904,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       function updateRow(row: HTMLElement, t: Tab): void {
         paintStatusDot(pick(row, ".wt-switcher-row-dot"), statusOf(t), t.reports);
         paintProgress(pick(row, ".wt-progress-bar"), shownProgress(t));
-        pick(row, ".wt-switcher-row-label").textContent = progressLabel(
-          t.display,
-          shownProgress(t),
-        );
+        pick(row, ".wt-switcher-row-label").textContent = t.display;
       }
       // renderSwitcherList reconciles the expanded list to a row per OTHER tab
       // (the active tab lives in the bar row), REUSING existing row elements
@@ -1309,8 +1306,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Set an initial label immediately (relabelAll refines it with de-dup
         // once the tab is in tabList and syncChrome runs).
         tab.display = baseLabel(tab).text;
-        label.textContent = progressLabel(tab.display, renderedProgress(info.status, tab.progress));
-        aria.setLabel(tabAccessibleName(label.textContent, info.status));
+        label.textContent = tab.display;
+        aria.setLabel(
+          tabAccessibleName(tab.display, info.status, renderedProgress(info.status, tab.progress)),
+        );
         el.addEventListener("click", (e) => {
           if ((e.target as HTMLElement).closest(".wt-tab-close")) {
             return; // handled by the close button

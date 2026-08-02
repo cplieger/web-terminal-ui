@@ -140,10 +140,17 @@ describe("activity-dot vocabulary (the OSC 9 states)", () => {
     expect(rule![1]).not.toContain("--status-");
     expect(rule![1]).toContain("height: 2px");
     // It is positioned against a chip, so every chip site must be a containing
-    // block (the desktop chip, the mobile bar row, an expanded list row).
+    // block (the desktop chip, the mobile bar row, an expanded list row)...
     expect(/\.wt-tab\s*\{[^}]*position: relative/.test(tabs)).toBe(true);
     expect(/\.wt-switcher-current\s*\{[^}]*position: relative/.test(switcher)).toBe(true);
     expect(/\.wt-switcher-row-select\s*\{[^}]*position: relative/.test(switcher)).toBe(true);
+    // ...and must CLIP, or the bar's square ends poke out through the chip's
+    // rounded bottom corners. The bar carries no radius of its own (a 2px box
+    // scales every radius to 2px), so the clip is the only thing rounding it.
+    expect(/\.wt-tab\s*\{[^}]*overflow: hidden/.test(tabs)).toBe(true);
+    expect(/\.wt-switcher-current\s*\{[^}]*overflow: hidden/.test(switcher)).toBe(true);
+    expect(/\.wt-switcher-row-select\s*\{[^}]*overflow: hidden/.test(switcher)).toBe(true);
+    expect(rule![1]).not.toContain("border-radius");
   });
 });
 
