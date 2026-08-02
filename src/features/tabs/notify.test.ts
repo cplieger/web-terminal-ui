@@ -14,19 +14,28 @@ import { describe, it, expect, vi } from "vitest";
 import { createNotifier, shouldNotify } from "./notify.js";
 import type { NotificationCtorLike, NotifierEnv } from "./notify.js";
 
-/** A recording Notification stand-in: captures what the notifier constructed,
- *  which is the whole observable surface of a posted notification. */
+/** A recording Notification stand-in: captures what the notifier constructed and
+ *  the instances themselves, so a test can drive the click the way a browser
+ *  would and observe whether the notification was closed. */
 function fakeCtor(): {
   ctor: NotificationCtorLike;
   posts: { title: string; body: string | undefined; tag: string | undefined }[];
+  made: { onclick: ((event: Event) => void) | null; closed: boolean }[];
 } {
   const posts: { title: string; body: string | undefined; tag: string | undefined }[] = [];
+  const made: { onclick: ((event: Event) => void) | null; closed: boolean }[] = [];
   class Fake {
+    onclick: ((event: Event) => void) | null = null;
+    closed = false;
     constructor(title: string, options?: { body?: string; tag?: string }) {
       posts.push({ title, body: options?.body, tag: options?.tag });
+      made.push(this);
+    }
+    close(): void {
+      this.closed = true;
     }
   }
-  return { ctor: Fake as unknown as NotificationCtorLike, posts };
+  return { ctor: Fake as unknown as NotificationCtorLike, posts, made };
 }
 
 function env(over: Partial<NotifierEnv> = {}): NotifierEnv {
@@ -37,6 +46,15 @@ function env(over: Partial<NotifierEnv> = {}): NotifierEnv {
     pageVisible: () => true,
     ...over,
   };
+}
+
+/** The per-delivery view. `activate` defaults to a no-op so a test that is not
+ *  about the click does not have to say anything about it; the click tests pass a
+ *  spy. */
+function view(
+  over: Partial<{ sessionIsActive: boolean; label: string; activate: () => void }> = {},
+): { sessionIsActive: boolean; label: string; activate: () => void } {
+  return { sessionIsActive: false, label: "a", activate: () => undefined, ...over };
 }
 
 describe("shouldNotify (the suppression rule)", () => {
@@ -68,7 +86,7 @@ describe("createNotifier delivery", () => {
     expect(
       n.deliver(
         { id: "s1", notification: "Response complete", notificationSeq: 1 },
-        { sessionIsActive: false, label: "agent" },
+        view({ label: "agent" }),
       ),
     ).toBe(true);
     expect(posts).toEqual([{ title: "agent", body: "Response complete", tag: "s1" }]);
@@ -80,7 +98,7 @@ describe("createNotifier delivery", () => {
     expect(
       n.deliver(
         { id: "s1", notification: "Response complete", notificationSeq: 1 },
-        { sessionIsActive: true, label: "agent" },
+        view({ sessionIsActive: true, label: "agent" }),
       ),
     ).toBe(false);
     expect(posts).toEqual([]);
@@ -92,7 +110,7 @@ describe("createNotifier delivery", () => {
     expect(
       n.deliver(
         { id: "s1", notification: "Permission required", notificationSeq: 1 },
-        { sessionIsActive: true, label: "agent" },
+        view({ sessionIsActive: true, label: "agent" }),
       ),
     ).toBe(true);
     expect(posts).toHaveLength(1);
@@ -112,7 +130,7 @@ describe("createNotifier delivery", () => {
     expect(
       n.deliver(
         { id: "s1", notification: hostile, notificationSeq: 1 },
-        { sessionIsActive: false, label: "<b>agent</b>" },
+        view({ label: "<b>agent</b>" }),
       ),
     ).toBe(true);
 
@@ -129,35 +147,33 @@ describe("createNotifier delivery", () => {
   it("ignores an event with no notification, and an empty one", () => {
     const { ctor, posts } = fakeCtor();
     const n = createNotifier(env({ ctor }));
-    expect(n.deliver({ id: "s1" }, { sessionIsActive: false, label: "a" })).toBe(false);
-    expect(n.deliver({ id: "s1", notification: "" }, { sessionIsActive: false, label: "a" })).toBe(
-      false,
-    );
+    expect(n.deliver({ id: "s1" }, view({ label: "a" }))).toBe(false);
+    expect(n.deliver({ id: "s1", notification: "" }, view({ label: "a" }))).toBe(false);
     expect(posts).toEqual([]);
   });
 
   it("delivers each sequence once, and a repeated message at a NEW sequence again", () => {
     const { ctor, posts } = fakeCtor();
     const n = createNotifier(env({ ctor }));
-    const view = { sessionIsActive: false, label: "a" };
-    expect(n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view)).toBe(true);
+    const v = view({ label: "a" });
+    expect(n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, v)).toBe(true);
     // Same event re-delivered (a doubled frame): not notified twice.
-    expect(n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view)).toBe(false);
+    expect(n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, v)).toBe(false);
     // The same TEXT at a new sequence is a new event.
-    expect(n.deliver({ id: "s1", notification: "Done", notificationSeq: 2 }, view)).toBe(true);
+    expect(n.deliver({ id: "s1", notification: "Done", notificationSeq: 2 }, v)).toBe(true);
     // Per session: another session's seq 1 is untouched by s1's cursor.
-    expect(n.deliver({ id: "s2", notification: "Done", notificationSeq: 1 }, view)).toBe(true);
+    expect(n.deliver({ id: "s2", notification: "Done", notificationSeq: 1 }, v)).toBe(true);
     expect(posts).toHaveLength(3);
   });
 
   it("forgets a closed session's sequence cursor", () => {
     const { ctor, posts } = fakeCtor();
     const n = createNotifier(env({ ctor }));
-    const view = { sessionIsActive: false, label: "a" };
-    n.deliver({ id: "s1", notification: "Done", notificationSeq: 5 }, view);
+    const v = view({ label: "a" });
+    n.deliver({ id: "s1", notification: "Done", notificationSeq: 5 }, v);
     n.forget("s1");
     // A recreated session id starts fresh rather than being muted up to seq 5.
-    expect(n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view)).toBe(true);
+    expect(n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, v)).toBe(true);
     expect(posts).toHaveLength(2);
   });
 
@@ -165,10 +181,7 @@ describe("createNotifier delivery", () => {
     const { ctor, posts } = fakeCtor();
     const n = createNotifier(env({ ctor, permission: () => "denied" }));
     expect(() =>
-      n.deliver(
-        { id: "s1", notification: "Done", notificationSeq: 1 },
-        { sessionIsActive: false, label: "a" },
-      ),
+      n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view({ label: "a" })),
     ).not.toThrow();
     expect(posts).toEqual([]);
   });
@@ -176,10 +189,7 @@ describe("createNotifier delivery", () => {
   it("degrades to tab-only when the API does not exist (iOS Safari)", () => {
     const n = createNotifier(env({ ctor: undefined }));
     expect(
-      n.deliver(
-        { id: "s1", notification: "Done", notificationSeq: 1 },
-        { sessionIsActive: false, label: "a" },
-      ),
+      n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view({ label: "a" })),
     ).toBe(false);
   });
 
@@ -191,11 +201,74 @@ describe("createNotifier delivery", () => {
     } as unknown as NotificationCtorLike;
     const n = createNotifier(env({ ctor: throwing }));
     expect(
-      n.deliver(
-        { id: "s1", notification: "Done", notificationSeq: 1 },
-        { sessionIsActive: false, label: "a" },
-      ),
+      n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view({ label: "a" })),
     ).toBe(false);
+  });
+});
+
+// Clicking a notification has to land the user on the session that raised it.
+// The Notifications API's own click default already moves focus to the viewport
+// of the notification's browsing context, so the page comes forward without our
+// help; the half that was missing is the in-page switch, which left the user
+// looking at whichever tab they last had active.
+describe("createNotifier click activation", () => {
+  it("activates the notification's own session when clicked", () => {
+    // RED-CHECKED against a notify.ts with the onclick assignment removed: the
+    // activation never fires, which is exactly the reported behaviour (the page
+    // is focused by the platform, the wrong tab is showing).
+    const { ctor, made } = fakeCtor();
+    const activate = vi.fn();
+    const n = createNotifier(env({ ctor }));
+    expect(
+      n.deliver(
+        { id: "s1", notification: "Permission required", notificationSeq: 1 },
+        view({ activate }),
+      ),
+    ).toBe(true);
+
+    expect(made).toHaveLength(1);
+    expect(activate).not.toHaveBeenCalled(); // not until the user clicks
+    made[0]?.onclick?.(new Event("click"));
+    expect(activate).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the notification it just acted on", () => {
+    // It is no longer relevant once the user has acted on it. (Closing is only
+    // wrong as a display timer, which strips it from the tray before the user
+    // can interact at all.)
+    const { ctor, made } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view());
+    expect(made[0]?.closed).toBe(false);
+    made[0]?.onclick?.(new Event("click"));
+    expect(made[0]?.closed).toBe(true);
+  });
+
+  it("does not cancel the platform's own focus default", () => {
+    // The handler must NOT preventDefault(): that default is what brings the page
+    // forward, and cancelling it would leave the switch happening in a window the
+    // user cannot see. Nor does it call window.focus() — the platform already did.
+    const { ctor, made } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view());
+    const event = new Event("click", { cancelable: true });
+    made[0]?.onclick?.(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("gives each session's notification its own activation", () => {
+    // The click closure carries the session, so two live notifications cannot
+    // activate each other's tab.
+    const { ctor, made } = fakeCtor();
+    const first = vi.fn();
+    const second = vi.fn();
+    const n = createNotifier(env({ ctor }));
+    n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view({ activate: first }));
+    n.deliver({ id: "s2", notification: "Done", notificationSeq: 1 }, view({ activate: second }));
+
+    made[1]?.onclick?.(new Event("click"));
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
   });
 });
 

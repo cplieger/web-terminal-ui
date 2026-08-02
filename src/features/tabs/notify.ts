@@ -2,7 +2,19 @@
 // BROWSER notifications. The spec names the display mode ("post a
 // notification"), which is why this one signal is not tab-only chrome: a
 // finished turn or a permission prompt has to be able to reach a user who is
-// looking at another app.
+// looking at another app. Clicking one takes the user to the session that raised
+// it (see deliver).
+//
+// NON-PERSISTENT notifications (the `new Notification()` constructor), which is
+// the standard surface available to a page with no service worker. Their lifetime
+// is tied to the page's, which suits this app exactly: the notification is about
+// a live PTY the page is attached to, and there is nothing useful to click once
+// the page is gone. Per the Notifications API the constructor throws on most
+// mobile browsers, where persistent (service-worker) notifications are the only
+// route; that throw is caught below and degrades to tab-only chrome. Registering
+// a service worker for an app that is otherwise entirely live is a cost this does
+// not pay — mobile support for the standard constructor is the platforms' side of
+// the contract.
 //
 // A notification is an EVENT, not a state (that is the structural difference
 // from OSC 9;4 progress, which is a state and drives the status dot): the engine
@@ -15,13 +27,20 @@
 // browserNotifierEnv() below. The notification text NEVER enters the DOM — see
 // the note on deliver().
 
-/** The slice of `window.Notification` used here. Constructed and dropped: the
- *  browser owns the notification's life, and we keep no handle (nothing in this
- *  UI closes or replaces one programmatically). */
+/** The slice of a non-persistent `Notification` instance this feature uses: the
+ *  `click` handler and `close()`. The instance is no longer discarded — attaching
+ *  a click handler is what lets a notification finish its job (see deliver).
+ *  Module-private: it is the ctor type's return shape, not a consumer surface. */
+interface NotificationLike {
+  onclick: ((event: Event) => void) | null;
+  close: () => void;
+}
+
+/** The slice of `window.Notification` used here. */
 export type NotificationCtorLike = new (
   title: string,
   options?: { body?: string; tag?: string },
-) => unknown;
+) => NotificationLike;
 
 /** The capabilities a notifier needs, all injected. `permission` and `request`
  *  are read as plain strings rather than the DOM's NotificationPermission union:
@@ -71,8 +90,15 @@ export interface Notifier {
   /** Deliver one status event's notification, if it carries a new one. Returns
    *  true when a browser notification was actually posted (false covers every
    *  degraded path: no notification in the event, a repeat, suppression, no API,
-   *  no permission, a throwing constructor). */
-  deliver(ev: NotificationEvent, view: { sessionIsActive: boolean; label: string }): boolean;
+   *  no permission, a throwing constructor).
+   *
+   *  `view.activate` is what the notification's click performs in the page. The
+   *  caller supplies it, so this module still knows nothing about sessions, tabs
+   *  or the DOM. */
+  deliver(
+    ev: NotificationEvent,
+    view: { sessionIsActive: boolean; label: string; activate: () => void },
+  ): boolean;
   /** Note that this page has a session capable of notifying, which is what makes
    *  a permission prompt worth raising at all. */
   arm(): void;
@@ -135,7 +161,30 @@ export function createNotifier(env: NotifierEnv): Notifier {
         // label. The engine already strips control/bidi runes and clamps the
         // length; that is not widened here. If this ever needs an in-page
         // surface, it must use textContent.
-        new Ctor(view.label, { body: text, tag: ev.id });
+        const posted = new Ctor(view.label, { body: text, tag: ev.id });
+        // A notification the user clicks should land them on the terminal that
+        // raised it. Half of that is the click event's OWN default behaviour —
+        // per the Notifications API, activating a non-persistent notification
+        // moves focus to the viewport of its browsing context — so this handler
+        // deliberately does NOT preventDefault() and does NOT call
+        // window.focus(): the platform already brings the page forward, and the
+        // only missing half is switching to the right session inside it. That
+        // asymmetry is the whole bug this fixes: the page came forward and then
+        // showed whichever tab the user happened to leave active.
+        //
+        // NOT the `navigate` option, which is the declarative alternative and
+        // bypasses the click event entirely: it NAVIGATES, which for a live
+        // terminal means dropping every WebSocket and replaying scrollback to
+        // arrive somewhere the page already was. A same-page switch is both
+        // cheaper and correct. Do not "modernise" this into `navigate`.
+        posted.onclick = (): void => {
+          view.activate();
+          // The user has just acted on it, so it is no longer relevant — the
+          // documented reason to close one. (Closing is only wrong when used as
+          // a display timer, which also strips it from the notification tray
+          // before the user can interact.)
+          posted.close();
+        };
         return true;
       } catch {
         // Safari throws on `new Notification` outside an installed PWA even when
