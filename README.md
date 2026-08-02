@@ -152,6 +152,11 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
   several sessions. An OSC 9 notification is posted as a browser
   notification when the user is not already looking at that terminal (permission
   is requested on a user gesture; a denial degrades silently to the tab dots).
+  Clicking one switches to the session that raised it: the Notifications API's
+  own click default already focuses the page, and the handler supplies the
+  in-page half. These are non-persistent notifications, so per the API the
+  constructor throws on most mobile browsers, where the notification degrades to
+  the tab dots.
 
 ### Options
 

@@ -2574,6 +2574,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           notifier.deliver(s, {
             sessionIsActive: s.id === activeId,
             label: tabList.find((t) => t.id === s.id)?.display ?? s.title,
+            // What clicking the notification does. The platform's own click
+            // default focuses the page; this supplies the other half, landing the
+            // user on the session that raised the notification rather than on
+            // whichever tab they last left active. switchTo already no-ops on an
+            // id that is gone, which is the case that matters here: the prompt may
+            // have been answered, or the tab closed, between post and click.
+            activate: () => {
+              switchTo(s.id);
+            },
           });
         });
         offStreamOpen = monitor.onStreamOpen?.(() => {
