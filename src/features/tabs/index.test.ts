@@ -399,6 +399,26 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s-new");
   });
 
+  it("paints a press state on the + while it is held", async () => {
+    // The "+" cancels its pointerdown default to keep the keyboard on the
+    // terminal, and that also suppresses the browser's own :active in Firefox —
+    // so the press class is the only press feedback the button has there. It
+    // shipped without one: the "+" was the single control in the desktop strip
+    // that acknowledged nothing on mousedown.
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const plus = root.querySelector<HTMLElement>(".wt-tab-new");
+    const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
+    plus?.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    expect(plus?.classList.contains("wt-pressed")).toBe(true);
+    window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    expect(plus?.classList.contains("wt-pressed")).toBe(false);
+  });
+
   it("opens one terminal when one press delivers two + activations", async () => {
     // iPadOS can deliver two activations for a single press on the strip (the
     // web-terminal-kiro server logged two POST /api/sessions 0-3ms apart for one

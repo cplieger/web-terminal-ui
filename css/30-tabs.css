@@ -347,8 +347,11 @@
 
 /* Press: brighten the hover fill with the active-tab fg (the
    .wt-switcher-current press recipe — a lighter press over an already-filled
-   control), keeping the accent glyph. */
-:where(.wt-root) .wt-tab-new:active {
+   control), keeping the accent glyph. .wt-pressed rides along because this
+   button cancels its pointerdown default and so never enters :active in Firefox
+   (holdFocusOnPress in features/dom.ts). */
+:where(.wt-root) .wt-tab-new:active,
+:where(.wt-root) .wt-tab-new.wt-pressed {
   background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 12%);
 }
 

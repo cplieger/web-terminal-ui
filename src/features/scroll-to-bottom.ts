@@ -5,7 +5,7 @@
 // scroll.scrollToBottom.
 
 import type { TerminalFeature } from "../kernel/types.js";
-import { fromHTML } from "./dom.js";
+import { fromHTML, holdFocusOnPress } from "./dom.js";
 
 const BUTTON_HTML = `
 <button type="button" class="wt-btn wt-scroll-bottom" aria-label="Scroll to bottom">
@@ -39,14 +39,13 @@ export function scrollToBottom(): TerminalFeature {
         surface.scrollTo({ top: surface.scrollHeight, behavior: "smooth" });
       };
 
-      // pointerdown (like the toolbar keys) so touch devices show press
-      // feedback; preventDefault keeps focus on the terminal. click is kept for
-      // keyboard activation. jump is idempotent, so the pair is safe.
-      const onDown = (e: PointerEvent): void => {
-        e.preventDefault();
-        jump();
-      };
-      btn.addEventListener("pointerdown", onDown);
+      // pointerdown (like the toolbar keys) so touch devices get the jump on the
+      // press rather than the release; click is kept for keyboard activation.
+      // jump is idempotent, so the pair is safe. holdFocusOnPress keeps the
+      // keyboard on the terminal across the press and paints the press class the
+      // cancelled default costs this button.
+      holdFocusOnPress(btn);
+      btn.addEventListener("pointerdown", jump);
       btn.addEventListener("click", jump);
 
       // Visible only while scrolled up; the region reflects it via a class.

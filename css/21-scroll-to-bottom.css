@@ -38,7 +38,11 @@
   border-color: color-mix(in oklch, var(--text) 35%, transparent);
 }
 
-:where(.wt-root) .wt-scroll-bottom:active {
+/* Press fills the background. .wt-pressed rides along: this button cancels its
+   pointerdown default and so never enters :active in Firefox (holdFocusOnPress
+   in features/dom.ts). */
+:where(.wt-root) .wt-scroll-bottom:active,
+:where(.wt-root) .wt-scroll-bottom.wt-pressed {
   background: var(--text-active);
 }
 

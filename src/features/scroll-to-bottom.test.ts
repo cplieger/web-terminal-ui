@@ -77,6 +77,22 @@ describe("scrollToBottom feature", () => {
     expect(slot.classList.contains("scrolled-up")).toBe(false);
   });
 
+  it("jumps on the press and paints the press class while held", () => {
+    // pointerdown, not click: the jump lands on the press. The class is what
+    // gives the button a press state at all in Firefox, where cancelling the
+    // pointerdown default (to keep the keyboard on the terminal) also suppresses
+    // the browser's own :active.
+    stubMatchMedia(true);
+    const { ctx, slot, scrollToBottomSpy } = fakeCtx();
+    scrollToBottom().setup(ctx);
+    const btn = button(slot);
+    btn?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+    expect(scrollToBottomSpy).toHaveBeenCalledTimes(1);
+    expect(btn?.classList.contains("wt-pressed")).toBe(true);
+    window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    expect(btn?.classList.contains("wt-pressed")).toBe(false);
+  });
+
   it("teardown removes the button and unsubscribes from scroll:state", () => {
     stubMatchMedia(false);
     const { ctx, slot, offSpy } = fakeCtx();

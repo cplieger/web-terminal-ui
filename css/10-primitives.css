@@ -38,7 +38,11 @@
   user-select: none;
 }
 
-:where(.wt-root) .wt-btn:active {
+/* Press. The pointerdown-cancelling bar buttons (holdFocusOnPress in
+   features/dom.ts) never enter :active in Firefox, so they paint .wt-pressed on
+   themselves and every press rule in this package matches either. */
+:where(.wt-root) .wt-btn:active,
+:where(.wt-root) .wt-btn.wt-pressed {
   background: var(--text-active);
 }
 
