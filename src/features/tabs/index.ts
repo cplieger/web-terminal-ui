@@ -12,7 +12,7 @@ import { LineStore, modes } from "@cplieger/web-terminal-engine";
 import type { SessionRef, TerminalContext, TerminalFeature } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
-import { fromHTML } from "../dom.js";
+import { fromHTML, holdFocusOnPress } from "../dom.js";
 import { createClickSwallow, placeMenuAt } from "../menu-position.js";
 import type { CueStatus, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
@@ -336,16 +336,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // and reflects its open state on every keyboard button.
       function makeNewButton(cls: string): HTMLElement {
         const btn = fromHTML(newButtonHTML(cls));
-        // Keep the hidden terminal textarea focused: a bar button needs no focus
-        // of its own, and letting the tap shift focus makes iOS/iPadOS consume
-        // the FIRST tap to blur the input (so "+" only fired create on the second
-        // tap — the reported double-tap). preventDefault on pointerdown fires the
-        // action on the first tap; switchTo then re-focuses the input for the new
-        // tab (see focusAfterSwitch). It does NOT make one press one activation —
-        // that is create()'s in-flight coalescing, for the opposite failure.
-        btn.addEventListener("pointerdown", (e) => {
-          e.preventDefault();
-        });
+        // Keeps the keyboard on the terminal and paints its own press state;
+        // holdFocusOnPress explains why those two are one job. It does NOT make
+        // one press one activation — that is create()'s in-flight coalescing,
+        // for the opposite failure.
+        holdFocusOnPress(btn);
         btn.addEventListener("click", () => {
           void create();
         });
@@ -353,11 +348,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
       function makeKbButton(cls: string): HTMLElement {
         const btn = fromHTML(kbButtonHTML(cls));
-        // First-tap focus retention (see makeNewButton): keep the terminal
-        // textarea focused so the toggle fires on the first tap on iOS/iPadOS.
-        btn.addEventListener("pointerdown", (e) => {
-          e.preventDefault();
-        });
+        holdFocusOnPress(btn);
         btn.addEventListener("click", () => {
           const kb = opts.keyboardToggle ? ctx.use(opts.keyboardToggle) : undefined;
           if (!kb) {
@@ -375,15 +366,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
       // makeSwitchButton builds the mobile switcher's dedicated open/close
       // button (its notification dot is painted by paintSwitchDot). Like the
-      // other bar buttons it preventDefaults pointerdown for first-tap focus
-      // retention (keeps the terminal textarea focused so it fires on the first
-      // tap on iOS/iPadOS); its click toggles the list (toggleSwitcher opens when
-      // collapsed, closes when expanded).
+      // other bar buttons it goes through holdFocusOnPress; its click toggles the
+      // list (toggleSwitcher opens when collapsed, closes when expanded).
       function makeSwitchButton(): HTMLElement {
         const btn = fromHTML(switchButtonHTML("wt-switcher-switch wt-btn"));
-        btn.addEventListener("pointerdown", (e) => {
-          e.preventDefault();
-        });
+        holdFocusOnPress(btn);
         btn.addEventListener("click", () => {
           toggleSwitcher();
         });

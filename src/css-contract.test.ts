@@ -19,6 +19,8 @@ const tokens = readFileSync(path.join(cssDir, "00-tokens.css"), "utf8");
 const terminal = readFileSync(path.join(cssDir, "02-terminal.css"), "utf8");
 const tabs = readFileSync(path.join(cssDir, "30-tabs.css"), "utf8");
 const switcher = readFileSync(path.join(cssDir, "31-switcher.css"), "utf8");
+const primitives = readFileSync(path.join(cssDir, "10-primitives.css"), "utf8");
+const scrollToBottomCss = readFileSync(path.join(cssDir, "21-scroll-to-bottom.css"), "utf8");
 
 describe("engine-toggled class contract", () => {
   it("styles DECSCNM reverse video (.term-reverse-video) as a default-pair swap", () => {
@@ -38,6 +40,30 @@ describe("engine-toggled class contract", () => {
   it("styles the caret overlay (.term-cursor-overlay) the engine positions", () => {
     expect(terminal).toContain(".term-cursor-overlay");
     expect(terminal).toContain(".term-cursor-overlay:not(.visible)");
+  });
+});
+
+// Same implicit contract, one layer in: the chrome buttons that cancel their
+// pointerdown default (holdFocusOnPress, features/dom.ts) paint .wt-pressed on
+// themselves because Firefox gives them no :active, so a press rule written for
+// :active alone is a control with no press feedback in that engine — silently,
+// since happy-dom applies no CSS and the other engines look fine. Assert the
+// pairing for every such control.
+describe("press-class contract for the focus-holding buttons", () => {
+  const PRESS_RULES: [name: string, css: string, selector: string][] = [
+    ["the shared .wt-btn primitive (keyboard + switcher buttons)", primitives, ".wt-btn"],
+    ["the desktop strip's +", tabs, ".wt-tab-new"],
+    ["the mobile switcher's +", switcher, ".wt-switcher-new"],
+    ["the scroll-to-bottom control", scrollToBottomCss, ".wt-scroll-bottom"],
+  ];
+
+  it.each(PRESS_RULES)("pairs %s press rule with .wt-pressed", (_name, css, selector) => {
+    const escaped = selector.replace(".", "\\.");
+    expect(new RegExp(`${escaped}:active`).test(css), `${selector}:active exists`).toBe(true);
+    expect(
+      new RegExp(`${escaped}\\.wt-pressed`).test(css),
+      `${selector}.wt-pressed accompanies it`,
+    ).toBe(true);
   });
 });
 

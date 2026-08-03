@@ -339,7 +339,10 @@
   }
 }
 
-:where(.wt-root) .wt-switcher-new:active {
+/* Press. .wt-pressed rides along: this button cancels its pointerdown default
+   and so never enters :active in Firefox (holdFocusOnPress in features/dom.ts). */
+:where(.wt-root) .wt-switcher-new:active,
+:where(.wt-root) .wt-switcher-new.wt-pressed {
   background: var(--tab-hover-bg);
 }
 
