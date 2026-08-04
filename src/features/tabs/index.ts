@@ -14,6 +14,7 @@ import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { fromHTML, holdFocusOnPress } from "../dom.js";
 import { createClickSwallow, placeMenuAt } from "../menu-position.js";
+import { centreChipLabels } from "./ink-centre.js";
 import type { CueStatus, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
   ACTIVE_TAB_KEY,
@@ -600,6 +601,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           offArmed = kbApi.onCtrlArmedChange(reflectArmed);
         }
       }
+      // Measured optical centring for every chip label in both layouts: writes
+      // --label-ink-shift onto the strip and the switcher from the line box THIS
+      // engine produced for THIS font at THIS size, rather than the em constant
+      // in 00-tokens.css that can only be right at one size (see ink-centre.ts).
+      const stopInkCentring = centreChipLabels(varRoot, { strip: bar, switcher });
+
       // Mark the root so the CSS lifts the bottom-anchored chrome (banner, toast,
       // scroll-to-bottom, key grid) above the switcher bar on a coarse pointer.
       const root = ctx.surface().parentElement;
@@ -3213,6 +3220,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
           barResize.disconnect();
           swReserve.disconnect();
+          stopInkCentring();
           surface.classList.remove("wt-with-tabbar");
           varRoot.style.removeProperty("--wt-tabbar-h");
           root?.classList.remove("wt-tabbed");
