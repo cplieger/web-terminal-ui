@@ -236,7 +236,7 @@
    metrics through CoreText where Linux WebKit uses FreeType — which is why the
    13px strip measured centred in every local check and still read high on an
    iPad. Nothing here is tunable by eye; if the centring looks wrong, run
-   scripts/verify-ink-centring.mjs and fix what it measures.
+   scripts/verify-chip-geometry.mjs and fix what it measures.
 
    What this deliberately does NOT use is `text-box: trim-both`, which three of
    the four previous attempts were built on. It ships in Blink and WebKit only
@@ -257,9 +257,23 @@
   margin-block: 0 calc(2 * var(--label-ink-shift));
 }
 
-/* A little breathing room after the activity dot, before the label. */
+/* The dot sits between two gaps that must read as one gap: the chip's own
+   padding on its left, and the run to the label on its right. The chip's flex
+   `gap` is --sp-1 (it also spaces label -> close, which wants the tighter
+   value), so the dot makes up the difference itself and the two flanking gaps
+   both land on --sp-2. Expressed as the arithmetic rather than a literal 4px so
+   the equality survives a change to either token — a literal 2px was 6px against
+   the padding's 8px, which reads as the dot being crowded toward the title.
+
+   This equalises the LAYOUT gaps, deliberately not the ink gaps. A monospace
+   glyph is centred in a fixed advance, so a title's first letter starts about a
+   pixel inside its box, and how far in depends on the letter: compensating would
+   mean a correction that changes per title and per font, and the engines do not
+   even agree on the measurement (for this face WebKit reports no left bearing
+   where Blink reports 1.01px). A title-independent definition beats a
+   sub-pixel one that is wrong on the next title. */
 :where(.wt-root) .wt-tab-dot {
-  margin-right: 2px;
+  margin-right: calc(var(--sp-2) - var(--sp-1));
 }
 
 /* The tab close (x): a centered, muted square icon button with a box on hover.

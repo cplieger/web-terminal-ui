@@ -1,25 +1,29 @@
 #!/usr/bin/env node
-// Cross-engine verification of chip-label optical centring.
+// Cross-engine verification of chip label geometry: the label's optical
+// centring, and the two gaps flanking the activity dot.
 //
-// Four successive fixes to this one geometry shipped a hardcoded correction
-// constant, and each was correct only in the engine, at the size and on the
-// platform it was tuned against — the fourth read correct on a 13px desktop
-// strip in Blink and sat 0.33px high on a 14px mobile chip in WebKit. The defect
-// is invisible to every other gate in this repo: it is sub-pixel, it needs real
-// layout (happy-dom has none), and it only appears at a size or in an engine the
-// author did not happen to look at. This script is the gate that closes that
+// Four successive fixes to the centring shipped a hardcoded correction constant,
+// and each was correct only in the engine, at the size and on the platform it was
+// tuned against — the fourth read correct on a 13px desktop strip in Blink and sat
+// 0.33px high on a 14px mobile chip in WebKit. Defects in this area are invisible
+// to every other gate in this repo: they are sub-pixel or single-pixel, they need
+// real layout (happy-dom has none), and they only appear at a size or in an engine
+// the author did not happen to look at. This script is the gate that closes that
 // hole. Run it before changing anything about label geometry, the label font
-// sizes, or the bundled font.
+// sizes, the chip's spacing, or the bundled font.
 //
 // It drives the REAL src/features/tabs/ink-centre.ts (compiled, not
 // reimplemented) against the repo's own CSS bundle in WebKit, Blink and Gecko,
-// sweeping the label size across the ascent/descent rounding boundaries that
-// broke every previous fix, and asserts the ink's centre lands on the chip's
-// centre in all of them.
+// sweeping the label size across the ascent/descent rounding boundaries that broke
+// every previous fix, and asserts two things in all of them:
 //
-//   node scripts/verify-ink-centring.mjs
-//   node scripts/verify-ink-centring.mjs --font /path/to/MonaspiceNeNerdFontMono-Regular.otf
-//   node scripts/verify-ink-centring.mjs --engines webkit,chromium
+//   1. ink centring — the label's visible ink centres on its chip
+//   2. dot gaps — the run from the chip's inner edge to the activity dot equals
+//      the run from the dot to the label, at both chip sites
+//
+//   node scripts/verify-chip-geometry.mjs
+//   node scripts/verify-chip-geometry.mjs --font /path/to/MonaspiceNeNerdFontMono-Regular.otf
+//   node scripts/verify-chip-geometry.mjs --engines webkit,chromium
 //
 // Not wired into CI: it needs three browser engines (~300 MB) and the repo's
 // validate gate is deliberately cheap. Playwright is resolved from a sibling
@@ -148,10 +152,10 @@ writeFileSync(
 </head><body>
 <div class="wt-root">
   <div class="wt-tab-bar" id="strip"><div class="wt-tab-scroll">
-    <div class="wt-tab wt-tab-active" id="strip-chip"><span class="wt-tab-dot"></span><span class="wt-tab-label" id="strip-label">${CHIP_TEXT}</span><button class="wt-tab-close" type="button"></button></div>
+    <div class="wt-tab wt-tab-active" id="strip-chip"><span class="wt-tab-dot wt-status-dot wt-reports" id="strip-dot" aria-hidden="true"></span><span class="wt-tab-label" id="strip-label">${CHIP_TEXT}</span><button class="wt-tab-close" type="button"></button></div>
   </div></div>
   <div class="wt-switcher" id="switcher"><div class="wt-switcher-bar"><div class="wt-switcher-current-wrap">
-    <button type="button" class="wt-switcher-current" id="switcher-chip"><span class="wt-switcher-current-inner"><span class="wt-switcher-dot"></span><span class="wt-switcher-label" id="switcher-label">${CHIP_TEXT}</span></span></button>
+    <button type="button" class="wt-switcher-current" id="switcher-chip"><span class="wt-switcher-current-inner"><span class="wt-switcher-dot wt-status-dot wt-reports" id="switcher-dot" aria-hidden="true"></span><span class="wt-switcher-label" id="switcher-label">${CHIP_TEXT}</span></span></button>
   </div></div></div>
 </div>
 <script type="module">
@@ -263,9 +267,47 @@ const measure = (sizes) => {
   return out;
 };
 
+// The two gaps flanking the activity dot must read as one gap: the chip's own
+// padding on the dot's left, and the run to the label on its right. Measured on
+// the layout boxes, which is the title-independent definition — a monospace
+// glyph is centred in a fixed advance, so a title's first letter starts about a
+// pixel inside its box by an amount that depends on the letter, and the engines
+// do not even agree on that measurement (reported below for information only).
+const measureGaps = () => {
+  const out = [];
+  for (const [name, chipId, dotId, labelId] of [
+    ["strip", "strip-chip", "strip-dot", "strip-label"],
+    ["switcher", "switcher-chip", "switcher-dot", "switcher-label"],
+  ]) {
+    const chip = document.getElementById(chipId);
+    const dot = document.getElementById(dotId);
+    const label = document.getElementById(labelId);
+    const cs = getComputedStyle(chip);
+    const ls = getComputedStyle(label);
+    const chipR = chip.getBoundingClientRect();
+    const dotR = dot.getBoundingClientRect();
+    const labelR = label.getBoundingClientRect();
+
+    const REF = 400;
+    const ctx = document.createElement("canvas").getContext("2d");
+    ctx.font = `${ls.fontStyle} ${ls.fontWeight} ${REF}px ${ls.fontFamily}`;
+    const first = ctx.measureText(label.textContent.charAt(0));
+    const bearing = (-first.actualBoundingBoxLeft / REF) * Number.parseFloat(ls.fontSize);
+
+    const innerLeft =
+      chipR.left + Number.parseFloat(cs.borderLeftWidth) + Number.parseFloat(cs.paddingLeft);
+    out.push({
+      site: name,
+      dotVisible: dotR.width > 0,
+      before: +(dotR.left - innerLeft + Number.parseFloat(cs.paddingLeft)).toFixed(3),
+      after: +(labelR.left - dotR.right).toFixed(3),
+      inkBearing: +bearing.toFixed(3),
+    });
+  }
+  return out;
+};
+
 // Which face actually rendered. Computed style reports the declared family list
-// whether or not the webfont loaded, so the only honest test is whether the
-// glyphs measure differently from the generic fallback.
 const resolvedFace = () => {
   const el = document.createElement("span");
   el.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
@@ -305,6 +347,20 @@ for (const name of engines) {
         `${measured ? "" : "  <- no measured shift: the module did not run"}\n`,
     );
   }
+
+  for (const g of await page.evaluate(measureGaps)) {
+    // Whole layout pixels on both sides, so they must match exactly; a tolerance
+    // here would only hide a token drifting apart from the chip's padding.
+    const ok = g.dotVisible && g.before === g.after;
+    if (!ok) {
+      failures += 1;
+    }
+    process.stdout.write(
+      `  ${ok ? "ok  " : "FAIL"} ${g.site.padEnd(9)} dot gaps  before=${String(g.before).padStart(6)}px  ` +
+        `after=${String(g.after).padStart(6)}px  (first-glyph ink bearing ${g.inkBearing}px, not compensated)` +
+        `${g.dotVisible ? "" : "  <- dot has no box: the gap check proves nothing"}\n`,
+    );
+  }
   await browser.close();
 }
 
@@ -313,11 +369,15 @@ rmSync(work, { recursive: true, force: true });
 
 if (failures > 0) {
   process.stderr.write(
-    `\n${failures} check(s) outside +/-${TOLERANCE_PX}px.\n` +
-      `Label ink is no longer centred. Do NOT tune a constant by eye — the\n` +
-      `correction is measured at runtime (src/features/tabs/ink-centre.ts), so a\n` +
-      `failure here means the measurement is wrong, not the number.\n`,
+    `\n${failures} check(s) failed.\n` +
+      `Chip label geometry has regressed. For a centring failure, do NOT tune a\n` +
+      `constant by eye — the correction is measured at runtime\n` +
+      `(src/features/tabs/ink-centre.ts), so it means the measurement is wrong,\n` +
+      `not the number. For a dot-gap failure, the chip's padding and the dot's\n` +
+      `own margin have drifted apart (see .wt-tab-dot in css/30-tabs.css).\n`,
   );
   process.exit(1);
 }
-process.stdout.write(`\nall sites centred within +/-${TOLERANCE_PX}px in ${engines.join(", ")}\n`);
+process.stdout.write(
+  `\nlabels centred within +/-${TOLERANCE_PX}px and dot gaps equal in ${engines.join(", ")}\n`,
+);

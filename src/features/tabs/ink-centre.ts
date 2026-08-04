@@ -196,7 +196,7 @@ interface Site {
  *   the signature below cannot see them: computed style reports the DECLARED
  *   font-family list whether or not the webfont ever arrived, so a cached
  *   signature would match and pin the fallback's shift permanently. (It did,
- *   until scripts/verify-ink-centring.mjs caught it.)
+ *   until scripts/verify-chip-geometry.mjs caught it.)
  * - A resize. rem-relative label sizes move with Safari's per-site page zoom,
  *   and a new size means new rounding; but most resizes change neither, so this
  *   path keeps the signature check and costs one computed-style read per site

@@ -82,22 +82,25 @@ There is **no build step**: the package ships TypeScript source
 runs the same battery centrally via cplieger/ci; the `web-lint` job also lints
 `css/` (stylelint) and `scaffold/index.html` (html-validate).
 
-### Verifying chip-label optical centring
+### Verifying chip geometry
 
 Run this before changing anything about chip-label geometry, the label font
-sizes, or the bundled font:
+sizes, the chip's spacing, or the bundled font:
 
 ```sh
-node scripts/verify-ink-centring.mjs --font /path/to/MonaspiceNeNerdFontMono-Regular.otf
+node scripts/verify-chip-geometry.mjs --font /path/to/MonaspiceNeNerdFontMono-Regular.otf
 ```
 
 It renders the real CSS bundle and the real `src/features/tabs/ink-centre.ts` in
 WebKit, Blink and Gecko, sweeps the label size across the ascent/descent
-rounding boundaries, and asserts each label's visible ink centres on its chip
-within 0.05px. Four earlier fixes to this geometry shipped a hardcoded
-correction constant and each was wrong somewhere else: sub-pixel, invisible to
-`happy-dom` (no layout engine), and only reproducible at a size or in an engine
-the author did not happen to open. Nothing else in the battery can see it.
+rounding boundaries, and asserts two invariants at both chip sites: each label's
+visible ink centres on its chip within 0.05px, and the gap from the chip's inner
+edge to the activity dot equals the gap from the dot to the label. Four earlier
+fixes to the centring shipped a hardcoded correction constant and each was wrong
+somewhere else, and the dot's gaps sat 8px against 6px for as long. Both classes
+are invisible to the rest of the battery: sub-pixel or single-pixel, needing real
+layout that `happy-dom` does not have, and only visible at a size or in an engine
+the author did not happen to open.
 
 Playwright is not a devDependency here (three engines is ~300 MB, and the
 `validate` gate is deliberately cheap, so this is not wired into CI). The script
