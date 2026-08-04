@@ -174,10 +174,13 @@
 
 /* Ink-centring geometry, identical to .wt-tab-label: a symmetric ink allowance
    the ellipsis clipping needs, plus a bottom margin of twice --label-ink-shift
-   that lifts the ink to the row centre. See 30-tabs.css for the derivation, for
-   why line-height must stay `normal` here, and for why this is margin arithmetic
-   over the bundled font rather than a text-box trim behind an @supports gate that
-   only one engine ever takes. */
+   that lifts the ink to the row centre. These labels are 14px against the strip's
+   13px, which is exactly why --label-ink-shift is MEASURED per site at runtime
+   (src/features/tabs/ink-centre.ts) rather than declared once: the shift an engine
+   needs is a sawtooth in font size, not a ratio, so the single em constant that
+   served both sizes was correct at 13px and 0.33px high here. See 30-tabs.css for
+   the full derivation, for why line-height must stay `normal`, and for why a
+   measured shift beats a text-box trim behind an @supports gate. */
 :where(.wt-root) .wt-switcher-label {
   flex: 1 1 auto;
   overflow: hidden;
@@ -446,10 +449,13 @@
 
 /* Ink-centring geometry, identical to .wt-tab-label: a symmetric ink allowance
    the ellipsis clipping needs, plus a bottom margin of twice --label-ink-shift
-   that lifts the ink to the row centre. See 30-tabs.css for the derivation, for
-   why line-height must stay `normal` here, and for why this is margin arithmetic
-   over the bundled font rather than a text-box trim behind an @supports gate that
-   only one engine ever takes. */
+   that lifts the ink to the row centre. These labels are 14px against the strip's
+   13px, which is exactly why --label-ink-shift is MEASURED per site at runtime
+   (src/features/tabs/ink-centre.ts) rather than declared once: the shift an engine
+   needs is a sawtooth in font size, not a ratio, so the single em constant that
+   served both sizes was correct at 13px and 0.33px high here. See 30-tabs.css for
+   the full derivation, for why line-height must stay `normal`, and for why a
+   measured shift beats a text-box trim behind an @supports gate. */
 :where(.wt-root) .wt-switcher-row-label {
   flex: 1 1 auto;
   overflow: hidden;

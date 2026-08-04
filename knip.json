@@ -1,3 +1,4 @@
 {
-  "ignoreDependencies": ["html-validate"]
+  "ignoreDependencies": ["html-validate"],
+  "entry": ["scripts/*.mjs"]
 }

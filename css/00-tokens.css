@@ -144,17 +144,26 @@
   --font-mono: "MonaspiceNe NFM", monospace;
   /* How far a chip label's INK sits below its line box's centre, so flex
      centring can be corrected by exactly that much (see .wt-tab-label in
-     30-tabs.css). Derived from MonaspiceNe NFM's own tables and outlines:
+     30-tabs.css).
 
-       (ascent - descent) / 2      = (0.995 - 0.250) / 2   = 0.3725em
-       (cap ink - descender ink)/2 = (0.7344 - 0.2188) / 2 = 0.2578em
-       difference                                          = 0.1147em
+     This value is only the PRE-MEASUREMENT DEFAULT — what the first paint uses
+     before the tabs feature replaces it, per site, with a pixel value measured
+     in the live engine (src/features/tabs/ink-centre.ts). It is not the answer,
+     because no single value can be: engines round the font's ascent and descent
+     to whole CSS pixels before building the line box, so the ideal shift is a
+     sawtooth in font size rather than a ratio. Against the bundled font in
+     WebKit it is 0.1190em at 13px and 0.0915em at 14px, since 0.25em x 13 =
+     3.25 rounds to 3 (a 16px box) while 0.25em x 14 = 3.5 rounds to 4 (an 18px
+     box). Engines then disagree with each other (Firefox makes that 14px box
+     17px) and platforms disagree within one engine (iOS reads metrics through
+     CoreText, Linux WebKit through FreeType). Four fixes were hardcoded
+     constants and each was correct only where it was tuned.
 
-     A constant is safe here only because the bundled font leaves engines
-     nothing to disagree about: hhea, OS/2 typo and usWin all declare the same
-     0.995 / 0.250 with lineGap 0, and fsSelection sets USE_TYPO_METRICS, so
-     Chromium, Gecko and WebKit all compute the same line box. Re-derive this
-     number if the bundled font ever changes; do not nudge it by eye. */
+     0.1147em is kept as the default because it is the midpoint of that
+     sawtooth: worst case 0.34px before the measurement lands, versus 1.5px for
+     no correction at all. Do not tune it by eye — a wrong default is invisible
+     the moment the measured value arrives, so eye-tuning it optimises nothing
+     and pins the wrong number in place. */
   --label-ink-shift: 0.1147em;
   --dur-micro: 0.1s;
   --dur-standard: 0.2s;

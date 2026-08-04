@@ -198,11 +198,11 @@
 
    Centre the INK, not the line box. A font's metrics box reaches far higher above
    the baseline than below it (the bundled font: 0.995em over, 0.250em under),
-   while the ink of a mixed-case title runs 0.7344em over (cap height) to 0.2188em
+   while the ink of a mixed-case title runs ~0.734em over (cap height) to ~0.203em
    under (descender). Flex centring centres the BOX, which leaves the visible text
-   --label-ink-shift low — 0.1147em, 1.5px at this size — reading as
-   baseline-aligned with the activity dot's bottom edge instead of level with its
-   centre. Two declarations, one job, and a third that must NOT be added:
+   --label-ink-shift low — about 1.5px at this size — reading as baseline-aligned
+   with the activity dot's bottom edge instead of level with its centre. Two
+   declarations, one job, and a third that must NOT be added:
 
    - padding-block is the ink allowance, not spacing. `overflow: hidden` (which
      the ellipsis requires) clips at the padding box, and the line box clears the
@@ -222,21 +222,31 @@
      -0.25 floored to -1) while the 13px strip label was fine, which is exactly
      the kind of works-where-I-looked bug this rule exists to end.
 
-   What this deliberately does NOT use is `text-box: trim-both`, which all three
-   previous attempts were built on. It ships in Blink and WebKit only (Firefox has
-   it in Nightly behind layout.css.text-box.enabled), so it can only be applied
-   behind an @supports gate, and a gate means two engines render two different
-   geometries of which only the one the author is looking at ever gets tuned.
-   Measured on the gated version: Chromium centred to 0.02px while Firefox sat
-   1.50px low with its baseline half a pixel BELOW the dot. The keyword vocabulary
-   is too coarse for this text besides -- `cap alphabetic` centres the cap band and
-   reads 1.14px low on lowercase, `ex alphabetic` centres the x-band and reads high
-   on capitals, and a mixed-case tab title wants neither edge.
+   --label-ink-shift is MEASURED, not declared. The tabs feature writes a pixel
+   value per site from the line box the running engine produced for this font at
+   this size (src/features/tabs/ink-centre.ts); the em value in 00-tokens.css is
+   only what the first paint uses. Four earlier fixes were constants, and the
+   reason none held is that engines round the font's ascent and descent to whole
+   CSS pixels before laying out the line box, so the required shift is a sawtooth
+   in font size, not a ratio: in WebKit 0.1190em at 13px against 0.0915em at 14px,
+   because 0.25em x 13 = 3.25 rounds to 3 (a 16px box) while 0.25em x 14 = 3.5
+   rounds to 4 (an 18px box). The three engines also report slightly different ink
+   extents for one font file (cap 0.7344 / 0.7350 / 0.7300em in WebKit, Blink and
+   Gecko), Firefox makes that 14px box 17px rather than 18px, and iOS resolves
+   metrics through CoreText where Linux WebKit uses FreeType — which is why the
+   13px strip measured centred in every local check and still read high on an
+   iPad. Nothing here is tunable by eye; if the centring looks wrong, run
+   scripts/verify-ink-centring.mjs and fix what it measures.
 
-   The residual error is engines rounding ascent and descent to whole pixels, which
-   makes the ideal shift 0.127em at 13px and 0.099em at 14px; the one authored
-   0.1147em is the unrounded truth and lands within 0.22px at both sizes, in every
-   engine, with no fork. */
+   What this deliberately does NOT use is `text-box: trim-both`, which three of
+   the four previous attempts were built on. It ships in Blink and WebKit only
+   (Firefox 151 still reports false for it), so it can only be applied behind an
+   @supports gate, and a gate means two engines render two different geometries of
+   which only the one the author is looking at ever gets tuned. Trimming to
+   `cap alphabetic` and giving the descender back as asymmetric padding IS
+   size-independent and holds to 0.05px in both engines that implement it — but
+   ungated it swings to 0.39px in Firefox, and a measured shift needs no gate and
+   no second code path to beat it. */
 :where(.wt-root) .wt-tab-label {
   flex: 1 1 auto;
   min-width: 0;

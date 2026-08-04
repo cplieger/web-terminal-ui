@@ -82,8 +82,39 @@ There is **no build step**: the package ships TypeScript source
 runs the same battery centrally via cplieger/ci; the `web-lint` job also lints
 `css/` (stylelint) and `scaffold/index.html` (html-validate).
 
+### Verifying chip-label optical centring
+
+Run this before changing anything about chip-label geometry, the label font
+sizes, or the bundled font:
+
+```sh
+node scripts/verify-ink-centring.mjs --font /path/to/MonaspiceNeNerdFontMono-Regular.otf
+```
+
+It renders the real CSS bundle and the real `src/features/tabs/ink-centre.ts` in
+WebKit, Blink and Gecko, sweeps the label size across the ascent/descent
+rounding boundaries, and asserts each label's visible ink centres on its chip
+within 0.05px. Four earlier fixes to this geometry shipped a hardcoded
+correction constant and each was wrong somewhere else: sub-pixel, invisible to
+`happy-dom` (no layout engine), and only reproducible at a size or in an engine
+the author did not happen to open. Nothing else in the battery can see it.
+
+Playwright is not a devDependency here (three engines is ~300 MB, and the
+`validate` gate is deliberately cheap, so this is not wired into CI). The script
+resolves `playwright-core` from the sibling engine checkout, the same way
+`verify.sh` reaches for the local engine; override with `PLAYWRIGHT_DIR`. Once
+per machine: `npx playwright install webkit chromium firefox`. Without `--font`
+it measures the platform monospace instead, which is a useful second case since
+the correction must not depend on the font.
+
 ### Conventions and gotchas
 
+- **Never hardcode a font-metric constant.** Engines round a font's ascent and
+  descent to whole CSS pixels before laying out a line box, so anything derived
+  from them is a sawtooth in font size, not a ratio: the shift a 14px label needs
+  is 1.29px in Blink and WebKit and 1.76px in Gecko, and the same font at 13px
+  needs 1.55px in Blink. Measure it in the engine (`ink-centre.ts`) and treat any
+  constant in the stylesheet as a pre-measurement default only.
 - **ESM only.** Use `.js` extensions in relative imports (e.g.
   `from "./predict.js"`) even though the files are `.ts`; required for the
   TS-source publish to resolve.
