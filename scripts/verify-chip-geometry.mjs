@@ -33,9 +33,9 @@
 //   npx playwright install webkit chromium firefox
 import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, extname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const REPO = resolve(dirname(new URL(import.meta.url).pathname), "..");
@@ -181,16 +181,17 @@ const TYPES = {
 const server = createServer((req, res) => {
   const rel = decodeURIComponent((req.url ?? "/").split("?")[0]);
   const file = join(work, rel === "/" ? "index.html" : rel);
-  if (!file.startsWith(work)) {
+  if (!file.startsWith(work + sep)) {
     res.writeHead(403).end();
     return;
   }
   try {
-    if (!statSync(file).isFile()) {
-      throw new Error("not a file");
-    }
+    // Read and THEN write the header: no stat-first check, both because a
+    // check-then-use pair is a file-system race and because the read is the only
+    // thing that has to succeed. A directory or a missing file throws here.
+    const body = readFileSync(file);
     res.writeHead(200, { "content-type": TYPES[extname(file)] ?? "application/octet-stream" });
-    res.end(readFileSync(file));
+    res.end(body);
   } catch {
     // The bundle's own @font-face URLs (/vendor/fonts/...) are served by the
     // product, not by this fixture. A prompt 404 lets document.fonts.ready
