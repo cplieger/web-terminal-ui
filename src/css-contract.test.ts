@@ -41,6 +41,24 @@ describe("engine-toggled class contract", () => {
     expect(terminal).toContain(".term-cursor-overlay");
     expect(terminal).toContain(".term-cursor-overlay:not(.visible)");
   });
+
+  it("gives app-declared links (.term-link) an affordance where nothing can hover", () => {
+    // The engine anchors OSC 8 runs as .term-link and auto-detected URLs as
+    // .term-autolink. .term-link's underline is hover-only, so on a touch device
+    // an app-declared link renders as plain text: kiro-cli emits OSC 8 for every
+    // markdown link, which made a phone session full of tappable invisible links.
+    // A `hover: none` block restores the affordance; deleted, mobile silently
+    // regresses with no other signal anywhere.
+    const block = /@media \(hover: none\) \{([\s\S]*?)\n\}/.exec(terminal);
+    expect(block, "a (hover: none) block exists in 02-terminal.css").not.toBeNull();
+    const body = block![1];
+    expect(body).toContain(".term-link");
+    expect(body).toContain("underline dotted");
+    // The pressed state stays distinguishable without hover.
+    expect(body).toContain(".term-link:active");
+    // And the hover rule survives for pointers that have one.
+    expect(terminal).toContain(".term-link:hover");
+  });
 });
 
 // Same implicit contract, one layer in: the chrome buttons that cancel their
