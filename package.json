@@ -72,6 +72,22 @@
     "type": "git",
     "url": "git+https://github.com/cplieger/web-terminal-ui.git"
   },
+  "homepage": "https://github.com/cplieger/web-terminal-ui",
+  "bugs": {
+    "url": "https://github.com/cplieger/web-terminal-ui/issues"
+  },
+  "author": "cplieger <917744+cplieger@users.noreply.github.com>",
+  "keywords": [
+    "terminal",
+    "terminal-ui",
+    "web-terminal",
+    "touch",
+    "mobile",
+    "tabs",
+    "ime",
+    "browser",
+    "typescript"
+  ],
   "files": [
     "src/",
     "css/",
