@@ -3,12 +3,13 @@ import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { centreChipLabels, inkShiftPx, type InkMetrics } from "./ink-centre.js";
 
-// The numbers below are not invented: each row is what the named engine actually
-// reported for the bundled Monaspace Neon NF against the deployed bundle, read via
-// Playwright (fontBox and baseline from a strut probe, ink extents from canvas
-// TextMetrics at 400px). They exist to pin the arithmetic to observed reality,
-// and to document WHY a single em constant could not work — the last column is
-// the shift as a ratio of font size, and it is not constant down any of them.
+// The numbers below are not invented: each row's fontBox, baseline and capInk are
+// what the named engine actually reported for the bundled Monaspace Neon NF
+// against the deployed bundle, read via Playwright (fontBox and baseline from a
+// strut probe, cap ink from canvas TextMetrics at 400px). They exist to pin the
+// arithmetic to observed reality, and to document WHY a single em constant could
+// not work — the last column is the shift as a ratio of font size, and it is not
+// constant down any of them, nor even of one sign.
 const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[] = [
   // WebKit 26.5 (the engine behind Safari 26). 13px rounds descent down to a
   // 16px box; 14px rounds it up to 18px, which is the whole bug.
@@ -18,8 +19,7 @@ const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[]
     fontBoxPx: 16,
     baselinePx: 13,
     capInkEm: 0.7344,
-    descInkEm: 0.2031,
-    expectedEm: 0.119,
+    expectedEm: 0.0174,
   },
   {
     engine: "webkit",
@@ -27,8 +27,7 @@ const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[]
     fontBoxPx: 18,
     baselinePx: 14,
     capInkEm: 0.7344,
-    descInkEm: 0.2031,
-    expectedEm: 0.0915,
+    expectedEm: -0.0101,
   },
   {
     engine: "webkit",
@@ -36,8 +35,7 @@ const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[]
     fontBoxPx: 23,
     baselinePx: 18,
     capInkEm: 0.7344,
-    descInkEm: 0.2031,
-    expectedEm: 0.0955,
+    expectedEm: -0.0061,
   },
   // Blink agrees with WebKit on the boxes and differs slightly on ink extents.
   {
@@ -46,8 +44,7 @@ const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[]
     fontBoxPx: 16,
     baselinePx: 13,
     capInkEm: 0.735,
-    descInkEm: 0.205,
-    expectedEm: 0.1196,
+    expectedEm: 0.0171,
   },
   {
     engine: "chromium",
@@ -55,8 +52,7 @@ const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[]
     fontBoxPx: 18,
     baselinePx: 14,
     capInkEm: 0.735,
-    descInkEm: 0.205,
-    expectedEm: 0.0921,
+    expectedEm: -0.0104,
   },
   // Gecko makes the 14px box 17px, not 18px, so it needs a different shift again
   // at the size the other two share.
@@ -66,8 +62,7 @@ const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[]
     fontBoxPx: 16,
     baselinePx: 13,
     capInkEm: 0.73,
-    descInkEm: 0.195,
-    expectedEm: 0.1171,
+    expectedEm: 0.0196,
   },
   {
     engine: "firefox",
@@ -75,8 +70,7 @@ const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[]
     fontBoxPx: 17,
     baselinePx: 14,
     capInkEm: 0.73,
-    descInkEm: 0.195,
-    expectedEm: 0.1254,
+    expectedEm: 0.0279,
   },
 ];
 
@@ -100,30 +94,40 @@ describe("inkShiftPx", () => {
     expect(spanPx).toBeGreaterThan(0.33);
   });
 
-  it("is zero for a font whose ink is already centred in its line box", () => {
-    // Equal cap and descender ink puts the ink's centre ON the baseline, and this
-    // baseline is at the box's own centre: nothing to correct.
-    expect(
-      inkShiftPx({ fontBoxPx: 20, baselinePx: 10, capInkEm: 0.5, descInkEm: 0.5, fontSizePx: 10 }),
-    ).toBe(0);
+  it("centres the CAP band, not the cap-to-descender band", () => {
+    // The regression this replaced: with descender ink in the band, a title's
+    // visible mass is lifted by half the descender and reads high. Same metrics,
+    // both definitions, so the difference is exactly that half.
+    const m: InkMetrics = { fontBoxPx: 16, baselinePx: 13, capInkEm: 0.7344, fontSizePx: 13 };
+    const descInkEm = 0.2031;
+    const capBand = inkShiftPx(m);
+    const withDescender = capBand + (descInkEm * m.fontSizePx) / 2;
+    expect(withDescender - capBand).toBeCloseTo(1.32, 2);
+    // And the cap band's own correction is the small one.
+    expect(Math.abs(capBand)).toBeLessThan(0.5);
   });
 
-  it("centres the ink by construction, for any metrics an engine can report", () => {
+  it("is zero for a font whose cap band is already centred in its line box", () => {
+    // Cap ink of a full em with the baseline one half-em below the box's centre
+    // puts the cap band's centre ON that centre: nothing to correct.
+    expect(inkShiftPx({ fontBoxPx: 20, baselinePx: 15, capInkEm: 1, fontSizePx: 10 })).toBe(0);
+  });
+
+  it("centres the cap band by construction, for any metrics an engine can report", () => {
     fc.assert(
       fc.property(
         fc.double({ min: 1, max: 200, noNaN: true }),
         fc.double({ min: 4, max: 400, noNaN: true }),
         fc.double({ min: 0, max: 1.5, noNaN: true }),
-        fc.double({ min: 0, max: 1.5, noNaN: true }),
         fc.double({ min: 0.5, max: 400, noNaN: true }),
-        (fontSizePx, fontBoxPx, capInkEm, descInkEm, baselinePx) => {
-          const shift = inkShiftPx({ fontBoxPx, baselinePx, capInkEm, descInkEm, fontSizePx });
-          // Lifting the box by `shift` puts the ink's centre on the box's centre,
-          // which is the whole contract. Stated as the invariant rather than a
-          // repeat of the formula: the ink centre measured from the LIFTED box's
-          // over edge must be half the box.
-          const inkCentreAfterLift = baselinePx + ((descInkEm - capInkEm) * fontSizePx) / 2 - shift;
-          expect(inkCentreAfterLift).toBeCloseTo(fontBoxPx / 2, 6);
+        (fontSizePx, fontBoxPx, capInkEm, baselinePx) => {
+          const shift = inkShiftPx({ fontBoxPx, baselinePx, capInkEm, fontSizePx });
+          // Lifting the box by `shift` puts the cap band's centre on the box's
+          // centre, which is the whole contract. Stated as the invariant rather
+          // than a repeat of the formula: the cap-band centre measured from the
+          // LIFTED box's over edge must be half the box.
+          const capCentreAfterLift = baselinePx - (capInkEm * fontSizePx) / 2 - shift;
+          expect(capCentreAfterLift).toBeCloseTo(fontBoxPx / 2, 6);
         },
       ),
     );

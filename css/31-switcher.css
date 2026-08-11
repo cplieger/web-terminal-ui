@@ -196,11 +196,12 @@
 
 /* Ink-centring geometry, identical to .wt-tab-label: a symmetric ink allowance
    the ellipsis clipping needs, plus a bottom margin of twice --label-ink-shift
-   that lifts the ink to the row centre. These labels are 14px against the strip's
+   that lifts the CAP band (cap top to baseline, never cap-to-descender) to the row
+   centre. These labels are 14px against the strip's
    13px, which is exactly why --label-ink-shift is MEASURED per site at runtime
    (src/features/tabs/ink-centre.ts) rather than declared once: the shift an engine
-   needs is a sawtooth in font size, not a ratio, so the single em constant that
-   served both sizes was correct at 13px and 0.33px high here. See 30-tabs.css for
+   needs is a sawtooth in font size, not a ratio — it does not even keep one sign
+   across the two sizes. See 30-tabs.css for
    the full derivation, for why line-height must stay `normal`, and for why a
    measured shift beats a text-box trim behind an @supports gate. */
 :where(.wt-root) .wt-switcher-label {
@@ -471,11 +472,12 @@
 
 /* Ink-centring geometry, identical to .wt-tab-label: a symmetric ink allowance
    the ellipsis clipping needs, plus a bottom margin of twice --label-ink-shift
-   that lifts the ink to the row centre. These labels are 14px against the strip's
+   that lifts the CAP band (cap top to baseline, never cap-to-descender) to the row
+   centre. These labels are 14px against the strip's
    13px, which is exactly why --label-ink-shift is MEASURED per site at runtime
    (src/features/tabs/ink-centre.ts) rather than declared once: the shift an engine
-   needs is a sawtooth in font size, not a ratio, so the single em constant that
-   served both sizes was correct at 13px and 0.33px high here. See 30-tabs.css for
+   needs is a sawtooth in font size, not a ratio — it does not even keep one sign
+   across the two sizes. See 30-tabs.css for
    the full derivation, for why line-height must stay `normal`, and for why a
    measured shift beats a text-box trim behind an @supports gate. */
 :where(.wt-root) .wt-switcher-row-label {

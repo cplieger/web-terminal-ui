@@ -4,27 +4,36 @@
 //
 // Flex centring centres a label's LINE BOX. A font's metrics box reaches much
 // further above the baseline than below (the bundled Monaspace Neon NF: 0.995em
-// over, 0.250em under) while a mixed-case title's ink runs cap height to
-// descender (0.734em over, 0.203em under), so the visible text sits low inside
-// the box it is centred by. The correction is the gap between those two centres.
+// over, 0.250em under), so the visible text sits low inside the box it is
+// centred by, and the correction is the gap between the box's centre and the
+// text's own.
 //
-// That gap is NOT a font-relative constant, which is what four previous fixes
-// assumed. Engines round the font's ascent and descent to whole CSS pixels
-// before building the line box, so the ideal shift jumps whenever a size
-// crosses a rounding boundary: measured in WebKit against this font it is
-// 0.1190em at 13px but 0.0915em at 14px, because 0.25em x 13 = 3.25 rounds to 3
-// (16px box) while 0.25em x 14 = 3.5 rounds to 4 (18px box). Sweeping 11-20px
-// gives a sawtooth between 0.092em and 0.119em, so one em value is right only at
-// the sizes whose rounding it was tuned against — the shipped 0.1147em was
-// correct on the 13px desktop strip and 0.33px high on the 14px mobile chip.
-// Engines disagree with each other too (Firefox makes that same 14px box 17px,
-// not 18px), and so do platforms within one engine: iOS resolves metrics through
+// WHICH BAND is the text's own is the load-bearing decision, and the first
+// version of this got it wrong. It centred cap-top-to-DESCENDER-bottom, which
+// reserves descender room below the letters and reads high: measured on the real
+// chip in Blink, the title's cap band sat 1.320px above the chip's centre while
+// the status dot and the close glyph beside it sat at exactly 0.000px, and a
+// title is judged against those two neighbours. So the band is cap-top to
+// BASELINE — the visible mass of a UI label, and the same pair of edges CSS
+// spells `text-box-edge: cap alphabetic`. Descenders overhang it deliberately;
+// the label's `padding-block` (30-tabs.css) is the allowance that keeps them
+// clear of `overflow: hidden`, so nothing is clipped by the choice.
+//
+// The correction is NOT a font-relative constant, which is what four earlier
+// fixes assumed. Engines round the font's ascent and descent to whole CSS pixels
+// before building the line box, so the ideal shift jumps whenever a size crosses
+// a rounding boundary: 0.25em x 13 = 3.25 rounds to 3 (a 16px box) while
+// 0.25em x 14 = 3.5 rounds to 4 (an 18px box), and the shift moves with it.
+// Engines disagree with each other too (Gecko makes that same 14px box 17px, not
+// 18px), and so do platforms within one engine: iOS resolves metrics through
 // CoreText, Linux WebKit through FreeType, which is why the strip read correct
-// in every local check and high on an iPad.
+// in every local check and high on an iPad. Measured across 11-20px the cap-band
+// shift sawtooths between about -0.010em and +0.028em — small, but still wider
+// than the 0.33px error that was reported as a defect, so it stays measured.
 //
 // So nothing here predicts. Each measurement asks the engine for the line box
-// and baseline it actually produced, asks the font for its actual ink extents,
-// and writes the difference to --label-ink-shift as pixels. The CSS keeps an em
+// and baseline it actually produced, asks the font for its actual cap ink, and
+// writes the difference to --label-ink-shift as pixels. The CSS keeps an em
 // default for the pre-measurement paint (see 00-tokens.css); this only ever
 // narrows the error.
 import { fromHTML } from "../dom.js";
@@ -42,7 +51,6 @@ const PROBE_CLASS = "wt-ink-probe";
 /** Cap ink, x-height ink and descender ink in one string, so the DOM probe's
  *  line box is the one a real mixed-case title produces. */
 const PROBE_TEXT = "Hxp";
-
 /** Class chains that resolve each site's label font. Deliberately the shortest
  *  chain that carries the font-size (`.wt-tab` and `.wt-switcher-current`) and
  *  not the real ancestry: `.wt-switcher` is `display: none` off a coarse pointer
@@ -59,16 +67,17 @@ export interface InkMetrics {
   readonly baselinePx: number;
   /** Cap ink above the baseline, em. */
   readonly capInkEm: number;
-  /** Descender ink below the baseline, em. */
-  readonly descInkEm: number;
   readonly fontSizePx: number;
 }
 
-/** How far a label's visible ink sits BELOW its line box's centre. Positive is
- *  the normal case (ink low), and the CSS lifts the box by exactly this much. */
+/** How far a label's visible ink sits BELOW its line box's centre, where
+ *  "visible ink" is the cap band (cap top to baseline). Positive is the normal
+ *  case (ink low), and the CSS lifts the box by exactly this much.
+ *
+ *  Descender ink is deliberately NOT part of the band; see the header. */
 export function inkShiftPx(m: InkMetrics): number {
-  const inkCentre = m.baselinePx + ((m.descInkEm - m.capInkEm) * m.fontSizePx) / 2;
-  return inkCentre - m.fontBoxPx / 2;
+  const capCentre = m.baselinePx - (m.capInkEm * m.fontSizePx) / 2;
+  return capCentre - m.fontBoxPx / 2;
 }
 
 let ctx2d: CanvasRenderingContext2D | null | undefined;
@@ -78,21 +87,20 @@ function canvas2d(): CanvasRenderingContext2D | null {
   return ctx2d;
 }
 
-/** The font's own ink extents, in em. Canvas rather than the DOM because only
+/** The font's own cap ink, in em. Canvas rather than the DOM because only
  *  TextMetrics reports where the glyphs' ink actually starts and stops; a DOM
  *  rect only ever reports the box around it. */
-function inkExtents(font: string): Pick<InkMetrics, "capInkEm" | "descInkEm"> | null {
+function inkExtents(font: string): Pick<InkMetrics, "capInkEm"> | null {
   const ctx = canvas2d();
   if (!ctx) {
     return null;
   }
   ctx.font = font;
   const capInk = ctx.measureText("H").actualBoundingBoxAscent;
-  const descInk = ctx.measureText("p").actualBoundingBoxDescent;
-  if (!(capInk > 0) || !(descInk > 0)) {
+  if (!(capInk > 0)) {
     return null;
   }
-  return { capInkEm: capInk / REF_PX, descInkEm: descInk / REF_PX };
+  return { capInkEm: capInk / REF_PX };
 }
 
 /** The engine's line box and baseline for a laid-out element's own font. The
