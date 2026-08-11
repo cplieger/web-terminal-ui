@@ -144,27 +144,33 @@
   --font-mono: "Monaspace Neon NF", monospace;
   /* How far a chip label's INK sits below its line box's centre, so flex
      centring can be corrected by exactly that much (see .wt-tab-label in
-     30-tabs.css).
+     30-tabs.css). The band is the CAP band — cap top to baseline, the visible
+     mass of a label — not cap-to-descender, which reserves empty descender room
+     below the letters and reads high (measured: 1.32px above the chip's centre
+     at 13px, while the dot and close glyph beside it sat at 0.00px).
 
      This value is only the PRE-MEASUREMENT DEFAULT — what the first paint uses
      before the tabs feature replaces it, per site, with a pixel value measured
      in the live engine (src/features/tabs/ink-centre.ts). It is not the answer,
      because no single value can be: engines round the font's ascent and descent
      to whole CSS pixels before building the line box, so the ideal shift is a
-     sawtooth in font size rather than a ratio. Against the bundled font in
-     WebKit it is 0.1190em at 13px and 0.0915em at 14px, since 0.25em x 13 =
-     3.25 rounds to 3 (a 16px box) while 0.25em x 14 = 3.5 rounds to 4 (an 18px
-     box). Engines then disagree with each other (Firefox makes that 14px box
-     17px) and platforms disagree within one engine (iOS reads metrics through
-     CoreText, Linux WebKit through FreeType). Four fixes were hardcoded
-     constants and each was correct only where it was tuned.
+     sawtooth in font size rather than a ratio, and on the cap band it does not
+     even keep one sign. Measured against the bundled font it runs from about
+     -0.021em (Blink 151 at 13px, a 17px box) to +0.028em (Gecko at 14px, where
+     the box is 17px against Blink's 18px), and platforms disagree inside one
+     engine too (iOS reads metrics through CoreText, Linux WebKit through
+     FreeType) — which is why four hardcoded constants each held only where they
+     were tuned.
 
-     0.1147em is kept as the default because it is the midpoint of that
-     sawtooth: worst case 0.34px before the measurement lands, versus 1.5px for
-     no correction at all. Do not tune it by eye — a wrong default is invisible
-     the moment the measured value arrives, so eye-tuning it optimises nothing
-     and pins the wrong number in place. */
-  --label-ink-shift: 0.1147em;
+     ZERO is the default because the whole range is within ~0.03em of it: flex
+     centring of the font box is already within 0.4px of cap-band centring, so
+     the first paint starts uncorrected and the measurement lands within a frame.
+     That is also the best behaviour if the measurement never runs at all (no
+     canvas, a display:none probe): 0.4px out rather than the 1.3px a
+     descender-inclusive constant was. Do not tune it by eye — a wrong default is
+     invisible the moment the measured value arrives, so eye-tuning it optimises
+     nothing and pins the wrong number in place. */
+  --label-ink-shift: 0em;
   --dur-micro: 0.1s;
   --dur-standard: 0.2s;
   --dur-enter: 0.25s;

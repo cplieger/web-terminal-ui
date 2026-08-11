@@ -17,12 +17,13 @@
 // sweeping the label size across the ascent/descent rounding boundaries that broke
 // every previous fix, and asserts two things in all of them:
 //
-//   1. ink centring — the label's visible ink centres on its chip
+//   1. ink centring — the label's CAP band (cap top to baseline) centres on
+//      its chip; descender ink overhangs it by design (see 30-tabs.css)
 //   2. dot gaps — the run from the chip's inner edge to the activity dot equals
 //      the run from the dot to the label, at both chip sites
 //
 //   node scripts/verify-chip-geometry.mjs
-//   node scripts/verify-chip-geometry.mjs --font /path/to/MonaspiceNeNerdFontMono-Regular.otf
+//   node scripts/verify-chip-geometry.mjs --font /path/to/MonaspaceNeonNF-Regular.woff2
 //   node scripts/verify-chip-geometry.mjs --engines webkit,chromium
 //
 // Not wired into CI: it needs three browser engines (~300 MB) and the repo's
@@ -131,8 +132,14 @@ execFileSync(
 );
 
 const fontPath = arg("font");
+// The family name and the metric overrides must match page.css exactly, or the
+// probe face is either never selected (a name nothing references) or selected
+// with the font file's own vertical tables, which are shorter than the cell and
+// are the reason page.css overrides them. Either way the script would measure a
+// geometry production does not have.
 const fontFace = fontPath
-  ? `@font-face{font-family:"MonaspiceNe NFM";src:url("./probe-font${extname(fontPath)}");font-weight:400;font-display:block}`
+  ? `@font-face{font-family:"Monaspace Neon NF";src:url("./probe-font${extname(fontPath)}");` +
+    `font-weight:400;font-display:block;ascent-override:99.5%;descent-override:25%}`
   : "";
 if (fontPath) {
   writeFileSync(join(work, `probe-font${extname(fontPath)}`), readFileSync(fontPath));
@@ -225,7 +232,6 @@ const measure = (sizes) => {
       const ctx = document.createElement("canvas").getContext("2d");
       ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${REF}px ${cs.fontFamily}`;
       const capEm = ctx.measureText("H").actualBoundingBoxAscent / REF;
-      const descEm = ctx.measureText("p").actualBoundingBoxDescent / REF;
 
       const strut = document.createElement("span");
       strut.style.cssText = "display:inline-block;width:0;height:0";
@@ -234,7 +240,9 @@ const measure = (sizes) => {
       strut.remove();
 
       const rect = chip.getBoundingClientRect();
-      const inkCentre = baselineY + ((descEm - capEm) * sizePx) / 2;
+      // The CAP band: cap top to baseline, the band ink-centre.ts centres.
+      // Descender ink is deliberately not part of it (see 30-tabs.css).
+      const inkCentre = baselineY - (capEm * sizePx) / 2;
       out.push({
         site: name,
         px: sizePx,
