@@ -15,6 +15,16 @@
 .wt-root.wt-viewport {
   position: fixed;
   inset: 0;
+  /* Clip like the container mode below, so the two layout modes agree. Inert
+     today: the root's box IS the viewport here and page.css already hides
+     document overflow, so nothing can currently paint outside it, and
+     position:fixed descendants escape a clip regardless. It exists so the
+     asymmetry cannot be mistaken for a deliberate difference, and so a future
+     transform on .term (see docs/tab-switch-repaint.md) is bounded by a
+     declaration rather than by the viewport happening to coincide with the box.
+     overflow:clip specifically, not hidden: no scroll container, no block
+     formatting context, nothing programmatically scrollable. */
+  overflow: clip;
 }
 
 .wt-root.wt-container {

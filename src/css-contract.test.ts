@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { LOADING_OVERLAY_CLASSES, PUBLIC_THEME_TOKENS } from "./kernel/style-contract.js";
+import { SWITCH_ANIMATIONS } from "./features/tabs/switch-anim.js";
 
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cssDir = path.join(packageDir, "css");
@@ -22,6 +23,7 @@ const switcher = readFileSync(path.join(cssDir, "31-switcher.css"), "utf8");
 const primitives = readFileSync(path.join(cssDir, "10-primitives.css"), "utf8");
 const scrollToBottomCss = readFileSync(path.join(cssDir, "21-scroll-to-bottom.css"), "utf8");
 const page = readFileSync(path.join(cssDir, "page.css"), "utf8");
+const animations = readFileSync(path.join(cssDir, "40-animations.css"), "utf8");
 
 describe("engine-toggled class contract", () => {
   it("styles DECSCNM reverse video (.term-reverse-video) as a default-pair swap", () => {
@@ -514,5 +516,49 @@ describe("public theme-token contract", () => {
         `.${className} is not styled by any rule in the bundle`,
       ).toBe(true);
     }
+  });
+});
+
+// The tabs feature listens for the `animationend` of the ONE keyframe name that
+// belongs to the switch it started, so it holds a copy of three names that live in
+// CSS. A rename on either side is SILENT: the listener stops matching, the class
+// comes off on the 360ms fallback instead of the animation's own end, and every
+// behavioural test still passes because those tests dispatch the JS constant. This
+// is the only place the two languages are compared.
+describe("switch-animation name contract (tabs feature vs 40-animations.css)", () => {
+  it.each(Object.entries(SWITCH_ANIMATIONS))(
+    "declares %s's animation as %s, and defines those keyframes",
+    (cls, keyframe) => {
+      // The rule the feature's class is expected to activate. Matched loosely on
+      // purpose: the selector may gain or lose scoping wrappers, but it must target
+      // this class and it must carry an `animation` shorthand.
+      // Anchor on the class as a whole name and take the LAST matching rule, since a
+      // later rule of equal specificity is the one that wins the cascade and so the
+      // one whose animation actually plays.
+      const all = [
+        ...animations.matchAll(new RegExp(`\\.${cls}(?![\\w-])[^{]*\\{([^}]*)\\}`, "g")),
+      ];
+      const rule = all.length > 0 ? all[all.length - 1] : null;
+      expect(rule, `a rule for .${cls} exists in 40-animations.css`).not.toBeNull();
+      const body = rule?.[1] ?? "";
+      const decl = /animation:\s*([\w-]+)/.exec(body);
+      expect(decl, `.${cls}'s rule declares an animation shorthand`).not.toBeNull();
+      expect(decl?.[1], `.${cls} plays the keyframes the feature listens for`).toBe(keyframe);
+      // `\b` is NOT a sufficient boundary for a hyphenated identifier: it matches at
+      // the hyphen, so `@keyframes wt-switch-in-reduced` satisfies a `wt-switch-in\b`
+      // test and the assertion passes on a rename it exists to catch. Proven by
+      // executing exactly that rename. Require a non-name character instead.
+      expect(
+        new RegExp(`@keyframes\\s+${keyframe}(?![\\w-])`).test(animations),
+        `@keyframes ${keyframe} is defined, under exactly that name`,
+      ).toBe(true);
+    },
+  );
+
+  it("gives every switch class its OWN keyframes, so one animationend cannot answer for another", () => {
+    // The listener's whole discrimination is the name, so two classes sharing one
+    // name would make a completed switch able to end the next one.
+    const names = Object.values(SWITCH_ANIMATIONS);
+    expect(new Set(names).size).toBe(names.length);
   });
 });

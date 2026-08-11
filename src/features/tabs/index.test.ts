@@ -17,6 +17,16 @@ import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
 import { CUE_SEEN_KEY } from "./model.js";
+// The reorder preview's timings, imported rather than restated: the tests below
+// pin that a hold is REQUIRED and that a release short-circuits it, not what the
+// numbers happen to be, so a deliberate retune moves one definition and not five
+// magic numbers in a test file.
+import {
+  REORDER_DWELL_MS,
+  REORDER_LEAN_PX,
+  REORDER_SETTLE_MS,
+  REORDER_SLOT_FADE_MS,
+} from "./strip.js";
 
 // A fake activityMonitor feature: lets a test push status events into tabs
 // without the real SSE. tabs reads it via ctx.use, so passing the same feature
@@ -270,6 +280,15 @@ function dragEvent(type: string, dt: FakeDataTransfer): Event {
   Object.defineProperty(e, "clientX", { value: 0 });
   Object.defineProperty(e, "clientY", { value: 0 });
   return e;
+}
+
+// The strip's labels in DOM order. Scoped to the scroller, which holds ONLY
+// tabs: a drag's ghost is a chip clone parked under .wt-root until the next
+// frame, so a root-wide query would count the dragged tab twice.
+function idsOf(root: HTMLElement): string[] {
+  return [
+    ...(root.querySelector(".wt-tab-scroll")?.querySelectorAll<HTMLElement>(".wt-tab-label") ?? []),
+  ].map((e) => e.textContent ?? "");
 }
 
 describe("tabs feature", () => {
@@ -872,8 +891,10 @@ describe("tabs feature", () => {
     labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
     expect(labels).toEqual(["one", "two", "three"]);
     expect(feature.api?.list().map((t) => t.id)).toEqual(["s1", "s2", "s3"]);
-    // No session was closed or created by a reorder.
-    expect(fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") !== "GET")).toBe(false);
+    // A reorder publishes the shared order (PUT /api/sessions/order) and must
+    // still create and close nothing.
+    const methods = fetchMock.mock.calls.map((c) => c[1]?.method ?? "GET");
+    expect(methods.filter((m) => m === "POST" || m === "DELETE")).toEqual([]);
   });
 
   it("swallows a tab drop rather than letting the browser act on the payload", async () => {
@@ -902,8 +923,10 @@ describe("tabs feature", () => {
     const offStrip = dragEvent("drop", dt);
     surface?.dispatchEvent(offStrip);
     expect(offStrip.defaultPrevented).toBe(true);
-    // Order still follows the DOM, and nothing was closed or created.
-    expect(fetchMock.mock.calls.some((c) => (c[1]?.method ?? "GET") !== "GET")).toBe(false);
+    // Order still follows the DOM. A committed drop publishes the shared order,
+    // so the only writes are that PUT: nothing was closed or created.
+    const dropMethods = fetchMock.mock.calls.map((c) => c[1]?.method ?? "GET");
+    expect(dropMethods.filter((m) => m === "POST" || m === "DELETE")).toEqual([]);
 
     // The document guard lasts only as long as the tab drag: an unrelated drop
     // (a file onto the page) is left entirely to the browser.
@@ -1719,178 +1742,15 @@ describe("tabs feature", () => {
     expect(mobKb?.classList.contains("wt-active")).toBe(true);
   });
 
-  // --- Persisted tab arrangement ---
+  // --- Tab arrangement and hostile storage ---
   //
-  // A reorder is a user decision about their own workspace, so it has to outlive
-  // a reload. It cannot come from the server: GET /api/sessions is sorted by
-  // creation time, which is exactly the order the user rearranged away from.
-  // These pin the client-side arrangement end to end — written on a reorder,
-  // honoured on the next load, and not corrupted by the things that legitimately
-  // change the tab set.
-
-  // The strip's labels in DOM order. Scoped to the scroller, which holds ONLY
-  // tabs: a drag's ghost is a chip clone parked under .wt-root until the next
-  // frame, so a root-wide query would count the dragged tab twice.
-  function idsOf(root: HTMLElement): string[] {
-    return [
-      ...(root.querySelector(".wt-tab-scroll")?.querySelectorAll<HTMLElement>(".wt-tab-label") ??
-        []),
-    ].map((e) => e.textContent ?? "");
-  }
-  function storedOrder(): unknown {
-    const raw = localStorage.getItem("wt-tab-order");
-    return raw === null ? null : JSON.parse(raw);
-  }
-
-  it("persists a reorder so it survives a reload", async () => {
-    listBody = [
-      { id: "s1", title: "one", createdAt: "1", status: "idle" },
-      { id: "s2", title: "two", createdAt: "2", status: "idle" },
-      { id: "s3", title: "three", createdAt: "3", status: "idle" },
-    ];
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
-    await until(() => root.querySelectorAll(".wt-tab").length === 3);
-
-    menuItem(openTabMenu(root, 2), "Move left")?.click();
-    expect(idsOf(root)).toEqual(["one", "three", "two"]);
-    expect(storedOrder()).toEqual(["s1", "s3", "s2"]);
-
-    // Reload: same server listing (creation order), a fresh feature instance.
-    term.destroy();
-    root.remove();
-    const root2 = document.createElement("div");
-    document.body.appendChild(root2);
-    term = createTerminal(root2, { features: () => [tabs()] });
-    await until(() => root2.querySelectorAll(".wt-tab").length === 3);
-    expect(idsOf(root2)).toEqual(["one", "three", "two"]);
-  });
-
-  it("restores the arrangement no matter which source delivers the sessions first", async () => {
-    // The status stream pushes a snapshot on open and the bootstrap's list lands
-    // separately, so arrival order is a race — and it is the SERVER's order, not
-    // the user's. Placement must not depend on it.
-    localStorage.setItem("wt-tab-order", JSON.stringify(["s3", "s1", "s2"]));
-    listBody = [
-      { id: "s1", title: "one", createdAt: "1", status: "idle" },
-      { id: "s2", title: "two", createdAt: "2", status: "idle" },
-      { id: "s3", title: "three", createdAt: "3", status: "idle" },
-    ];
-    const snapshot = listBody as unknown as SessionStatus[];
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    const monitor = snapshotMonitor(snapshot);
-    term = createTerminal(root, { features: () => [monitor, tabs({ activityMonitor: monitor })] });
-    await until(() => root.querySelectorAll(".wt-tab").length === 3);
-
-    expect(idsOf(root)).toEqual(["three", "one", "two"]);
-    // The list order and the DOM order agree, so positions, the switcher rows
-    // and close-to-the-side all read the same strip.
-    expect(
-      root.querySelector(".wt-tab-scroll")?.querySelectorAll(":scope > :not(.wt-tab)").length,
-    ).toBe(0);
-  });
-
-  it("puts a session the arrangement does not know at the end, and prunes closed ones", async () => {
-    localStorage.setItem("wt-tab-order", JSON.stringify(["s2", "s1", "gone-long-ago"]));
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
-    await until(() => root.querySelectorAll(".wt-tab").length === 2);
-    expect(idsOf(root)).toEqual(["two", "one"]);
-
-    // A new session lands last (it predates no arrangement), and the stored
-    // arrangement is rewritten from the live strip — so the id of a session that
-    // no longer exists does not accumulate forever.
-    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
-    await until(() => root.querySelectorAll(".wt-tab").length === 3);
-    expect(storedOrder()).toEqual(["s2", "s1", "s-new"]);
-  });
-
-  it("keeps the stored arrangement when the strip transiently empties", async () => {
-    // 'Close all' drops every tab before its replacement lands. An empty strip
-    // carries no arrangement, so persisting it would erase the user's order.
-    listBody = [
-      { id: "s1", title: "one", createdAt: "1", status: "idle" },
-      { id: "s2", title: "two", createdAt: "2", status: "idle" },
-    ];
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
-    await until(() => root.querySelectorAll(".wt-tab").length === 2);
-    menuItem(openTabMenu(root, 1), "Move left")?.click();
-    expect(storedOrder()).toEqual(["s2", "s1"]);
-
-    vi.stubGlobal(
-      "confirm",
-      vi.fn(() => true),
-    );
-    menuItem(openTabMenu(root, 0), "Close all")?.click();
-    await until(() => root.querySelectorAll(".wt-tab").length === 1);
-    expect(storedOrder()).not.toEqual([]);
-  });
-
-  it("persists a DRAG reorder too, not only the menu's move commands", async () => {
-    // The strip's drag-and-drop is the primary reorder gesture; Move left/right
-    // is the pointer/keyboard alternative. Both commit through syncOrderFromDom,
-    // which is why persistence hangs off syncChrome rather than off either call
-    // site — this pins that the drag really reaches storage.
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
-    await until(() => root.querySelectorAll(".wt-tab").length === 2);
-
-    const first = root.querySelector<HTMLElement>(".wt-tab");
-    const bar = root.querySelector(".wt-tab-bar");
-    const dt = fakeDataTransfer();
-    first?.dispatchEvent(dragEvent("dragstart", dt));
-    // Every rect is zero-sized under happy-dom, so dragTargetBefore finds no
-    // midpoint past clientX=0 and the dragged chip goes to the end.
-    bar?.dispatchEvent(dragEvent("dragover", dt));
-    first?.dispatchEvent(dragEvent("drop", dt));
-
-    expect(idsOf(root)).toEqual(["two", "one"]);
-    expect(storedOrder()).toEqual(["s2", "s1"]);
-  });
-
-  it("never persists a partial arrangement while the strip is still filling", async () => {
-    // The initial population grows the strip one tab at a time, so each
-    // intermediate state is a PARTIAL arrangement. Persisting those meant a
-    // reload landing mid-population stored a one-tab order — and, worse, the
-    // partial write became the arrangement the rest of the population was placed
-    // by, so the restore destroyed the very order it was reading. Pruning the one
-    // COMPLETE strip at the end of the bootstrap is fine and wanted.
-    localStorage.setItem("wt-tab-order", JSON.stringify(["s3", "s1", "s2", "closed-elsewhere"]));
-    listBody = [
-      { id: "s1", title: "one", createdAt: "1", status: "idle" },
-      { id: "s2", title: "two", createdAt: "2", status: "idle" },
-      { id: "s3", title: "three", createdAt: "3", status: "idle" },
-    ];
-    const writes: string[][] = [];
-    const realSet = Storage.prototype.setItem;
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
-      this: Storage,
-      k: string,
-      v: string,
-    ) {
-      if (k === "wt-tab-order") {
-        writes.push(JSON.parse(v) as string[]);
-      }
-      realSet.call(this, k, v);
-    });
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    const monitor = snapshotMonitor(listBody as unknown as SessionStatus[]);
-    term = createTerminal(root, { features: () => [monitor, tabs({ activityMonitor: monitor })] });
-    await until(() => root.querySelectorAll(".wt-tab").length === 3);
-
-    expect(idsOf(root)).toEqual(["three", "one", "two"]);
-    // Whatever was written must describe the WHOLE strip, never a prefix of it.
-    for (const w of writes) {
-      expect(w, JSON.stringify(writes)).toEqual(["s3", "s1", "s2"]);
-    }
-  });
+  // The arrangement itself is the SERVER's since engine 3.10.0: a reorder is
+  // published with PUT /api/sessions/order and read back as SessionInfo.order,
+  // so every viewer of one server shares it and it outlives a reload without the
+  // client storing anything. The localStorage arrangement this section used to
+  // pin is gone with it. What remains worth pinning is that the strip still
+  // works when Storage itself is hostile, which the active-tab and cue-seen
+  // writes still touch.
 
   it("survives storage that throws (Safari private mode) without losing the reorder", async () => {
     const boom = (): never => {
@@ -1908,7 +1768,7 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     menuItem(openTabMenu(root, 1), "Move left")?.click();
-    // The reorder still applies for this page; only its persistence is lost.
+    // The reorder still applies: it is published to the server, not stored here.
     expect(idsOf(root)).toEqual(["two", "one"]);
   });
 });
@@ -2536,5 +2396,742 @@ describe("tabs OSC 9 notifications", () => {
         notificationSeq: 1,
       });
     }).not.toThrow();
+  });
+});
+
+// The switch animation's lifecycle (docs/tab-switch-repaint.md §3.2). The class
+// comes off on the animation's own end, with the 360ms timer kept as the net for
+// the cases no event covers: an interrupted animation (animationend does not
+// fire, and animationcancel is not reliably delivered in Blink), a host with no
+// animations feature or reduced motion set (no animation runs at all), and a
+// consumer stylesheet without the rules.
+//
+// Fidelity notes, each one a correction from adversarial review:
+//   - The event is dispatched from `.term-output`, which is where all three rules
+//     actually declare the animation (css/40-animations.css), and it BUBBLES to
+//     `.term` where the listener lives. Manufacturing it on `.term` tested a path
+//     the browser never takes.
+//   - The "unrelated animation" names are real ones from the bundle. `wt-tab-in`
+//     is the tab bar's (and a sibling of the surface, so in production it cannot
+//     even bubble here) and `wt-blink-anim` is the only other animation inside
+//     `.term`. An invented name proves the filter rejects invented names.
+//   - rAF handles are monotonic and cancellation is real, via a Map. The earlier
+//     stub returned an array length that restarted at 1 after every pump, so a
+//     retained handle could alias a later callback. Nothing depended on that yet,
+//     which is exactly why it was worth removing.
+describe("tabs switch-animation lifecycle", () => {
+  const SWITCH_CLASSES = ["wt-switching", "wt-switching-next", "wt-switching-prev"];
+
+  function switchClass(surface: Element): string | undefined {
+    return SWITCH_CLASSES.find((c) => surface.classList.contains(c));
+  }
+
+  // happy-dom has no AnimationEvent constructor, so carry animationName on a
+  // plain bubbling Event. Dispatched from the element the CSS animates, so
+  // `target` is set by dispatch rather than asserted into place.
+  function fireAnimEnd(output: Element, name: string): void {
+    const e = new Event("animationend", { bubbles: true });
+    Object.defineProperty(e, "animationName", { value: name });
+    output.dispatchEvent(e);
+  }
+
+  interface Harness {
+    root: HTMLElement;
+    surface: Element;
+    output: Element;
+    chips: () => NodeListOf<HTMLElement>;
+    pumpFrame: () => void;
+    pendingFrames: () => number;
+  }
+
+  /** Mount two tabs, then take over rAF with a manual pump and freeze the timers
+   *  so both halves of the lifecycle can be driven independently.
+   *
+   *  A pump, NOT a synchronous rAF: the catch-up cue polls itself through a
+   *  self-chaining rAF (`pollCatchup`), so a stub that invokes its callback
+   *  inline recurses until the stack blows. */
+  async function mount2(): Promise<Harness> {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    const surface = root.querySelector(".term");
+    const output = root.querySelector(".term-output");
+    if (!surface || !output) {
+      throw new Error("no .term / .term-output");
+    }
+    let nextHandle = 1;
+    const frames = new Map<number, FrameRequestCallback>();
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback): number => {
+      const h = nextHandle++;
+      frames.set(h, cb);
+      return h;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (h: number): void => {
+      frames.delete(h);
+    });
+    const pumpFrame = (): void => {
+      const due = [...frames.entries()];
+      frames.clear();
+      for (const [, cb] of due) {
+        cb(0);
+      }
+    };
+    // Only the timers, NOT requestAnimationFrame: vitest fakes rAF by default,
+    // which would queue the class add behind the same clock the net is driven on
+    // and make every assertion below read an un-added class.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    return {
+      root,
+      surface,
+      output,
+      chips: () => root.querySelectorAll<HTMLElement>(".wt-tab"),
+      pumpFrame,
+      pendingFrames: () => frames.size,
+    };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("drops the class on the animation's own end, long before the net", async () => {
+    const h = await mount2();
+    h.chips()[1]?.click();
+    h.pumpFrame();
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+
+    fireAnimEnd(h.output, "wt-switch-next");
+
+    expect(switchClass(h.surface)).toBeUndefined();
+    // And the net does not fire a second removal against a later switch.
+    vi.advanceTimersByTime(1000);
+    expect(switchClass(h.surface)).toBeUndefined();
+  });
+
+  it("ignores an animationend from other animations in the subtree", async () => {
+    // Real names from the bundle: wt-tab-in is the tab bar's, wt-blink-anim the
+    // only other animation inside .term. Neither may end the switch.
+    const h = await mount2();
+    h.chips()[1]?.click();
+    h.pumpFrame();
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+
+    fireAnimEnd(h.output, "wt-tab-in");
+    fireAnimEnd(h.output, "wt-blink-anim");
+
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+  });
+
+  it("ignores the OTHER switch animation's end, so a stale event cannot cut a switch short", async () => {
+    // The reachable race: switch 1's animation completes, its event is queued, a
+    // re-switch lands before the task runs. The old listener is gone by dispatch
+    // time, so the NEW listener receives it. A listener accepting any of the three
+    // names would end switch 2 a frame in.
+    const h = await mount2();
+    h.chips()[1]?.click();
+    h.pumpFrame();
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+
+    h.chips()[0]?.click();
+    h.pumpFrame();
+    expect(switchClass(h.surface)).toBe("wt-switching-prev");
+
+    fireAnimEnd(h.output, "wt-switch-next");
+
+    expect(switchClass(h.surface)).toBe("wt-switching-prev");
+  });
+
+  it("still drops the class with no animation at all, via the net", async () => {
+    // Reduced motion or a host without the animations feature: no .wt-animate, so
+    // no animation runs and no animationend ever fires. The class must not stick.
+    const h = await mount2();
+    h.chips()[1]?.click();
+    h.pumpFrame();
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+
+    vi.advanceTimersByTime(359);
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+    vi.advanceTimersByTime(1);
+
+    expect(switchClass(h.surface)).toBeUndefined();
+  });
+
+  it("arms the net only once the class is on, so a starved frame cannot skip the animation", async () => {
+    // The net is armed inside the class-add frame. Armed beside it, a 360ms timer
+    // could fire first in a hidden document or under a blocked main thread, and its
+    // cleanup would cancel the pending class-add: the animation would be skipped
+    // outright, which the no-skip constraint forbids.
+    const h = await mount2();
+    h.chips()[1]?.click();
+    // At least the class-add frame is pending (other features queue frames too).
+    expect(h.pendingFrames()).toBeGreaterThanOrEqual(1);
+
+    // A very long stall before the frame runs. Nothing may be armed yet.
+    vi.advanceTimersByTime(5000);
+    expect(switchClass(h.surface)).toBeUndefined();
+
+    h.pumpFrame();
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+    vi.advanceTimersByTime(360);
+    expect(switchClass(h.surface)).toBeUndefined();
+  });
+
+  it("does not let a matching event BEFORE the class lands skip the animation", async () => {
+    // The listener is attached in the click's task; the class lands a frame later.
+    // In that window a matching animationend from anywhere in the subtree would,
+    // without the class check, cancel the pending class-add and skip the animation
+    // outright. An animationend cannot precede its own animation, so the only
+    // sender here is something else, and it must be ignored.
+    const h = await mount2();
+    h.chips()[1]?.click();
+    expect(switchClass(h.surface)).toBeUndefined();
+
+    fireAnimEnd(h.output, "wt-switch-next");
+    h.pumpFrame();
+
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+    vi.advanceTimersByTime(360);
+    expect(switchClass(h.surface)).toBeUndefined();
+  });
+
+  it("does not let a previous switch's net strip the current switch's class", async () => {
+    // The rapid re-switch the class-add frame exists to serve.
+    const h = await mount2();
+    h.chips()[1]?.click();
+    h.pumpFrame();
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+
+    vi.advanceTimersByTime(200);
+    h.chips()[0]?.click();
+    h.pumpFrame();
+    expect(switchClass(h.surface)).toBe("wt-switching-prev");
+
+    // Past switch 1's deadline, well inside switch 2's.
+    vi.advanceTimersByTime(200);
+    expect(switchClass(h.surface)).toBe("wt-switching-prev");
+
+    // Switch 2's own net still lands.
+    vi.advanceTimersByTime(200);
+    expect(switchClass(h.surface)).toBeUndefined();
+  });
+
+  it("plays the animation of the switch that happened, when both land before a frame", async () => {
+    // Two clicks inside one frame leave two pending class-add callbacks. Without
+    // cancellation both classes land, and the cascade then picks whichever of the
+    // three rules comes LAST in the stylesheet rather than the one the user's switch
+    // asked for: a forward switch animates backwards. This is the defect that
+    // predates the change.
+    const h = await mount2();
+    h.chips()[1]?.click();
+    h.chips()[0]?.click();
+
+    h.pumpFrame();
+
+    const present = SWITCH_CLASSES.filter((c) => h.surface.classList.contains(c));
+    expect(present).toEqual(["wt-switching-prev"]);
+  });
+
+  it("cancels a pending class-add on destroy, so no class lands after teardown", async () => {
+    const h = await mount2();
+    h.chips()[1]?.click();
+    expect(h.pendingFrames()).toBeGreaterThanOrEqual(1);
+
+    term?.destroy();
+    term = undefined;
+    h.pumpFrame();
+    vi.advanceTimersByTime(1000);
+
+    expect(switchClass(h.surface)).toBeUndefined();
+  });
+
+  it("removes the listener on destroy, not just the class", async () => {
+    // The earlier version of this test dispatched an event after destroy and
+    // asserted no class and no throw. Both hold with the listener teardown DELETED,
+    // because teardown already removed the class and a leaked listener would only
+    // remove it again. So that leg of "torn down as one unit" had no red check.
+    //
+    // The observable difference: put a class back by hand after destroy. A leaked
+    // listener strips it; no listener leaves it alone.
+    const h = await mount2();
+    h.chips()[1]?.click();
+    h.pumpFrame();
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+
+    term?.destroy();
+    term = undefined;
+    expect(switchClass(h.surface)).toBeUndefined();
+
+    h.surface.classList.add("wt-switching-next");
+    expect(() => {
+      fireAnimEnd(h.output, "wt-switch-next");
+    }).not.toThrow();
+
+    expect(switchClass(h.surface)).toBe("wt-switching-next");
+  });
+});
+
+// --- Desktop reorder preview: hold, lean, slide, cancel ---------------------
+//
+// The reorder used to move the dragged chip on every dragover, which is what these
+// pin the end of: a candidate slot is now HELD before the strip opens it, a release
+// commits whatever is pending without waiting, and an abandoned drag puts the strip
+// back.
+//
+// What these CANNOT prove: happy-dom applies no stylesheet and reports every rect as
+// zero, so the slide itself never runs (an all-zero FLIP has nothing to invert) and
+// the dashed slot's appearance is unverifiable here. The lean IS checkable, because
+// its direction and distance come from DOM index arithmetic rather than geometry, and
+// so is every stage's inline-style bookkeeping. How the motion FEELS, and that the
+// hold is the right length for a hand, are on the manual checklist.
+//
+// Zero rects also mean dropTargetBefore never finds a midpoint past clientX=0, so
+// every candidate below is "past the last chip" — enough to exercise the machinery,
+// and the reason the expected orders all rotate the dragged tab to the end.
+describe("tabs reorder preview", () => {
+  async function mountDrag(
+    count: number,
+    opts: { reducedMotion?: boolean } = {},
+  ): Promise<{
+    root: HTMLElement;
+    bar: HTMLElement;
+    surface: HTMLElement;
+    dt: FakeDataTransfer;
+    chips: () => HTMLElement[];
+    live: () => string;
+    ids: () => string[];
+    stubRects: () => void;
+  }> {
+    if (opts.reducedMotion === true) {
+      // prefersReduce() is read live on every use, so one stub covers the whole drag.
+      vi.stubGlobal(
+        "matchMedia",
+        vi.fn((query: string) => ({
+          matches: query.includes("prefers-reduced-motion"),
+          media: query,
+          addEventListener: () => undefined,
+          removeEventListener: () => undefined,
+        })),
+      );
+    }
+    listBody = ["one", "two", "three", "four"]
+      .slice(0, count)
+      .map((title, i) => ({ id: `s${String(i + 1)}`, title, createdAt: String(i + 1) }));
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const feature = tabs();
+    term = createTerminal(root, { features: () => [feature] });
+    await until(() => root.querySelectorAll(".wt-tab").length === count);
+    const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
+    const surface = root.querySelector<HTMLElement>(".term");
+    const scroller = root.querySelector<HTMLElement>(".wt-tab-scroll");
+    if (!bar || !surface || !scroller) {
+      throw new Error("strip chrome missing");
+    }
+    const chips = (): HTMLElement[] => [...root.querySelectorAll<HTMLElement>(".wt-tab")];
+    // Only the timers, and only AFTER the async mount: until() drives itself on
+    // setTimeout, and the tabs feature's status poll is a setInterval that must keep
+    // running on the real clock (freezing it deadlocks teardown).
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    return {
+      root,
+      bar,
+      surface,
+      dt: fakeDataTransfer(),
+      chips,
+      live: () => root.querySelector('[aria-live="polite"]')?.textContent ?? "",
+      // The feature's OWN order, which is what a drop commits (syncOrderFromDom writes
+      // tabList). Deliberately not localStorage: where an arrangement is PERSISTED is a
+      // separate concern with its own tests, and asserting it here couples this suite to
+      // a storage backend two layers away from the seam under test.
+      ids: () => feature.api?.list().map((t) => t.id) ?? [],
+      // Give the chips real horizontal geometry, derived from their LIVE DOM index so a
+      // reorder changes what they report. Without this the FLIP finds every delta zero
+      // and returns before writing a style, which silently makes any assertion about
+      // the slide vacuous. Deliberately does not stub offsetLeft/offsetWidth: the hit
+      // test reads those, and leaving them at zero keeps every candidate "past the last
+      // chip", which is the one target this environment can express.
+      stubRects: () => {
+        for (const chip of chips()) {
+          chip.getBoundingClientRect = (): DOMRect => {
+            const at = chips().indexOf(chip);
+            const left = at * 100;
+            return {
+              left,
+              right: left + 100,
+              width: 100,
+              x: left,
+              y: 0,
+              top: 0,
+              bottom: 0,
+              height: 0,
+              toJSON: () => ({}),
+            } as DOMRect;
+          };
+        }
+      },
+    };
+  }
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // happy-dom returns undefined for a `translate` that was never set and "" for one
+  // that was cleared, and it does not implement the property through getPropertyValue
+  // at all; a real browser returns "" in both cases. Normalise, so "no displacement"
+  // reads the same either way. The cast is the honest way to say the DOM emulator can
+  // hand back undefined where lib.dom promises a string.
+  function translateOf(el: HTMLElement): string {
+    return (el.style.translate as string | undefined) ?? "";
+  }
+
+  it("does not reorder on dragover: a candidate slot has to be held first", async () => {
+    const h = await mountDrag(3);
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+
+    // The whole point. Passing over a slot previews it; it does not take it.
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+    vi.advanceTimersByTime(REORDER_DWELL_MS - 1);
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+
+    vi.advanceTimersByTime(1);
+    expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
+  });
+
+  it("leans the chips a commit would displace, and fades the slot in when it lands", async () => {
+    const h = await mountDrag(3);
+    const [dragged, second, third] = h.chips();
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+
+    // Immediate feedback that a slot is pending and which way the strip will open:
+    // the two chips the move would displace tip LEFT (the dragged tab is heading
+    // right past them). Negative, and it is the direction that matters.
+    //
+    // `translate`, not `transform`: a running CSS animation out-ranks inline style, so
+    // an inline `transform` would be ignored outright by a chip mid `wt-slot-in` or
+    // `wt-tab-in`. Asserting the property here is what pins that choice.
+    expect(translateOf(second!)).toBe(`-${String(REORDER_LEAN_PX)}px`);
+    expect(translateOf(third!)).toBe(`-${String(REORDER_LEAN_PX)}px`);
+    // The slot itself never leans: it is the hole, and the pointer already carries a
+    // solid copy of the tab.
+    expect(translateOf(dragged!)).toBe("");
+    // The pending boundary is marked, and the mark fills over the hold's own duration
+    // rather than a duration CSS restates. Every layout offset is zero here, so the
+    // candidate is always "past the last chip" and the rail takes the trailing edge.
+    const rail = h.root.querySelector<HTMLElement>(".wt-tab-dwell");
+    expect(rail?.parentElement).toBe(third);
+    expect(rail?.classList.contains("wt-tab-dwell-end")).toBe(true);
+    expect(rail?.style.transition).toBe(`transform ${String(REORDER_DWELL_MS)}ms linear`);
+
+    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    // The countdown is spent, so its mark goes; the slot fades in at its new home.
+    expect(h.root.querySelector(".wt-tab-dwell")).toBeNull();
+    expect(dragged?.classList.contains("wt-tab-slotted")).toBe(true);
+    vi.advanceTimersByTime(REORDER_SLOT_FADE_MS);
+    expect(dragged?.classList.contains("wt-tab-slotted")).toBe(false);
+  });
+
+  it("moves the mark to the last chip's trailing edge for a drop past the end", async () => {
+    // The insertion boundary for `before === null` is not on any chip's leading edge,
+    // so the rail has to flip sides rather than simply not render. It rides the LAST
+    // chip, never the dragged one, even though that chip is the one leaving.
+    const h = await mountDrag(3);
+    const chips = h.chips();
+    chips[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+
+    const rail = h.root.querySelector<HTMLElement>(".wt-tab-dwell");
+    expect(rail?.classList.contains("wt-tab-dwell-end")).toBe(true);
+    expect(rail?.parentElement).toBe(chips[2]);
+    expect(rail?.parentElement).not.toBe(chips[0]);
+  });
+
+  it("keeps the hold running across a stream of dragover events on one candidate", async () => {
+    // A hand does not hold perfectly still, so dragover fires continuously while the
+    // pointer rests. Re-arming on each of them would restart the countdown every few
+    // milliseconds and nothing could ever commit — the bug a naive dwell ships with.
+    const h = await mountDrag(2);
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+
+    vi.advanceTimersByTime(REORDER_DWELL_MS - 100);
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    vi.advanceTimersByTime(100);
+
+    expect(idsOf(h.root)).toEqual(["two", "one"]);
+  });
+
+  it("commits a pending slot on release rather than making a fast drag wait", async () => {
+    // What keeps the hold affordable: it buys the animation on a slow drag and costs
+    // a quick drag-and-drop nothing at all.
+    const h = await mountDrag(2);
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    vi.advanceTimersByTime(50);
+    expect(idsOf(h.root)).toEqual(["one", "two"]);
+
+    dragged?.dispatchEvent(dragEvent("drop", h.dt));
+
+    expect(idsOf(h.root)).toEqual(["two", "one"]);
+    // ...and the model follows the DOM, which is what the drop commits.
+    expect(h.ids()).toEqual(["s2", "s1"]);
+  });
+
+  it("stands a pending hold down when the pointer leaves the strip", async () => {
+    const h = await mountDrag(3);
+    const [, second] = h.chips();
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    expect(translateOf(second!)).toBe(`-${String(REORDER_LEAN_PX)}px`);
+
+    // Off the strip there is no candidate, so the countdown stops and the lean eases
+    // home. The document handler is what sees this: dragleave alone cannot be trusted,
+    // because it fires on every child-to-child transition inside the bar.
+    h.surface.dispatchEvent(dragEvent("dragover", h.dt));
+    expect(translateOf(second!)).toBe("0px");
+
+    vi.advanceTimersByTime(REORDER_DWELL_MS * 2);
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+    // ...and the eased-back chip is handed back to the stylesheet, not left holding
+    // an inline translate for the rest of the session.
+    expect(translateOf(second!)).toBe("");
+    expect(second?.style.transition).toBe("");
+  });
+
+  it("stands the hold down when the pointer leaves through the window edge", async () => {
+    // The strip is docked at the viewport EDGE, so a pointer can leave it by leaving
+    // the window, and then no other element receives a dragover to notice with. Only
+    // dragleave sees this, which is why the bar carries one despite the child-churn
+    // problem: a null relatedTarget is the window exit.
+    const h = await mountDrag(3);
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+
+    const leave = dragEvent("dragleave", h.dt);
+    Object.defineProperty(leave, "relatedTarget", { value: null });
+    h.bar.dispatchEvent(leave);
+
+    vi.advanceTimersByTime(REORDER_DWELL_MS * 2);
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+  });
+
+  it("keeps the hold when dragleave is only a move between the bar's own children", async () => {
+    // The reason dragleave cannot be used bare: crossing from a chip to its label
+    // fires one, and treating that as an exit would make the hold unreachable.
+    const h = await mountDrag(3);
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+
+    const inner = dragEvent("dragleave", h.dt);
+    Object.defineProperty(inner, "relatedTarget", {
+      value: h.root.querySelector(".wt-tab-label"),
+    });
+    h.bar.dispatchEvent(inner);
+
+    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
+  });
+
+  it("cancels rather than commits when the tab is released off the strip", async () => {
+    // The strip is the drop zone. Committing an out-of-strip release would persist an
+    // arrangement chosen at a position the user visibly left, and the outcome would
+    // depend on whether the browser chose to emit `drop` at all: an accepted document
+    // drop would commit while a refused release fell through to dragend and reverted.
+    // That distinction is invisible to the person dragging, so both cancel.
+    const h = await mountDrag(3);
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
+
+    const offStrip = dragEvent("drop", h.dt);
+    h.surface.dispatchEvent(offStrip);
+    // Still swallowed, so WebKit cannot read the payload as a URL and navigate.
+    expect(offStrip.defaultPrevented).toBe(true);
+    dragged?.dispatchEvent(dragEvent("dragend", h.dt));
+
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+    // The model was never written, because only a drop ON the strip writes it.
+    expect(h.ids()).toEqual(["s1", "s2", "s3"]);
+    vi.advanceTimersByTime(150);
+    expect(h.live()).toBe("Move cancelled");
+  });
+
+  it("reverts the whole preview when a drag is abandoned without a drop", async () => {
+    // Escape (and any release the browser refuses) fires dragend with no drop at all,
+    // which is the exact signal for "cancel". The old reorder had no revert path: it
+    // committed whatever the strip happened to be showing, so an abandoned drag left
+    // the tabs rearranged. Nothing is snapshotted to make this work — tabList is
+    // untouched for the whole gesture, so the original order is simply re-projected.
+    const h = await mountDrag(3);
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
+
+    dragged?.dispatchEvent(dragEvent("dragend", h.dt));
+
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+    // The model never moved at all: commitSlot writes the DOM only, so a cancelled
+    // gesture leaves nothing to undo in tabList and nothing to persist downstream.
+    expect(h.ids()).toEqual(["s1", "s2", "s3"]);
+    // And it is said out loud: the drag path announced nothing at all before this.
+    vi.advanceTimersByTime(150);
+    expect(h.live()).toBe("Move cancelled");
+  });
+
+  it("announces a pending slot as a target, not as a completed move", async () => {
+    // commitSlot moves the DOM but not tabList, so a committed slot is a PREVIEW that
+    // Escape can still undo. Announcing it as "Moved one to position 2" told a
+    // screen-reader user a reversible hover state was a finished action, once per
+    // dwell, sometimes followed by "Move cancelled" contradicting all of it.
+    const h = await mountDrag(2);
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    vi.advanceTimersByTime(REORDER_DWELL_MS);
+
+    vi.advanceTimersByTime(150);
+    expect(h.live()).toBe("Drop position 2");
+
+    // The completed move is announced once, by the release.
+    dragged?.dispatchEvent(dragEvent("drop", h.dt));
+    vi.advanceTimersByTime(150);
+    expect(h.live()).toBe("Moved one to position 2");
+  });
+
+  it("previews nothing when the candidate is the slot the tab already holds", async () => {
+    // Dragging the LAST tab past the end of the strip: with zero layout offsets the
+    // candidate is "after everything", which is where it already is. No hold, no lean,
+    // no rail, no announcement — the cheap idempotent path every dragover takes when
+    // the pointer has not actually chosen anything new.
+    const h = await mountDrag(3);
+    const chips = h.chips();
+    chips[2]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+
+    expect(chips.map(translateOf)).toEqual(["", "", ""]);
+    expect(h.root.querySelector(".wt-tab-dwell")).toBeNull();
+    vi.advanceTimersByTime(REORDER_DWELL_MS * 2);
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+    vi.advanceTimersByTime(150);
+    expect(h.live()).toBe("");
+  });
+
+  it("survives the pending target being closed from another window mid-hold", async () => {
+    // The hold captures a live DOM node for a whole second. A session closed elsewhere
+    // removes chips underneath it, and insertBefore throws NotFoundError on a reference
+    // that is no longer a child — which would abandon the reorder half-done and leave
+    // the lean stranded, because the timer has already nulled the pending flag by then
+    // and cancelDwell can no longer reach it.
+    const h = await mountDrag(3);
+    const [dragged, second] = h.chips();
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    expect(translateOf(second!)).toBe(`-${String(REORDER_LEAN_PX)}px`);
+
+    // The chip the hold is counting down against goes away.
+    h.chips()[1]?.remove();
+    expect(() => {
+      vi.advanceTimersByTime(REORDER_DWELL_MS);
+    }).not.toThrow();
+
+    // No half-applied reorder, and the removed chip's neighbours are not left leaning.
+    vi.advanceTimersByTime(REORDER_SETTLE_MS);
+    for (const chip of h.chips()) {
+      expect(translateOf(chip)).toBe("");
+      expect(chip.style.transition).toBe("");
+    }
+  });
+
+  it("ends the gesture when the dragged tab itself is closed from another window", async () => {
+    // There is no source left to deliver a dragend, and a browser is not obliged to
+    // fire one for a removed source. Without an explicit abort the feature would hold
+    // `draggingEl` on a detached node forever, and the document-level guard reads that
+    // as "a tab drag is in progress" and would swallow every unrelated drop on the page
+    // from then on.
+    const h = await mountDrag(3);
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+
+    const feature = h.root.querySelector<HTMLElement>(".wt-tab-close");
+    feature?.click(); // closes tab one, which is the tab being dragged
+    await until(() => h.chips().length === 2);
+
+    // No dragend is dispatched. An unrelated drag must be the browser's business again.
+    const unrelated = dragEvent("drop", h.dt);
+    h.surface.dispatchEvent(unrelated);
+    expect(unrelated.defaultPrevented).toBe(false);
+    for (const chip of h.chips()) {
+      expect(translateOf(chip)).toBe("");
+      expect(chip.classList.contains("wt-tab-dragging")).toBe(false);
+    }
+    expect(h.root.querySelector(".wt-tab-dwell")).toBeNull();
+  });
+
+  it("writes no inline transition at all under reduced motion", async () => {
+    // The lean and the slide are inline transitions, so no stylesheet gate can reach
+    // them: .wt-animate and the scoped prefers-reduced-motion reset in 01-scope.css
+    // both govern CSS only. The reorder has to check the preference itself, and it has
+    // to still REORDER — motion is what the user opted out of, not the feature.
+    const h = await mountDrag(3, { reducedMotion: true });
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+
+    for (const chip of h.chips()) {
+      expect(translateOf(chip)).toBe("");
+      expect(chip.style.transition).toBe("");
+    }
+    // The pending boundary is still MARKED, because a mark is not motion. It just does
+    // not count down.
+    const rail = h.root.querySelector<HTMLElement>(".wt-tab-dwell");
+    expect(rail?.style.transform).toBe("scaleY(1)");
+    expect(rail?.style.transition).toBe("none");
+
+    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
+    for (const chip of h.chips()) {
+      expect(chip.style.transition).toBe("");
+    }
+  });
+
+  it("leaves no inline style on any chip once a real slide has run", async () => {
+    // happy-dom reports every rect as zero, so an unstubbed FLIP finds nothing to
+    // invert and returns before writing a single style — which made an earlier version
+    // of this test vacuous for the half it names. Stubbing rects from live DOM index
+    // makes the slide branch actually execute, so this can prove the settle timer hands
+    // every chip back.
+    const h = await mountDrag(3);
+    h.stubRects();
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    vi.advanceTimersByTime(REORDER_DWELL_MS);
+
+    // The slide is really running: the displaced chips are mid-transition.
+    const sliding = h.chips().filter((c) => c.style.transition !== "");
+    expect(sliding.length).toBeGreaterThan(0);
+    expect(sliding[0]?.style.transition).toContain("translate");
+
+    dragged?.dispatchEvent(dragEvent("drop", h.dt));
+    dragged?.dispatchEvent(dragEvent("dragend", h.dt));
+    vi.advanceTimersByTime(REORDER_SETTLE_MS + REORDER_SLOT_FADE_MS);
+
+    for (const chip of h.chips()) {
+      expect(translateOf(chip)).toBe("");
+      expect(chip.style.transition).toBe("");
+      expect(chip.classList.contains("wt-tab-dragging")).toBe(false);
+      expect(chip.classList.contains("wt-tab-slotted")).toBe(false);
+    }
+    expect(h.root.querySelector(".wt-tab-dwell")).toBeNull();
   });
 });

@@ -1,15 +1,83 @@
-// tabs/strip.ts — the desktop tab strip's chrome vocabulary: the shared SVG
-// glyphs, the one chip-content builder every chip site reuses, the strip tab
-// template, the shared control markup factories, the status-dot painter, and
-// the required-descendant picker. Everything here is closure-free markup +
-// tiny pure helpers; element construction with event wiring stays in index.ts
-// (it closes over the feature state). The mobile chrome templates live in
-// switcher.ts; the session model in model.ts.
+// tabs/strip.ts — the desktop tab strip's chrome vocabulary: the reorder-preview
+// constants, the shared SVG glyphs, the one chip-content builder every chip site
+// reuses, the strip tab template, the shared control markup factories, the
+// status-dot painter, and the required-descendant picker. Everything here is
+// closure-free markup + tiny pure helpers; element construction with event wiring
+// stays in index.ts (it closes over the feature state). The mobile chrome
+// templates and its gesture constants live in switcher.ts; the session model in
+// model.ts.
 
 // The status vocabulary itself (which statuses reveal a dot, and how each one is
 // worded for a human) lives in the DOM-free model, so the painters here and the
 // accessible names index.ts builds read one definition.
 import { statusPhrase, statusRevealsDot } from "./model.js";
+
+// --- Reorder preview -------------------------------------------------------
+// Every chip in this strip is the same width (see .wt-tab in 30-tabs.css: a
+// definite 300px with flex-grow 0, so a title changes the label and never the
+// box). That is what makes a reorder hard to read: the chip a release would
+// displace looks exactly like the one beside it, so the only thing that can say
+// where the drag will land is the strip's own motion. These are the numbers that
+// motion is spelled in — index.ts owns the mechanism, strip.ts owns the values,
+// the same split switcher.ts keeps for the mobile swipe.
+
+/** How long (ms) the pointer holds over one candidate slot before the strip
+ *  opens it.
+ *
+ *  Long on purpose. A sweep across a six-tab strip crosses five slots, and
+ *  committing each one in passing is what made the old reorder unreadable: the
+ *  strip rearranged itself continuously and the user chose a slot by stopping the
+ *  mouse at the right millisecond. A hold is a deliberate act, so the strip only
+ *  rearranges where the pointer actually rests.
+ *
+ *  It costs a fast drag nothing, because a release COMMITS the pending slot
+ *  (flushDwell) instead of discarding it: drop early and the reorder lands
+ *  immediately, exactly as it did before the preview existed. The hold is what
+ *  buys the animation, not a floor on the gesture. */
+export const REORDER_DWELL_MS = 1000;
+
+/** How far (px) each chip a commit would displace leans toward its destination
+ *  while the hold runs.
+ *
+ *  Small enough to read as a lean rather than a move, and large enough to be
+ *  unambiguous at a glance — it answers "the strip heard me, and it is about to
+ *  open THAT way" during a wait that is otherwise a second of nothing. The same
+ *  purpose the mobile switcher's PREVIEW_PEEK_MAX serves for its live swipe. */
+export const REORDER_LEAN_PX = 7;
+
+/** The one transition both preview stages use (the lean, and the slide that
+ *  commits it).
+ *
+ *  --dur-standard and --ease-standard written out as literals. JS-driven motion
+ *  in this package does not read tokens back out of the cascade; the switcher's
+ *  release reel spells its own transition the same way. Keep the two in step: a
+ *  token edit has to be mirrored here by hand.
+ *
+ *  The property is `translate`, NOT `transform`, and that is load-bearing rather
+ *  than stylistic. Declarations from a running CSS animation out-rank every normal
+ *  author declaration, inline style included, so a chip in the middle of
+ *  `wt-slot-in` or `wt-tab-in` (both animate `transform: scale`) would ignore an
+ *  inline `transform` outright and refuse to move. `translate` is a separate
+ *  property that composes with `transform` instead of competing for it. */
+export const REORDER_SHIFT_TRANS = "translate 0.2s cubic-bezier(0.2, 0, 0, 1)";
+
+/** When (ms after the slide starts) the inline transform and transition come off
+ *  the chips and the stylesheet has them back.
+ *
+ *  A margin past the 200ms transition, not a race with its own end event: an
+ *  interrupted transition fires no transitionend, and the strip must not be left
+ *  holding inline styles because a second drag arrived mid-slide. Mirrors the
+ *  switcher reel's 300ms net over a 250ms transition. */
+export const REORDER_SETTLE_MS = 300;
+
+/** How long (ms) the .wt-tab-slotted class stays on, one margin past the
+ *  --dur-enter fade the stylesheet runs with it.
+ *
+ *  A timer rather than animationend for the same reason .wt-tab-enter uses one:
+ *  the class must also come off when no animation ran at all — the animations
+ *  feature is optional, reduced motion flattens it, and a consumer stylesheet can
+ *  drop the rule. */
+export const REORDER_SLOT_FADE_MS = 300;
 
 // The +/x/keyboard glyphs are inline SVG (not font glyphs) so they center
 // exactly in their flex-centered buttons and stay symmetric regardless of the UI

@@ -15,6 +15,7 @@ import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { fromHTML, holdFocusOnPress } from "../dom.js";
 import { createClickSwallow, placeMenuAt } from "../menu-position.js";
 import { centreChipLabels } from "./ink-centre.js";
+import { SWITCH_ANIMATIONS, SWITCH_CLASSES } from "./switch-anim.js";
 import type { CueStatus, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
   ACTIVE_TAB_KEY,
@@ -24,8 +25,8 @@ import {
   PROGRESS_ABSENT,
   SWIPE_HINT_KEY,
   SessionAPIError,
-  TAB_ORDER_KEY,
   baseLabel,
+  compareTabOrder,
   createSessionAPI,
   createTombstones,
   hasPinnedName,
@@ -34,16 +35,19 @@ import {
   normalizeProgress,
   orderedInsertIndex,
   parseCueSeen,
-  parseTabOrder,
   renderedProgress,
   sanitizePinnedName,
   serializeCueSeen,
-  serializeTabOrder,
   statusPhrase,
   tabAccessibleName,
 } from "./model.js";
 import { browserNotifierEnv, createNotifier } from "./notify.js";
 import {
+  REORDER_DWELL_MS,
+  REORDER_LEAN_PX,
+  REORDER_SETTLE_MS,
+  REORDER_SHIFT_TRANS,
+  REORDER_SLOT_FADE_MS,
   TAB_HTML,
   kbButtonHTML,
   newButtonHTML,
@@ -182,38 +186,6 @@ const CATCHUP_SETTLE_MS = 250;
  *  telling the user about; ordinary streaming queues a handful of rows per frame
  *  and must never arm it (nor pay for the completion poll). */
 const CATCHUP_MIN_BACKLOG = 400;
-
-/** orderSignature collapses an arrangement into one comparable string, so the
- *  persist path can decide "did the order change?" with a string compare instead
- *  of re-serializing and re-writing on every status tick. NUL is the separator
- *  because a session id can never contain one. */
-function orderSignature(ids: readonly string[]): string {
-  return ids.join("\u0000");
-}
-
-/** readSavedOrder loads the persisted tab arrangement, or [] when there is none
- *  to trust. Storage itself can throw — Safari in private mode, a disabled
- *  third-party context, an embedder's iframe — and an unreadable arrangement is
- *  never fatal: the strip falls back to the server's creation order, exactly as
- *  it behaved before arrangements were persisted. */
-function readSavedOrder(): string[] {
-  try {
-    return parseTabOrder(localStorage.getItem(TAB_ORDER_KEY));
-  } catch {
-    return [];
-  }
-}
-
-/** writeSavedOrder persists an arrangement, best-effort: a full quota or an
- *  unavailable store must not break a reorder the user just performed on screen.
- *  The in-memory arrangement stays authoritative for this page either way. */
-function writeSavedOrder(ids: readonly string[]): void {
-  try {
-    localStorage.setItem(TAB_ORDER_KEY, serializeTabOrder(ids));
-  } catch {
-    /* storage unavailable or full — the order still holds for this page */
-  }
-}
 
 /** readCueSeen loads the acknowledged background-tab cues, or an empty map when
  *  there is none to trust. Storage itself can throw (Safari private mode, a
@@ -687,24 +659,37 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // /api/sessions) that predates the server reaping the session does not
       // re-adopt (flash back) a closed tab.
       const tombstones = createTombstones();
-      // The user's persisted tab arrangement (model.ts TAB_ORDER_KEY): read ONCE
-      // at setup, before any session can be adopted, so every adopt — from the
-      // status-stream snapshot or from the bootstrap's list, in either order —
-      // can place its tab at the saved position. Read-only for the life of the
-      // page: it is the arrangement to RESTORE, and the live strip must not
-      // overwrite it (see persistOrder).
-      const savedOrder: readonly string[] = readSavedOrder();
-      // Signature of the arrangement currently on disk, so persistOrder can run
-      // from syncChrome (which fires on every status tick) and still write only
-      // when the sequence actually changed. Seeded from what was read, so a
-      // window that simply restored an arrangement writes nothing.
-      let persistedSig = orderSignature(savedOrder);
       // The expanded mobile list's row elements, keyed by tab id. Rows are
       // reused across re-renders (reconcile, not rebuild) so a swipe can FLIP the
       // same elements from their old slots to their new ones (the rotation).
       const rowEls = new Map<string, HTMLElement>();
       let activeId: string | null = null;
       let draggingEl: HTMLElement | null = null;
+      // --- Desktop reorder preview state (mechanism below, near dragTargetBefore) ---
+      // The chips currently carrying an inline transform: the lean during a hold,
+      // or the slide that commits it. One set, because both stages write the same
+      // two properties on the same elements and one settle function has to be able
+      // to hand every one of them back to the stylesheet.
+      const shifted = new Set<HTMLElement>();
+      let shiftTimer: ReturnType<typeof setTimeout> | null = null;
+      // The pending slot and its hold. `dwellTimer !== null` is the only "a slot is
+      // pending" flag — `dwellBefore` cannot be one, because null is a legitimate
+      // value there meaning "past the last chip".
+      let dwellTimer: ReturnType<typeof setTimeout> | null = null;
+      let dwellBefore: HTMLElement | null = null;
+      // Whether a `drop` fired for the drag in flight. It is the exact signal for
+      // "the user released deliberately" as opposed to "the drag was abandoned":
+      // Escape and a refused release fire dragend with no drop at all. dragend
+      // without it reverts the preview, which is the cancel this reorder never had.
+      let dropped = false;
+      // The pending-drop rail: ONE element, moved to whichever edge the current hold
+      // is counting down on (see showDwellRail).
+      const dwellRail = document.createElement("span");
+      dwellRail.className = "wt-tab-dwell";
+      dwellRail.setAttribute("aria-hidden", "true");
+      // The chip mid slot-fade, and the timer that ends it.
+      let slotFadeEl: HTMLElement | null = null;
+      let slotFadeTimer: ReturnType<typeof setTimeout> | null = null;
       // Gate the new-tab enter animation: tabs present at initial population
       // should not animate in (jarring on load); only tabs added at runtime do.
       let started = false;
@@ -1131,7 +1116,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           renderSwitcherList();
         }
         maybeSwipeHint();
-        persistOrder();
+        applyServerOrder();
       }
 
       // The percentage is deliberately NOT written into the browser document
@@ -1144,41 +1129,50 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // window's. The per-chip prefix carries the same information without the
       // conflict, because each chip shows its own session. Do not add it back.
 
-      // persistOrder stores the strip's current arrangement so it survives a
-      // reload. It hangs off syncChrome — the one function every list mutation
-      // already ends with (reorder, create, adopt, close, reconcile) — rather than
-      // off the two reorder call sites, so a future path that rearranges tabs
-      // cannot forget to persist. Three guards make that safe:
+      // applyServerOrder re-sorts the strip into the order the SERVER holds, and
+      // is the read half of tab-order sync: a drag on another device arrives as a
+      // new `order` on that session's status event, and this is what turns it into
+      // a moved chip here.
       //
-      //  - `started`: nothing is written while the initial population runs. The
-      //    strip grows one tab at a time there, and each intermediate state is a
-      //    partial arrangement, NOT a user decision — writing them meant a reload
-      //    landing mid-population could store a one-tab order and lose the real
-      //    one. After the bootstrap every change is a genuine change.
-      //  - the signature compare: syncChrome also runs on every status tick, so
-      //    only a changed id sequence reaches storage.
-      //  - a non-empty list: an empty strip carries no arrangement, and a
-      //    transient empty state (the last tab closed just before its replacement
-      //    lands, a reconcile against a restarted server) must not erase the
-      //    stored order.
+      // It hangs off syncChrome — the one function every list mutation already
+      // ends with (reorder, create, adopt, close, reconcile) — so no path can
+      // forget it. Three properties make that safe to run that often:
       //
-      // savedOrder is deliberately NOT reassigned here. It is the ARRANGEMENT
-      // READ AT LOAD, which is what adoption places tabs by; overwriting it with
-      // the live strip discards the position of every session that has not been
-      // adopted yet — which is precisely what a strip still filling up is full of.
-      function persistOrder(): void {
-        if (!started || tabList.length === 0) {
+      //  - It is a no-op when the strip already matches, decided by one pass over
+      //    the list, so the status tick pays a comparison and nothing else.
+      //  - It is skipped mid-drag. The pointer owns the strip then, and the DOM
+      //    holds a preview that is deliberately not yet in tabList; re-sorting
+      //    under the user's finger would fight the gesture.
+      //  - It sorts by the same total order adoption inserts by (compareTabOrder),
+      //    so the two cannot disagree about where a tab belongs.
+      //
+      // A locally-committed reorder is already applied optimistically, and the
+      // server echoes that same arrangement back, so the echo lands here as a
+      // no-op rather than as a second visible move.
+      function applyServerOrder(): void {
+        if (draggingEl !== null) {
           return;
         }
-        const ids = tabList.map((t) => t.id);
-        const sig = orderSignature(ids);
-        if (sig === persistedSig) {
+        const sorted = [...tabList].sort(compareTabOrder);
+        let moved = false;
+        for (let i = 0; i < sorted.length; i++) {
+          if (sorted[i] !== tabList[i]) {
+            moved = true;
+            break;
+          }
+        }
+        if (!moved) {
           return;
         }
-        persistedSig = sig;
-        // Writing the LIVE strip also prunes: ids whose sessions are gone never
-        // reach storage again, so the stored arrangement cannot grow forever.
-        writeSavedOrder(ids);
+        tabList.length = 0;
+        tabList.push(...sorted);
+        // appendChild MOVES an existing node, so one pass in the wanted sequence
+        // both reorders the chips and leaves no duplicates behind.
+        for (const tab of tabList) {
+          scroller.appendChild(tab.el);
+        }
+        paintActive();
+        syncMobile();
       }
 
       // closeKeyGrid closes the mobile key grid (if a keyboardToggle is wired and
@@ -1303,6 +1297,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           nameSeq: 0,
           display: "",
           createdAt: info.createdAt,
+          order: info.order,
           // Through the kernel factory, never `new LineStore()`: the factory
           // applies the consumer's scrollbackLines cap, so per-tab caches and
           // the kernel's implicit store share one retained-line budget. The id
@@ -1437,16 +1432,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           e.preventDefault();
           showTabMenu(e.clientX, e.clientY, tab.id);
         });
-        // Drag-and-drop reorder on the desktop strip. The bar's dragover moves
-        // this element live; drop/dragend commit the new order into tabList.
+        // Drag-and-drop reorder on the desktop strip. The bar's dragover arms a
+        // slot, the hold (or a drop) commits it, and drop/dragend commit the
+        // resulting order into tabList. See the reorder-preview block below.
         el.draggable = true;
         el.addEventListener("dragstart", (e) => {
           if (editingId === tab.id) {
             e.preventDefault(); // renaming: a drag would fight caret selection
             return;
           }
+          endReorderPreview(); // no residue from a previous drag
+          endShift(); // ...and nothing mid-slide, so this gesture starts from rest
+          dropped = false;
           draggingEl = el;
-          // Snapshot the preview from the PRISTINE chip, before the dim class.
+          // Snapshot the preview from the PRISTINE chip, before the slot class.
           setDragGhost(e, el);
           el.classList.add("wt-tab-dragging");
           if (e.dataTransfer) {
@@ -1460,9 +1459,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         });
         el.addEventListener("dragend", () => {
           el.classList.remove("wt-tab-dragging");
+          if (!dropped) {
+            // No drop fired, so the drag was abandoned: Escape, or a release the
+            // browser refused. Put the strip back — tabList still holds the order
+            // the gesture started from, because only a drop writes to it.
+            revertPreview();
+          }
           draggingEl = null;
+          // The gesture's state goes; a slide started by the revert above is left to
+          // finish under its own settle timer (see endReorderPreview).
+          endReorderPreview();
           clearDragGhost(); // belt-and-braces: the rAF normally got there first
-          syncOrderFromDom();
         });
         return tab;
       }
@@ -1668,21 +1675,104 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // direction the incoming content slides in from that side (the swipe
       // feel); without one it is a plain cross-fade. The rAF re-adds the class a
       // frame after clearing it so a rapid re-switch restarts the animation.
+      //
+      // The class comes off on the animation's OWN end, with the timer kept as
+      // the net. Two numbers had to agree and did not: the CSS duration is
+      // --dur-standard (0.2s) and this timer is 360ms, so the class outlived the
+      // animation by ~144ms (the add is deferred one rAF), which on a tab above
+      // ~3000 rows lands in the middle of the rebuild's drain. Reading the event
+      // makes the timer a fallback instead of the primary signal.
+      //
+      // The timer CANNOT be dropped, and three cases are why:
+      //  - an interrupted animation fires no animationend, and animationcancel is
+      //    not reliably delivered in Blink. A rapid re-switch is exactly that
+      //    case, and it is the case the rAF above exists to serve.
+      //  - the animations feature is optional and removes .wt-animate under
+      //    reduced motion, so no animation runs and no event ever fires.
+      //  - a consumer stylesheet could drop the rules entirely.
+      //
+      // The listener filters on the ONE animation name this switch expects AND on
+      // the class still being present. Three notes, because each was argued:
+      //  - The name must be the expected one, not any of the three. An animation
+      //    that COMPLETED just as a re-switch landed has its event already queued;
+      //    the old listener is gone by dispatch time, so the NEW listener receives
+      //    it, and a listener accepting all three names would let switch N's
+      //    completion end switch N+1's animation a frame in.
+      //  - The class check closes the window BEFORE the animation starts. The
+      //    listener is attached in this task and the class lands a frame later, so
+      //    for one frame a matching `animationend` from anywhere in the subtree
+      //    would cancel the pending class-add and skip the animation outright. An
+      //    animationend cannot precede its own animation, so requiring the class is
+      //    free.
+      //  - No generation counter, and no target check. A generation was tried and
+      //    removed: `endSwitchAnim` removes the listener synchronously before the
+      //    next one is added, so a stale listener cannot receive an event and the
+      //    counter could never fire (its red check could not be made to fail). A
+      //    target check would couple this feature to the kernel's `.term-output`
+      //    markup, which it does not own; the residual risk is a consumer applying
+      //    one of these three library-private keyframe names to another element
+      //    inside the surface, and the class check already reduces that to "ends a
+      //    running switch animation early" rather than "skips it".
+      const SWITCH_ANIM_NET_MS = 360;
       let switchAnimTimer: ReturnType<typeof setTimeout> | null = null;
-      function flashSwitch(dir?: "next" | "prev"): void {
-        const surface = ctx.surface();
-        const cls = dir ? `wt-switching-${dir}` : "wt-switching";
-        surface.classList.remove("wt-switching", "wt-switching-next", "wt-switching-prev");
+      let switchAnimFrame: number | null = null;
+      let switchAnimOff: (() => void) | null = null;
+
+      // Drop the classes and every pending mechanism from the previous switch.
+      // All three are torn down together: a stray timer or listener from switch N
+      // would otherwise strip the class switch N+1 has just added, and a surviving
+      // rAF would ADD the previous direction's class alongside the new one. That
+      // last one predates this change, and its consequence is not "two animations
+      // at once" — the cascade picks one winner for the `animation` property, and
+      // the winner is whichever of the three rules comes LAST in the stylesheet
+      // (`wt-switching-prev`), regardless of which switch the user actually made. So
+      // a forward switch could animate backwards.
+      function endSwitchAnim(surface: HTMLElement): void {
+        surface.classList.remove(...SWITCH_CLASSES);
         if (switchAnimTimer !== null) {
           clearTimeout(switchAnimTimer);
-        }
-        requestAnimationFrame(() => {
-          surface.classList.add(cls);
-        });
-        switchAnimTimer = setTimeout(() => {
           switchAnimTimer = null;
-          surface.classList.remove("wt-switching", "wt-switching-next", "wt-switching-prev");
-        }, 360);
+        }
+        if (switchAnimFrame !== null) {
+          cancelAnimationFrame(switchAnimFrame);
+          switchAnimFrame = null;
+        }
+        if (switchAnimOff !== null) {
+          switchAnimOff();
+          switchAnimOff = null;
+        }
+      }
+
+      function flashSwitch(dir?: "next" | "prev"): void {
+        const surface = ctx.surface();
+        const cls = dir ? (`wt-switching-${dir}` as const) : ("wt-switching" as const);
+        endSwitchAnim(surface);
+        const expected = SWITCH_ANIMATIONS[cls];
+        const onAnimEnd = (ev: AnimationEvent): void => {
+          if (ev.animationName !== expected || !surface.classList.contains(cls)) {
+            return;
+          }
+          endSwitchAnim(surface);
+        };
+        surface.addEventListener("animationend", onAnimEnd);
+        switchAnimOff = (): void => {
+          surface.removeEventListener("animationend", onAnimEnd);
+        };
+        // The net is armed INSIDE the frame that adds the class, never beside it.
+        // Armed in this task it would be a deadline on a REQUEST to animate rather
+        // than a net around an animation: rAF is paused in a hidden document and
+        // deferred under a blocked main thread, so a 360ms timer could fire first,
+        // and its `endSwitchAnim` would cancel the pending class-add and skip the
+        // animation outright. Armed here, a frame that never runs arms nothing and
+        // leaves no class to strip.
+        switchAnimFrame = requestAnimationFrame(() => {
+          switchAnimFrame = null;
+          surface.classList.add(cls);
+          switchAnimTimer = setTimeout(() => {
+            switchAnimTimer = null;
+            endSwitchAnim(surface);
+          }, SWITCH_ANIM_NET_MS);
+        });
       }
 
       // Any frame can reveal a backlog worth telling the user about: a resume
@@ -1736,20 +1826,503 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // dragTargetBefore returns the first tab whose horizontal midpoint is past
-      // x (the element the dragged tab should sit before), or null to drop at
-      // the end of the tab list. syncOrderFromDom rebuilds tabList to
-      // match the strip's DOM order after a drag, so position indicators, the
-      // switcher, and close-to-the-right/left all follow the visible order.
-      function dragTargetBefore(x: number): HTMLElement | null {
-        for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab:not(.wt-tab-dragging)")) {
-          const rect = el.getBoundingClientRect();
-          if (x < rect.left + rect.width / 2) {
+      // --- Desktop reorder preview: hold, lean, slide -------------------------
+      //
+      // The old reorder moved the dragged chip on EVERY dragover, so the strip
+      // rearranged itself continuously under the pointer and — every chip being
+      // the same width — nothing on screen said which slot a release would land
+      // in. The chip you were dragging looked like the slot it left, the slot it
+      // was over, and the slot it would end up in.
+      //
+      // The reorder now runs in three stages, and the dragged chip stays in the
+      // flow throughout as the slot it will land in (`.wt-tab-dragging`, which
+      // 30-tabs.css renders as an empty dashed outline rather than a dimmed copy
+      // of the tab — the solid copy is the drag image under the pointer, and one
+      // of the two had to stop pretending to be the tab):
+      //
+      //  1. dragover picks a candidate slot and ARMS a hold. Nothing reorders.
+      //  2. Every chip the commit would displace LEANS a few px toward where it
+      //     is going, at once, so the hold reads as "held here, opening that way"
+      //     instead of as a second of nothing.
+      //  3. After REORDER_DWELL_MS on the same candidate the slot COMMITS: one
+      //     DOM move, the displaced chips slide from their old positions to their
+      //     new ones, and the slot fades in at its new home.
+      //
+      // A release never waits for the hold: `drop` commits whatever slot is
+      // pending (flushDwell), so a fast drag-and-drop reorders exactly as before.
+      //
+      // dropTargetBefore returns the first tab whose horizontal midpoint is past
+      // x (the element the dragged tab should sit before), or null to drop at the
+      // end of the tab list. syncOrderFromDom rebuilds tabList to match the
+      // strip's DOM order after a drag, so position indicators, the switcher, and
+      // close-to-the-right/left all follow the visible order.
+      //
+      // It hit-tests LAYOUT geometry (offsetLeft/offsetWidth), never
+      // getBoundingClientRect. That is not an optimisation, it is what makes an
+      // animated reorder hit-testable at all: a rect read while a chip is mid-lean or
+      // mid-slide returns the INTERPOLATED position, so the preview's own motion feeds
+      // back into the decision that produced it and the strip oscillates between two
+      // slots for as long as the pointer sits near a boundary. Layout offsets are the
+      // chip's position in the FLOW, which a transform does not affect at all.
+      //
+      // An earlier draft instead cached rects measured "at rest" and re-measured after
+      // each commit. Two things killed it: the cache had to be invalidated on anything
+      // that reflowed the strip (a window or embed resize changes every chip's midpoint
+      // without changing the chip SET, which was the only thing the cache checked), and
+      // it could capture a transform anyway, because a chip adopted mid-drag arrives
+      // mid `.wt-tab-enter` scale. Reading layout needs no cache and cannot go stale.
+      //
+      // Coordinates: chips share the scroller's offsetParent (the scroller is not
+      // positioned, so it is not one), which makes `el.offsetLeft - scroller.offsetLeft`
+      // the chip's offset inside the scroller — and the scroller has no border for that
+      // subtraction to skip. Layout offsets ignore scrolling, so clientX is converted
+      // into the same space by adding scrollLeft back, which is what lets a scrolled
+      // strip hit-test correctly.
+      function dropTargetBefore(clientX: number): HTMLElement | null {
+        const x = clientX - scroller.getBoundingClientRect().left + scroller.scrollLeft;
+        const base = scroller.offsetLeft;
+        for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab")) {
+          if (el === draggingEl) {
+            continue; // the slot does not displace itself
+          }
+          if (x < el.offsetLeft - base + el.offsetWidth / 2) {
             return el;
           }
         }
         return null;
       }
+
+      // applyShift writes one displacement per chip and remembers which chips are
+      // carrying one. `trans` is REORDER_SHIFT_TRANS to animate to the new value,
+      // or "none" to plant a from-state the next write animates out of.
+      //
+      // It writes the individual `translate` property, NOT `transform`, and that is
+      // load-bearing rather than stylistic. Declarations from a running CSS ANIMATION
+      // out-rank normal author declarations, inline style included, so a chip in the
+      // middle of `wt-slot-in` (`transform: scale(0.97)`) or `wt-tab-in`
+      // (`transform: scale(0.82)`) would silently ignore an inline `transform` and
+      // refuse to move: an Escape landing inside the slot fade would snap the dragged
+      // chip home while its siblings slid. `translate` is a separate property that
+      // composes with `transform` instead of fighting it, so the two animations can own
+      // one chip at the same time.
+      function applyShift(px: ReadonlyMap<HTMLElement, number>, trans: string): void {
+        if (shiftTimer !== null) {
+          clearTimeout(shiftTimer);
+          shiftTimer = null;
+        }
+        for (const [el, dx] of px) {
+          el.style.transition = trans;
+          el.style.translate = `${String(Math.round(dx))}px`;
+          shifted.add(el);
+        }
+      }
+      // endShift hands every displaced chip back to the stylesheet. Both stages
+      // write the same two inline properties, so this one function ends whichever
+      // ran last — called before a fresh measurement, by the settle timer after a
+      // slide, when the drag ends, and on teardown. Idempotent.
+      function endShift(): void {
+        if (shiftTimer !== null) {
+          clearTimeout(shiftTimer);
+          shiftTimer = null;
+        }
+        for (const el of shifted) {
+          el.style.transition = "";
+          el.style.translate = "";
+        }
+        shifted.clear();
+      }
+
+      // leanToward tips the chips a commit would displace a few px toward their
+      // destination, for as long as the hold lasts. No settle timer: the lean is a
+      // held state, not an animation with an end, and a timer that expired mid-hold
+      // would snap it away while the user is still waiting on it.
+      //
+      // Chips that were leaning and no longer would be are written back to zero in
+      // the SAME pass, so a changed candidate eases from one lean into the other
+      // rather than snapping through rest first.
+      function leanToward(before: HTMLElement | null): void {
+        if (!draggingEl) {
+          return;
+        }
+        // The preference is read live, so it can flip mid-gesture. Clearing here rather
+        // than returning bare is what honours a mid-hold opt-in: a bare return would
+        // leave the lean already applied under the previous preference sitting there.
+        if (prefersReduce()) {
+          endShift();
+          return;
+        }
+        const chips = [...scroller.querySelectorAll<HTMLElement>(".wt-tab")];
+        const from = chips.indexOf(draggingEl);
+        const to = before === null ? chips.length : chips.indexOf(before);
+        if (from < 0 || to < 0) {
+          return;
+        }
+        // Moving right past the chips in between shifts them LEFT, and moving left
+        // shifts the chips it displaces RIGHT — the direction the user reads as
+        // "that tab is getting out of the way".
+        const movers = from < to ? chips.slice(from + 1, to) : chips.slice(to, from);
+        const dx = from < to ? -REORDER_LEAN_PX : REORDER_LEAN_PX;
+        const next = new Map<HTMLElement, number>();
+        for (const el of movers) {
+          next.set(el, dx);
+        }
+        for (const el of shifted) {
+          if (!next.has(el)) {
+            next.set(el, 0);
+          }
+        }
+        applyShift(next, REORDER_SHIFT_TRANS);
+      }
+      // releaseLean eases every leaning chip back to rest and settles it, for when
+      // a candidate is withdrawn (the pointer came back to the committed slot, or
+      // left the strip). endShift would be wrong here: it strips the transition in
+      // the same write, so the lean would snap home.
+      function releaseLean(): void {
+        if (shifted.size === 0) {
+          return;
+        }
+        // ...except under reduced motion, where snapping IS the requested behaviour and
+        // easing back would animate the very motion the preference opted out of.
+        if (prefersReduce()) {
+          endShift();
+          return;
+        }
+        const rest = new Map<HTMLElement, number>();
+        for (const el of shifted) {
+          rest.set(el, 0);
+        }
+        applyShift(rest, REORDER_SHIFT_TRANS);
+        shiftTimer = setTimeout(endShift, REORDER_SETTLE_MS);
+      }
+      // showDwellRail marks the exact boundary the tab will be inserted at, on the edge
+      // of the chip beside it, and fills that mark over the hold's own duration.
+      //
+      // Without it the hold was a second of near-silence, and the silence was worse than
+      // it sounds: the most authoritative thing on screen is the dashed slot, and the
+      // slot sits at the tab's CURRENT position, so the strongest cue was describing the
+      // state being left rather than the one being chosen. The 7px lean says which
+      // DIRECTION the strip will open without saying which boundary, and nothing at all
+      // said how much longer. The rail answers both of those, which makes the gesture
+      // read as three ordered states: the tab under the pointer, the edge about to open,
+      // then the gap that opened.
+      //
+      // The fill duration comes from REORDER_DWELL_MS, so the bar and the timer it
+      // depicts cannot drift apart. That is also why the rail is a real element rather
+      // than a pseudo-element on the chip: a pseudo-element's duration would have to
+      // travel through a custom property, which is a second place to keep in step.
+      function showDwellRail(before: HTMLElement | null): void {
+        // The leading edge of the chip being pushed aside, or the trailing edge of the
+        // last chip when the tab is heading past the end of the strip.
+        const host = before ?? scroller.querySelector<HTMLElement>(".wt-tab:last-of-type");
+        if (host === null || host === draggingEl) {
+          hideDwellRail();
+          return;
+        }
+        dwellRail.classList.toggle("wt-tab-dwell-end", before === null);
+        host.appendChild(dwellRail);
+        if (prefersReduce()) {
+          // No countdown, but the boundary still has to be legible, so show it filled.
+          dwellRail.style.transition = "none";
+          dwellRail.style.transform = "scaleY(1)";
+          return;
+        }
+        dwellRail.style.transition = "none";
+        dwellRail.style.transform = "scaleY(0)";
+        dwellRail.getBoundingClientRect(); // commit the from-state before the fill
+        dwellRail.style.transition = `transform ${String(REORDER_DWELL_MS)}ms linear`;
+        dwellRail.style.transform = "scaleY(1)";
+      }
+      function hideDwellRail(): void {
+        dwellRail.remove(); // idempotent: removing a detached node does nothing
+      }
+
+      // armDwell registers the slot a release would land in and starts (or keeps)
+      // the hold that commits it. Called on every dragover, so it must be cheap
+      // and idempotent for an unchanged candidate: restarting the timer on each
+      // event would mean a hand that never holds perfectly still could never
+      // commit anything, which is the bug a naive dwell always ships with.
+      function armDwell(before: HTMLElement | null): void {
+        if (!draggingEl) {
+          return;
+        }
+        // Already the committed slot, so there is nothing to preview. Withdraw any
+        // pending commitment — the pointer came back.
+        if (before === draggingEl || before === draggingEl.nextElementSibling) {
+          cancelDwell();
+          return;
+        }
+        if (dwellTimer !== null && before === dwellBefore) {
+          return; // same candidate, still holding
+        }
+        if (dwellTimer !== null) {
+          clearTimeout(dwellTimer);
+        }
+        dwellBefore = before;
+        leanToward(before);
+        showDwellRail(before);
+        dwellTimer = setTimeout(() => {
+          dwellTimer = null;
+          commitSlot(before);
+        }, REORDER_DWELL_MS);
+      }
+      function cancelDwell(): void {
+        hideDwellRail();
+        if (dwellTimer === null) {
+          return;
+        }
+        clearTimeout(dwellTimer);
+        dwellTimer = null;
+        dwellBefore = null;
+        releaseLean();
+      }
+      // flushDwell commits a pending slot at once. A release is a decision, so a
+      // drop does not have to wait out a hold it interrupted: this is what keeps a
+      // quick drag-and-drop reordering exactly as it did before the preview
+      // existed, and it is why the hold can afford to be a full second. Only a
+      // `drop` calls it; an abandoned drag reaches dragend without one and reverts.
+      function flushDwell(): void {
+        if (dwellTimer === null) {
+          return;
+        }
+        const before = dwellBefore;
+        clearTimeout(dwellTimer);
+        dwellTimer = null;
+        dwellBefore = null;
+        commitSlot(before);
+      }
+
+      // flipTo runs a rearranging mutation and animates its result: every chip that
+      // ends up somewhere new slides there from where it was. One function for both
+      // directions of the preview — committing a slot, and reverting the whole
+      // gesture — because "the strip rearranged, show the rearrangement" is one job,
+      // and a revert that snapped while a commit slid would read as two different
+      // features.
+      //
+      // `hold` is the one chip that must NOT slide. On a commit that is the dragged
+      // chip: it is the slot, the pointer is already carrying a solid copy of it,
+      // and a hole travelling across the strip alongside that copy is two things
+      // moving at once. On a revert nothing is held — the drag image is gone by
+      // then, so the chip has to travel home itself.
+      function flipTo(mutate: () => void, hold: HTMLElement | null): void {
+        // Reduced motion: perform the rearrangement and animate none of it. The gate
+        // belongs HERE and not only in the CSS, because these transitions are written
+        // inline and no stylesheet gate can reach them; the switcher's release reel
+        // guards its own call site the same way. Read live, so toggling the OS setting
+        // mid-drag takes effect on the next commit and strips any existing lean.
+        if (prefersReduce()) {
+          endShift();
+          mutate();
+          return;
+        }
+        // FIRST — where each chip is right now, LEAN INCLUDED, so a slide continues
+        // out of the lean instead of jumping back through rest first. The switcher's
+        // release reel captures its live swipe preview the same way, and for the
+        // same reason. Rects, not layout offsets: this is VISUAL position, which is
+        // what the animation interpolates (hit-testing wants the opposite, see
+        // dropTargetBefore).
+        const first = new Map<HTMLElement, number>();
+        for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab")) {
+          if (el !== hold) {
+            first.set(el, el.getBoundingClientRect().left);
+          }
+        }
+        endShift(); // back to the resting layout before the DOM moves
+        mutate();
+        // LAST — the new resting layout. No style is written between the reads below,
+        // so they are all served from one layout pass.
+        const invert = new Map<HTMLElement, number>();
+        for (const [el, was] of first) {
+          const dx = el.isConnected ? was - el.getBoundingClientRect().left : 0;
+          if (dx !== 0) {
+            invert.set(el, dx);
+          }
+        }
+        if (invert.size === 0) {
+          return; // nothing moved on screen (a zero-rect DOM: happy-dom)
+        }
+        applyShift(invert, "none");
+        // The read forces the reflow that COMMITS the from-state. Without it the
+        // browser is free to collapse the from- and to-writes into one recalc and
+        // no transition runs at all — the exact trap the reel documents.
+        scroller.getBoundingClientRect();
+        const rest = new Map<HTMLElement, number>();
+        for (const el of invert.keys()) {
+          rest.set(el, 0);
+        }
+        applyShift(rest, REORDER_SHIFT_TRANS);
+        shiftTimer = setTimeout(endShift, REORDER_SETTLE_MS);
+      }
+
+      // commitSlot performs the reorder the hold earned: one DOM move, the slide
+      // that shows it, and the slot fading in at its new home.
+      //
+      // It moves the DOM and NOT tabList. That split is what makes the preview a
+      // preview: tabList stays the arrangement the gesture started from for the
+      // whole drag, and only a drop writes it (syncOrderFromDom). Two things fall
+      // out of it for free — a cancel is just "re-project tabList" (revertPreview),
+      // and a syncChrome arriving mid-drag from an unrelated source (a status tick,
+      // an OSC title) renders the committed order rather than flickering through
+      // whatever the pointer is hovering.
+      //
+      // Every early return releases the lean, and that is not belt-and-braces. The
+      // caller nulls `dwellTimer` BEFORE calling in (both the timer callback and
+      // flushDwell do), so by the time control arrives here `cancelDwell` has already
+      // become a no-op and nothing else would ever hand those chips back.
+      function commitSlot(before: HTMLElement | null): void {
+        // The countdown is over however this call ends: the rail's whole job was to
+        // depict a hold that has now expired.
+        hideDwellRail();
+        const dragged = draggingEl;
+        if (!dragged?.isConnected) {
+          releaseLean();
+          return; // the dragged session was closed elsewhere mid-hold
+        }
+        // The hold captured a live DOM node a whole second ago. A session closed in
+        // another window (an SSE push, or the poll reconcile) removes chips through
+        // dropTab while this gesture is still open, so the reference node may be gone
+        // — and insertBefore throws NotFoundError on a reference that is no longer a
+        // child, which would abandon the drop mid-way and leave DOM order and tabList
+        // disagreeing. null stays legal: it means "past the last chip".
+        if (before !== null && before.parentNode !== scroller) {
+          releaseLean();
+          return;
+        }
+        if (before === dragged || before === dragged.nextElementSibling) {
+          releaseLean();
+          return; // already in that slot
+        }
+        flipTo(() => {
+          scroller.insertBefore(dragged, before);
+        }, dragged);
+        flashSlot(dragged);
+        announceTarget(dragged);
+      }
+
+      // revertPreview puts the strip back the way the gesture found it, and is what
+      // makes Escape mean cancel.
+      //
+      // The old reorder had no revert path at all: dragover moved the chip on every
+      // event and dragend committed whatever the strip happened to be showing, so an
+      // abandoned drag left the tabs rearranged and the only way back was to drag
+      // them again. Reverting needs no saved snapshot, because tabList IS the
+      // snapshot — nothing but a drop writes to it — so the original arrangement is
+      // recovered by re-projecting it, the same projection moveTab uses.
+      function revertPreview(): void {
+        const chips = [...scroller.querySelectorAll<HTMLElement>(".wt-tab")];
+        const untouched =
+          chips.length === tabList.length && chips.every((el, i) => tabList[i]?.el === el);
+        if (untouched) {
+          return; // no slot ever committed; there is nothing to put back
+        }
+        flipTo(() => {
+          for (const t of tabList) {
+            scroller.appendChild(t.el);
+          }
+        }, null);
+        ctx.announce("Move cancelled");
+      }
+
+      // flashSlot restarts the slot's fade at its new home. Removing and re-adding
+      // the class is the restart (re-adding a class an element already carries
+      // restarts nothing), and the read between them is what flushes the removal to
+      // style so the two writes are not collapsed into one. It owns that read rather
+      // than depending on a caller's, so a commit can call it either side of the
+      // FLIP's own reflow.
+      function flashSlot(el: HTMLElement): void {
+        endSlotFade();
+        el.classList.remove("wt-tab-slotted");
+        el.getBoundingClientRect();
+        el.classList.add("wt-tab-slotted");
+        slotFadeEl = el;
+        slotFadeTimer = setTimeout(() => {
+          slotFadeTimer = null;
+          endSlotFade();
+        }, REORDER_SLOT_FADE_MS);
+      }
+      function endSlotFade(): void {
+        if (slotFadeTimer !== null) {
+          clearTimeout(slotFadeTimer);
+          slotFadeTimer = null;
+        }
+        slotFadeEl?.classList.remove("wt-tab-slotted");
+        slotFadeEl = null;
+      }
+
+      // The two things a reorder can say, and they are deliberately different
+      // sentences. commitSlot moves the DOM but NOT tabList, so a committed slot is a
+      // PREVIEW that Escape can still undo: announcing it as "Moved X to position 3"
+      // told a screen-reader user that a reversible hover state was a finished action,
+      // three times over on a drag that dwelt in three places, sometimes followed by
+      // "Move cancelled" contradicting all of it. So the preview announces a TARGET and
+      // only the drop announces a move.
+      //
+      // The position is read from the DOM because the DOM is what the preview moved;
+      // tabList still holds the order the gesture started from.
+      function slotPosition(el: HTMLElement): number {
+        return [...scroller.querySelectorAll<HTMLElement>(".wt-tab")].indexOf(el) + 1;
+      }
+      function announceTarget(el: HTMLElement): void {
+        const at = slotPosition(el);
+        if (at > 0) {
+          ctx.announce(`Drop position ${String(at)}`);
+        }
+      }
+      // announceMoved is the completed move, on drop. The drag path announced nothing
+      // at all before this, while the menu's moveTab announced every move — the same
+      // reorder, one of them silent to anyone who cannot see the strip rearrange.
+      function announceMoved(el: HTMLElement): void {
+        const tab = tabList.find((t) => t.el === el);
+        const at = slotPosition(el);
+        if (tab && at > 0) {
+          ctx.announce(`Moved ${tab.display} to position ${String(at)}`);
+        }
+      }
+
+      // endReorderPreview ends the GESTURE's state: the pending hold (easing any
+      // lean home as it goes) and the slot's fade.
+      //
+      // It deliberately does NOT stop a slide that is already playing. A slide is an
+      // animation with its own settle timer, and cutting it here is exactly what
+      // would make a revert snap home instead of run — dragend fires immediately
+      // after the revert starts. dragstart and teardown add an explicit endShift()
+      // for the two cases where nothing may be left in flight: a fresh gesture must
+      // start from rest, and a torn-down feature may leave no inline style on an
+      // element it no longer owns.
+      function endReorderPreview(): void {
+        cancelDwell();
+        hideDwellRail(); // cancelDwell returns early when no hold was pending
+        endSlotFade();
+      }
+
+      // abortReorderFor is the one path that cannot wait for dragend, called by every
+      // site that REMOVES a chip while a drag may be open (dropTab and the bulk-close
+      // sweep). Two removals matter, for different reasons:
+      //
+      //  - the pending reference chip: commitSlot would hand a detached node to
+      //    insertBefore. It guards that too, but standing the hold down here means the
+      //    user's lean comes off at the moment the target vanishes rather than a second
+      //    later, and a fresh dragover can arm a slot that still exists.
+      //  - the DRAGGED chip: the gesture is over and there is no source left to deliver
+      //    a dragend. A browser is not obliged to fire one for a removed source, and
+      //    without this the feature would keep `draggingEl` set to a detached node for
+      //    the rest of its life — which the document-level guard reads as "a tab drag is
+      //    in progress" and so would preventDefault every unrelated file or text drop on
+      //    the page from then on.
+      function abortReorderFor(removed: HTMLElement): void {
+        if (removed === dwellBefore) {
+          cancelDwell();
+        }
+        if (removed !== draggingEl) {
+          return;
+        }
+        removed.classList.remove("wt-tab-dragging");
+        draggingEl = null;
+        dropped = false;
+        endReorderPreview();
+        endShift();
+        clearDragGhost();
+      }
+
       function syncOrderFromDom(): void {
         const order: Tab[] = [];
         for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab")) {
@@ -1761,8 +2334,56 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (order.length === tabList.length) {
           tabList.length = 0;
           tabList.push(...order);
+          // Before syncChrome: it ends in applyServerOrder, which would undo this
+          // move while the tabs still carry their old positions.
+          publishOrder();
           syncChrome();
         }
+      }
+
+      // publishOrder sends the strip's arrangement to the server, which is the
+      // write half of tab-order sync: the order belongs to the session SET, so a
+      // drag here has to reach the other devices watching the same server.
+      //
+      // Called only from the two paths that COMMIT a reorder (a finished drag, and
+      // Move left/right), never from the drag preview, which repaints the DOM many
+      // times per gesture. The local strip is already showing the new arrangement,
+      // so this is optimistic; the server echoes the same order back and
+      // applyServerOrder then has nothing to do.
+      //
+      // Best-effort by design, with one exception. A 409 means the server's
+      // session set is not the one just sent — this client has not yet seen a
+      // session created or closed elsewhere — and the answer is to take the
+      // server's word: reconcileOnce adopts what it missed, and the arrangement
+      // that survives is the server's. Re-sending would be a fight this client
+      // cannot win, since its list is the stale one. Any other failure leaves the
+      // strip as the user arranged it for this page and lets the next reorder try
+      // again; a toast for a cosmetic write the user can simply repeat would be
+      // noise, and the arrangement is not lost data.
+      //
+      // It renumbers the tabs BEFORE sending, and that is not bookkeeping: every
+      // tab still carries the position the server gave it, so the applyServerOrder
+      // pass inside the caller's syncChrome would sort the strip straight back and
+      // the tab would snap to where it started. Adopting the new positions locally
+      // is the optimistic half of the write — the server echoes these same numbers
+      // and the echo then lands as a no-op. Against a server with no order route
+      // the numbers simply stay local, which is the old per-page behaviour.
+      function publishOrder(): void {
+        if (tabList.length === 0) {
+          return;
+        }
+        tabList.forEach((tab, i) => {
+          tab.order = i;
+        });
+        if (!started) {
+          return; // the bootstrap is still placing tabs; nothing to publish yet
+        }
+        const ids = tabList.map((t) => t.id);
+        void api.setOrder(ids).catch((err: unknown) => {
+          if (err instanceof SessionAPIError && err.status === 409) {
+            void reconcileOnce();
+          }
+        });
       }
 
       // --- Drag preview (the ghost) ---
@@ -1831,6 +2452,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         for (const item of tabList) {
           scroller.appendChild(item.el);
         }
+        publishOrder(); // before syncChrome, for the reason at its definition
         syncChrome();
         ctx.announce(`Moved ${tab.display} to position ${String(to + 1)}`);
       }
@@ -1848,17 +2470,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return; // just closed here; ignore a stale listing until the server reaps it
         }
         const tab = addTabChrome(info);
-        // Place the tab where the user's stored arrangement says it goes, not
-        // where it happened to arrive: the status-stream snapshot and the
-        // bootstrap's GET /api/sessions race each other, so arrival order is not
-        // the user's order (and is not even stable between loads). A session the
-        // arrangement does not know is appended, which is what a genuinely new
-        // tab wants.
-        const at = orderedInsertIndex(
-          tabList.map((t) => t.id),
-          savedOrder,
-          info.id,
-        );
+        // Place the tab where the SERVER's shared order says it goes, not where it
+        // happened to arrive: the status-stream snapshot and the bootstrap's
+        // GET /api/sessions race each other, so arrival order is neither source's
+        // order and is not stable between loads. Against a server that keeps no
+        // order the same call falls back to age, which is creation order. See
+        // compareTabOrder.
+        const at = orderedInsertIndex(tabList, info);
         tabList.splice(at, 0, tab);
         // addTabChrome appended the chip to the scroller's end; move it to match
         // the list when the arrangement put it earlier, so the DOM, the switcher
@@ -1999,6 +2617,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Remove immediately (no exit animation): a lingering element made the
         // "+" teleport after a delay, and made a last-tab replacement appear in
         // the second slot before shifting left. The strip reflows in one frame.
+        // A live desktop drag holds references to chips, so tell it first: this
+        // element may be the one it is dragging or the one it means to insert
+        // before, and both stop existing on the next line.
+        abortReorderFor(tab.el);
         tab.el.remove();
         ctx.dropSession(id);
         // If this close empties the expanded list (only one tab remains),
@@ -2074,6 +2696,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // to be listed here too.
           forgetCueSeen(t.id);
           t.aria.remove();
+          abortReorderFor(t.el); // same reason as dropTab: a live drag holds this node
           t.el.remove();
           ctx.dropSession(t.id);
         }
@@ -2535,6 +3158,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         t.reports = reports;
+        // The server's shared position. Only an explicitly PRESENT value updates
+        // the tab, for the same reason as progressValue below: an engine that
+        // keeps no order sends no field, and reading that absence as "position 0"
+        // would drag every tab to the front of the strip on every status tick.
+        // syncChrome's applyServerOrder then moves the chip if this changed.
+        if (rec.order !== undefined) {
+          t.order = rec.order;
+        }
         paintStatusDot(t.dot, rec.status, reports);
         // The OSC 9;4 percentage. Only an explicitly PRESENT value updates the
         // tab: the polling fallback lists SessionInfo, which carries no
@@ -2729,7 +3360,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         return false;
       });
-      // Live reorder while dragging a tab over the strip (drop/dragend commit it).
+      // Arm the reorder preview while dragging a tab over the strip. This no longer
+      // reorders anything: it picks the slot a release would land in and starts the
+      // hold that commits it (see the reorder-preview block above).
       bar.addEventListener("dragover", (e) => {
         if (!draggingEl) {
           return;
@@ -2738,7 +3371,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (e.dataTransfer) {
           e.dataTransfer.dropEffect = "move";
         }
-        scroller.insertBefore(draggingEl, dragTargetBefore(e.clientX));
+        armDwell(dropTargetBefore(e.clientX));
       });
       // Commit on drop — and, load-bearing, CANCEL the drop's default action. An
       // uncancelled drop leaves the browser free to act on the drag payload
@@ -2747,22 +3380,72 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // instead of reordering. Chrome and Firefox ignore an unhandled reorder
       // drop, which is why the strip looked fine on the desktop.
       bar.addEventListener("drop", (e) => {
+        const moved = draggingEl;
+        if (!moved) {
+          return;
+        }
+        e.preventDefault();
+        dropped = true;
+        flushDwell(); // a release decides: do not make a fast drag wait out the hold
+        syncOrderFromDom();
+        announceMoved(moved); // the ONE completed-move announcement per gesture
+      });
+      // Leaving the strip stands a pending hold down. The document dragover below
+      // does this too and covers more ground, but it cannot cover the case that
+      // matters most here: the strip is docked at the viewport EDGE, so a pointer can
+      // leave it by leaving the window entirely, and then no other element in the
+      // document receives a dragover to notice with. Without this listener the hold
+      // would run to completion and commit a slot the pointer had already abandoned.
+      //
+      // relatedTarget is what makes dragleave usable at all: it fires on every
+      // child-to-child transition inside the bar (chip to label, label to close), and
+      // the next target being inside the bar is exactly how those are told apart. A
+      // null relatedTarget means the pointer left the window, which is the case this
+      // exists for.
+      bar.addEventListener("dragleave", (e) => {
+        if (!draggingEl) {
+          return;
+        }
+        const next = e.relatedTarget;
+        if (next === null || !bar.contains(next as Node)) {
+          cancelDwell();
+        }
+      });
+      // A tab released anywhere OTHER than the strip — over the terminal, over
+      // any other chrome — must be inert, not a navigation, so claim the whole
+      // document as a drop target for the life of a tab drag and swallow the drop
+      // there too. Gated on draggingEl so an unrelated drag (a file dropped on the
+      // page) is left entirely to the browser.
+      const onDocTabDrop = (e: DragEvent): void => {
         if (!draggingEl) {
           return;
         }
         e.preventDefault();
-        syncOrderFromDom();
-      });
-      // A tab released anywhere OTHER than the strip — over the terminal, over
-      // any other chrome — must be inert as well, not a navigation, so claim the
-      // whole document as a drop target for the life of a tab drag and swallow
-      // the drop there too. dragend still commits whatever order the strip was
-      // previewing. Gated on draggingEl so an unrelated drag (a file dropped on
-      // the page) is left entirely to the browser.
-      const onDocTabDrop = (e: DragEvent): void => {
-        if (draggingEl) {
-          e.preventDefault();
+        if (bar.contains(e.target as Node)) {
+          return; // on the strip: the bar's own handlers own it
         }
+        if (e.type === "drop") {
+          // Released off the strip, which CANCELS. The strip is the drop zone and it
+          // is a generous one (a --touch-target chip plus the bar's own padding, ~61px
+          // at the viewport edge), and once the pointer has left it this same handler
+          // has already declared there is no candidate slot out here. Committing a
+          // slot anyway would persist an arrangement chosen at a position the user
+          // visibly left, and worse, the outcome would depend on whether the browser
+          // chose to emit `drop` at all: an accepted document drop committed while a
+          // refused release fell through to dragend and reverted. That distinction is
+          // invisible to the person doing the dragging.
+          //
+          // So: leave `dropped` false, stand the hold down, and let dragend run the
+          // revert. Nothing is lost silently — the revert animates and announces, so a
+          // mis-release reads as "that did not take" rather than as a mystery.
+          cancelDwell();
+          return;
+        }
+        // dragover, off the strip: no candidate slot exists out here, so stand a
+        // pending hold down rather than let it open a gap for a target the pointer
+        // has already left. A slot already COMMITTED stays put; the pointer may yet
+        // come back onto the strip and release there.
+        cancelDwell();
       };
       document.addEventListener("dragover", onDocTabDrop);
       document.addEventListener("drop", onDocTabDrop);
@@ -3351,9 +4034,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           varRoot.style.removeProperty("--wt-tabbar-h");
           root?.classList.remove("wt-tabbed");
           varRoot.style.removeProperty("--wt-reserve-bottom");
-          if (switchAnimTimer !== null) {
-            clearTimeout(switchAnimTimer);
-          }
+          endSwitchAnim(surface);
           if (collapseClearTimer !== null) {
             clearTimeout(collapseClearTimer);
           }
@@ -3361,6 +4042,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           gestureAbort?.abort(); // drop any in-flight gesture's window listeners
           endEdit(); // abandon an open rename without issuing a request
           clearDragGhost();
+          endReorderPreview();
+          endShift(); // leave no inline style on a chip this feature no longer owns
           clearCatchup();
           hideTabMenu();
           for (const t of tabList) {

@@ -495,9 +495,81 @@
   }
 }
 
-/* The tab being dragged (reorder) dims while it moves. */
-:where(.wt-root) .wt-tab-dragging {
-  opacity: 0.5;
+/* ===== Pending drop edge (tabs feature, desktop drag) =====
+   The exact boundary the dragged tab will be inserted at, marked while the hold runs
+   and filling from nothing to full over the hold's own duration (the tabs feature
+   sets the duration inline from REORDER_DWELL_MS, so the bar and the timer cannot
+   drift apart).
+
+   It rides the neighbouring chip: the leading edge of the chip being pushed aside,
+   or the trailing edge of the last chip when the tab is heading past the end of the
+   strip (.wt-tab-dwell-end). The chip is already position: relative for its progress
+   bar, and its overflow clip keeps the rail inside the same rounded padding box.
+
+   3px of solid accent rather than a dashed treatment: the dashed vocabulary belongs
+   to the SLOT, which is a destination that has been decided. This is a boundary
+   still being chosen, so it reads as a caret. inset-block keeps it clear of the
+   chip's rounded corners without needing its own radius arithmetic. */
+:where(.wt-root) .wt-tab-dwell {
+  position: absolute;
+  inset-block: var(--sp-1);
+  inset-inline-start: 0;
+  width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  /* Grows upward like a gauge. The feature writes scaleY inline; a transform on this
+     element cannot collide with the chip's own animations because it is a separate
+     element, which is the whole reason the rail is not a pseudo-element on the chip. */
+  transform-origin: bottom;
+  pointer-events: none;
+}
+
+:where(.wt-root) .wt-tab-dwell-end {
+  inset-inline: auto 0;
+}
+
+/* ===== Reorder drop slot (tabs feature, desktop drag) =====
+   The dragged chip stays in the strip's flow for the whole gesture and renders as
+   the SLOT it will land in: an empty dashed outline in the accent over a faint
+   accent wash. It used to be a dimmed copy of the tab, and with a solid drag
+   image already following the pointer that put three tab-shaped things on screen
+   at once — the slot it left, the chip it hovered, and the copy under the
+   pointer — none of which read as the answer to "where will this land". One
+   solid thing under the pointer, one hollow thing where it will land.
+
+   Staying in the flow is what keeps the geometry honest: the slot IS the gap,
+   exactly one chip wide, so nothing has to synthesise a placeholder box or agree
+   with the chip about how wide a tab is. It is also what lets the reorder animate
+   at all — the strip's other chips slide around a real box (index.ts, commitSlot).
+
+   The outline is the chip's OWN reserved border switched to `dashed`: every tab
+   carries a transparent 1px border for exactly this kind of toggle (see .wt-tab),
+   so the treatment costs no layout and lands on the same --radius-inner corners
+   as every other chip state.
+
+   Scoped through .wt-tab-scroll on purpose, and it is not decoration. A drag
+   reorder exists only inside the desktop scroller, and the extra compound is what
+   carries the rule past the two rungs it has to out-rank without any of the usual
+   tricks: the press rung (.wt-tab:not(.wt-tab-active):active, which a mousedown
+   that starts a drag leaves applied for the whole gesture in Blink, so the slot
+   would otherwise paint as a pressed tab under the dashes), and the per-status
+   dot rules far below, which would otherwise keep the status dot lit inside an
+   outline that is meant to be empty. */
+:where(.wt-root) .wt-tab-scroll .wt-tab.wt-tab-dragging {
+  background: color-mix(in oklch, var(--accent) 12%, transparent);
+  border-color: color-mix(in oklch, var(--accent) 60%, transparent);
+  border-style: dashed;
+}
+
+/* Nothing inside the slot: the outline is the whole message, and the tab's
+   identity is already in the drag image under the pointer. Fading the CONTENT
+   rather than the chip is what keeps the dashes at full strength — an opacity on
+   the chip dimmed the outline along with everything else, which is exactly how
+   the old treatment ended up reading as a faded tab rather than as a gap. The dot
+   is included by inheritance: opacity multiplies onto its glow and ripple
+   pseudo-elements, so one declaration silences the whole dot. */
+:where(.wt-root) .wt-tab-scroll .wt-tab.wt-tab-dragging > * {
+  opacity: 0;
 }
 
 /* ===== Inline rename (tabs feature) =====
