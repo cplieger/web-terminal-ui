@@ -45,6 +45,12 @@
   touch-action: pan-x pan-y;
   font-family: var(--font-mono);
   font-size: 14px;
+  /* The cell height. It is PAIRED with the bundled font's overridden vertical
+     metrics (page.css): a cell's background is painted by an inline span, whose
+     box comes from the font's ascent + descent, so those must stay >= this value
+     or every row boundary shows an unpainted stripe. Changing either number
+     alone reopens that gap. The engine reads this as its cell height
+     (render.ts updateFontMetrics) and sizes the PTY from it. */
   line-height: 17px;
   padding: 4px;
   background: var(--bg);
