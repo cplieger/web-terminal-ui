@@ -21,6 +21,7 @@ const tabs = readFileSync(path.join(cssDir, "30-tabs.css"), "utf8");
 const switcher = readFileSync(path.join(cssDir, "31-switcher.css"), "utf8");
 const primitives = readFileSync(path.join(cssDir, "10-primitives.css"), "utf8");
 const scrollToBottomCss = readFileSync(path.join(cssDir, "21-scroll-to-bottom.css"), "utf8");
+const page = readFileSync(path.join(cssDir, "page.css"), "utf8");
 
 describe("engine-toggled class contract", () => {
   it("styles DECSCNM reverse video (.term-reverse-video) as a default-pair swap", () => {
@@ -58,6 +59,61 @@ describe("engine-toggled class contract", () => {
     expect(body).toContain(".term-link:active");
     // And the hover rule survives for pointers that have one.
     expect(terminal).toContain(".term-link:hover");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The cell-height contract: does the bundled font paint a WHOLE cell?
+//
+// A cell's background is an inline span, and an inline box paints its FONT's
+// content area — ascent + descent — never the line box. So a font whose metrics
+// are shorter than the terminal's line-height leaves an unpainted stripe at
+// every row boundary, and an application drawing a solid column of background
+// (kiro-cli's green and purple block gutters) renders as dashes.
+//
+// This shipped once, in 5.3.0, when the nerd-fonts OTFs were swapped for
+// GitHub's own WOFF2 faces: the swap was gated on horizontal advances, and the
+// new faces declare 0.945em + 0.200em against a 17px cell at 14px — a 1px gap on
+// every row. The fix is the ascent-override/descent-override pair on each face
+// (page.css); this test is what makes the pairing CHECKED rather than
+// remembered, because the two halves live in different files and each looks
+// self-consistent alone. Text-level, like its neighbours: happy-dom applies no
+// CSS, so a rendering assertion is not available here.
+describe("bundled-font cell coverage", () => {
+  /** Reads one declaration out of a rule body as a float, dropping its unit. */
+  const decl = (body: string, prop: string): number | null => {
+    const m = new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([\\d.]+)`).exec(body);
+    return m ? Number.parseFloat(m[1]!) : null;
+  };
+
+  const termRule = /:where\(\.wt-root\)\s*\.term\s*\{([\s\S]*?)\n\}/.exec(terminal);
+  const fontFaces = [...page.matchAll(/@font-face\s*\{([\s\S]*?)\n\}/g)].map((m) => m[1]!);
+
+  it("declares the cell geometry the override is measured against", () => {
+    expect(termRule, ":where(.wt-root) .term rule exists in 02-terminal.css").not.toBeNull();
+    expect(decl(termRule![1]!, "font-size")).toBe(14);
+    expect(decl(termRule![1]!, "line-height")).toBe(17);
+    // Four faces: regular, bold, italic, bold-italic. A face added without the
+    // override is a weight whose backgrounds gap while the others do not.
+    expect(fontFaces).toHaveLength(4);
+  });
+
+  it.each([0, 1, 2, 3])("face %i paints at least a full cell", (i) => {
+    const body = fontFaces[i]!;
+    const fontSize = decl(termRule![1]!, "font-size");
+    const lineHeight = decl(termRule![1]!, "line-height");
+    const ascent = decl(body, "ascent-override");
+    const descent = decl(body, "descent-override");
+    // Read the cell geometry FIRST and refuse a missing value: a null here would
+    // coerce to 0 in the comparison below and pass the assertion vacuously, so
+    // the guard would report green on a stylesheet it never actually read.
+    expect(fontSize, ".term declares font-size").not.toBeNull();
+    expect(lineHeight, ".term declares line-height").not.toBeNull();
+    expect(ascent, "face declares ascent-override").not.toBeNull();
+    expect(descent, "face declares descent-override").not.toBeNull();
+    // Both descriptors are percentages of font-size.
+    const painted = ((ascent! + descent!) / 100) * fontSize!;
+    expect(painted).toBeGreaterThanOrEqual(lineHeight!);
   });
 });
 

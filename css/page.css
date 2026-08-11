@@ -215,13 +215,44 @@ body {
    different typeface per engine (see --label-ink-shift in 00-tokens.css). An
    embedder does not serve these files and never inherits these URLs, so it
    either ships its own @font-face or lets both tokens fall back to the platform
-   monospace stack. */
+   monospace stack.
+
+   EVERY face overrides the font's vertical metrics to 0.995em over the baseline
+   and 0.250em under, and that is load-bearing for the terminal, not taste.
+
+   A cell's background is painted by an inline span, and an inline box paints its
+   FONT's content area, never the line box: at `font-size: 14px` with
+   `line-height: 17px` (02-terminal.css) a font whose ascent + descent is under
+   17px leaves an unpainted stripe between consecutive rows, so an application
+   drawing a solid column of background (kiro-cli's green and purple block
+   gutters) renders as dashes. GitHub's own Monaspace webfont declares
+   ascent 1890/2000 and descent 400/2000 with USE_TYPO_METRICS set, which is
+   0.945em + 0.200em = 16.03px at 14px, and Chromium rounds that to a 16px box
+   inside a 17px row: a 1px gap on every row boundary, measured in the sidecar.
+
+   0.995em + 0.250em is what the nerd-fonts-patched MonaspiceNe NFM OTFs carried
+   until 5.3.0 swapped them for these WOFF2 files (the swap was gated on
+   horizontal advances only, which is how the regression shipped). It rounds to
+   an 18px box, so a row's background overhangs its box by 1px and consecutive
+   rows meet with no seam — and the baseline does not move (13px from the row's
+   top edge, before and after), so no glyph shifts by restoring it. It is also
+   the metric pair the rest of this package is already tuned and documented
+   against: --label-ink-shift's sawtooth and ink-centre.ts both derive from
+   0.995em / 0.250em by name.
+
+   Do not "modernise" these away, and do not close the gap by lowering
+   `line-height` instead: that shrinks the cell, so it changes how many rows fit
+   a viewport and what the engine reports to the PTY. If a Monaspace bump ever
+   changes the outlines enough that a 0.995em ascent clips them, re-measure both
+   halves together — the terminal needs ascent + descent >= the cell height. */
 @font-face {
   font-family: "Monaspace Neon NF";
   src: url("/vendor/fonts/MonaspaceNeonNF-Regular.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
   font-display: block;
+  ascent-override: 99.5%;
+  descent-override: 25%;
 }
 
 @font-face {
@@ -230,6 +261,8 @@ body {
   font-weight: 700;
   font-style: normal;
   font-display: block;
+  ascent-override: 99.5%;
+  descent-override: 25%;
 }
 
 @font-face {
@@ -238,6 +271,8 @@ body {
   font-weight: 400;
   font-style: italic;
   font-display: block;
+  ascent-override: 99.5%;
+  descent-override: 25%;
 }
 
 @font-face {
@@ -246,4 +281,6 @@ body {
   font-weight: 700;
   font-style: italic;
   font-display: block;
+  ascent-override: 99.5%;
+  descent-override: 25%;
 }
