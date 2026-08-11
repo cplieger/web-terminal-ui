@@ -64,6 +64,24 @@
     padding var(--dur-enter) var(--ease-standard);
 }
 
+/* The switcher's frosting hand-off (the blur state rules live in
+   31-switcher.css: viewport-collapsed = none, expanded/container = blurred).
+   Asymmetric by design: ON instantly at expand — terminal content appears
+   behind the tray at once — and OFF only after the tray's collapse above has
+   run, or the shrinking tray would lose its frosting while still over the
+   terminal. The off-delay equals the collapse duration (--dur-enter). The
+   near-zero 0.01s duration is a delayed switch, not a visible fade (and the
+   reduced-motion reset in 01-scope.css flattens durations, not delays, so the
+   late switch-off survives there too — invisible over the flat viewport
+   background either way). */
+:where(.wt-root.wt-animate.wt-narrow) .wt-switcher {
+  transition: backdrop-filter 0.01s linear var(--dur-enter);
+}
+
+:where(.wt-root.wt-animate.wt-narrow) .wt-switcher.wt-switcher-expanded {
+  transition: backdrop-filter 0.01s linear;
+}
+
 /* When the tab list expands, the keyboard button collapses to zero width and
    fades (the key grid is closed in JS); the active row flex-grows into the freed
    space in lockstep as the button's width animates. */

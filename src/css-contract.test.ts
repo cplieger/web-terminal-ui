@@ -129,14 +129,19 @@ describe("activity-dot vocabulary (the OSC 9 states)", () => {
 
   it("gives warning and failed working's exact animation, and no ring", () => {
     // One progress indicator with several states: one shared rule, one shared
-    // pair of keyframes, hue the only difference. A ring would be a lie — the
-    // frozen ring is input's exclusive "blocked, waiting on you".
+    // overlay, one shared pair of keyframes, hue the only difference. A ring
+    // would be a lie — the frozen ring is input's exclusive "blocked, waiting
+    // on you".
     const shared =
       /\[data-status="working"\],\s*:where\(\.wt-root\) \.wt-status-dot\[data-status="warning"\],\s*:where\(\.wt-root\) \.wt-status-dot\[data-status="failed"\]\s*\{([^}]*)\}/.exec(
         tabs,
       );
     expect(shared, "working/warning/failed share one paint rule").not.toBeNull();
-    expect(shared![1]).toContain("animation: wt-working-glow");
+    // The disc is STATIC and promoted to its own compositing layer (nested
+    // overlay/wave layers snap to device pixels WITH it, not independently —
+    // the off-centre-pulse bug); the beat lives on the ::before overlay.
+    expect(shared![1]).toContain("transform: translateZ(0)");
+    expect(shared![1]).not.toContain("animation");
     expect(shared![1]).not.toContain("box-shadow");
     for (const state of ["warning", "failed"]) {
       // The ONE difference, as its own single-declaration rule.
@@ -144,6 +149,24 @@ describe("activity-dot vocabulary (the OSC 9 states)", () => {
         `:where(.wt-root) .wt-status-dot[data-status="${state}"] {\n  --dot-color: var(--status-${state});\n}`,
       );
     }
+    // The glow beat: a shared compositor-only overlay — opacity keyframes on a
+    // pre-painted bright radial whose edge is FEATHERED (a hard edge shows any
+    // half-pixel layer snap as an off-centre pulse at 9px).
+    const overlay =
+      /\[data-status="working"\]::before,\s*:where\(\.wt-root\) \.wt-status-dot\[data-status="warning"\]::before,\s*:where\(\.wt-root\) \.wt-status-dot\[data-status="failed"\]::before\s*\{([^}]*)\}/.exec(
+        tabs,
+      );
+    expect(overlay, "working/warning/failed share one glow overlay").not.toBeNull();
+    expect(overlay![1]).toContain("animation: wt-working-glow");
+    expect(overlay![1]).toContain("radial-gradient");
+    expect(overlay![1]).toContain("color-mix(in oklch, var(--dot-color) 78%, #fff)");
+    // The keyframes animate OPACITY only — never a paint property, which would
+    // silently reintroduce the per-frame repaint this shape exists to remove.
+    const beat = /@keyframes wt-working-glow\s*\{([\s\S]*?)\n\}/.exec(tabs);
+    expect(beat, "wt-working-glow keyframes exist").not.toBeNull();
+    expect(beat![1]).toContain("opacity");
+    expect(beat![1]).not.toContain("background");
+    expect(beat![1]).not.toContain("border");
     // The travelling wave is shared too, and takes its hue from the same variable.
     expect(tabs).toContain('[data-status="warning"]::after');
     expect(tabs).toContain('[data-status="failed"]::after');
@@ -168,9 +191,11 @@ describe("activity-dot vocabulary (the OSC 9 states)", () => {
     expect(reduced).not.toBeNull();
     const body = reduced?.[1] ?? "";
     for (const state of ["working", "warning", "failed"]) {
-      // Both halves: the donut treatment (the state appears in the rule's
-      // selector list) and the removal of the wave layer.
+      // All three halves: the donut treatment (the state appears in the rule's
+      // selector list) and the removal of BOTH animated layers — the glow
+      // overlay (::before) and the wave (::after).
       expect(new RegExp(`\\[data-status="${state}"\\](,|\\s*\\{)`).test(body), state).toBe(true);
+      expect(body, state).toContain(`[data-status="${state}"]::before`);
       expect(body, state).toContain(`[data-status="${state}"]::after`);
     }
     // The dot is invisible without .wt-reports, whatever its status.

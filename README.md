@@ -25,8 +25,12 @@ terminal:
   needs-input / exited) from the server's status stream
 - a **mobile key toolbar** (Tab / Esc / arrows / Enter / sticky-Ctrl) and a
   scroll-to-bottom control
-- a **context menu** (Copy / Select All / Paste), reachable by right-click and
-  by long-press on touch
+- a **context menu** (Copy / Select All / Paste), on a right-click and on a
+  touch long-press. Paste is the reason it exists: the keyboard target is a
+  hidden `<textarea>`, so no platform can offer a native paste over the output.
+  On touch the platform keeps its long-press — word selection and the OS copy
+  callout run untouched, and the menu appears on release only when the press
+  selected nothing
 - **predictive local echo**, **IME / composition** (CJK, dictation,
   autocorrect), and **viewport + keyboard-inset** handling for the iOS soft
   keyboard, rotation, and font-load reflows
@@ -160,15 +164,17 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
 
 ### Options
 
-| Option         | Default                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| -------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `features`     | _(none; bare kernel)_      | A FUNCTION returning the feature list. Omitted builds only the terminal (no chrome). Pass a preset by name (`features: presetTabbed`) or a factory of your own; it is called inside the startup-failure boundary, so a preset that throws is handled rather than escaping.                                                                                                                                                                                                                                                                                                                |
-| `layout`       | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                                                                                                                                                                                                                                                                                                            |
-| `wsPath`       | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `fontReady`    | `'14px "MonaspiceNe NFM"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `loading`      | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `onFatalError` | _(built-in recovery)_      | Called with a `TerminalStartupFailure` after a fatal startup failure, in either phase (`feature-setup` or `kernel-init`); behavior below.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `theme`        | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input`, `--status-warning`, `--status-failed`. The library ships neutral defaults. If you retheme the animated trio (`--status-working` / `--status-warning` / `--status-failed`), keep their LIGHTNESS spread: they differ only in hue, so equal-lightness replacements collapse into one another in greyscale and under deuteranopia. |
+| Option              | Default                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `features`          | _(none; bare kernel)_      | A FUNCTION returning the feature list. Omitted builds only the terminal (no chrome). Pass a preset by name (`features: presetTabbed`) or a factory of your own; it is called inside the startup-failure boundary, so a preset that throws is handled rather than escaping.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `layout`            | `"viewport"`               | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `wsPath`            | `"/ws"`                    | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `fontReady`         | `'14px "Monaspace Neon NF"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `scrollbackLines`   | _(engine default)_         | Retained scrollback lines per terminal — and per tab under the tabs feature (every per-tab cache is built through the same budget). This is the page's dominant memory dial: it bounds the styled-run arrays each session retains AND the DOM rows the renderer keeps (one row element per retained line), so a memory-constrained host (iOS Safari, where the content process is reclaimed under system pressure) passes a smaller budget at the price of a shorter scroll-back. A history budget floored at the live screen: the engine never evicts the current window, so a value at or below the terminal height keeps the full screen with no scrollback — but choose a value comfortably above the largest expected terminal height (a few multiples), since near or below it the batched eviction degrades to per-line churn. Non-integer or non-positive values are ignored. Left unset, the engine decides, and it decides twice: 5000 against a server that cannot serve history back, dropping to a 1500-line resident tail plus an on-demand cache once a server declares demand-paged scrollback. Prefer leaving it unset — the depth then lives on the server and the phone holds a working set. An explicit value opts OUT of that flip: it is an explicit memory decision and holds in both states.                                 |
+| `persistScrollback` | _(off)_                    | Persist each session's scrollback across a page discard, through storage YOU supply. A page that is discarded and reloaded otherwise resumes holding nothing, so it asks the server for everything and refills its whole buffer over the wire — the normal case on iOS, where Safari evicts backgrounded tabs under memory pressure and returning to one re-runs the page. With a snapshot restored, the resume asks only for what was printed while the tab was gone. It helps the FRESH-LOAD case only: a warm reconnect and an in-page tab switch already replay nothing. Off by default because `localStorage` is a shared, origin-wide, quota-limited resource and this library is embedded in applications that keep their own state there — an application decides durability for its own users, a library does not decide it for an embedder. Applies to a single terminal and to every tab alike. See below. |
+| `loading`           | _(none)_                   | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `onFatalError`      | _(built-in recovery)_      | Called with a `TerminalStartupFailure` after a fatal startup failure, in either phase (`feature-setup` or `kernel-init`); behavior below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `theme`             | _(none)_                   | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input`, `--status-warning`, `--status-failed`. The library ships neutral defaults. If you retheme the animated trio (`--status-working` / `--status-warning` / `--status-failed`), keep their LIGHTNESS spread: they differ only in hue, so equal-lightness replacements collapse into one another in greyscale and under deuteranopia.                                                                                                                                                                                                                                                                                                                             |
 
 `createTerminal()` returns a handle: `focus()` re-focuses the terminal input
 (and opens the soft keyboard on touch); `send(bytes)` sends bytes to the active
@@ -177,6 +183,138 @@ for a "type this command" affordance); `reset()` drops the local scrollback and
 screen without injecting keystrokes (send a redraw keystroke yourself if you
 want one, for example Ctrl+L); and `destroy()` tears every feature down and
 releases the kernel.
+
+### Persisting scrollback across a discard
+
+`persistScrollback` takes the storage, not a switch, because storage is a
+decision this library should not make for you. Chrome's page-lifecycle guidance
+is to close IndexedDB connections on freeze, since a held connection costs
+bfcache eligibility — and this kernel depends on bfcache, so it must not own a
+database. `localStorage` is also a shared, origin-wide, ~5 MB resource, and this
+package is embedded in applications that keep their own state there: consuming it
+uninvited would risk the host's writes failing, and how that degrades is theirs to
+design. Ours degrades gracefully — nothing restored, terminal unaffected.
+
+So the option is off until you pass storage, and `localScrollbackStorage()` is the
+ready-made answer for consumers who want the ordinary one — one import, and it
+handles the quota sweep, the age bound and the `localStorage`-unavailable case:
+
+```ts
+import { createTerminal, localScrollbackStorage, presetTabbed } from "@cplieger/web-terminal-ui";
+
+createTerminal("#terminal", {
+  features: presetTabbed,
+  persistScrollback: localScrollbackStorage(),
+});
+```
+
+All three reference apps (web-terminal-kiro, web-terminal-server, vibekit's shell
+panel) enable it that way; web-terminal-server additionally exposes an operator
+opt-out, because it runs a command its operator chooses.
+
+Supply your own storage instead when the snapshots belong somewhere else — a shared
+IndexedDB, a server round-trip, an in-memory cache for a test. The rest of this
+section is that case:
+
+```ts
+import { createTerminal } from "@cplieger/web-terminal-ui";
+import type { PersistedScrollback } from "@cplieger/web-terminal-ui";
+
+// Read your snapshots into memory BEFORE mounting; see the note below.
+const cache = new Map<string, PersistedScrollback>(await loadAllFromIndexedDB());
+
+createTerminal("#terminal", {
+  features: presetTabbed,
+  persistScrollback: {
+    load: (sessionId) => cache.get(sessionId) ?? null,
+    save: (sessionId, entry) => {
+      cache.set(sessionId, entry);
+      void writeToIndexedDB(sessionId, entry); // fire and forget
+    },
+    drop: (sessionId) => {
+      cache.delete(sessionId);
+      void deleteFromIndexedDB(sessionId);
+    },
+  },
+});
+```
+
+`load` is synchronous, which is the one constraint worth understanding rather
+than working around: a restore has to be in place before the resume announces
+what the client already holds, and a resume cannot be taken back. A store
+hydrated after that has already lost the argument. So an asynchronous store is
+read into memory first — which is also the shape that holds no database
+connection open.
+
+`sessionId` is a real session id, never a key of your invention: the id the tabs
+feature uses, or — for a single terminal — the engine's own per-tab id. That is
+load-bearing rather than tidy, because the same id is what the persisted server
+boot epoch is checked against. Prefix it however you like inside your storage.
+
+Knobs, all optional. On the option itself: `lines` (default 200) bounds how much of
+each session's tail is written, `maxAgeMs` (default 7 days) bounds how long an entry
+may be used, and `saveIntervalMs` (default 10s) sets the background save cadence.
+`localScrollbackStorage` adds `prefix` and `maxBytes` (default 512 KiB of
+characters, roughly 1 MiB of quota since `localStorage` is accounted in UTF-16 —
+about a fifth of the ~5 MiB floor, leaving the rest to the host application).
+
+The 200-line default is a measurement rather than a guess: VS Code's own
+`terminal.integrated.persistentSessionScrollback` restores 100 lines by default, and
+at 200 a coloured session serialises to ~60 K characters in under a millisecond,
+against ~300 K and ~4 ms at 1000. A write happens on every backgrounding and on a
+timer while output advances, so that cost is paid repeatedly on the device this
+exists for.
+
+The library writes on `visibilitychange` to hidden, on `pagehide`, on `destroy()`,
+and on that timer — in every case only for a session whose content has advanced
+since its last recorded save. That predicate is not an optimisation: two pages of
+the same app hold the same session ids, and an unconditional write let a background
+page roll a foreground page's newer entry back. `pagehide` is documented as not
+guaranteed, which is why the timer exists.
+
+Every callback may throw or return nonsense without consequence — a failure
+degrades to "nothing was restored", exactly as if the option were absent. An
+entry is also discarded, and dropped, when it is too old, unreadable, or from a
+different server process: absolute line indices only mean anything within one
+server boot, so an entry that cannot be checked against the live server is
+thrown away rather than shown. A slow restore is a much better failure than a
+terminal that is confidently wrong.
+
+No permission prompt is involved: `localStorage` is not in the Permissions API, so
+there is nothing for a user to grant or refuse. (`navigator.storage.persist()` is
+the call that can prompt, and this library never makes it — these snapshots are
+disposable by design, so asking a user to exempt them from eviction would be asking
+for the wrong thing.) Storage can still be _unavailable_ with no prompt either way,
+and the failures differ: a browser set to block site data makes
+`window.localStorage` **throw on access** (Chrome, Firefox), while Safari
+historically allowed access in private browsing and threw on the **write**; Firefox
+can clear it on close; Safari's ITP evicts script-writable storage after seven days
+without interaction; and a cross-origin iframe embed gets **partitioned, ephemeral**
+storage rather than the top-level origin's (all three engines partition; Safari has
+the strictest lifetime). `localScrollbackStorage` guards access as well as writes, so
+the read side always degrades to "nothing restored" and the terminal is unaffected; a
+refused write is reported instead, so the library never records a save that did not
+happen.
+
+Cleanup, since a store that only ever writes fills up. Four mechanisms, and the
+first is the one that matters day to day: the kernel calls `drop` when a session
+closes, so a tab the user closes — or one the server reaps while the page is open —
+takes its entry with it. On top of that, an entry past `maxAgeMs` is deleted when it
+is next read; `localScrollbackStorage` sweeps both at construction and after every
+write (expired entries first, then the oldest until the byte budget fits); and a
+rejected entry is always dropped rather than left to be re-read. What no mechanism
+can catch promptly is a session that disappeared while the page was CLOSED — nothing
+runs then, and there is no reliable "this tab is closing for good" event to hook — so
+that case is the sweep's, which is why a budget exists rather than the age bound
+alone.
+
+The budget is bytes rather than an entry count deliberately, because a count bounds
+the wrong thing. Measured on the real stored value at the 200-line default, a plain
+80-column session is ~24 K characters and a wide coloured one ~112 K, so a 20-entry
+allowance would have permitted over 4 MiB of a ~5 MiB quota — the cap would have
+guaranteed the refusal it was meant to prevent. A single snapshot larger than the
+whole budget is refused outright rather than evicting everything for something that
+still would not fit.
 
 ### Themes that provably apply
 

@@ -8,7 +8,13 @@
 // reads it through a typed token.
 
 import type { LoadingMessages } from "./loading-status.js";
-import type { ScreenMessage, ModesMessage, LineStore } from "@cplieger/web-terminal-engine";
+import type {
+  ScreenMessage,
+  ModesMessage,
+  LineStore,
+  StoreSnapshot,
+  ViewMemory,
+} from "@cplieger/web-terminal-engine";
 
 /** Cancels a subscription or registration. Idempotent by convention. */
 export type Unsubscribe = () => void;
@@ -81,12 +87,29 @@ export interface RenderHandle {
   setPredictedCursor(row: number, col: number, active: boolean): void;
   getCursorPx(): { left: number; top: number; cellH: number };
   computeSize(): { cols: number; rows: number };
-  /** Point the renderer at a store and rebuild from it (tabs, on switch). */
-  bind(store: LineStore): void;
+  /** Point the renderer at a store and rebuild from it (tabs, on switch).
+   *  `opts.view` is the per-view scroll memory captureViewMemory() returned when
+   *  this store was last active, and passing it makes the swap ATOMIC: the
+   *  follow half is adopted synchronously (so the first flush's bottom pin is
+   *  gated on the INCOMING view, not the outgoing one) and the position half is
+   *  re-asserted across the rebuild's frames until the row it names is built.
+   *  Omitting it keeps the pre-3.8 behavior. */
+  bind(store: LineStore, opts?: { view?: ViewMemory | null }): void;
+  /** Capture the current view as per-view scroll memory: the absolute LINE at
+   *  the viewport top plus its on-screen offset, not a pixel scrollTop. Null
+   *  when there is nothing to remember (no content rows, or the alternate
+   *  screen is active). Pairs with bind's `opts.view`. */
+  captureViewMemory(): ViewMemory | null;
   /** The store the renderer is currently bound to. */
   boundStore(): LineStore;
   /** Highest absolute line index the active store holds (-1 if empty). */
   getHighestIndex(): number;
+  /** Rows queued for a DOM (re)build but not yet built: non-zero means the
+   *  surface is still materializing content the store already holds. Reaches
+   *  zero between a replay's chunks, so it is a "this frame's backlog is
+   *  drained" signal, not "the restore finished arriving" — pair it with the
+   *  resume bounds for the latter. */
+  pendingRowCount(): number;
 }
 
 /** The scroll methods features may drive. */
@@ -98,8 +121,25 @@ export interface ScrollHandle {
    *  features go through this seam, never the DOM element (engine >= v3). */
   currentScrollTop(): number;
   /** Restore a saved offset; follow/hold re-derives from the resulting scroll
-   *  event exactly as for a user scroll — the write half of scroll memory. */
+   *  event exactly as for a user scroll — the write half of scroll memory.
+   *
+   *  @deprecated A pixel offset cannot identify a reading position: replayed
+   *  into a surface whose rows are still building it is silently clamped, and
+   *  replayed into one whose content grew it points at a different line. Use
+   *  render.captureViewMemory() + render.bind(store, { view }), which restore a
+   *  LINE. Removed in the next major. */
   restoreScrollTop(top: number): void;
+  /** Restore an offset AND its follow state together, which is the only way to
+   *  express "holding at the bottom" (a content shrink clamps a scrolled-up reader
+   *  there without engaging follow, so position alone cannot say it).
+   *
+   *  NOT the per-view scroll-memory API: this is still a PIXEL offset, with the
+   *  same defect as `restoreScrollTop` above — a rebuild clamps it and a tab whose
+   *  content grew while backgrounded lands on a different line. `render.bind(store,
+   *  { view })` with `render.captureViewMemory()` is what a consumer wants; the
+   *  engine calls this internally from that path. Declared here because it is part
+   *  of the engine's scroll surface, not because a consumer should reach for it. */
+  restoreView(view: { top: number; following: boolean }): void;
 }
 
 // --- Typed event bus payloads (section 22.4) ---
@@ -236,6 +276,22 @@ export interface TerminalContext {
   loadingReason(message: string): void;
   /** The kernel's tablist/tabpanel ARIA controller (used by tabs). */
   tablist(): TablistController;
+
+  /** Construct a LineStore honoring the terminal's configured retained-line
+   *  cap (`CreateTerminalOptions.scrollbackLines`; engine default when unset).
+   *  A feature that keeps per-session stores (tabs' switching cache) creates
+   *  every store through this factory, so ONE consumer option governs the
+   *  kernel's implicit store and every per-tab store alike — the two cannot
+   *  drift.
+   *
+   *  Pass the session id the store belongs to. It is optional only so an
+   *  existing feature keeps compiling; a feature that owns sessions should
+   *  always pass it, because it is what lets the kernel return a store HYDRATED
+   *  from `CreateTerminalOptions.persistScrollback` (and register it for
+   *  saving). Omitting it yields a correct but always-empty store, so that
+   *  feature's sessions silently opt out of persistence — the kernel warns once
+   *  when persistence is enabled and an id is withheld. */
+  newLineStore(sessionId?: string): LineStore;
 
   /** The current layout facts a feature keys touch-vs-desktop behavior on.
    *  `narrow` is a ROOT compact in EITHER dimension against the kernel's
@@ -379,6 +435,97 @@ export type TerminalStartupFailure =
       readonly surface: HTMLElement | undefined;
     };
 
+/** One stored scrollback entry: the engine's store snapshot plus the timestamp
+ *  the library stamps on it.
+ *
+ *  The timestamp is the library's, not the consumer's, because the maximum age
+ *  is ENFORCED here rather than documented as someone else's job. The case that
+ *  motivates persisting at all — iOS discarding a backgrounded tab — is exactly
+ *  the case where no "closed cleanly" path ever runs, so without an age bound
+ *  the consumer's storage accumulates snapshots for sessions that stopped
+ *  existing weeks ago. A rejected entry is also dropped through
+ *  `ScrollbackPersistence.drop`, which makes collection-on-access automatic; a
+ *  consumer that wants to sweep proactively has `savedAt` to sweep by. */
+export interface PersistedScrollback {
+  /** `Date.now()` when the library wrote this entry. */
+  readonly savedAt: number;
+  /** The engine's plain-data store snapshot (structuredClone-safe). */
+  readonly snapshot: StoreSnapshot;
+}
+
+/** The consumer-supplied storage seam for scrollback persistence
+ *  (`CreateTerminalOptions.persistScrollback`).
+ *
+ *  Storage is the CONSUMER's, deliberately, for two reasons. Chrome's
+ *  page-lifecycle guidance is to close IndexedDB connections on freeze because a
+ *  held connection affects bfcache eligibility, and this library depends on
+ *  bfcache (it reconnects and re-measures on `pageshow`) — so the library must
+ *  not own a database. And terminal scrollback contains secrets while browser
+ *  storage has no meaningful at-rest protection, which makes "where does this
+ *  live, and for how long" a decision for the application, not its terminal
+ *  widget.
+ *
+ *  `sessionId` is a real session id, never a key of the consumer's invention:
+ *  the same id the tabs feature uses, or — for a single unmanaged terminal — the
+ *  engine's per-tab id from `connection.currentSessionId()`. That is load-bearing
+ *  rather than tidy, because the id is also what the persisted server epoch is
+ *  adopted against. A consumer may of course prefix it inside its own storage.
+ *
+ *  `load` is SYNCHRONOUS, which is a real constraint and worth understanding
+ *  before fighting it: hydration has to complete before the resume goes out, and
+ *  a resume is not restartable — a store hydrated after `haveThrough` was sent
+ *  has already lost the argument. A consumer whose storage is asynchronous
+ *  (IndexedDB) reads its snapshots into memory before calling `createTerminal`
+ *  and answers from there, which is also the shape that holds no database
+ *  connection open.
+ *
+ *  Every callback may throw or return nonsense without consequence: the library
+ *  treats any failure as "nothing was restored" and takes a full resume, exactly
+ *  as if persistence were switched off. */
+export interface ScrollbackPersistence {
+  /** Return the stored entry for a session, or null/undefined when there is
+   *  none. Called once per session, before that session connects. */
+  load(sessionId: string): PersistedScrollback | null | undefined;
+  /** Store an entry, replacing any previous one for the session.
+   *
+   *  THROW when nothing was persisted (over quota, storage revoked, an entry the
+   *  store refuses). Returning normally is taken as "this is on disk" and records
+   *  a watermark against it; a failure reported that way made the library skip the
+   *  session until its output advanced again, which is how persistence stopped
+   *  silently. A throw is caught, warned once, and retried on the next pass. */
+  save(sessionId: string, entry: PersistedScrollback): void;
+  /** Delete a session's entry. Called when a tab is closed, and when the
+   *  library rejects a stored entry (too old, unusable, or unverifiable), so a
+   *  bad or expired entry is not re-read on every load. */
+  drop(sessionId: string): void;
+  /** Newest lines to persist per session (default 200).
+   *
+   *  A bound rather than the whole store because the cost is a repeated
+   *  serialize-and-store on a device that may already be under memory pressure,
+   *  and because the screen plus recent history is what a returning user needs.
+   *  The default follows the nearest precedent — VS Code's
+   *  `terminal.integrated.persistentSessionScrollback` restores 100 lines — with
+   *  headroom, and against measurement: 200 lines is ~60 K characters of a
+   *  coloured session and serialises in under a millisecond, where 1000 is ~300 K
+   *  and ~4 ms, paid on every backgrounding and every timer tick while output
+   *  advances. The depth NOT kept is reported honestly after hydration: the store
+   *  shows its "earlier output trimmed" marker rather than implying the buffer is
+   *  complete. Non-integer or non-positive values are ignored. */
+  lines?: number;
+  /** Maximum age of a stored entry (default 7 days). An entry outside this is
+   *  neither loaded nor kept. Distance in EITHER direction counts, so a phone
+   *  whose clock moved cannot leave an entry that never expires. */
+  maxAgeMs?: number;
+  /** Interval for the background save while content is changing (default 10s).
+   *
+   *  `visibilitychange` to hidden and `pagehide` are the last reliable callbacks
+   *  before a discard and the library writes on both, but Chrome's page-lifecycle
+   *  documentation is explicit that `pagehide` is not guaranteed. The timer is
+   *  what makes a killed tab have a recent-enough snapshot rather than none. It
+   *  skips sessions whose content has not advanced since their last save. */
+  saveIntervalMs?: number;
+}
+
 /** Options for createTerminal. */
 export interface CreateTerminalOptions {
   /** The feature list, as a FUNCTION that produces it; omitted means the bare
@@ -406,6 +553,64 @@ export interface CreateTerminalOptions {
   wsPath?: string;
   /** CSS font shorthand awaited before the first resize. */
   fontReady?: string;
+  /** Retained scrollback lines per terminal (and per tab under the tabs
+   *  feature) — the client-side line cap; the engine's default is 5000.
+   *
+   *  This is the page's dominant memory dial: the cap bounds both the styled
+   *  run arrays each store retains AND the DOM rows the renderer keeps (one
+   *  `div.term-row` per retained line, no offscreen virtualisation), which in
+   *  turn bounds the height of the scrolled-contents layer the browser
+   *  composites. It is a HISTORY budget floored at the live screen: the
+   *  engine never evicts the current window's rows, so a value at or below
+   *  the terminal height keeps the full screen and simply retains no
+   *  scrollback. Choose a value comfortably above the largest expected
+   *  terminal height (a few multiples of it): near or below the height,
+   *  batched eviction has no history headroom to work with and degrades
+   *  back to per-line eviction — the screen stays correct, but the churn
+   *  the batching exists to remove returns. A memory-constrained consumer (iOS Safari, where the content
+   *  process is a jetsam victim under system pressure) passes a smaller
+   *  budget; scrolling back then reaches fewer lines, so this is a consumer
+   *  policy choice, not a tuning knob the library second-guesses. Applies to
+   *  the kernel's implicit store (via the engine renderer) and to every store
+   *  created through `ctx.newLineStore()` (the tabs switching cache).
+   *  Non-integer or non-positive values are ignored. */
+  scrollbackLines?: number;
+  /** Persist each session's scrollback across a page discard, through storage
+   *  the CONSUMER supplies. Omitted means off, which is the default on purpose.
+   *
+   *  What it fixes: a page that is discarded and reloaded otherwise resumes
+   *  holding nothing, so it asks the server for everything and refills its whole
+   *  buffer over the wire. On iOS that is the normal case rather than an edge
+   *  case — Safari evicts backgrounded tabs under memory pressure and returning
+   *  to one re-runs the page — and the refill is both slow and visible. With a
+   *  snapshot restored, the resume asks only for what was printed while the tab
+   *  was gone.
+   *
+   *  Scope it honestly: this helps the FRESH-LOAD case only. A warm reconnect and
+   *  an in-page tab switch already replay nothing, because their stores never
+   *  went away.
+   *
+   *  Off by default, and the default is the LIBRARY's rather than a
+   *  recommendation. `localStorage` is a shared, origin-wide, quota-limited
+   *  resource, and this package is embedded in host applications that keep their
+   *  own state there; consuming it uninvited would risk the embedder's writes
+   *  failing, whose degradation is theirs to design and not ours to assume. Our
+   *  own failure under quota pressure is graceful (nothing restored, terminal
+   *  unaffected). An application decides durability for its own users; a library
+   *  does not decide it for an embedder who never asked. All three reference apps
+   *  DO enable it — see `localScrollbackStorage`, which is the ready-made answer.
+   *
+   *  Note for a consumer weighing it: enabling this writes terminal output where
+   *  it is readable from that browser without reaching the server and outlives the
+   *  tab (bounded by a per-session delete on close and a seven-day expiry). No
+   *  permission prompt is involved — `localStorage` needs none — and a browser
+   *  that blocks site data simply restores nothing.
+   *
+   *  It applies to the whole terminal, not one composition: the kernel's implicit
+   *  store (a single unmanaged terminal) and every store a session-owning feature
+   *  creates through `ctx.newLineStore(sessionId)` (the tabs cache) are both
+   *  hydrated and both saved. */
+  persistScrollback?: ScrollbackPersistence;
   /** Optional pre-JS loading overlay the kernel fades out on first paint. Give
    *  it the `wt-loading` class and a `wt-loading-bar` child and css/page.css
    *  styles it; the kernel also writes a progressive status line into it while

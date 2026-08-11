@@ -3,9 +3,10 @@ import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vite
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as ViewportModule from "./viewport.js";
 
-const { isUserScrolledUp, scrollToBottom } = vi.hoisted(() => ({
+const { isUserScrolledUp, scrollToBottom, stickToBottom } = vi.hoisted(() => ({
   isUserScrolledUp: vi.fn<() => boolean>(() => false),
   scrollToBottom: vi.fn(),
+  stickToBottom: vi.fn(),
 }));
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
@@ -15,6 +16,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
     scroll: {
       isUserScrolledUp,
       scrollToBottom,
+      stickToBottom,
       init: vi.fn(),
       suppressScroll: vi.fn(),
       isInUserScroll: vi.fn(() => false),
@@ -40,13 +42,14 @@ beforeEach(async () => {
   vi.advanceTimersByTime(SETTLE_MS + 50);
   onSettled.mockClear();
   scrollToBottom.mockClear();
+  stickToBottom.mockClear();
 });
 afterEach(() => {
   vi.useRealTimers();
 });
 
 describe("viewport: settle lifecycle", () => {
-  it("fires onSettled once SETTLE_MS after the last viewport event and snaps to bottom", () => {
+  it("fires onSettled once SETTLE_MS after the last viewport event and pins to the bottom", () => {
     isUserScrolledUp.mockReturnValue(false);
     window.dispatchEvent(new Event("resize"));
     vi.advanceTimersByTime(SETTLE_MS - 1);
@@ -54,7 +57,10 @@ describe("viewport: settle lifecycle", () => {
     vi.advanceTimersByTime(1);
     expect(onSettled).toHaveBeenCalledTimes(1);
     expect(onSettled).toHaveBeenCalledWith(true);
-    expect(scrollToBottom).toHaveBeenCalledTimes(1);
+    // Pins, never forces: stickToBottom respects the follow state, whereas
+    // scrollToBottom would OVERRIDE it, which is not this handler's decision.
+    expect(stickToBottom).toHaveBeenCalledTimes(1);
+    expect(scrollToBottom).not.toHaveBeenCalled();
   });
 
   it("coalesces a burst of events into a single settle (debounce)", () => {
@@ -69,13 +75,41 @@ describe("viewport: settle lifecycle", () => {
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
 
-  it("does not snap to bottom when the user was scrolled up at the start of the burst", () => {
+  it("does not pin when the user is scrolled up at settle time", () => {
     isUserScrolledUp.mockReturnValue(true);
     window.dispatchEvent(new Event("resize"));
     vi.advanceTimersByTime(SETTLE_MS);
     expect(onSettled).toHaveBeenCalledTimes(1);
     expect(onSettled).toHaveBeenCalledWith(false);
+    expect(stickToBottom).not.toHaveBeenCalled();
+  });
+
+  it("does not drag down a user who scrolled up DURING the burst", () => {
+    // The regression this settle-time read exists to prevent. Every viewport
+    // event re-arms the timer without re-reading, and on iOS a wake or keyboard
+    // slide emits a stream of them, so a latch captured when the burst STARTED
+    // stayed true across the user scrolling up and then snapped them to the
+    // bottom. Reading at settle is the whole fix.
+    isUserScrolledUp.mockReturnValue(false); // at the bottom when the burst starts
+    window.dispatchEvent(new Event("resize"));
+    vi.advanceTimersByTime(100);
+    window.dispatchEvent(new Event("resize")); // the burst continues (iOS)
+    isUserScrolledUp.mockReturnValue(true); // ... and the user scrolls up to read
+    vi.advanceTimersByTime(SETTLE_MS);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(onSettled).toHaveBeenCalledWith(false);
+    expect(stickToBottom).not.toHaveBeenCalled();
     expect(scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it("reports a transition in flight so a caller can withhold a provisional measurement", () => {
+    expect(viewport.isInTransition()).toBe(false);
+    window.dispatchEvent(new Event("resize"));
+    expect(viewport.isInTransition()).toBe(true);
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    expect(viewport.isInTransition()).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(viewport.isInTransition()).toBe(false);
   });
 });
 

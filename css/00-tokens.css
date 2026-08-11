@@ -134,14 +134,14 @@
      asymmetry as a known constant (--label-ink-shift below), and an unknown
      font has no constant, so no value could ever be right on both.
 
-     MonaspiceNe NFM is already served at /vendor/fonts by every full-page host
+     Monaspace Neon NF is already served at /vendor/fonts by every full-page host
      (page.css declares the faces, the Dockerfiles ship the files), so this adds
      no download. A consumer serving a component-only manifest has no face for
      this family and falls back to the platform monospace — and also ships no tab
      strip (MANIFEST.touch excludes 30-tabs.css), so nothing metric-dependent
      rides on that fallback. */
-  --font-ui: "MonaspiceNe NFM", ui-monospace, monospace;
-  --font-mono: "MonaspiceNe NFM", monospace;
+  --font-ui: "Monaspace Neon NF", ui-monospace, monospace;
+  --font-mono: "Monaspace Neon NF", monospace;
   /* How far a chip label's INK sits below its line box's centre, so flex
      centring can be corrected by exactly that much (see .wt-tab-label in
      30-tabs.css).

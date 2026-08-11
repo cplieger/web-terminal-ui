@@ -1,50 +1,57 @@
-// contextMenu feature: the right-click / long-press menu (Copy, Select All,
-// Paste) rendered into the overlay region (design section 22.4). Copy/Paste are
-// offered only when the clipboard feature is present (ctx.use), routing Paste
-// through the kernel's sanitizing funnel. Escape-to-close goes through the
-// kernel keydown intercept; outside-click is a document gesture.
+// contextMenu feature: the Copy / Select All / Paste menu for the terminal
+// surface (design section 22.4), rendered into the overlay region. Copy and Paste
+// need the clipboard feature (ctx.use), and Paste routes through the kernel's
+// sanitizing funnel. Escape-to-close goes through the kernel keydown intercept;
+// outside-click is a document gesture.
 //
-// TOUCH MODEL (best-practice, cross-platform iOS + Android):
-// The terminal output is the browser's native text-selection surface, so a
-// touch long-press ON TEXT is left to the platform: it selects a word and shows
-// the OS copy callout. We do NOT stack a custom menu on that (it fought native
-// selection and, since the long-press is immediately followed by a touchend,
-// closed the instant the finger lifted). The custom menu opens on touch ONLY
-// when the long-press selected nothing (empty space) — its job there is Paste,
-// which the native callout cannot offer because our keyboard target is a 1x1,
-// pointer-events:none textarea (no editable surface under the finger for the OS
-// paste item). Paste reads the clipboard via the Clipboard API (secure context
-// required, so serve over HTTPS for touch paste). Desktop is the ordinary
-// right-click menu (Copy / Select All / Paste).
+// WHY THIS MENU EXISTS
+// The terminal output is real DOM text, so the browser already does the hard
+// part: drag-select with a mouse, long-press word-select plus the OS copy callout
+// on touch. What no platform can offer is PASTE — the keyboard target is a 1x1
+// pointer-events:none textarea, so there is no editable surface under the pointer
+// for a native paste item to attach to. This menu is the paste path. It carries
+// Copy and Select All because a menu appearing where the platform's would have
+// appeared should not be missing them.
 //
-// Deciding "did the long-press select text?" is the crux — a naive
-// getSelection() read at a fixed delay races the native selection and caused the
-// reported flakiness (sometimes native, sometimes custom, sometimes both). So we
-// TRACK whether a selection is made during THIS press via a selectionchange
-// listener armed only while a touch is down (the moment one appears we cancel
-// the pending menu and, if it already opened, close it), AND we gate the menu on
-// PRESS POSITION: a long-press that landed on a glyph run belongs to the
-// platform's word-select even when no selection has registered yet (iOS 26's
-// native selection can land well past our 550ms timer, so timing alone misfires
-// over text). The platforms deliver the long-press differently: iPhone fires NO
-// contextmenu (a hold timer detects it); iPadOS DOES fire contextmenu mid-press
-// and WebKit treats preventDefault on it as "cancel every remaining default of
-// this gesture" — including a not-yet-registered selection — so on Apple touch
-// devices the contextmenu handler never preventDefaults (that asymmetry is what
-// once made iPad unable to select at all while iPhone worked); Android also
-// fires contextmenu, and there we DO preventDefault when showing our own menu so
-// Android's native menu doesn't also appear (the "both menus" case). All paths
-// share the same selection + position gates, so the outcome is consistent.
+// THE MODEL: one owner per gesture, and nothing decided mid-gesture.
+//
+//   Mouse / pen — `contextmenu` is an already-classified request for a menu:
+//   preventDefault and open at the pointer. No timers, no heuristics, no
+//   platform branches.
+//
+//   Touch — the platform owns the press while the finger is down. We run no hold
+//   timer against it, open nothing before it finishes, and never cancel its
+//   gesture on WebKit. We classify ONCE, on `touchend`, when every fact is
+//   settled: a single-finger, stationary press held past the tap ceiling
+//   (kernel/gesture.ts, shared with the kernel's tap-to-focus so the two cannot
+//   both claim one press) that selected nothing and did not start on a link is a
+//   press the platform declined — so it is ours, and it is the paste path. A
+//   press that produced a selection belongs to the OS callout; a press on a link
+//   belongs to the platform's link preview; a shorter press is the kernel's tap.
+//
+// WHY AT RELEASE RATHER THAN DURING THE HOLD
+// Opening from a ~550ms hold timer put this feature in a race it cannot win: the
+// timer has to beat the platform's own long-press threshold and then GUESS
+// whether a selection is still coming (iOS 26 registers a word selection well
+// after 550ms). Four mechanisms existed only to referee that guess — a hit test
+// for glyphs under the finger, a selectionchange watch to retract a menu that
+// opened too early, a device sniff, and per-platform contextmenu branching,
+// because WebKit reads preventDefault on a touch contextmenu as "cancel every
+// remaining default of this gesture", the not-yet-registered selection included.
+// Deciding at release deletes all four: the outcome is observed, not predicted.
+//
+// It also fixes the symptom that prompted the rewrite. A touch long-press emits a
+// trailing click on release, and the swallow window that covers that click was
+// armed when the menu OPENED — ~550ms into the press, expiring 350ms later — so
+// holding a beat longer meant the release click landed as an outside click and
+// dismissed the menu the instant the finger lifted. Opened BY the release, the
+// window can only ever start at the release edge.
 
 import type { TerminalFeature } from "../kernel/types.js";
+import { TAP_MAX_MS, TAP_MOVEMENT_PX, isLinkTarget } from "../kernel/gesture.js";
 import type { ClipboardApi } from "./clipboard.js";
 import { createClickSwallow, placeMenuAt } from "./menu-position.js";
 
-// Slightly longer than the browser's ~500ms native long-press so a native word
-// selection (which we defer to) has registered — and fired selectionchange —
-// before this fires.
-const LONG_PRESS_MS = 550;
-const LONG_PRESS_MOVE_PX = 10;
 // Viewport clamping, the flip-above-the-fingertip gap, and the trailing-click
 // swallow all live in the shared point-anchored menu module (menu-position.ts),
 // shared with the tab menu.
@@ -55,14 +62,18 @@ export interface ContextMenuOptions {
   clipboard?: TerminalFeature<ClipboardApi>;
 }
 
-/** iPhone/iPad/iPod, including iPadOS Safari's default "desktop mode" (which
- *  reports platform MacIntel but with a touch screen). On these, a long-press on
- *  text fires `contextmenu` slightly BEFORE the native word-selection registers,
- *  so hasNativeSelection() is still false at that instant and the Android
- *  empty-space branch would wrongly open our menu and preventDefault the native
- *  selection. Deferring on any Apple touch device lets iOS/iPadOS run its own
- *  text selection + drag handles (bug: an iPad long-press opened the custom menu
- *  instead of native selection, leaving Select All the only way to select). */
+/** iPhone/iPad/iPod, including iPadOS Safari's default "desktop mode" (platform
+ *  MacIntel with a touch screen).
+ *
+ *  This decides exactly one thing: whether a touch `contextmenu` may be
+ *  cancelled. WebKit reads preventDefault there as "cancel every remaining
+ *  default action of this gesture", which takes the platform's own
+ *  not-yet-registered word selection with it — that asymmetry is what once left
+ *  an iPad unable to select text at all while an iPhone (which fires no
+ *  contextmenu) could. Everywhere else, cancelling is how we stop the platform's
+ *  menu appearing alongside ours. It no longer decides whether or when our menu
+ *  opens, so a wrong answer here costs at most a duplicated menu on an unusual
+ *  device, never a broken selection and never a lost paste. */
 function isAppleTouchDevice(): boolean {
   if (typeof navigator === "undefined") {
     return false;
@@ -77,6 +88,17 @@ function isAppleTouchDevice(): boolean {
   return platform === "MacIntel" && navigator.maxTouchPoints > 1;
 }
 
+/** The current selection as text ("" when nothing is selected). A collapsed
+ *  selection stringifies to "", so this is the whole test. */
+function selectionText(): string {
+  return window.getSelection()?.toString() ?? "";
+}
+
+/** True when an event target sits inside a hyperlink. A long-press on a link
+ *  raises the platform's own link preview/menu without ever making a selection,
+ *  so the selection test alone would not keep us out of its way. */
+const onLink = isLinkTarget;
+
 export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
   return {
     name: "contextMenu",
@@ -86,23 +108,28 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
       menu.className = "wt-ctx-menu";
       ctx.region("overlay", "menu").appendChild(menu);
 
-      let longPressTimer = 0;
-      let longPressOrigin = { x: 0, y: 0 };
-      // The device that started the current interaction: contextmenu fires on
-      // desktop right-click AND on Android long-press, so its handler branches
+      // The device that started the current interaction: `contextmenu` fires on a
+      // desktop right-click AND on an Android long-press, so its handler branches
       // on this to tell them apart.
       let lastPointerType = "mouse";
-      // Computed once: on an Apple touch device, defer a touch contextmenu to
-      // native text selection (see isAppleTouchDevice).
+      // Computed once: may a touch contextmenu be cancelled (see isAppleTouchDevice).
       const appleTouch = isAppleTouchDevice();
       // Swallows the trailing click a touch long-press emits on release.
       const swallow = createClickSwallow();
-      // A native selection was made during the current touch press (tracked via
-      // selectionchange). Gates the touch menu: a selected long-press belongs to
-      // the native callout, an empty one to us (Paste).
-      let pressSelectedText = false;
-      // A touch press is in progress, so selectionchange is relevant (armed).
-      let touchActive = false;
+
+      // The in-flight single-finger press, all of it read at `touchend`.
+      // pressLive goes false the moment the gesture stops being a candidate (a
+      // second finger, movement past the ceiling, a cancel), so touchend does not
+      // have to re-derive any of it.
+      let pressLive = false;
+      let pressStart = 0;
+      let pressX = 0;
+      let pressY = 0;
+      let pressOnLink = false;
+      // The selection as it stood when the press began, so touchend can tell a
+      // selection THIS press produced (the OS callout owns it) from one that was
+      // already on screen (ours to offer Copy for).
+      let pressSelection = "";
 
       const clip = (): ClipboardApi | undefined =>
         opts.clipboard ? ctx.use(opts.clipboard) : undefined;
@@ -110,42 +137,6 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
       function focusInput(): void {
         surface.querySelector<HTMLElement>(".term-input")?.focus({ preventScroll: true });
       }
-
-      const clearLongPress = (): void => {
-        if (longPressTimer) {
-          clearTimeout(longPressTimer);
-          longPressTimer = 0;
-        }
-      };
-
-      // True when the press landed on rendered text (a glyph run inside the
-      // output). The empty-space menu must not open there: a long-press on text
-      // belongs to the platform's word-selection, and opening ours first races
-      // it (on iOS 26 the native selection can register well after 550ms, so
-      // the old no-selection-yet check misfired over text). Hitting the row or
-      // container (the blank area beside/below content) still counts as empty
-      // space so Paste stays reachable.
-      const pressOverText = (x: number, y: number): boolean => {
-        const el = document.elementFromPoint(x, y);
-        if (!(el instanceof HTMLElement) || !el.closest(".term-output")) {
-          return false;
-        }
-        const run = el.closest("span, a");
-        return run !== null && run.textContent.trim().length > 0;
-      };
-
-      // True when text is (or just got) selected, so the OS callout owns Copy and
-      // our menu stays out of the way. pressSelectedText catches a native
-      // selection the instant it happens (selectionchange), avoiding a race with
-      // a fixed-delay read; the live check is the fallback for when selectionchange
-      // did not arm (a desktop right-click on an existing selection).
-      const hasNativeSelection = (): boolean => {
-        if (pressSelectedText) {
-          return true;
-        }
-        const s = window.getSelection();
-        return s !== null && !s.isCollapsed && s.toString().length > 0;
-      };
 
       function hide(refocus = true): void {
         const shouldRefocus = refocus && menu.contains(document.activeElement);
@@ -170,19 +161,16 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         menu.appendChild(b);
       }
 
-      function show(x: number, y: number, touch: boolean): void {
+      /** Open the menu at viewport point (x, y). Same items for every modality:
+       *  Copy when something is selected, then Select All, then Paste. */
+      function show(x: number, y: number): void {
         hide();
         const clipboard = clip();
-        // On touch we only reach here over empty space (no selection), so Copy
-        // has nothing to act on; the native callout owns Copy over selected
-        // text. On desktop, offer Copy when there is a selection.
-        if (!touch) {
-          const sel = window.getSelection()?.toString();
-          if (sel) {
-            addButton("Copy", () => {
-              clipboard?.copy(sel);
-            });
-          }
+        const sel = selectionText();
+        if (clipboard && sel) {
+          addButton("Copy", () => {
+            clipboard.copy(sel);
+          });
         }
         addButton(
           "Select All",
@@ -204,15 +192,10 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
           return; // nothing to offer
         }
         // Make visible (so it has measurable size), then place it within the
-        // visible viewport via the shared point-anchored positioner (clamp to
-        // the visual viewport; flip above the finger near the bottom edge).
+        // visible viewport via the shared point-anchored positioner (clamp to the
+        // visual viewport; flip above the finger near the bottom edge).
         menu.classList.add("visible");
         placeMenuAt(menu, x, y);
-        // A touch long-press is immediately followed by a synthetic click on
-        // release; swallow it so the menu stays open.
-        if (touch) {
-          swallow.arm();
-        }
       }
 
       const onPointerDown = (e: PointerEvent): void => {
@@ -220,65 +203,23 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
       };
       surface.addEventListener("pointerdown", onPointerDown, { passive: true });
 
-      // contextmenu fires on desktop right-click AND on Android long-press (iOS
-      // fires none). Desktop: always our menu. Touch (Android): our menu only
-      // when nothing is selected — and preventDefault so Android's native menu
-      // does not ALSO appear (the "both menus" bug); with a selection, defer to
-      // the native selection toolbar (don't preventDefault).
       const onContextMenu = (e: MouseEvent): void => {
         if (lastPointerType !== "touch") {
           e.preventDefault();
-          show(e.clientX, e.clientY, false);
+          show(e.clientX, e.clientY);
           return;
         }
-        if (appleTouch) {
-          // NEVER preventDefault a touch contextmenu on iOS/iPadOS: WebKit then
-          // cancels every remaining default action of the gesture, including a
-          // native word-selection that registers AFTER this event (iPadOS fires
-          // contextmenu mid-long-press; on iOS 26 the selection can land well
-          // after it). iPhone fires no contextmenu at all, so suppressing here
-          // is exactly what made iPad behave differently from iPhone. If our
-          // empty-space menu opened first (the hold timer beat a slow native
-          // selection), stand down so the platform's selection wins.
-          if (menu.classList.contains("visible") && !hasNativeSelection()) {
-            hide(false);
-          }
-          return;
+        // Touch: our menu never opens from here — the touchend classifier owns
+        // that. The only question left is whether the PLATFORM's menu may
+        // proceed. On WebKit it must (cancelling here cancels the whole gesture's
+        // remaining defaults, the word selection included). Elsewhere (Android
+        // fires contextmenu mid-press) cancel it when the press has nothing of
+        // the platform's own to show, so its menu and ours cannot both appear.
+        if (!appleTouch && !onLink(e.target) && selectionText() === "") {
+          e.preventDefault();
         }
-        if (menu.classList.contains("visible")) {
-          e.preventDefault(); // the hold timer already opened it; just suppress native
-          return;
-        }
-        if (hasNativeSelection()) {
-          return; // native selection toolbar owns Copy over text
-        }
-        if (pressOverText(e.clientX, e.clientY)) {
-          return; // a long-press on text belongs to the platform's word-select
-        }
-        e.preventDefault();
-        clearLongPress();
-        show(e.clientX, e.clientY, true);
       };
       surface.addEventListener("contextmenu", onContextMenu);
-
-      // Track a native selection made during the current touch press, so the
-      // long-press decision never races a fixed-delay read. Armed only while a
-      // touch is down (touchActive) so unrelated selection changes (Select All,
-      // typing) don't trip it.
-      const onSelectionChange = (): void => {
-        if (!touchActive) {
-          return;
-        }
-        const s = window.getSelection();
-        if (s && !s.isCollapsed && s.toString().length > 0) {
-          pressSelectedText = true;
-          clearLongPress(); // native selection is happening; don't open our menu
-          if (menu.classList.contains("visible")) {
-            hide(false); // a native selection appeared after we opened; native wins
-          }
-        }
-      };
-      document.addEventListener("selectionchange", onSelectionChange);
 
       // Escape closes the menu without also sending ESC to the PTY.
       const offKey = ctx.registerKeydown((ev) => {
@@ -290,8 +231,16 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         return false;
       });
 
-      const onDocClick = (): void => {
-        // Swallow the release click of the long-press that just opened the menu.
+      const onDocClick = (e: MouseEvent): void => {
+        // A click on an item is that item's own business: its handler hides the
+        // menu with the correct refocus behaviour (Select All must not refocus
+        // the input, or Firefox collapses the selection it just made). Reaching
+        // hide() from here as well would override that choice.
+        if (e.target instanceof Node && menu.contains(e.target)) {
+          return;
+        }
+        // The release click of the long-press that just opened the menu is that
+        // gesture's own end, not a click-away.
         if (swallow.swallowing()) {
           return;
         }
@@ -308,64 +257,77 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
       };
       document.addEventListener("contextmenu", onDocContextMenu);
 
-      // Touch long-press — the iOS path (iOS fires no contextmenu). Open the menu
-      // only when nothing got natively selected during the hold; if a word/line
-      // was selected, the OS callout owns it and we stay out.
       const onTouchStart = (e: TouchEvent): void => {
-        if (e.touches.length !== 1) {
-          clearLongPress();
-          return;
-        }
-        const t = e.touches[0];
+        const t = e.touches.length === 1 ? e.touches[0] : undefined;
         if (!t) {
+          pressLive = false; // a second finger: pinch/zoom, not a long-press
           return;
         }
-        touchActive = true;
-        pressSelectedText = false;
-        longPressOrigin = { x: t.clientX, y: t.clientY };
-        longPressTimer = window.setTimeout(() => {
-          longPressTimer = 0;
-          if (!hasNativeSelection() && !pressOverText(longPressOrigin.x, longPressOrigin.y)) {
-            show(longPressOrigin.x, longPressOrigin.y, true);
-          }
-        }, LONG_PRESS_MS);
+        pressLive = true;
+        pressStart = e.timeStamp;
+        pressX = t.clientX;
+        pressY = t.clientY;
+        pressOnLink = onLink(e.target);
+        pressSelection = selectionText();
       };
       const onTouchMove = (e: TouchEvent): void => {
-        if (!longPressTimer || e.touches.length !== 1) {
+        if (!pressLive) {
           return;
         }
-        const t = e.touches[0];
+        const t = e.touches.length === 1 ? e.touches[0] : undefined;
         if (!t) {
+          pressLive = false;
           return;
         }
-        const dx = t.clientX - longPressOrigin.x;
-        const dy = t.clientY - longPressOrigin.y;
-        if (dx * dx + dy * dy > LONG_PRESS_MOVE_PX * LONG_PRESS_MOVE_PX) {
-          clearLongPress();
+        // A drag is a scroll or a selection-extend, both the browser's.
+        if (
+          Math.abs(t.clientX - pressX) > TAP_MOVEMENT_PX ||
+          Math.abs(t.clientY - pressY) > TAP_MOVEMENT_PX
+        ) {
+          pressLive = false;
         }
       };
-      const onTouchEnd = (): void => {
-        clearLongPress();
-        touchActive = false;
+      // The whole touch decision, made with the gesture complete: every input is
+      // a settled fact, so there is nothing here to race and nothing to retract.
+      const onTouchEnd = (e: TouchEvent): void => {
+        const live = pressLive;
+        pressLive = false;
+        if (!live || pressOnLink) {
+          return;
+        }
+        if (e.timeStamp - pressStart <= TAP_MAX_MS) {
+          return; // a tap: the kernel focuses the input / clears the selection
+        }
+        const sel = selectionText();
+        if (sel !== "" && sel !== pressSelection) {
+          return; // this press selected text; the OS callout owns it
+        }
+        show(pressX, pressY);
+        if (menu.classList.contains("visible")) {
+          // Armed at the release edge, so the trailing click this same gesture
+          // emits is always inside the window.
+          swallow.arm();
+        }
+      };
+      const onTouchCancel = (): void => {
+        pressLive = false;
       };
       surface.addEventListener("touchstart", onTouchStart, { passive: true });
       surface.addEventListener("touchmove", onTouchMove, { passive: true });
       surface.addEventListener("touchend", onTouchEnd, { passive: true });
-      surface.addEventListener("touchcancel", onTouchEnd, { passive: true });
+      surface.addEventListener("touchcancel", onTouchCancel, { passive: true });
 
       return {
         teardown() {
-          clearLongPress();
           offKey();
           surface.removeEventListener("pointerdown", onPointerDown);
           surface.removeEventListener("contextmenu", onContextMenu);
-          document.removeEventListener("selectionchange", onSelectionChange);
           document.removeEventListener("click", onDocClick);
           document.removeEventListener("contextmenu", onDocContextMenu);
           surface.removeEventListener("touchstart", onTouchStart);
           surface.removeEventListener("touchmove", onTouchMove);
           surface.removeEventListener("touchend", onTouchEnd);
-          surface.removeEventListener("touchcancel", onTouchEnd);
+          surface.removeEventListener("touchcancel", onTouchCancel);
           menu.remove();
         },
       };

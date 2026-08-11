@@ -4,7 +4,7 @@ import fc from "fast-check";
 import { centreChipLabels, inkShiftPx, type InkMetrics } from "./ink-centre.js";
 
 // The numbers below are not invented: each row is what the named engine actually
-// reported for the bundled MonaspiceNe NFM against the deployed bundle, read via
+// reported for the bundled Monaspace Neon NF against the deployed bundle, read via
 // Playwright (fontBox and baseline from a strut probe, ink extents from canvas
 // TextMetrics at 400px). They exist to pin the arithmetic to observed reality,
 // and to document WHY a single em constant could not work — the last column is

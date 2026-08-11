@@ -25,6 +25,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
       getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
       getHighestIndex: vi.fn(() => -1),
+      pendingRowCount: vi.fn(() => 0),
       noteResumeBounds: vi.fn(),
       handleScreen: vi.fn(),
       handleScroll: vi.fn(),
@@ -40,6 +41,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       isUserScrolledUp: vi.fn(() => false),
       currentScrollTop: vi.fn(() => 0),
       restoreScrollTop: vi.fn(),
+      restoreView: vi.fn(),
     },
     connection: {
       init: connectionInit,

@@ -3,7 +3,7 @@
 // font's tables.
 //
 // Flex centring centres a label's LINE BOX. A font's metrics box reaches much
-// further above the baseline than below (the bundled MonaspiceNe NFM: 0.995em
+// further above the baseline than below (the bundled Monaspace Neon NF: 0.995em
 // over, 0.250em under) while a mixed-case title's ink runs cap height to
 // descender (0.734em over, 0.203em under), so the visible text sits low inside
 // the box it is centred by. The correction is the gap between those two centres.

@@ -1,9 +1,11 @@
 // @vitest-environment happy-dom
 //
-// contextMenu Paste-on-touch tests (the iOS paste fix). The terminal's keyboard
-// target is a 1x1 pointer-events:none textarea, so iOS never shows a native
-// paste callout; this menu is the paste path on touch, so it must offer Paste
-// (right-click and long-press) and route it to the clipboard feature.
+// contextMenu tests. The terminal's keyboard target is a 1x1
+// pointer-events:none textarea, so no platform can offer a native Paste over the
+// output; this menu is the paste path, on a desktop right-click and on a touch
+// long-press. The touch half is classified entirely at `touchend` (see the
+// module header), so these tests drive complete gestures and assert the
+// classification rather than any mid-press timing.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -23,6 +25,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
       getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
       getHighestIndex: vi.fn(() => -1),
+      pendingRowCount: vi.fn(() => 0),
       noteResumeBounds: vi.fn(),
       handleScreen: vi.fn(),
       handleScroll: vi.fn(),
@@ -38,6 +41,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       isUserScrolledUp: vi.fn(() => false),
       currentScrollTop: vi.fn(() => 0),
       restoreScrollTop: vi.fn(),
+      restoreView: vi.fn(),
     },
     connection: {
       init: vi.fn(),
@@ -68,10 +72,54 @@ function fakeClipboard(): TerminalFeature<ClipboardApi> {
 }
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
-const pasteButton = (root: HTMLElement): HTMLButtonElement | undefined =>
-  [...root.querySelectorAll<HTMLButtonElement>(".wt-ctx-menu button")].find(
-    (b) => b.textContent === "Paste",
+const menuIn = (root: HTMLElement): HTMLElement | null =>
+  root.querySelector<HTMLElement>(".wt-ctx-menu");
+const isOpen = (root: HTMLElement): boolean => menuIn(root)?.classList.contains("visible") ?? false;
+const itemLabels = (root: HTMLElement): string[] =>
+  [...root.querySelectorAll<HTMLButtonElement>(".wt-ctx-menu button")].map(
+    (b) => b.textContent ?? "",
   );
+const itemNamed = (root: HTMLElement, label: string): HTMLButtonElement | undefined =>
+  [...root.querySelectorAll<HTMLButtonElement>(".wt-ctx-menu button")].find(
+    (b) => b.textContent === label,
+  );
+
+// happy-dom has no TouchEvent constructor, so shape a plain event with the
+// single-touch fields the handlers read. `timeStamp` is set explicitly: the touch
+// classifier measures the press from touchstart to touchend, so a hold of any
+// length is expressed here without the test actually waiting for it.
+interface TouchPoint {
+  x: number;
+  y: number;
+}
+function touch(type: string, at: TouchPoint | TouchPoint[], timeStamp: number): TouchEvent {
+  const points = Array.isArray(at) ? at : [at];
+  const ev = new Event(type, { bubbles: true, cancelable: true }) as unknown as TouchEvent;
+  Object.defineProperty(ev, "touches", {
+    value: points.map((p) => ({ clientX: p.x, clientY: p.y })),
+  });
+  Object.defineProperty(ev, "timeStamp", { value: timeStamp });
+  return ev;
+}
+/** A stationary single-finger press of `heldMs`, released. Returns nothing; the
+ *  caller asserts on the menu afterwards. */
+function longPress(el: Element, at: TouchPoint, heldMs: number, startTarget: Element = el): void {
+  startTarget.dispatchEvent(touch("touchstart", at, 1000));
+  el.dispatchEvent(touch("touchend", at, 1000 + heldMs));
+}
+function touchPointer(el: Element): void {
+  const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
+  Object.defineProperty(pd, "pointerType", { value: "touch" });
+  el.dispatchEvent(pd);
+}
+function stubSelection(text: string): { mockRestore: () => void } {
+  return vi.spyOn(window, "getSelection").mockReturnValue({
+    isCollapsed: text === "",
+    toString: () => text,
+    removeAllRanges: () => undefined,
+    selectAllChildren: () => undefined,
+  } as unknown as Selection);
+}
 
 beforeEach(async () => {
   vi.resetModules();
@@ -85,6 +133,7 @@ afterEach(() => {
   term?.destroy();
   term = undefined;
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function rootIn(): HTMLElement {
@@ -93,52 +142,70 @@ function rootIn(): HTMLElement {
   return root;
 }
 
-describe("contextMenu Paste (iOS paste fix)", () => {
-  it("offers Paste and routes it to the clipboard feature on right-click / long-press", async () => {
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick(); // features set up in the background
+async function mount(withClipboard = true): Promise<{ root: HTMLElement; surface: HTMLElement }> {
+  const root = rootIn();
+  const clip = fakeClipboard();
+  term = createTerminal(root, {
+    features: () => (withClipboard ? [clip, contextMenu({ clipboard: clip })] : [contextMenu()]),
+  });
+  await tick(); // features set up in the background
+  const surface = root.querySelector<HTMLElement>(".term");
+  if (!surface) {
+    throw new Error("no .term surface");
+  }
+  return { root, surface };
+}
 
-    const surface = root.querySelector<HTMLElement>(".term");
-    surface?.dispatchEvent(
+describe("contextMenu — desktop right-click", () => {
+  it("offers Paste and routes it to the clipboard feature", async () => {
+    const { root, surface } = await mount();
+
+    surface.dispatchEvent(
       new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
     );
 
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
-    const paste = pasteButton(root);
-    expect(paste).toBeTruthy();
-
-    paste?.click();
+    expect(isOpen(root)).toBe(true);
+    itemNamed(root, "Paste")?.click();
     expect(pasteSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("opens the menu with Paste on a stationary touch long-press", async () => {
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick();
+  it("offers Copy for the current selection and suppresses the browser menu", async () => {
+    const { root, surface } = await mount();
+    const sel = stubSelection("selected text");
 
-    const surface = root.querySelector<HTMLElement>(".term");
-    // happy-dom lacks a TouchEvent constructor, so shape a plain event with the
-    // single-touch fields the handler reads.
-    const ev = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
-    Object.defineProperty(ev, "touches", { value: [{ clientX: 30, clientY: 40 }] });
-    surface?.dispatchEvent(ev);
-    // Held still past LONG_PRESS_MS (500).
-    await new Promise((r) => setTimeout(r, 600));
+    const ev = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    });
+    surface.dispatchEvent(ev);
 
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
-    expect(pasteButton(root)).toBeTruthy();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(itemLabels(root)).toEqual(["Copy", "Select All", "Paste"]);
+    itemNamed(root, "Copy")?.click();
+    expect(copySpy).toHaveBeenCalledWith("selected text");
+    sel.mockRestore();
   });
 
-  it("opens above the finger when the anchor is near the bottom (not clipped/under the touch)", async () => {
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick();
+  it("omits Copy with nothing selected, and Paste with no clipboard feature", async () => {
+    const { root, surface } = await mount();
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+    expect(itemLabels(root)).toEqual(["Select All", "Paste"]);
 
-    const menu = root.querySelector<HTMLElement>(".wt-ctx-menu");
+    term?.destroy();
+    const bare = await mount(false);
+    bare.surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+    expect(itemLabels(bare.root)).toEqual(["Select All"]);
+  });
+
+  it("opens above the pointer near the bottom edge (not clipped, not under the finger)", async () => {
+    const { root, surface } = await mount();
+    const menu = menuIn(root);
     expect(menu).toBeTruthy();
     if (!menu) {
       return;
@@ -150,39 +217,168 @@ describe("contextMenu Paste (iOS paste fix)", () => {
     const vv = window.visualViewport;
     const viewTop = vv ? vv.offsetTop : 0;
     const viewBottom = viewTop + (vv ? vv.height : window.innerHeight);
-    const y = viewBottom - 20; // a long-press near the bottom edge
+    const y = viewBottom - 20;
 
-    root
-      .querySelector<HTMLElement>(".term")
-      ?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: y }));
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: y }),
+    );
 
     const top = parseFloat(menu.style.top);
-    expect(top).toBeLessThan(y); // opened above the tap
-    expect(top + 200).toBeLessThanOrEqual(y); // its bottom edge is above the finger
+    expect(top).toBeLessThan(y); // opened above the pointer
+    expect(top + 200).toBeLessThanOrEqual(y); // its bottom edge clears the pointer
     expect(top).toBeGreaterThanOrEqual(viewTop); // still on-screen
   });
+});
 
-  it("stands aside on an iPad touch contextmenu so native selection wins", async () => {
-    // iPadOS Safari desktop mode reports platform MacIntel with a touch screen.
-    // On a text long-press it fires contextmenu a beat BEFORE the native
-    // selection registers, so hasNativeSelection() is still false here — the
-    // menu must defer anyway (return, no preventDefault) instead of opening its
-    // empty-space menu and suppressing the platform's own text selection.
+describe("contextMenu — touch long-press, classified at release", () => {
+  it("opens with Paste on a stationary hold over empty space", async () => {
+    const { root, surface } = await mount();
+
+    longPress(surface, { x: 30, y: 40 }, 700);
+
+    expect(isOpen(root)).toBe(true);
+    expect(itemLabels(root)).toEqual(["Select All", "Paste"]);
+  });
+
+  it("survives the release click however long the finger was held (the reported bug)", async () => {
+    // The trailing click of a long-press must never read as a click-away. The
+    // swallow window is a fixed 350ms, so a menu armed when it OPENED (the old
+    // 550ms hold timer) lost its guard at ~900ms of hold and dismissed itself the
+    // instant the finger lifted. Opening at the release edge makes the hold
+    // length irrelevant — assert that with a hold far past the old budget.
+    const { root, surface } = await mount();
+
+    longPress(surface, { x: 30, y: 40 }, 5000);
+    expect(isOpen(root)).toBe(true);
+
+    document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(isOpen(root)).toBe(true);
+  });
+
+  it("survives the release click after a REAL hold past the old swallow budget", async () => {
+    // The same guarantee driven by the clock instead of a synthetic timeStamp, so
+    // the assertion covers the swallow window itself and not just the release
+    // classification. Real events, real elapsed time: the menu opened at 550ms of
+    // hold with a 350ms window died on any release after ~900ms, which is what a
+    // person holding a finger on a phone actually does.
+    const { root, surface } = await mount();
+    const start = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
+    Object.defineProperty(start, "touches", { value: [{ clientX: 30, clientY: 40 }] });
+    surface.dispatchEvent(start);
+
+    await new Promise((r) => setTimeout(r, 1100));
+
+    const end = new Event("touchend", { bubbles: true }) as unknown as TouchEvent;
+    Object.defineProperty(end, "touches", { value: [] });
+    surface.dispatchEvent(end);
+    expect(isOpen(root)).toBe(true);
+
+    document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(isOpen(root)).toBe(true);
+  });
+
+  it("still dismisses on a genuine later tap outside the menu", async () => {
+    const { root, surface } = await mount();
+    longPress(surface, { x: 30, y: 40 }, 5000);
+    expect(isOpen(root)).toBe(true);
+
+    // Past the swallow window: a deliberate follow-up tap is a click-away.
+    await new Promise((r) => setTimeout(r, 400));
+    document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(isOpen(root)).toBe(false);
+  });
+
+  it("leaves a tap alone (the kernel's tap-to-focus owns it)", async () => {
+    const { root, surface } = await mount();
+    longPress(surface, { x: 30, y: 40 }, 200);
+    expect(isOpen(root)).toBe(false);
+  });
+
+  it("leaves a drag alone (a scroll or a selection-extend)", async () => {
+    const { root, surface } = await mount();
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    surface.dispatchEvent(touch("touchmove", { x: 30, y: 90 }, 1200));
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 90 }, 1700));
+    expect(isOpen(root)).toBe(false);
+  });
+
+  it("stands down when the press selected text (the OS callout owns Copy)", async () => {
+    const { root, surface } = await mount();
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    // The platform's word-select landed during the hold — whenever it landed,
+    // because the decision is read at release rather than predicted.
+    const sel = stubSelection("word");
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 1700));
+
+    expect(isOpen(root)).toBe(false);
+    sel.mockRestore();
+  });
+
+  it("opens over a selection that predates the press, and offers Copy for it", async () => {
+    const { root, surface } = await mount();
+    const sel = stubSelection("earlier selection");
+    // Selected before the press and untouched by it: the platform did nothing
+    // with this hold, so it is ours — and Copy is worth offering.
+    longPress(surface, { x: 30, y: 40 }, 700);
+
+    expect(isOpen(root)).toBe(true);
+    expect(itemLabels(root)).toEqual(["Copy", "Select All", "Paste"]);
+    sel.mockRestore();
+  });
+
+  it("stands down on a link (the platform's link preview owns it)", async () => {
+    const { root, surface } = await mount();
+    const output = root.querySelector<HTMLElement>(".term-output");
+    const link = document.createElement("a");
+    link.className = "term-link";
+    link.href = "https://example.com/";
+    link.textContent = "https://example.com/";
+    output?.appendChild(link);
+
+    longPress(surface, { x: 30, y: 40 }, 700, link);
+
+    expect(isOpen(root)).toBe(false);
+  });
+
+  it("stands down when a second finger joins (a pinch, not a hold)", async () => {
+    const { root, surface } = await mount();
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    surface.dispatchEvent(
+      touch(
+        "touchstart",
+        [
+          { x: 30, y: 40 },
+          { x: 90, y: 40 },
+        ],
+        1100,
+      ),
+    );
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 1800));
+    expect(isOpen(root)).toBe(false);
+  });
+
+  it("stands down when the gesture is cancelled", async () => {
+    const { root, surface } = await mount();
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    surface.dispatchEvent(touch("touchcancel", { x: 30, y: 40 }, 1600));
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 1700));
+    expect(isOpen(root)).toBe(false);
+  });
+});
+
+describe("contextMenu — the platform's own touch menu", () => {
+  it("never cancels a touch contextmenu on Apple, and never opens from it", async () => {
+    // WebKit reads preventDefault on a touch contextmenu as "cancel every
+    // remaining default of this gesture", which takes a word selection that has
+    // not registered yet with it. That is what once left an iPad unable to select
+    // at all. Our menu opens from touchend, so there is nothing to do here.
     vi.stubGlobal("navigator", {
       userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
       platform: "MacIntel",
       maxTouchPoints: 5,
     });
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick();
-
-    const surface = root.querySelector<HTMLElement>(".term");
-    // A touch pointer puts the handler on the touch (not desktop) path.
-    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
-    Object.defineProperty(pd, "pointerType", { value: "touch" });
-    surface?.dispatchEvent(pd);
+    const { root, surface } = await mount();
+    touchPointer(surface);
 
     const cm = new MouseEvent("contextmenu", {
       bubbles: true,
@@ -190,193 +386,96 @@ describe("contextMenu Paste (iOS paste fix)", () => {
       clientX: 30,
       clientY: 30,
     });
-    surface?.dispatchEvent(cm);
+    surface.dispatchEvent(cm);
 
-    // Deferred: the custom menu did NOT open and the event default was NOT
-    // prevented, so iOS/iPadOS runs its own text selection. (Without the
-    // isAppleTouchDevice guard, the empty-space branch would open the menu and
-    // preventDefault here.)
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
     expect(cm.defaultPrevented).toBe(false);
+    expect(isOpen(root)).toBe(false);
   });
 
-  it("closes an already-open menu on an iPad touch contextmenu WITHOUT preventDefault (iOS 26 slow-selection race)", async () => {
-    // iOS 26 can register the native word-selection well after our 550ms hold
-    // timer, so the empty-space menu may already be open when iPadOS delivers
-    // the gesture's contextmenu. preventDefault here would cancel EVERY
-    // remaining default of the gesture — the not-yet-registered selection
-    // included — which left iPad unable to select at all while iPhone (which
-    // fires no contextmenu) still selected late. The menu must stand down and
-    // let the platform finish.
+  it("suppresses the platform menu elsewhere (Android) over empty space, without opening ours", async () => {
+    // Android fires contextmenu mid-press. Cancelling it is how its menu and ours
+    // do not both appear once the release opens ours.
     vi.stubGlobal("navigator", {
-      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-      platform: "MacIntel",
+      userAgent: "Mozilla/5.0 (Linux; Android 15) Chrome/140",
+      platform: "Linux armv8l",
       maxTouchPoints: 5,
     });
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick();
-
-    const surface = root.querySelector<HTMLElement>(".term");
-    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
-    Object.defineProperty(pd, "pointerType", { value: "touch" });
-    surface?.dispatchEvent(pd);
-
-    // The hold timer opened the empty-space menu first (no native selection yet).
-    const ts = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
-    Object.defineProperty(ts, "touches", { value: [{ clientX: 30, clientY: 40 }] });
-    surface?.dispatchEvent(ts);
-    await new Promise((r) => setTimeout(r, 600));
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
+    const { root, surface } = await mount();
+    touchPointer(surface);
 
     const cm = new MouseEvent("contextmenu", {
       bubbles: true,
       cancelable: true,
-      clientX: 30,
-      clientY: 40,
+      clientX: 20,
+      clientY: 20,
     });
-    surface?.dispatchEvent(cm);
+    surface.dispatchEvent(cm);
 
-    expect(cm.defaultPrevented).toBe(false); // the gesture's defaults survive
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
+    expect(cm.defaultPrevented).toBe(true);
+    expect(isOpen(root)).toBe(false);
+
+    // The same gesture's release is what opens ours.
+    surface.dispatchEvent(touch("touchstart", { x: 20, y: 20 }, 1000));
+    surface.dispatchEvent(touch("touchend", { x: 20, y: 20 }, 1700));
+    expect(isOpen(root)).toBe(true);
   });
 
-  it("does not open the hold-timer menu when the long-press landed on rendered text", async () => {
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick();
+  it("leaves the platform's selection toolbar alone when text is selected (Android)", async () => {
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (Linux; Android 15) Chrome/140",
+      platform: "Linux armv8l",
+      maxTouchPoints: 5,
+    });
+    const { root, surface } = await mount();
+    const sel = stubSelection("selected");
+    touchPointer(surface);
 
-    const surface = root.querySelector<HTMLElement>(".term");
-    // Put a glyph run under the press point: a row span inside .term-output.
-    const output = root.querySelector<HTMLElement>(".term-output");
-    const row = document.createElement("div");
-    row.className = "term-row";
-    const run = document.createElement("span");
-    run.textContent = "hello world";
-    row.appendChild(run);
-    output?.appendChild(row);
-    const efp = vi.spyOn(document, "elementFromPoint").mockReturnValue(run);
+    const cm = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    });
+    surface.dispatchEvent(cm);
 
-    const ts = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
-    Object.defineProperty(ts, "touches", { value: [{ clientX: 30, clientY: 40 }] });
-    surface?.dispatchEvent(ts);
-    await new Promise((r) => setTimeout(r, 600));
-
-    // A long-press on text belongs to the platform's word-select; our menu
-    // stays out even though no selection has registered yet (iOS 26 can be
-    // slower than the hold timer).
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
-    efp.mockRestore();
+    expect(cm.defaultPrevented).toBe(false);
+    expect(isOpen(root)).toBe(false);
+    sel.mockRestore();
   });
+});
 
-  it("omits Paste when no clipboard feature is present", async () => {
-    const root = rootIn();
-    term = createTerminal(root, { features: () => [contextMenu()] });
-    await tick();
-
-    const surface = root.querySelector<HTMLElement>(".term");
-    surface?.dispatchEvent(
+describe("contextMenu — dismissal", () => {
+  it("closes on Escape", async () => {
+    const { root, surface } = await mount();
+    surface.dispatchEvent(
       new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
     );
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
-    expect(pasteButton(root)).toBeUndefined();
+    expect(isOpen(root)).toBe(true);
+
+    const input = root.querySelector<HTMLTextAreaElement>(".term-input");
+    input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(isOpen(root)).toBe(false);
   });
 
-  it("does not open on a touch long-press while text is selected (native selection owns it)", async () => {
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick();
-    // Simulate a native word-selection made during the hold.
-    const spy = vi.spyOn(window, "getSelection").mockReturnValue({
-      isCollapsed: false,
-      toString: () => "selected",
-    } as unknown as Selection);
+  it("closes on a click outside, and lets an item's own click own the close", async () => {
+    const { root, surface } = await mount();
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+    const selectAll = itemNamed(root, "Select All");
+    expect(selectAll).toBeTruthy();
 
-    const surface = root.querySelector<HTMLElement>(".term");
-    const ev = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
-    Object.defineProperty(ev, "touches", { value: [{ clientX: 30, clientY: 40 }] });
-    surface?.dispatchEvent(ev);
-    await new Promise((r) => setTimeout(r, 600));
+    // A click routed through the item closes via the item's handler; the document
+    // handler must not run its own hide() over the top (Select All deliberately
+    // does not refocus the input, or Firefox collapses the selection).
+    selectAll?.click();
+    expect(isOpen(root)).toBe(false);
 
-    // The OS callout owns a selection long-press; our menu stays out of the way.
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
-    spy.mockRestore();
-  });
-
-  it("opens the paste menu on an Android touch long-press (contextmenu) over empty space, suppressing the native menu", async () => {
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick();
-
-    const surface = root.querySelector<HTMLElement>(".term");
-    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
-    Object.defineProperty(pd, "pointerType", { value: "touch" });
-    surface?.dispatchEvent(pd);
-    // Android fires contextmenu on long-press. Over empty space (no selection)
-    // it is the paste path: show our menu and preventDefault so Android's own
-    // menu doesn't also appear (the "both menus" bug).
-    const ev = new MouseEvent("contextmenu", {
-      bubbles: true,
-      cancelable: true,
-      clientX: 20,
-      clientY: 20,
-    });
-    surface?.dispatchEvent(ev);
-
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
-    expect(pasteButton(root)).toBeTruthy();
-    expect(ev.defaultPrevented).toBe(true);
-  });
-
-  it("defers to native selection on an Android touch contextmenu when text is selected", async () => {
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick();
-    const spy = vi.spyOn(window, "getSelection").mockReturnValue({
-      isCollapsed: false,
-      toString: () => "selected",
-    } as unknown as Selection);
-
-    const surface = root.querySelector<HTMLElement>(".term");
-    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
-    Object.defineProperty(pd, "pointerType", { value: "touch" });
-    surface?.dispatchEvent(pd);
-    const ev = new MouseEvent("contextmenu", {
-      bubbles: true,
-      cancelable: true,
-      clientX: 20,
-      clientY: 20,
-    });
-    surface?.dispatchEvent(ev);
-
-    // A selection means the native callout / selection toolbar owns Copy; our
-    // menu stays out of the way and we leave the event alone.
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(false);
-    expect(ev.defaultPrevented).toBe(false);
-    spy.mockRestore();
-  });
-
-  it("keeps the menu open across the release click after a touch long-press", async () => {
-    const root = rootIn();
-    const clip = fakeClipboard();
-    term = createTerminal(root, { features: () => [clip, contextMenu({ clipboard: clip })] });
-    await tick();
-
-    const surface = root.querySelector<HTMLElement>(".term");
-    const ev = new Event("touchstart", { bubbles: true }) as unknown as TouchEvent;
-    Object.defineProperty(ev, "touches", { value: [{ clientX: 30, clientY: 40 }] });
-    surface?.dispatchEvent(ev);
-    await new Promise((r) => setTimeout(r, 600));
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
-
-    // The long-press emits a trailing click on release; it must NOT dismiss the
-    // just-opened menu (the open-then-close-on-release race).
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+    expect(isOpen(root)).toBe(true);
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(root.querySelector(".wt-ctx-menu")?.classList.contains("visible")).toBe(true);
+    expect(isOpen(root)).toBe(false);
   });
 });

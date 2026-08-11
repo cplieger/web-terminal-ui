@@ -10,7 +10,10 @@
 //   2. While in transition: autoscroll is suppressed, input dimensions
 //      may shift, no resize is sent to the server.
 //   3. After SETTLE_MS of no further events, fire onSettled — the caller
-//      then sends the final size, snaps to bottom if was-at-bottom, etc.
+//      then sends the final size, pins to the bottom if still following, etc.
+//      The follow state is read AT SETTLE (see startTransition): a latch taken
+//      at the start of the burst goes stale, because every further event
+//      extends the window without re-reading it.
 
 import { scroll } from "@cplieger/web-terminal-engine";
 
@@ -27,7 +30,6 @@ let termWrap: HTMLElement;
 let varTarget: HTMLElement;
 let onSettled: ((wasAtBottom: boolean) => void) | null = null;
 let inTransition = false;
-let wasAtBottomAtStart = true;
 let settleTimer: ReturnType<typeof setTimeout> | null = null;
 // When true, ignore the visualViewport keyboard geometry entirely (a hardware
 // keyboard/trackpad is present, so the soft keyboard never opens). Set at init
@@ -40,26 +42,41 @@ let suppressKeyboardInset: () => boolean = () => false;
 let cleanup: (() => void)[] = [];
 
 function startTransition(): void {
-  // Capture pre-transition scroll state at the *start* of the transition,
-  // not on every event in the burst.
-  if (!inTransition) {
-    inTransition = true;
-    wasAtBottomAtStart = !scroll.isUserScrolledUp();
-  }
-
+  inTransition = true;
   if (settleTimer !== null) {
     clearTimeout(settleTimer);
   }
   settleTimer = setTimeout(() => {
     settleTimer = null;
     inTransition = false;
-    if (wasAtBottomAtStart) {
-      scroll.scrollToBottom();
+    // Read the follow state AT SETTLE, not at the start of the burst. Every
+    // viewport event re-arms this timer without re-reading, and on iOS a wake or
+    // keyboard slide emits a stream of them, so a latch captured at the start
+    // stays true across a user scrolling up mid-burst and then yanks them back
+    // down. Asking now is only safe because a content shrink can no longer
+    // corrupt the follow state on its own (the engine's scroll controller
+    // re-engages follow only on a downward user move); before that, this snap
+    // was accidentally repairing the corruption it was also causing.
+    const stillFollowing = !scroll.isUserScrolledUp();
+    if (stillFollowing) {
+      // Pin, do not force. A geometry change can leave scrollTop stale short of
+      // the bottom, which the pin fixes; scrollToBottom would additionally
+      // OVERRIDE the follow state, which is not this handler's call to make.
+      scroll.stickToBottom();
     }
     if (onSettled) {
-      onSettled(wasAtBottomAtStart);
+      onSettled(stillFollowing);
     }
   }, SETTLE_MS);
+}
+
+/**
+ * Whether a viewport transition is in flight (an iOS keyboard slide, a rotation,
+ * a font-load reflow). Geometry measured now is provisional, so a caller that
+ * puts a measurement on the wire should wait for the settle instead.
+ */
+export function isInTransition(): boolean {
+  return inTransition;
 }
 
 export function init(opts: {
