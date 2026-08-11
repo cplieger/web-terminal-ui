@@ -192,66 +192,6 @@ export const ACTIVE_TAB_KEY = "wt-active-session";
 // One-time "swipe to switch" hint, remembered across loads.
 export const SWIPE_HINT_KEY = "wt-swipe-hint-seen";
 
-/** localStorage key for the user's tab ARRANGEMENT: the strip's session ids in
- *  the order they are shown, so a drag-reorder (or a Move left/right) survives a
- *  reload instead of snapping back to the server's creation order.
- *
- *  Deliberately client-side, alongside ACTIVE_TAB_KEY: the arrangement is a
- *  per-viewer preference, not a property of the session. Keeping it here costs
- *  no engine API — the session REST surface is a fixed four routes, and adding a
- *  fifth for cosmetics would be a release-noted change to every consumer. The
- *  tradeoff is that two devices do not share an arrangement (each keeps its own),
- *  and that when several windows of the same browser are open the last order
- *  change written wins. */
-export const TAB_ORDER_KEY = "wt-tab-order";
-
-/** Bound on the persisted arrangement. Every id is a live PTY server-side, so a
- *  real strip is nowhere near this; the cap is there so a corrupted or hostile
- *  stored value cannot make the restore path do unbounded work. */
-export const MAX_PERSISTED_TAB_ORDER = 200;
-
-/** parseTabOrder reads a stored arrangement into a clean id list. Anything the
- *  restore path cannot trust yields [] (or is dropped), because falling back to
- *  the server's creation order is always a valid arrangement: a non-JSON or
- *  non-array value, a non-string or empty entry, and a duplicate id (which would
- *  make the insert position ambiguous) are all discarded rather than repaired.
- *  Pure, so it is testable without a storage backend; the caller owns the
- *  localStorage read and its try/catch. */
-export function parseTabOrder(raw: string | null): string[] {
-  if (raw === null || raw === "") {
-    return [];
-  }
-  let data: unknown;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(data)) {
-    return [];
-  }
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const entry of data) {
-    if (typeof entry !== "string" || entry === "" || seen.has(entry)) {
-      continue;
-    }
-    seen.add(entry);
-    out.push(entry);
-    if (out.length >= MAX_PERSISTED_TAB_ORDER) {
-      break;
-    }
-  }
-  return out;
-}
-
-/** serializeTabOrder encodes an arrangement for storage, capped the same way the
- *  read is so a write can never produce a value its own parser would truncate
- *  differently. */
-export function serializeTabOrder(ids: readonly string[]): string {
-  return JSON.stringify(ids.slice(0, MAX_PERSISTED_TAB_ORDER));
-}
-
 /** The session statuses that raise the mobile switcher's aggregate attention
  *  cue. The rule is "only states that want the user — it's like a notification":
  *  a background terminal blocked on the user ("input"), one whose turn finished
@@ -278,11 +218,12 @@ export function isCueStatus(status: string): status is CueStatus {
  *  back on the next page load — and, since the snapshot is re-pushed on every
  *  SSE reconnect, on a phone simply returning to a backgrounded page.
  *
- *  Client-side for the same reason as ACTIVE_TAB_KEY and TAB_ORDER_KEY: "I have
- *  seen this" is a property of the VIEWER, not of the session. A phone
- *  acknowledging a finished turn must not blank the dot on the desktop watching
- *  the same server, so this needs no engine API and the session REST surface
- *  stays the fixed four routes.
+ *  Client-side for the same reason as ACTIVE_TAB_KEY: "I have seen this" is a
+ *  property of the VIEWER, not of the session. A phone acknowledging a finished
+ *  turn must not blank the dot on the desktop watching the same server, so this
+ *  needs no engine API. Contrast the tab ARRANGEMENT, which is a property of the
+ *  session set and so is the server's (see compareTabOrder): a reorder is meant
+ *  to reach the other device, and an acknowledgement is not.
  *
  *  Keyed per session rather than as one latest-wins slot: several background tabs
  *  can hold a latched status at once while the cue only ever shows the newest, so
@@ -290,10 +231,9 @@ export function isCueStatus(status: string): status is CueStatus {
  *  the next load. */
 export const CUE_SEEN_KEY = "wt-cue-seen";
 
-/** Bound on the acknowledgement map, same reasoning as MAX_PERSISTED_TAB_ORDER:
- *  every key is a live session server-side, so a real one is nowhere near this,
- *  and a corrupted or hostile stored value cannot make the restore path do
- *  unbounded work. */
+/** Bound on the acknowledgement map: every key is a live session server-side, so
+ *  a real one is nowhere near this, and a corrupted or hostile stored value
+ *  cannot make the restore path do unbounded work. */
 export const MAX_PERSISTED_CUE_SEEN = 200;
 
 /** parseCueSeen reads stored acknowledgements into a clean map. Anything it
@@ -336,31 +276,89 @@ export function serializeCueSeen(seen: ReadonlyMap<string, CueStatus>): string {
   return JSON.stringify(Object.fromEntries(seen));
 }
 
-/** orderedInsertIndex returns where `id` belongs in `current` (a list of tab ids
- *  in display order) to honour the stored arrangement `saved`.
+/** TabOrderKey is what the strip's order is decided by: the server's shared
+ *  position for the session, its creation timestamp, and its id. Both `Tab` and
+ *  the wire `SessionInfo` carry these three fields, so either can be passed
+ *  without a projection. */
+export interface TabOrderKey {
+  readonly id: string;
+  readonly createdAt: string;
+  /** the server's shared position, absent when the server keeps no order (an
+   *  engine before 3.9.0). Explicitly `| undefined` so a Tab, whose field is
+   *  always present and sometimes undefined, satisfies this under
+   *  exactOptionalPropertyTypes. */
+  readonly order?: number | undefined;
+}
+
+/** ORDER_ABSENT is the position given to a session the server did not place, so
+ *  it sorts after every session the server did. Absent must not read as 0, which
+ *  is a real position at the front of the strip. */
+const ORDER_ABSENT = Number.MAX_SAFE_INTEGER;
+
+/** createdMillis reads a wire createdAt as a number for comparison. An
+ *  unparseable value sorts LAST rather than first: the caller's question is where
+ *  a tab belongs in a strip, and the end is the answer that reads as "new" —
+ *  putting a tab the client cannot date at the head would rewrite the top of the
+ *  strip on the strength of a value it failed to read.
  *
- *  This is what makes the restore independent of the order tabs ARRIVE in, which
- *  matters because they arrive from two racing sources: the status stream pushes
- *  a snapshot of the existing sessions on open, and the bootstrap's
- *  GET /api/sessions lands separately — whichever wins, each session is placed
- *  by the saved arrangement rather than by arrival.
+ *  Milliseconds, deliberately, against a wire value carrying nanoseconds: the
+ *  server's own tiebreak is the id, this one's is too, and the pair therefore
+ *  agree on every input a human can produce. Comparing the STRINGS instead would
+ *  be wrong, not merely coarse — Go's RFC 3339 encoding drops trailing zeros
+ *  from the fraction, so ".15" sorts before ".1" lexically. */
+function createdMillis(raw: string): number {
+  const when = Date.parse(raw);
+  return Number.isNaN(when) ? Number.MAX_SAFE_INTEGER : when;
+}
+
+/** compareTabOrder is the total order the strip is built in: the server's shared
+ *  position, then age, then id.
  *
- *  An id absent from `saved` goes last: it is a session created after the
- *  arrangement was stored (here or in another browser), and a new tab belongs at
- *  the end. Ids in `current` that are absent from `saved` are transparent to the
- *  scan, so a saved tab can still slot ahead of them. */
-export function orderedInsertIndex(
-  current: readonly string[],
-  saved: readonly string[],
-  id: string,
-): number {
-  const rank = saved.indexOf(id);
-  if (rank < 0) {
-    return current.length;
+ *  The server owns the arrangement (engine 3.9.0, `PUT /api/sessions/order`), so
+ *  a drag on one device moves the tab on every device, and a browser with no
+ *  history of this server still opens on the arrangement its owner chose. This
+ *  replaced a per-browser `localStorage` arrangement, which by construction could
+ *  not travel and which left a second device with no arrangement at all.
+ *
+ *  Age and id remain, and each answers a case the position cannot: age orders
+ *  every session when the server keeps no order (an older engine sends no field,
+ *  so all positions are absent and creation order is the honest fallback), and
+ *  the id makes the order TOTAL, so two sessions created inside one millisecond
+ *  cannot swap places between two runs.
+ *
+ *  Age is read from the `createdAt` field rather than from the wire SEQUENCE on
+ *  purpose. Sessions arrive from two racing sources — the status stream's
+ *  snapshot on open, and the bootstrap's GET /api/sessions — so a client that
+ *  merges them sees neither source's order, however well each source sorted. */
+export function compareTabOrder(a: TabOrderKey, b: TabOrderKey): number {
+  const posA = a.order ?? ORDER_ABSENT;
+  const posB = b.order ?? ORDER_ABSENT;
+  if (posA !== posB) {
+    return posA < posB ? -1 : 1;
   }
+  const bornA = createdMillis(a.createdAt);
+  const bornB = createdMillis(b.createdAt);
+  if (bornA !== bornB) {
+    return bornA < bornB ? -1 : 1;
+  }
+  if (a.id === b.id) {
+    return 0;
+  }
+  return a.id < b.id ? -1 : 1;
+}
+
+/** orderedInsertIndex returns where `incoming` belongs in `current` (the tabs
+ *  already on the strip, in display order) under compareTabOrder: the index of
+ *  the first tab that sorts after it, else the end.
+ *
+ *  This is what makes the strip independent of the order tabs ARRIVE in. Each
+ *  insertion goes before the first tab that outranks the new one, which keeps a
+ *  list built from an empty strip sorted at every step, so all arrival orders of
+ *  one session set converge on the same strip. */
+export function orderedInsertIndex(current: readonly TabOrderKey[], incoming: TabOrderKey): number {
   for (let i = 0; i < current.length; i++) {
-    const other = saved.indexOf(current[i] ?? "");
-    if (other > rank) {
+    const other = current[i];
+    if (other !== undefined && compareTabOrder(other, incoming) > 0) {
       return i;
     }
   }
@@ -387,6 +385,10 @@ export interface Tab {
   /** The computed, de-duplicated label actually shown in the chrome. */
   display: string;
   createdAt: string;
+  /** The server's shared position for this session, or undefined against a server
+   *  that keeps no order. Updated from every status event, so a reorder made on
+   *  another device reaches this strip (see compareTabOrder). */
+  order: number | undefined;
   store: LineStore;
   el: HTMLElement;
   label: HTMLElement;
@@ -480,6 +482,17 @@ export interface SessionAPI {
   /** Remove a session's pinned name so its label falls back to the automatic
    *  sources. Throws on failure, for the same reason as setPinnedTitle. */
   clearPinnedTitle(id: string): Promise<void>;
+  /** Replace the display order every viewer of this server shares, by sending
+   *  every live session id in the wanted order.
+   *
+   *  THROWS on failure, and the status is the point. A 409 means the server's
+   *  session set is not the one the caller listed, so this client has not yet
+   *  seen a session created or closed elsewhere; the caller answers it by
+   *  re-listing and sending again, not by telling the user. Any other status is a
+   *  genuine failure of a reorder the user performed.
+   *
+   *  Absent from a server before engine 3.9.0, where it answers 404. */
+  setOrder(ids: readonly string[]): Promise<void>;
 }
 
 const SESSION_API_TIMEOUT_MS = 15000;
@@ -637,6 +650,19 @@ export function createSessionAPI(apiBase: string): SessionAPI {
       });
       if (!r.ok) {
         throw await sessionError("clear pinned title", r);
+      }
+    },
+    // The shared display order. The path is a literal segment rather than an id,
+    // so nothing is interpolated into it.
+    async setOrder(ids: readonly string[]): Promise<void> {
+      const r = await fetch(`${apiBase}/order`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order: ids }),
+        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
+      });
+      if (!r.ok) {
+        throw await sessionError("set order", r);
       }
     },
   };

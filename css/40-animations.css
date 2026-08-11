@@ -27,13 +27,46 @@
     display var(--dur-standard) allow-discrete;
 }
 
-/* Tab chrome micro-transitions (hover/active color shifts). */
+/* Tab chrome micro-transitions (hover/active colour shifts, and a chip's hand-off
+   into the reorder drop slot). border-color rides along because the slot IS a
+   border-colour change plus a dashed style (30-tabs.css): without it the chip
+   snapped from tab to outline in a single frame, which is the same instant
+   rearrangement the reorder preview exists to remove. The dash pattern itself still
+   appears at once — border-style does not interpolate — so the slot reads as an
+   outline drawing itself in rather than as a tab bleaching out. */
 :where(.wt-root.wt-animate) .wt-tab,
 :where(.wt-root.wt-animate) .wt-tab-close,
 :where(.wt-root.wt-animate) .wt-tab-new {
   transition:
     background-color var(--dur-micro) var(--ease-standard),
+    border-color var(--dur-micro) var(--ease-standard),
     color var(--dur-micro) var(--ease-standard);
+}
+
+/* The chip's content dissolves as it becomes the drop slot, and comes back when the
+   drag ends (30-tabs.css fades every child to nothing). One rule on the children,
+   not four per-part rules: the label, the status dot, the progress bar and the close
+   all leave together, because they leave for one reason. */
+:where(.wt-root.wt-animate) .wt-tab > * {
+  transition: opacity var(--dur-micro) var(--ease-standard);
+}
+
+/* The drop slot fades in at each position the reorder preview commits it to
+   (index.ts, flashSlot). The chips it displaces SLIDE there — a JS FLIP, because the
+   distance is only known at commit time — while the slot itself deliberately does
+   not travel: a hole crossing the strip alongside the solid drag image the pointer
+   is already carrying is two things moving at once, which is what made the old
+   instant reorder unreadable. It appears where the strip has just opened, which is
+   the frame that says the reorder took. */
+:where(.wt-root.wt-animate) .wt-tab-slotted {
+  animation: wt-slot-in var(--dur-enter) var(--ease-enter);
+}
+
+@keyframes wt-slot-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
 }
 
 /* New tab enters with a fade + scale-in. Only runtime-added tabs get

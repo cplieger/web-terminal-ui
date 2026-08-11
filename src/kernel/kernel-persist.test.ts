@@ -77,6 +77,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       lastBrowseActivityMs: vi.fn(() => 0),
       dropBrowseCache: vi.fn(),
       maybeFetchHistory: vi.fn(),
+      handleScrollPosition: vi.fn(),
       replayMaxForResume: vi.fn(() => 1500),
       handleHistoryReply: vi.fn(),
       applyResumeTransition: vi.fn(),

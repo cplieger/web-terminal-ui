@@ -6,22 +6,21 @@
  *  tool engine installs on first boot). Flattening that into a message string
  *  made it indistinguishable from a 500 and threw away the retry hint. */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import type { CueStatus } from "./model.js";
+import fc from "fast-check";
+import type { CueStatus, TabOrderKey } from "./model.js";
 import {
   MAX_PERSISTED_CUE_SEEN,
-  MAX_PERSISTED_TAB_ORDER,
   PROGRESS_ABSENT,
   SessionAPIError,
+  compareTabOrder,
   createSessionAPI,
   isCueStatus,
   isEndedStatus,
   normalizeProgress,
   orderedInsertIndex,
   parseCueSeen,
-  parseTabOrder,
   renderedProgress,
   serializeCueSeen,
-  serializeTabOrder,
   statusOwnsProgress,
   statusPhrase,
   statusRevealsDot,
@@ -198,58 +197,6 @@ describe("SessionAPIError carries what the server said", () => {
  *  always a valid strip) rather than to a corrupted strip, and a tab is placed by
  *  the stored arrangement regardless of the order sessions ARRIVE in — which is
  *  not stable, since the status-stream snapshot races the bootstrap's list. */
-describe("parseTabOrder rejects anything the restore path cannot trust", () => {
-  it("reads a well-formed arrangement back verbatim", () => {
-    expect(parseTabOrder(JSON.stringify(["c", "a", "b"]))).toEqual(["c", "a", "b"]);
-  });
-
-  it("degrades to no arrangement on unusable values", () => {
-    const cases: Record<string, string | null> = {
-      absent: null,
-      empty: "",
-      "not json": "{oh no",
-      "an object": JSON.stringify({ a: 1 }),
-      "a bare string": JSON.stringify("s1"),
-      "a number": JSON.stringify(7),
-      null_literal: JSON.stringify(null),
-    };
-    for (const [name, raw] of Object.entries(cases)) {
-      expect(parseTabOrder(raw), name).toEqual([]);
-    }
-  });
-
-  it("drops entries that are not usable ids, keeping the rest in order", () => {
-    expect(parseTabOrder(JSON.stringify(["a", 1, "", null, "b", { id: "c" }, "d"]))).toEqual([
-      "a",
-      "b",
-      "d",
-    ]);
-  });
-
-  it("drops a duplicate id, which would make the insert position ambiguous", () => {
-    expect(parseTabOrder(JSON.stringify(["a", "b", "a", "c", "b"]))).toEqual(["a", "b", "c"]);
-  });
-
-  it("caps a hostile or corrupted list so the restore cannot do unbounded work", () => {
-    const huge = Array.from({ length: MAX_PERSISTED_TAB_ORDER + 500 }, (_, i) => `s${String(i)}`);
-    expect(parseTabOrder(JSON.stringify(huge))).toHaveLength(MAX_PERSISTED_TAB_ORDER);
-    // The write is capped the same way, so a round trip is stable: what is
-    // written back is exactly what the reader would keep.
-    expect(parseTabOrder(serializeTabOrder(huge))).toHaveLength(MAX_PERSISTED_TAB_ORDER);
-  });
-
-  it("round-trips through serializeTabOrder", () => {
-    const ids = ["s3", "s1", "s2"];
-    expect(parseTabOrder(serializeTabOrder(ids))).toEqual(ids);
-  });
-});
-
-/** Persisted cue acknowledgements.
- *
- *  The dot on the mobile switch button is dismissible, but `input` and `done` are
- *  LATCHED server-side and re-pushed in every status-stream snapshot, so the
- *  dismissal only survives a reload (or an SSE reconnect) because it is stored.
- *  These pin the store's shape and its safe-degradation rule. */
 describe("parseCueSeen rejects anything the acknowledgement store cannot trust", () => {
   it("reads a well-formed map back verbatim", () => {
     expect([...parseCueSeen(JSON.stringify({ s1: "done", s2: "input" }))]).toEqual([
@@ -312,36 +259,220 @@ describe("isCueStatus declares the cue-worthy statuses in one place", () => {
   });
 });
 
-describe("orderedInsertIndex places a tab by the arrangement, not by arrival", () => {
-  it("rebuilds the saved arrangement from any arrival order", () => {
-    const saved = ["c", "a", "b"];
-    // Every permutation of arrival must converge on the same strip.
-    const arrivals = [
-      ["a", "b", "c"],
-      ["c", "b", "a"],
-      ["b", "a", "c"],
-      ["a", "c", "b"],
-      ["b", "c", "a"],
-      ["c", "a", "b"],
-    ];
-    for (const order of arrivals) {
-      const strip: string[] = [];
-      for (const id of order) {
-        strip.splice(orderedInsertIndex(strip, saved, id), 0, id);
-      }
-      expect(strip, order.join(">")).toEqual(saved);
+describe("the strip's order follows the server, not arrival", () => {
+  // Wire records as a server would send them: creation order d, a, c, b, and a
+  // shared order the server holds that is deliberately NEITHER creation order nor
+  // id order, so a test cannot pass by accident on the wrong key.
+  const born: Record<string, string> = {
+    d: "2026-08-11T09:00:00Z",
+    a: "2026-08-11T09:01:00Z",
+    c: "2026-08-11T09:02:00Z",
+    b: "2026-08-11T09:03:00Z",
+  };
+  const key = (id: string, order?: number): TabOrderKey =>
+    order === undefined
+      ? { id, createdAt: born[id] ?? "" }
+      : { id, createdAt: born[id] ?? "", order };
+
+  /** Build a strip by adopting ids in the given arrival order, the way
+   *  adoptSession does: compute the index, splice the tab in. */
+  const build = (arrival: readonly string[], order: Record<string, number>): string[] => {
+    const strip: TabOrderKey[] = [];
+    for (const id of arrival) {
+      const incoming = key(id, order[id]);
+      strip.splice(orderedInsertIndex(strip, incoming), 0, incoming);
+    }
+    return strip.map((t) => t.id);
+  };
+
+  it("rebuilds the server's arrangement from any arrival order", () => {
+    // This is the whole point of server-owned order: a second device that has
+    // never seen this server opens on the arrangement its owner chose.
+    const server = { c: 0, a: 1, b: 2, d: 3 };
+    for (const arrival of permutations(["a", "b", "c", "d"])) {
+      expect(build(arrival, server), arrival.join(">")).toEqual(["c", "a", "b", "d"]);
     }
   });
 
-  it("appends a session the arrangement does not know (a new tab goes last)", () => {
-    expect(orderedInsertIndex(["c", "a"], ["c", "a", "b"], "zz")).toBe(2);
-    expect(orderedInsertIndex([], [], "s1")).toBe(0);
+  it("falls back to creation order against a server that keeps no order", () => {
+    // An engine before 3.9.0 sends no order field at all. Every position is then
+    // absent, age is the only key left, and creation order is the honest answer.
+    for (const arrival of permutations(["a", "b", "c", "d"])) {
+      expect(build(arrival, {}), arrival.join(">")).toEqual(["d", "a", "c", "b"]);
+    }
   });
 
-  it("lets a saved tab slot ahead of tabs the arrangement does not know", () => {
-    // "x" is unknown to the arrangement and already at the head; "a" (rank 1)
-    // still lands before "b" (rank 2) rather than being pushed to the end.
-    expect(orderedInsertIndex(["x", "b"], ["c", "a", "b"], "a")).toBe(1);
+  it("puts a session the server has not placed after every session it has", () => {
+    // The mixed case: a server that keeps an order, and one session whose event
+    // carried none. Absent must not read as position 0, which would drag it to
+    // the head of the strip.
+    for (const arrival of permutations(["a", "b", "c", "d"])) {
+      expect(build(arrival, { c: 0, b: 1 }), arrival.join(">")).toEqual(["c", "b", "d", "a"]);
+    }
+  });
+
+  it("appends the first tab of an empty strip", () => {
+    expect(orderedInsertIndex([], key("a", 0))).toBe(0);
+    expect(orderedInsertIndex([], key("a"))).toBe(0);
+  });
+
+  it("converges on one strip from every arrival order, for any server order", () => {
+    const ids = ["a", "b", "c", "d"];
+    fc.assert(
+      fc.property(
+        fc.record({
+          // A permutation of the ids is what the server's dense order is, so the
+          // property covers every arrangement a reorder can produce.
+          server: fc.shuffledSubarray(ids, { minLength: ids.length }),
+          arrivals: fc.uniqueArray(fc.shuffledSubarray(ids, { minLength: ids.length }), {
+            minLength: 2,
+            maxLength: 6,
+          }),
+        }),
+        ({ server, arrivals }) => {
+          const order: Record<string, number> = {};
+          server.forEach((id, i) => {
+            order[id] = i;
+          });
+          const strips = arrivals.map((arrival) => build(arrival, order).join(">"));
+          // One strip, and it is the server's arrangement.
+          expect(new Set(strips).size).toBe(1);
+          expect(strips[0]).toBe(server.join(">"));
+        },
+      ),
+    );
+  });
+});
+
+/** Every permutation of a small id list, so an arrival-order test states "any
+ *  order" rather than a hand-picked few. */
+function permutations<T>(items: readonly T[]): T[][] {
+  if (items.length <= 1) {
+    return [[...items]];
+  }
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i++) {
+    const head = items[i];
+    if (head === undefined) {
+      continue;
+    }
+    const rest = [...items.slice(0, i), ...items.slice(i + 1)];
+    for (const tail of permutations(rest)) {
+      out.push([head, ...tail]);
+    }
+  }
+  return out;
+}
+
+describe("compareTabOrder is a total order", () => {
+  const early = "2026-08-11T09:00:00Z";
+  const late = "2026-08-11T09:00:01Z";
+  const at = (iso: string, id: string, order?: number): TabOrderKey =>
+    order === undefined ? { id, createdAt: iso } : { id, createdAt: iso, order };
+
+  it("ranks the server's position above age and id", () => {
+    // "b" is younger and sorts later by id, and still comes first because the
+    // server put it there. That is the user's arrangement outranking every
+    // inference about it.
+    expect(compareTabOrder(at(late, "b", 0), at(early, "a", 1))).toBeLessThan(0);
+    expect(compareTabOrder(at(early, "a", 1), at(late, "b", 0))).toBeGreaterThan(0);
+  });
+
+  it("orders two unplaced sessions by age", () => {
+    expect(compareTabOrder(at(early, "z"), at(late, "a"))).toBeLessThan(0);
+    expect(compareTabOrder(at(late, "a"), at(early, "z"))).toBeGreaterThan(0);
+  });
+
+  it("sorts an unplaced session after a placed one, whatever its age", () => {
+    // Absent is not position 0. A session the server has not placed is newer than
+    // the arrangement, so the end is where it belongs.
+    expect(compareTabOrder(at(early, "a"), at(late, "z", 5))).toBeGreaterThan(0);
+  });
+
+  it("breaks a shared position and timestamp on id, so no pair is ever unordered", () => {
+    // A shared position cannot happen while the server keeps the order dense, but
+    // two sessions created inside one millisecond can, and without the id they
+    // would sort by whatever order the input happened to be in. Sub-millisecond
+    // precision is deliberately not read (Go's RFC 3339 fraction cannot be
+    // compared as a string), so the id carries these.
+    expect(compareTabOrder(at(early, "a"), at(early, "b"))).toBeLessThan(0);
+    expect(compareTabOrder(at(early, "b"), at(early, "a"))).toBeGreaterThan(0);
+    expect(compareTabOrder(at(early, "a"), at(early, "a"))).toBe(0);
+  });
+
+  it("sorts a session it cannot date last, not first", () => {
+    // A timestamp the client cannot read must not rewrite the head of the strip.
+    for (const bad of ["", "not-a-date", "2026-13-45T99:99:99Z"]) {
+      expect(compareTabOrder(at(bad, "a"), at(late, "z"))).toBeGreaterThan(0);
+    }
+  });
+
+  it("is antisymmetric for every pair of keys", () => {
+    const keys = [
+      at(early, "a"),
+      at(early, "b"),
+      at(late, "a"),
+      at(late, "b"),
+      at(early, "a", 0),
+      at(late, "b", 0),
+      at(early, "b", 1),
+    ];
+    for (const x of keys) {
+      for (const y of keys) {
+        const forward = compareTabOrder(x, y);
+        const back = compareTabOrder(y, x);
+        // Stated as a sum so the self-comparison case holds too: Math.sign(0) is
+        // 0 and -Math.sign(0) is -0, which Object.is separates.
+        expect(
+          Math.sign(forward) + Math.sign(back),
+          `${x.id}@${x.createdAt}#${String(x.order)} vs ${y.id}@${y.createdAt}#${String(y.order)}`,
+        ).toBe(0);
+      }
+    }
+  });
+
+  it("sorts a whole strip the same way inserting one at a time does", () => {
+    // applyServerOrder sorts the live list; adoptSession inserts into it. The two
+    // must agree, or a remote reorder and a fresh adopt would fight.
+    const strip = [at(late, "b", 2), at(early, "a", 0), at(late, "c", 1)];
+    const sorted = [...strip].sort(compareTabOrder).map((k) => k.id);
+    const inserted: TabOrderKey[] = [];
+    for (const k of strip) {
+      inserted.splice(orderedInsertIndex(inserted, k), 0, k);
+    }
+    expect(sorted).toEqual(inserted.map((k) => k.id));
+    expect(sorted).toEqual(["a", "c", "b"]);
+  });
+});
+
+describe("setOrder sends the arrangement to the server", () => {
+  it("PUTs the id list to the order route", async () => {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    const api = createSessionAPI("/api/sessions");
+    await api.setOrder(["s2", "s1"]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("/api/sessions/order");
+    expect(calls[0]?.init?.method).toBe("PUT");
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ order: ["s2", "s1"] }));
+  });
+
+  it("throws with the status, so a caller can tell 409 from a real failure", async () => {
+    // 409 is the server saying "your session set is stale", which the caller
+    // answers by re-listing rather than by telling the user. Any other status is a
+    // genuine failure of a reorder the user performed, so the two must be
+    // distinguishable.
+    for (const status of [409, 404, 500]) {
+      vi.stubGlobal("fetch", () => Promise.resolve(new Response("nope", { status })));
+      const api = createSessionAPI("/api/sessions");
+      await expect(api.setOrder(["s1"])).rejects.toMatchObject({
+        name: "SessionAPIError",
+        status,
+      });
+    }
   });
 });
 

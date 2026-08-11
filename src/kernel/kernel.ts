@@ -513,9 +513,12 @@ function buildTerminal(
     // WITHIN history never toggles follow, and that is exactly when paging has
     // to work. The trigger re-evaluates its own guards, so firing for the
     // browser's own clamps as well as gestures costs nothing.
-    onScrollPosition: () => {
-      render.maybeFetchHistory();
-    },
+    //
+    // ONE hook, deliberately. The renderer's scroll-position contract is two jobs
+    // (re-evaluate the paging trigger, and finish a drain that stopped with rows
+    // queued) and it owns the ordering and the guards for both. A consumer wiring
+    // them as two calls is a consumer that can wire one.
+    onScrollPosition: render.handleScrollPosition,
   });
 
   // The size this client would announce right now, or null when it cannot

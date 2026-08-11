@@ -26,6 +26,9 @@ const scrollInit = vi.fn<(opts: Parameters<typeof Engine.scroll.init>[0]) => voi
 const browseCacheSize = vi.fn<() => number>(() => 0);
 const lastBrowseActivityMs = vi.fn<() => number>(() => 0);
 const dropBrowseCache = vi.fn<(pageVisible: boolean) => void>();
+// Hoisted so the scroll seam test can assert the callback the kernel builds
+// actually REACHES the renderer, not merely that it is a function.
+const handleScrollPosition = vi.fn();
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -52,6 +55,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       lastBrowseActivityMs,
       dropBrowseCache,
       maybeFetchHistory: vi.fn(),
+      handleScrollPosition,
       replayMaxForResume: vi.fn(() => 1500),
       handleHistoryReply: vi.fn(),
       applyResumeTransition: vi.fn(),
@@ -1059,6 +1063,18 @@ describe("demand-paged scrollback wiring", () => {
     const opts = scrollInit.mock.calls[0]?.[0];
     expect(opts).toBeDefined();
     expect(typeof opts?.onScrollPosition).toBe("function");
+  });
+
+  it("routes that seam to the renderer's scroll-position hook, and INVOKES it", () => {
+    // Asserting the callback exists is what let the feature ship dark the first
+    // time. The seam is only wired if calling it reaches the renderer, so call it.
+    // One hook, not two: the renderer owns the ordering of the paging trigger and
+    // the drain resume, precisely so a consumer cannot wire half of it.
+    createTerminal(rootIn(), { features: () => [] });
+    const opts = scrollInit.mock.calls[0]?.[0];
+    handleScrollPosition.mockClear();
+    opts?.onScrollPosition?.();
+    expect(handleScrollPosition).toHaveBeenCalledTimes(1);
   });
 
   it("gives the transport every store and viewport decision it cannot make", () => {
