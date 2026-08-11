@@ -6,7 +6,7 @@
 // the api is surfaced on the feature value and via ctx.use, teardown runs on
 // destroy, the input funnel composes transforms) behaves as specified.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as KernelModule from "./kernel.js";
 import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
@@ -19,33 +19,54 @@ const setSession = vi.fn<(id: string) => void>();
 const disconnect = vi.fn();
 const resetScrollback = vi.fn();
 const resetScreen = vi.fn();
+const renderInit = vi.fn<(opts: Parameters<typeof Engine.render.init>[0]) => void>();
+const scrollInit = vi.fn<(opts: Parameters<typeof Engine.scroll.init>[0]) => void>();
+// Hoisted so a test can drive the browse-cache TTL: the sweep reads both of
+// these, and short-circuits on an empty cache.
+const browseCacheSize = vi.fn<() => number>(() => 0);
+const lastBrowseActivityMs = vi.fn<() => number>(() => 0);
+const dropBrowseCache = vi.fn<(pageVisible: boolean) => void>();
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
   return {
     ...actual,
     render: {
-      init: vi.fn(),
+      init: renderInit,
       updateFontMetrics: vi.fn(),
       setPredictedCursor: vi.fn(),
       computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
       getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
       getHighestIndex: vi.fn(() => -1),
+      pendingRowCount: vi.fn(() => 0),
       noteResumeBounds: vi.fn(),
       handleScreen: vi.fn(),
       handleScroll: vi.fn(),
       updateReverseVideo: vi.fn(),
       resetScrollback,
       resetScreen,
+      // The demand-paging surface the kernel wires (engine
+      // docs/paged-scrollback.md §5): the browse-cache TTL calls the first two on
+      // every visibility transition, so a double without them throws there.
+      browseCacheSize,
+      lastBrowseActivityMs,
+      dropBrowseCache,
+      maybeFetchHistory: vi.fn(),
+      replayMaxForResume: vi.fn(() => 1500),
+      handleHistoryReply: vi.fn(),
+      applyResumeTransition: vi.fn(),
+      noteSolicited: vi.fn(),
+      clearSolicited: vi.fn(),
       bind: vi.fn(),
       boundStore: vi.fn(),
     },
     scroll: {
-      init: vi.fn(),
+      init: scrollInit,
       scrollToBottom: vi.fn(),
       isUserScrolledUp: vi.fn(() => false),
       currentScrollTop: vi.fn(() => 0),
       restoreScrollTop: vi.fn(),
+      restoreView: vi.fn(),
     },
     connection: {
       init: connectionInit,
@@ -56,6 +77,10 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       disconnect,
       setSession,
       forgetSession: vi.fn(),
+      // The engine's own per-tab session identity. The kernel reads it to scope
+      // the unverified-restore guard to ONE session, so a double that omits it
+      // makes every close path throw.
+      currentSessionId: vi.fn<() => string>(() => "session-under-test"),
     },
   };
 });
@@ -74,6 +99,13 @@ beforeEach(async () => {
   disconnect.mockClear();
   resetScrollback.mockClear();
   resetScreen.mockClear();
+  renderInit.mockClear();
+  scrollInit.mockClear();
+  browseCacheSize.mockClear();
+  browseCacheSize.mockReturnValue(0);
+  lastBrowseActivityMs.mockClear();
+  lastBrowseActivityMs.mockReturnValue(0);
+  dropBrowseCache.mockClear();
   document.body.replaceChildren();
   ({ createTerminal } = await import("./kernel.js"));
 });
@@ -854,5 +886,343 @@ describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () 
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "a" }));
     expect(snap).not.toHaveBeenCalled();
+  });
+});
+
+describe("scrollbackLines (the consumer retained-line budget)", () => {
+  it("passes a valid cap to the engine renderer as maxLines", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [], scrollbackLines: 1500 });
+    expect(renderInit).toHaveBeenCalledTimes(1);
+    expect(renderInit.mock.calls[0]?.[0]).toMatchObject({ maxLines: 1500 });
+  });
+
+  it("omits maxLines entirely when the option is unset (engine default applies)", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    expect(renderInit).toHaveBeenCalledTimes(1);
+    expect(renderInit.mock.calls[0]?.[0]).not.toHaveProperty("maxLines");
+  });
+
+  it("ignores a non-integer or non-positive cap rather than clamping it", () => {
+    const root = rootIn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      createTerminal(root, { features: () => [], scrollbackLines: 0.5 });
+      expect(renderInit.mock.calls[0]?.[0]).not.toHaveProperty("maxLines");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("scrollbackLines"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("ctx.newLineStore() builds stores honoring the same cap (the tabs switching cache)", async () => {
+    // LineStore is the REAL engine class (the mock spreads the actual module),
+    // so the cap is observable through eviction: cap 8 retains the newest 8 of
+    // 12 lines. This is the seam the tabs feature creates every per-tab store
+    // through, so the one option governs those stores too.
+    const root = rootIn();
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "probe",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(root, { features: () => [probe], scrollbackLines: 8 });
+    await tick();
+    expect(captured).toBeDefined();
+    const store = captured?.newLineStore();
+    expect(store).toBeDefined();
+    if (!store) {
+      return;
+    }
+    const row = (t: string): { t: string; f: number; b: number; a: number; uc: number }[] => [
+      { t, f: -1, b: -1, a: 0, uc: -1 },
+    ];
+    store.applyScroll({
+      type: "scroll",
+      firstIndex: 0,
+      lines: Array.from({ length: 12 }, (_, i) => row(`l${String(i)}`)),
+    });
+    expect(store.highestIndex()).toBe(11);
+    expect(store.oldestIndex()).toBe(4); // cap 8: the oldest 4 evicted
+  });
+});
+
+describe("mouse selection: a press never turns into a native text drag", () => {
+  // The bug this pins: a browser reads a left press INSIDE an existing selection
+  // as the start of a drag-and-drop of the selected text, so the press neither
+  // collapses the selection nor starts a new one — drag twice over the same text
+  // and the selection is stuck, un-clearable (a real mouse jitters a pixel or
+  // two, which re-enters the drag path on every retry). The kernel collapses the
+  // selection on the press so the browser takes its ordinary select path.
+  function selectOutputText(root: HTMLElement): Selection {
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    const text = document.createTextNode("line 1 the quick brown fox");
+    output.appendChild(text);
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 7);
+    const sel = window.getSelection();
+    if (!sel) {
+      throw new Error("no selection");
+    }
+    sel.removeAllRanges();
+    sel.addRange(range);
+    expect(sel.isCollapsed).toBe(false);
+    return sel;
+  }
+  const press = (root: HTMLElement, init: MouseEventInit): void => {
+    const term = root.querySelector(".term");
+    term?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, ...init }));
+  };
+  const collapsed = (): boolean => window.getSelection()?.isCollapsed ?? true;
+
+  it("collapses the selection on a bare left press", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    selectOutputText(root);
+    press(root, { button: 0 });
+    expect(collapsed()).toBe(true);
+  });
+
+  it("keeps the selection for a right press, so the context menu can copy it", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    selectOutputText(root);
+    press(root, { button: 2 });
+    expect(collapsed()).toBe(false);
+  });
+
+  it("keeps the selection for a middle press, which pastes it on Linux", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    selectOutputText(root);
+    press(root, { button: 1 });
+    expect(collapsed()).toBe(false);
+  });
+
+  it("keeps the selection for a modified press (Shift extends, Ctrl adds a range)", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    selectOutputText(root);
+    press(root, { button: 0, shiftKey: true });
+    expect(collapsed()).toBe(false);
+    press(root, { button: 0, ctrlKey: true });
+    expect(collapsed()).toBe(false);
+    press(root, { button: 0, altKey: true });
+    expect(collapsed()).toBe(false);
+    press(root, { button: 0, metaKey: true });
+    expect(collapsed()).toBe(false);
+  });
+
+  it("leaves a touch press alone: the platform's selection UI owns it", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const term = root.querySelector(".term");
+    selectOutputText(root);
+    term?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+    press(root, { button: 0 });
+    expect(collapsed()).toBe(false);
+  });
+});
+
+describe("demand-paged scrollback wiring", () => {
+  // This whole feature shipped DARK: the engine grew the server control, the
+  // client store, the fetch controller and the gap markers, and every one of its
+  // own tests passed — while this kernel, the only thing that constructs a
+  // terminal, passed none of the options that connect them. Nothing asserted the
+  // connection, so nothing failed. These tests assert the seam itself.
+  //
+  // Each option below is a decision one module cannot make alone: the transport
+  // is store-blind and viewport-blind, and the renderer has no socket. A missing
+  // one does not break a test elsewhere — it just silently disables paging.
+
+  it("gives the renderer a transport to fetch history with", () => {
+    createTerminal(rootIn(), { features: () => [] });
+    const opts = renderInit.mock.calls[0]?.[0];
+    expect(opts).toBeDefined();
+    expect(typeof opts?.requestHistory).toBe("function");
+    expect(typeof opts?.historyBudget).toBe("function");
+  });
+
+  it("gives the scroll layer the position seam that drives the trigger", () => {
+    // Not onUserScrollChange: that fires only on a follow/hold TOGGLE, so a
+    // reader moving WITHIN history would never notify — and that is exactly when
+    // paging has to work.
+    createTerminal(rootIn(), { features: () => [] });
+    const opts = scrollInit.mock.calls[0]?.[0];
+    expect(opts).toBeDefined();
+    expect(typeof opts?.onScrollPosition).toBe("function");
+  });
+
+  it("gives the transport every store and viewport decision it cannot make", () => {
+    createTerminal(rootIn(), { features: () => [] });
+    const cb = connectionInit.mock.calls[0]?.[0];
+    expect(cb).toBeDefined();
+    for (const name of [
+      "getReplayMax",
+      "onHistoryReply",
+      "onResumeTransition",
+      "noteSolicited",
+      "clearSolicited",
+      "onHistoryRetry",
+    ] as const) {
+      expect(typeof cb?.[name], `connection.init must wire ${name}`).toBe("function");
+    }
+  });
+
+  it("asks for no more resume replay than it intends to keep resident", () => {
+    // The bound the server honours. Sending nothing is not an option — the server
+    // bounds the replay regardless, and a client that predicted no bound would
+    // miss the resulting replay jump.
+    createTerminal(rootIn(), { features: () => [] });
+    const cb = connectionInit.mock.calls[0]?.[0];
+    const max = cb?.getReplayMax?.();
+    expect(typeof max).toBe("number");
+    expect(max).toBeGreaterThan(0);
+  });
+});
+
+describe("browse-cache TTL", () => {
+  // Paged-in history is disposable (recovery is one fetch), so it is evicted by
+  // INACTIVITY — never eagerly, or rapid scrolling would pay an RTT every time.
+  // The engine owns the mechanism and this layer owns the clock, because the
+  // engine has no notion of a page.
+  const TTL_MS = 5 * 60_000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("drops an idle cache on the sweep, and passes the page's visibility", () => {
+    vi.useFakeTimers();
+    createTerminal(rootIn(), { features: () => [] });
+    browseCacheSize.mockReturnValue(1200);
+    lastBrowseActivityMs.mockReturnValue(Date.now() - TTL_MS - 1);
+
+    vi.advanceTimersByTime(61_000);
+
+    expect(dropBrowseCache).toHaveBeenCalled();
+    // Visibility is forwarded rather than decided here: a VISIBLE page whose
+    // reader is parked on cached rows must keep them, and only the store knows
+    // where the reader is.
+    expect(dropBrowseCache).toHaveBeenCalledWith(true);
+  });
+
+  it("leaves a recently-read cache alone", () => {
+    vi.useFakeTimers();
+    createTerminal(rootIn(), { features: () => [] });
+    browseCacheSize.mockReturnValue(1200);
+    lastBrowseActivityMs.mockReturnValue(Date.now()); // just read
+
+    vi.advanceTimersByTime(61_000);
+
+    expect(dropBrowseCache).not.toHaveBeenCalled();
+  });
+
+  it("does NOT drop on the return transition, even with the TTL long expired", () => {
+    // An earlier version enforced the TTL the throttled hidden period owed, right
+    // here, with hidden-page semantics (unconditional). That deleted the rows the
+    // returning reader was parked on, in the one moment they are certain to look
+    // at them — and it bought at most 60 s over the periodic sweep, which applies
+    // the visible-page rule instead. The page is visible the instant this fires,
+    // so the visible rule is the correct one and this branch has nothing to add.
+    createTerminal(rootIn(), { features: () => [] });
+    browseCacheSize.mockReturnValue(1200);
+    lastBrowseActivityMs.mockReturnValue(Date.now() - TTL_MS - 1);
+
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    expect(dropBrowseCache).not.toHaveBeenCalled();
+  });
+
+  it("drops every cache on FREEZE, TTL or no TTL", () => {
+    // The one state the periodic sweep cannot cover: a frozen page runs no code,
+    // so without a last-chance hook its caches stay resident for the whole freeze
+    // and a discard then throws them away unread. Unconditional here is the
+    // opposite call from the return transition, and deliberately so — this fires
+    // as the page STOPS running, with no reader and none imminent.
+    let captured: TerminalContext | undefined;
+    const grabber: TerminalFeature<void> = {
+      name: "store-grabber",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [grabber] });
+    const background = captured?.newLineStore("session-bg");
+    if (background === undefined) {
+      throw new Error("the feature never ran");
+    }
+    const bgDrop = vi.spyOn(background, "dropBrowseCache");
+    // Both caches were read SECONDS ago, so the TTL is nowhere near expired.
+    browseCacheSize.mockReturnValue(1200);
+    lastBrowseActivityMs.mockReturnValue(Date.now());
+    vi.spyOn(background, "browseCacheSize").mockReturnValue(900);
+    vi.spyOn(background, "lastBrowseActivityMs").mockReturnValue(Date.now());
+
+    document.dispatchEvent(new Event("freeze"));
+
+    expect(dropBrowseCache).toHaveBeenCalledWith(false);
+    expect(bgDrop).toHaveBeenCalledWith(-1, false);
+  });
+
+  it("drops on pagehide INTO bfcache, but not on an ordinary pagehide", () => {
+    // Safari's path to the same frozen state, on the platform this feature is
+    // for: `freeze` is Chrome's signal and bfcache entry is Safari's, and either
+    // can fire without the other. An ordinary pagehide (a real navigation away)
+    // needs no drop — the page is going away with its memory.
+    createTerminal(rootIn(), { features: () => [] });
+    browseCacheSize.mockReturnValue(1200);
+    lastBrowseActivityMs.mockReturnValue(Date.now());
+
+    window.dispatchEvent(new Event("pagehide"));
+    expect(dropBrowseCache).not.toHaveBeenCalled();
+
+    const persisted = new Event("pagehide");
+    Object.defineProperty(persisted, "persisted", { value: true });
+    window.dispatchEvent(persisted);
+    expect(dropBrowseCache).toHaveBeenCalledWith(false);
+  });
+
+  it("sweeps a BACKGROUND tab's store, which the renderer never sees", () => {
+    // render.* only ever reports the BOUND store, so a sweep written against it
+    // reaches the visible tab and nothing else: every background tab's cache was
+    // immortal for the life of the page, at up to the engine's whole cache budget
+    // each. The kernel's store factory is the only place every store passes
+    // through, so it is where they become reachable.
+    vi.useFakeTimers();
+    // The factory lives on the feature context, which is where the tabs feature
+    // gets its per-tab stores from.
+    let captured: TerminalContext | undefined;
+    const grabber: TerminalFeature<void> = {
+      name: "store-grabber",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [grabber] });
+    const background = captured?.newLineStore("session-bg");
+    if (background === undefined) {
+      throw new Error("the feature never ran");
+    }
+    const bgDrop = vi.spyOn(background, "dropBrowseCache");
+    vi.spyOn(background, "browseCacheSize").mockReturnValue(900);
+    vi.spyOn(background, "lastBrowseActivityMs").mockReturnValue(Date.now() - TTL_MS - 1);
+    // The bound store has nothing, so only the background one can be swept.
+    browseCacheSize.mockReturnValue(0);
+
+    vi.advanceTimersByTime(61_000);
+
+    // No reader on a background tab, so no position to exempt: unconditional.
+    expect(bgDrop).toHaveBeenCalledWith(-1, false);
   });
 });

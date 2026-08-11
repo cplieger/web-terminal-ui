@@ -7,6 +7,7 @@
 
 import type { LineStore } from "@cplieger/web-terminal-engine";
 import type { SessionInfo } from "@cplieger/web-terminal-engine";
+import type { ViewMemory } from "@cplieger/web-terminal-engine";
 import type { TabHandle } from "../../kernel/types.js";
 
 // One session's wire shape (SessionInfo) is the ENGINE's exported type — the
@@ -399,8 +400,20 @@ export interface Tab {
    *  any title field. */
   progress: number;
   aria: TabHandle;
-  scrollTop: number;
-  following: boolean;
+  /** This tab's saved reading position: the absolute LINE at the viewport top
+   *  plus its on-screen offset and the follow state, as captureViewMemory()
+   *  returned it when the tab was last left. Null for a tab never viewed (and
+   *  for one left on the alternate screen, which has no absolute indices worth
+   *  remembering) — restoring null means "follow the tail", which is the right
+   *  default for a first visit.
+   *
+   *  NOT a pixel scrollTop, which is what this was until 2026-08: a rebuild has
+   *  built only ~301 of up to 5000 rows when the restore lands, so the browser
+   *  clamped the offset away, and it stopped meaning the same line as soon as
+   *  the tab's session produced output while backgrounded
+   *  (engine docs/scroll-position-fidelity.md §1.1). In memory only, like
+   *  before: a reload starts every tab following. */
+  view: ViewMemory | null;
   /** Sticky: true once this session emitted a genuine activity signal (OSC 9;4).
    *  Its activity dot is shown only while true; a session that never reports
    *  activity (a plain shell) keeps a clean, dot-less tab. Fed from the server's

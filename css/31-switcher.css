@@ -33,9 +33,31 @@
     display: flex;
     flex-direction: column; /* bar on top; the tab list expands below it as the bar slides up */
     background: var(--surface);
-    backdrop-filter: var(--blur);
     border-top: 1px solid var(--border);
     z-index: 25;
+  }
+
+  /* Frosting is paid for only where it shows (same policy as .wt-tab-bar in
+     30-tabs.css, where the full rationale lives). The COLLAPSED bar in the
+     full-page product sits over the page kit's flat background — terminal
+     content stops above it via --wt-reserve-bottom — so a standing
+     backdrop-filter there buys nothing and holds compositor surfaces on the
+     one device class (an iPhone under memory pressure) that cannot spare
+     them, for the whole life of the page. The EXPANDED tray is the deliberate
+     overlay exception: it slides up OVER the terminal, so it keeps the blur —
+     a transient, user-invoked surface. An embedded root keeps the blur in
+     both states, since the host's own content can sit behind the bar.
+
+     The expand/collapse hand-off timing lives with the rest of the switcher
+     motion in 40-animations.css (gated on .wt-animate like all of it): ON
+     instantly at expand, OFF delayed past the collapse animation so the
+     shrinking tray stays frosted while still over the terminal. Without the
+     animations feature both the tray collapse and the blur toggle are
+     instant, which is consistent; over the flat viewport background the
+     hand-off is invisible either way by construction. */
+  :where(.wt-root.wt-narrow.wt-container) .wt-switcher,
+  :where(.wt-root.wt-narrow) .wt-switcher.wt-switcher-expanded {
+    backdrop-filter: var(--blur);
   }
 }
 

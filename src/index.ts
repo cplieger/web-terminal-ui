@@ -12,6 +12,8 @@
 // their own DOM.
 
 export { createTerminal } from "./kernel/kernel.js";
+export { localScrollbackStorage } from "./kernel/scrollback-storage.js";
+export type { LocalScrollbackStorageOptions } from "./kernel/scrollback-storage.js";
 export { STARTUP_FAILURE_COPY } from "./kernel/startup-copy.js";
 export { LOADING_OVERLAY_CLASSES, PUBLIC_THEME_TOKENS } from "./kernel/style-contract.js";
 export type { PublicThemeToken } from "./kernel/style-contract.js";
@@ -21,6 +23,8 @@ export type {
   TerminalHandle,
   TerminalFeature,
   FeatureInstance,
+  PersistedScrollback,
+  ScrollbackPersistence,
   SessionOwnerRegistration,
   TerminalContext,
   TerminalEvents,

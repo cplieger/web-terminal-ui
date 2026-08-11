@@ -27,9 +27,24 @@
   /* Breathing room around the tab area (a roomier bottom bar). */
   padding: var(--sp-2);
   background: var(--surface);
-  backdrop-filter: var(--blur);
   border-top: 1px solid var(--border);
   z-index: 15;
+}
+
+/* Frosted bar only where something can actually sit behind it. In the
+   full-page product (wt-viewport) the terminal content stops ABOVE the bar —
+   the strip's clearance rules pull the surface up off it
+   (`.term.wt-with-tabbar { bottom: var(--wt-tabbar-h) }`, below) — so the
+   bar's backdrop is the page kit's own flat background and blurring it is
+   invisible. It is NOT free: every backdrop-filter surface holds an offscreen
+   copy of what is behind it plus the blurred result, re-derived when that
+   content changes — a standing compositor allocation on exactly the
+   memory-constrained devices this UI targets (see the iOS-memory section of
+   the steering doc). An EMBEDDED root (wt-container) keeps the frosting: the
+   host's own page can sit behind the bar there, which is what the blur is
+   for. */
+:where(.wt-root.wt-container) .wt-tab-bar {
+  backdrop-filter: var(--blur);
 }
 
 /* The scrolling tab list inside the bar: the tabs and nothing else — the "+"
@@ -519,8 +534,10 @@
 }
 
 /* The drag preview clone (setDragGhost): a full-opacity copy of the chip parked
-   under .wt-root — OUTSIDE the bar's backdrop-filter, which is what stops WebKit
-   from rendering the automatic drag image (webkit.org/b/22787) — and laid exactly
+   under .wt-root — OUTSIDE the bar's backdrop-filter (embedded wt-container
+   roots only, since 5.3.0; the full-page bar no longer carries one), which is
+   what stops WebKit from rendering the automatic drag image (webkit.org/b/22787)
+   — and laid exactly
    over the real chip via inline left/top/width/height. It exists for less than a
    frame (the browser snapshots it, then a rAF removes it), so it must not be
    hidden (an invisible element makes no snapshot) and must not intercept the
@@ -733,7 +750,15 @@
   position: relative;
   background: var(--dot-color);
   border-color: var(--dot-color);
-  animation: wt-working-glow 1.2s ease-in-out infinite;
+  /* Own compositing layer. The glow overlay (::before) and the wave (::after)
+     are compositor-driven layers, and a nested layer's position snaps to
+     DEVICE pixels independently of its parent's fractional page position — at
+     9px that reads as the pulse sitting visibly off-centre (measured on a
+     DPR-1 display: bottom-left or bottom-right depending on rounding).
+     Promoting the dot makes disc, overlay and wave raster in one frame of
+     reference, so they snap together. The disc itself is STATIC now; the beat
+     lives on the overlay (see the ::before rule below). */
+  transform: translateZ(0);
 }
 
 /* The one difference between the three animated states. Kept as three
@@ -750,6 +775,43 @@
 
 :where(.wt-root) .wt-status-dot[data-status="failed"] {
   --dot-color: var(--status-failed);
+}
+
+/* The glow beat, compositor-only (2026-08; owner-ratified against a live A/B
+   demo). It was an element-level background-color/border-color animation,
+   which repainted the disc every frame for the whole time an agent works —
+   pure battery/heat on a phone (the demo measured 2x fps once multiplied).
+   The disc never changes now; this pre-painted overlay carries the 35%-peak
+   bright colour and animates ONLY opacity, so after one rasterization the
+   GPU blends two static layers.
+
+   Geometry is load-bearing: a HARD-edged overlay at this size shows any
+   half-pixel layer snap as an off-centre pulse (three positioning strategies
+   all failed on a DPR-1 display), so the overlay is a radial with a solid
+   bright core and a ~1px feather ending at the disc's rim — a snapped
+   half-pixel falls inside the feather. The travelling wave below has proven
+   that property for the same geometry all along.
+
+   The stale-raster hazard the old colors-at-every-frame beat existed to pin
+   (a dot entering working in the same frame input/done ends re-pulsing the
+   previously rasterized paint) is held by construction instead: this pseudo
+   exists only in the three animated states and resolves --dot-color at
+   raster time, so there is no previous-state paint to re-pulse. */
+:where(.wt-root) .wt-status-dot[data-status="working"]::before,
+:where(.wt-root) .wt-status-dot[data-status="warning"]::before,
+:where(.wt-root) .wt-status-dot[data-status="failed"]::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  background: radial-gradient(
+    closest-side,
+    color-mix(in oklch, var(--dot-color) 78%, #fff) 0 70%,
+    transparent 92%
+  );
+  opacity: 0;
+  animation: wt-working-glow 1.2s ease-in-out infinite;
+  will-change: opacity;
 }
 
 /* The ripple layer: a feathered radial BAND (not a hairline border) that starts
@@ -840,25 +902,21 @@
 }
 
 /* The disc's glow beat: base -> brighter -> base, then a rest until the next
-   cycle. Colors are set at EVERY frame, which both drives the glow and pins
-   the paint — a dot entering working in the same frame input/done ends can
-   never re-pulse the previously rasterized paint (the hazard the old
-   opacity-only pulse had to pin box-shadow against). Element opacity stays 1
-   throughout; see the layer-independence note on the working rule.
+   cycle — expressed as the opacity envelope of the pre-painted bright overlay
+   (the ::before rule above), so the beat costs compositing, not repaints.
+   The element's own opacity stays 1 throughout; only the overlay fades.
 
-   --dot-color, not --status-working: this beat is shared verbatim by working,
-   warning and failed, each of which supplies its own hue. */
+   Named for what it does, shared verbatim by working, warning and failed —
+   each supplies its own hue through --dot-color at the overlay's raster. */
 @keyframes wt-working-glow {
   0%,
   70%,
   100% {
-    background-color: var(--dot-color);
-    border-color: var(--dot-color);
+    opacity: 0;
   }
 
   35% {
-    background-color: color-mix(in oklch, var(--dot-color) 78%, #fff);
-    border-color: color-mix(in oklch, var(--dot-color) 78%, #fff);
+    opacity: 1;
   }
 }
 
@@ -904,7 +962,6 @@
   :where(.wt-root) .wt-status-dot[data-status="working"],
   :where(.wt-root) .wt-status-dot[data-status="warning"],
   :where(.wt-root) .wt-status-dot[data-status="failed"] {
-    animation: none;
     /* Motion is what separates the animated states from input's frozen ping;
        with it removed, punch an inner hole (dot -> donut) and add a static ring
        so they differ from input (solid ringed disc) and done (bare disc) by
@@ -915,7 +972,11 @@
       0 0 0 2px color-mix(in srgb, var(--dot-color) 30%, transparent);
   }
 
-  /* The ripple layer disappears entirely (not just paused mid-wave). */
+  /* The glow overlay and the ripple layer disappear entirely (not paused
+     mid-beat / mid-wave; the beat lives on ::before, the wave on ::after). */
+  :where(.wt-root) .wt-status-dot[data-status="working"]::before,
+  :where(.wt-root) .wt-status-dot[data-status="warning"]::before,
+  :where(.wt-root) .wt-status-dot[data-status="failed"]::before,
   :where(.wt-root) .wt-status-dot[data-status="working"]::after,
   :where(.wt-root) .wt-status-dot[data-status="warning"]::after,
   :where(.wt-root) .wt-status-dot[data-status="failed"]::after {

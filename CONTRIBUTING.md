@@ -88,7 +88,7 @@ Run this before changing anything about chip-label geometry, the label font
 sizes, the chip's spacing, or the bundled font:
 
 ```sh
-node scripts/verify-chip-geometry.mjs --font /path/to/MonaspiceNeNerdFontMono-Regular.otf
+node scripts/verify-chip-geometry.mjs --font /path/to/MonaspaceNeonNF-Regular.woff2
 ```
 
 It renders the real CSS bundle and the real `src/features/tabs/ink-centre.ts` in

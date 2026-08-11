@@ -119,6 +119,12 @@ function fakeKeyboardToggle(): {
 const setSession = vi.fn<(id: string) => void>();
 const forgetSession = vi.fn<(id: string) => void>();
 const bind = vi.fn();
+// The renderer owns the abs<->pixel mapping, so per-tab view memory is captured
+// through it. Returns a real ViewMemory shape (not null) so the switch assertions
+// below can prove the SAVED view of the outgoing tab is the one handed back to
+// bind for the incoming one — the round trip is the behavior, and a null-returning
+// double would let a broken round trip pass.
+const captureViewMemory = vi.fn(() => ({ abs: 7, screenTop: -3, following: false }));
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -131,6 +137,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
       getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
       getHighestIndex: vi.fn(() => -1),
+      pendingRowCount: vi.fn(() => 0),
       noteResumeBounds: vi.fn(),
       handleScreen: vi.fn(),
       handleScroll: vi.fn(),
@@ -138,6 +145,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       resetScrollback: vi.fn(),
       resetScreen: vi.fn(),
       bind,
+      captureViewMemory,
       boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
     },
     scroll: {
@@ -146,6 +154,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       isUserScrolledUp: vi.fn(() => false),
       currentScrollTop: vi.fn(() => 0),
       restoreScrollTop: vi.fn(),
+      restoreView: vi.fn(),
     },
     connection: {
       init: vi.fn(),
@@ -156,6 +165,12 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       disconnect: vi.fn(),
       setSession,
       forgetSession,
+      // Persistence reads the epoch a session's content belongs to and seeds it
+      // back on a hydrate; a non-zero epoch is what makes a stored snapshot
+      // usable at all, so the fake reports one.
+      serverEpochOf: vi.fn(() => 777),
+      adoptPersistedEpoch: vi.fn(),
+      currentSessionId: vi.fn(() => "unmanaged"),
     },
   };
 });
@@ -271,6 +286,67 @@ describe("tabs feature", () => {
     // The first (oldest) session is activated: renderer bound + WS connected.
     expect(bind).toHaveBeenCalled();
     expect(setSession).toHaveBeenCalledWith("s1");
+  });
+
+  it("creates every per-tab store through ctx.newLineStore, so scrollbackLines caps them", async () => {
+    // End-to-end through the real kernel: the consumer's one option must reach
+    // the tabs switching cache, not only the kernel's implicit store. The
+    // renderer's bind mock captures the actual per-tab LineStore; a cap of 8
+    // is observable through eviction (12 lines committed -> oldest 4 gone).
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()], scrollbackLines: 8 });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const store = bind.mock.calls[0]?.[0] as InstanceType<typeof Engine.LineStore>;
+    expect(store).toBeDefined();
+    const row = (t: string): { t: string; f: number; b: number; a: number; uc: number }[] => [
+      { t, f: -1, b: -1, a: 0, uc: -1 },
+    ];
+    store.applyScroll({
+      type: "scroll",
+      firstIndex: 0,
+      lines: Array.from({ length: 12 }, (_, i) => row(`l${String(i)}`)),
+    });
+    expect(store.highestIndex()).toBe(11);
+    expect(store.oldestIndex()).toBe(4); // cap 8 applied to the TAB's store
+  });
+
+  it("names each session when it creates its store, so a tab restores its scrollback", async () => {
+    // The end-to-end pin for the tabbed half of persistScrollback. tabs must pass
+    // the session id to ctx.newLineStore, or the kernel has no key to look a
+    // snapshot up by and every tab silently starts cold — a regression that would
+    // otherwise be invisible, because an unhydrated store is still a correct one.
+    const { LineStore } = await import("@cplieger/web-terminal-engine");
+    const seed = new LineStore();
+    seed.applyScroll({
+      type: "scroll",
+      firstIndex: 500,
+      lines: [[{ t: "restored", f: -1, b: -1, a: 0, uc: -1 }]],
+    });
+    const snapshot = seed.snapshot(777);
+    expect(snapshot).not.toBeNull();
+    const entries = new Map([["s1", { savedAt: Date.now(), snapshot: snapshot! }]]);
+
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [tabs()],
+      persistScrollback: {
+        load: (id) => entries.get(id) ?? null,
+        save: (id, entry) => {
+          entries.set(id, entry);
+        },
+        drop: (id) => {
+          entries.delete(id);
+        },
+      },
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    const store = bind.mock.calls[0]?.[0] as InstanceType<typeof Engine.LineStore>;
+    expect(store.highestIndex()).toBe(500);
+    expect(store.getLine(500)?.[0]?.t).toBe("restored");
   });
 
   it("restores the previously-active tab on reload from localStorage", async () => {
@@ -1479,7 +1555,7 @@ describe("tabs feature", () => {
     expect(switcher?.classList.contains("wt-switcher-expanded")).toBe(false);
   });
 
-  it("arms the catching-up cue after a switch (until a screen frame lands)", async () => {
+  it("arms the catching-up cue when a switch lands on a tab with nothing cached", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = createTerminal(root, { features: () => [tabs()] });
@@ -1490,8 +1566,9 @@ describe("tabs feature", () => {
     expect(cue?.classList.contains("visible")).toBe(false);
     root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
     expect(cue?.classList.contains("visible")).toBe(false);
-    // Shown once the short grace elapses without the resume delta arriving (the
-    // mocked connection emits no screen frame, so it stays up).
+    // Shown once the short grace elapses: the incoming tab holds nothing, so its
+    // whole screen is still coming over the network (the mocked connection sends
+    // no frames, so it stays up until the poll's deadline).
     await new Promise((r) => setTimeout(r, 180));
     expect(cue?.classList.contains("visible")).toBe(true);
   });

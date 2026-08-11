@@ -20,14 +20,24 @@
 // default the previous UI already had); adding mouse tracking with focus
 // suppression is a tracked follow-up.
 
-import { render, scroll, connection, keyboard, modes } from "@cplieger/web-terminal-engine";
+import {
+  render,
+  scroll,
+  connection,
+  keyboard,
+  modes,
+  LineStore,
+} from "@cplieger/web-terminal-engine";
 import * as composition from "../composition.js";
 import * as viewport from "../viewport.js";
 import { INPUT_PLACEHOLDER, resetToPlaceholder } from "../input-placeholder.js";
 import { createBus } from "./bus.js";
+import { optionalPositiveIntOption } from "./options.js";
+import { TAP_MAX_MS, TAP_MOVEMENT_PX, isLinkTarget } from "./gesture.js";
 import { createRegions } from "./regions.js";
 import { createAnnouncer, createTablist } from "./a11y.js";
 import { createConnState } from "./conn-state.js";
+import { createScrollbackKeeper } from "./scrollback.js";
 import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
 import { attachLoadingStatus, DEFAULT_LOADING_MESSAGES } from "./loading-status.js";
 import type {
@@ -43,14 +53,15 @@ import type {
 const { mapKeyboardEvent, bracketTextForPaste, prepareTextForTerminal } = keyboard;
 
 const DEFAULT_WS_PATH = "/ws";
-const DEFAULT_FONT_READY = '14px "MonaspiceNe NFM"';
+const DEFAULT_FONT_READY = '14px "Monaspace Neon NF"';
+
 const TOAST_MS = 3000;
-const TAP_MOVEMENT_PX = 10;
 // A touch that focuses the input (opens the soft keyboard) must be a genuine
 // tap: short and low-movement. A longer hold is a long-press, which belongs to
 // native text selection / the context menu — so tap-to-focus bows out above
-// this duration and never steals a long-press or a selection.
-const TAP_MAX_MS = 500;
+// this duration and never steals a long-press or a selection. The thresholds
+// live in gesture.ts because the contextMenu feature classifies the other side
+// of the same boundary from them.
 // The narrow-layout breakpoints, in ROOT pixels. The single source of the
 // numbers: the kernel mirrors the resulting fact into the .wt-narrow root
 // class for CSS (paired there with pointer-coarseness media queries where
@@ -166,6 +177,21 @@ function buildTerminal(
 ): TerminalHandle {
   const wsPath = opts.wsPath ?? DEFAULT_WS_PATH;
   const fontReady = opts.fontReady ?? DEFAULT_FONT_READY;
+  // The one resolved retained-line cap: the engine renderer's implicit store
+  // and every ctx.newLineStore() (the tabs switching cache) both honor it, so
+  // a consumer sets its memory budget in exactly one place.
+  // Invalid reads as OMITTED, so the engine's own default applies — and the engine
+  // additionally floors the cap at the live screen, so even a tiny valid value
+  // cannot truncate the visible window.
+  const scrollbackLines = optionalPositiveIntOption(opts.scrollbackLines, "scrollbackLines");
+  // Scrollback persistence (off unless the consumer supplied storage). One
+  // keeper serves the whole terminal: the kernel's implicit store below and
+  // every per-session store a session-owning feature creates through
+  // ctx.newLineStore(sessionId).
+  const scrollbackKeeper =
+    opts.persistScrollback !== undefined
+      ? createScrollbackKeeper(opts.persistScrollback, scrollbackLines)
+      : null;
   // At most one feature owns session selection (fail fast, before any DOM
   // work): the kernel drives the first connect through its registration.
   const owners = featureList.filter((f) => f.sessionOwner !== undefined);
@@ -330,6 +356,89 @@ function buildTerminal(
 
   // --- Loading lifecycle ---
   let ready = false;
+  /**
+   * Every LineStore this kernel hands out, held WEAKLY and keyed by session. A
+   * closed tab's store must stay collectable, and a weak registry cannot leak or
+   * go stale the way a strong map paired with an unregister call can — the store
+   * outlives the tab record in more than one teardown order.
+   *
+   * Keyed rather than a bare set because two features need to reach a SPECIFIC
+   * session's store, not just "all of them": the restore guard below, and the
+   * browse-cache sweep. The implicit store (a bare kernel with no session owner)
+   * has no id, so it takes a reserved key no session can collide with.
+   */
+  const knownStores = new Map<string, WeakRef<LineStore>>();
+  const IMPLICIT_STORE_KEY = "\u0000implicit";
+  /** The live stores, pruning entries whose store has been collected. */
+  function liveStores(): LineStore[] {
+    const out: LineStore[] = [];
+    for (const [key, ref] of knownStores) {
+      const store = ref.deref();
+      if (store === undefined) {
+        knownStores.delete(key); // the tab closed and its store was collected
+        continue;
+      }
+      out.push(store);
+    }
+    return out;
+  }
+
+  // Which restored scrollbacks have not yet been confirmed against the live
+  // server. A session enters when its snapshot is hydrated and leaves on the
+  // first resumeAck for THAT session; in between, the content is last session's —
+  // plausible but unconfirmed.
+  //
+  // Per SESSION, and that is the whole point. Two booleans stood here, and under
+  // the tabs preset (which every reference app uses) they could not do the job:
+  // N sessions are hydrated at boot and all set the same flag, the active
+  // session's first ack cleared it for everyone, and the reset reached only the
+  // renderer-BOUND store. So tabs 2..N were neither verified nor discardable for
+  // the life of the page, and the exact failure this guard exists to prevent —
+  // the previous run's output under a "Session ended" banner — stayed reachable
+  // by switching tabs. The claimed invariant ("only ever discards a restore,
+  // never live content") also did not hold: a background tab's restore
+  // authorised a reset of the bound tab's store.
+  const unverifiedRestores = new Set<string>();
+  /** Drop restored scrollback that will never be confirmed.
+   *
+   *  The epoch check makes a stale restore self-correcting ONLY when a resumeAck
+   *  arrives: that is what compares the seeded epoch and fires the restart reset.
+   *  Two closes reach `markReady` without one — a process-exited 4001 (the session
+   *  is gone, which is what a container restart leaves behind) and a wire-revision
+   *  refusal (a cached client one revision behind, which is what an image update
+   *  leaves behind). Both are exactly the restart case, and without this the
+   *  overlay lifts over the PREVIOUS run's output under a "Session ended" banner —
+   *  the one path where the design's stated worst case was reachable.
+   *
+   *  SCOPE matters because the two triggers differ: a 4001 says one session's
+   *  process is gone, so only that session's restore is condemned; a wire refusal
+   *  says this client cannot talk to this server at all, so every unverified
+   *  restore is. Discarding page-wide on a 4001 would wipe restores for sessions
+   *  that are perfectly alive.
+   *
+   *  Only ever discards a restore, never live content: a session leaves the set
+   *  the moment its resume is served, and a session that was never hydrated never
+   *  enters it. */
+  function discardUnverifiedRestore(scope: { session: string } | "page"): void {
+    const ids = scope === "page" ? [...unverifiedRestores] : [scope.session];
+    const bound = render.boundStore();
+    for (const id of ids) {
+      if (!unverifiedRestores.delete(id)) {
+        continue; // never hydrated, or already verified
+      }
+      const store = knownStores.get(id)?.deref();
+      if (store === undefined || store === bound) {
+        // The BOUND store goes through the renderer so the DOM is reconciled;
+        // an unknown id can only be the implicit store, which is also bound.
+        render.resetScrollback();
+        render.resetScreen();
+        continue;
+      }
+      // A background store has no DOM: resetting it is enough, and the next
+      // bind rebuilds from whatever it then holds.
+      store.reset();
+    }
+  }
   let firstFrameRendered = false;
   let fontsLoaded = false;
   let wsOpen = false;
@@ -376,6 +485,14 @@ function buildTerminal(
       composition.positionCompositionView();
       bus.emit("render:cursor", undefined);
     },
+    // Demand-paged scrollback (engine docs/paged-scrollback.md §5.4). The
+    // renderer owns the DECISION (which gap the reader is approaching, and how
+    // much to ask for); the transport owns the request. Wrapped rather than
+    // passed by reference so neither module's identity leaks into the other's
+    // options object.
+    requestHistory: (fromAbs, maxLines) => connection.requestHistory(fromAbs, maxLines),
+    historyBudget: () => connection.historyBudget(),
+    ...(scrollbackLines !== undefined ? { maxLines: scrollbackLines } : {}),
   });
   render.updateFontMetrics();
 
@@ -392,20 +509,84 @@ function buildTerminal(
     onUserScrollChange(scrolledUp) {
       bus.emit("scroll:state", { scrolledUp });
     },
+    // Every position change, not only a follow/hold toggle: a reader scrolling
+    // WITHIN history never toggles follow, and that is exactly when paging has
+    // to work. The trigger re-evaluates its own guards, so firing for the
+    // browser's own clamps as well as gestures costs nothing.
+    onScrollPosition: () => {
+      render.maybeFetchHistory();
+    },
   });
 
-  function maybeSendFirstResize(): void {
-    if (!fontsLoaded || !wsOpen) {
-      return;
+  // The size this client would announce right now, or null when it cannot
+  // measure trustworthily yet. Both the resume-time announce (the engine's
+  // Callbacks.initialSize) and the open-time send below read it, so there is one
+  // definition of "measurable" rather than two that can disagree.
+  //
+  // Unmeasurable means either web fonts are still loading (cell metrics would be
+  // wrong, so cols/rows would be) or a viewport transition is in flight (an iOS
+  // keyboard slide or rotation, whose intermediate geometry is provisional). In
+  // both cases announcing costs a second resize once the real size is known, and
+  // therefore a second redraw from any program that repaints on SIGWINCH.
+  function measurableSize(): { cols: number; rows: number } | null {
+    if (!fontsLoaded || viewport.isInTransition()) {
+      return null;
     }
     render.updateFontMetrics();
+    return render.computeSize();
+  }
+
+  function maybeSendFirstResize(): void {
+    if (!wsOpen || measurableSize() === null) {
+      return;
+    }
     connection.sendResize();
   }
 
   connection.init({
     computeSize: render.computeSize,
     getHaveThrough: render.getHighestIndex,
-    onResumeBounds: render.noteResumeBounds,
+    // --- Demand-paged scrollback (engine docs/paged-scrollback.md §4-5) ---
+    // The transport is store-blind and viewport-blind by design, so every one of
+    // these forwards a decision only the renderer can make. Without them the
+    // engine's paging machinery is inert: the server still declares the
+    // capability and still bounds its replay, but nothing ever asks for a page.
+    //
+    // How much replay this client wants on attach: no more than it intends to
+    // keep resident. The server bounds the replay regardless, and the client
+    // sends the same number, so its replay-jump prediction and the server's
+    // actual start agree.
+    getReplayMax: render.replayMaxForResume,
+    onHistoryReply: render.handleHistoryReply,
+    // ONE transition per ack, carrying the values this socket SENT. It must not
+    // be split into separate callbacks: the store's five steps (epoch reset,
+    // bounds, cap flip, replay-jump prediction, budget pass) are ordered against
+    // each other, and an implementer with five hooks can interleave them.
+    onResumeTransition: render.applyResumeTransition,
+    // The solicited window: the store's permission to admit lines below its
+    // stale-re-send watermark, opened for exactly the range in flight and closed
+    // when the reply lands.
+    noteSolicited: render.noteSolicited,
+    clearSolicited: render.clearSolicited,
+    // A denied request (paced by the token bucket, or a data timeout) re-runs the
+    // FULL trigger rather than replaying the denied range: by the time the bucket
+    // refills the gap may have healed, or the session may have entered alt.
+    onHistoryRetry: () => {
+      render.maybeFetchHistory();
+    },
+    onResumeBounds(committed, oldest) {
+      // A resume VERIFIES the restored store of the session it belongs to: the
+      // server has answered under a known epoch, so that content is confirmed
+      // rather than merely plausible. Recorded here because onResumeBounds rides
+      // every resumeAck, which is also where the epoch comparison happens. Scoped
+      // to the socket's OWN session — one ack cannot vouch for a tab it never
+      // talked to.
+      unverifiedRestores.delete(connection.currentSessionId());
+      render.noteResumeBounds(committed, oldest);
+    },
+    // Announced BEFORE the resume so the server's snapshot and history replay
+    // come back at this client's geometry (engine Callbacks.initialSize).
+    initialSize: measurableSize,
     wsPath,
     onMessage(msg) {
       if (msg.type === "screen") {
@@ -459,6 +640,7 @@ function buildTerminal(
       // wedge. Then surface the end state: "Session ended", not a flapping
       // "Reconnecting…", since no reconnect is coming. The final screen (when
       // the server delivered it) stays rendered behind the banner.
+      discardUnverifiedRestore({ session: connection.currentSessionId() });
       markReady();
       connState.ended();
     },
@@ -466,6 +648,7 @@ function buildTerminal(
       // Compatibility refusal is terminal for this page instance. Lower the
       // pre-JS overlay even if no screen frame arrived, then leave the
       // actionable banner visible while the engine suppresses reconnects.
+      discardUnverifiedRestore("page");
       markReady();
       connState.incompatible();
     },
@@ -614,7 +797,7 @@ function buildTerminal(
       if (e.pointerType !== "touch") {
         return;
       }
-      if ((e.target as HTMLElement).closest(".term-link")) {
+      if (isLinkTarget(e.target)) {
         return;
       }
       const dx = Math.abs(e.clientX - pointerDownX);
@@ -657,13 +840,47 @@ function buildTerminal(
   termWrap.addEventListener(
     "mousedown",
     (e) => {
-      // Cancel the synthetic mousedown after a touch tap so iOS keeps the
-      // keyboard up (xterm.js focus-preservation pattern, scoped to touch). Skip
-      // it when a fine pointer is present (iPad + trackpad / Magic Keyboard):
-      // there is no soft keyboard to protect, and suppressing the mousedown was
-      // defeating the native focus, so the terminal needed several taps to focus.
-      if (lastPointerType === "touch" && !hasFinePointer()) {
-        e.preventDefault();
+      // Touch is the platform's press, start to finish: its own selection UI
+      // (long-press word select, the drag handles, the OS callout) owns a press
+      // that lands on a selection, and it never uses HTML5 drag-and-drop. So a
+      // touch press gets nothing here but the keyboard preservation below, and
+      // the selection policy that follows is deliberately mouse-and-pen only.
+      if (lastPointerType === "touch") {
+        // Cancel the synthetic mousedown after a touch tap so iOS keeps the
+        // keyboard up (xterm.js focus-preservation pattern, scoped to touch).
+        // Skip it when a fine pointer is present (iPad + trackpad / Magic
+        // Keyboard): there is no soft keyboard to protect, and suppressing the
+        // mousedown was defeating the native focus, so the terminal needed
+        // several taps to focus.
+        if (!hasFinePointer()) {
+          e.preventDefault();
+        }
+        return;
+      }
+      // Terminal text is display-only, never draggable content — but a browser
+      // does not know that, and a bare left press that lands INSIDE the current
+      // selection is the one gesture where it matters: Blink and Gecko both read
+      // it as the start of a native drag-and-drop of the selected text, so the
+      // press neither collapses the selection nor begins a new one, and the
+      // release drops nothing (there is no drop target). Drag over text you just
+      // selected and the selection is stuck: no new selection, and not even a
+      // click clears it, because a real mouse always moves a pixel or two and
+      // that is enough to re-enter the drag path. Collapsing the selection here,
+      // before the browser resolves the gesture, is what keeps it out: with
+      // nothing selected under the press both engines take their ordinary select
+      // path and the drag is never considered. A press OUTSIDE the selection
+      // collapses it natively anyway, so this only ever pre-empts the browser,
+      // never contradicts it — no hit test against the selection needed.
+      // Non-left and modified presses are left alone: a right-click has to keep
+      // the selection for the context menu's Copy, a middle-click for the
+      // primary selection it pastes, Shift-click extends a selection, and
+      // Ctrl-drag adds a second range in Firefox.
+      if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) {
+        return;
+      }
+      const pressSel = window.getSelection();
+      if (pressSel && !pressSel.isCollapsed) {
+        pressSel.removeAllRanges();
       }
     },
     { signal },
@@ -695,8 +912,11 @@ function buildTerminal(
     root,
     suppressKeyboardInset: hasFinePointer,
     onSettled() {
-      render.updateFontMetrics();
-      if (fontsLoaded) {
+      // The settle is the authoritative size for this geometry: measurableSize
+      // re-measures the font metrics and now reports a viewport that has stopped
+      // moving, so this is the one resize a keyboard slide or rotation should
+      // cost. sendResize deduplicates, so a settle that changed nothing is free.
+      if (measurableSize() !== null) {
         connection.sendResize();
       }
       composition.positionCompositionView();
@@ -726,16 +946,124 @@ function buildTerminal(
     onFontSettled();
   }
 
+  // --- Browse-cache TTL (engine docs/paged-scrollback.md §5.6) ---
+  //
+  // Paged-in history is disposable by construction: recovery is one fetch. The
+  // ENGINE provides the mechanism and this layer owns the clock, because the
+  // engine has no notion of a page or a tab. Eviction is by INACTIVITY, never
+  // eagerly, so that rapid scrolling in any direction stays instant.
+  //
+  // The visible-page drop is CONDITIONAL inside the store: a reader parked on
+  // cached rows is inactive while looking straight at them, so the store skips
+  // and this timer retries. A hidden page has no reader, so its drop is
+  // unconditional.
+  const BROWSE_CACHE_TTL_MS = 5 * 60_000;
+  /**
+   * Every store EXCEPT the renderer-bound one, pruning refs whose store has been
+   * collected. A background tab has no reader, which is what lets both callers
+   * below drop its cache without a position to protect.
+   */
+  const backgroundStores = (bound: LineStore): LineStore[] => {
+    const out: LineStore[] = [];
+    for (const store of liveStores()) {
+      if (store !== bound) {
+        out.push(store);
+      }
+    }
+    return out;
+  };
+  const browseSweep = window.setInterval(() => {
+    // The BOUND store is the one with a reader, so its drop is conditional and
+    // goes through the renderer — the only layer that knows where that reader is.
+    const bound = render.boundStore();
+    if (
+      render.browseCacheSize() > 0 &&
+      Date.now() - render.lastBrowseActivityMs() >= BROWSE_CACHE_TTL_MS
+    ) {
+      render.dropBrowseCache(document.visibilityState === "visible");
+    }
+    // Every OTHER store belongs to a background tab. Without this pass the sweep
+    // only ever reached the visible tab and every background tab's cache was
+    // immortal for the life of the page — up to the engine's whole cache budget
+    // per tab, on the phone this feature exists for.
+    for (const store of backgroundStores(bound)) {
+      if (
+        store.browseCacheSize() > 0 &&
+        Date.now() - store.lastBrowseActivityMs() >= BROWSE_CACHE_TTL_MS
+      ) {
+        store.dropBrowseCache(-1, false); // no reader: no position to exempt
+      }
+    }
+  }, 60_000);
+
+  /**
+   * Drop every cache unconditionally, TTL ignored. The LAST CHANCE handler: it
+   * runs when the page is about to stop executing entirely, which is the one
+   * state the sweep above cannot cover — a frozen page runs no code at all, so
+   * without this its caches stay resident for as long as the freeze lasts, and a
+   * discard then throws them away unread. Ten to twenty megabytes (estimate), for
+   * an unbounded time, for nobody.
+   *
+   * Unconditional is right HERE and wrong on the return transition, and the
+   * difference is which way the reader is walking. `visibilitychange` to visible
+   * fires as a reader ARRIVES, so dropping there deletes the rows they are about
+   * to look at (that drop existed and was removed). `freeze` fires as the page
+   * stops being a running program, with no reader and none imminent — and the
+   * cache is disposable by construction, so the cost of being wrong is one fetch
+   * on a return that may never come.
+   */
+  const dropEveryBrowseCache = (): void => {
+    const bound = render.boundStore();
+    render.dropBrowseCache(false); // through the renderer: it schedules the reconcile
+    for (const store of backgroundStores(bound)) {
+      store.dropBrowseCache(-1, false);
+    }
+  };
+  // Two hooks for one state, because no single one covers both engines: `freeze`
+  // is Chrome's Page Lifecycle signal, and `pagehide` with `persisted` is entry
+  // into the back/forward cache — the Safari path, on the platform this feature
+  // is for. Either can fire without the other.
+  document.addEventListener(
+    "freeze",
+    () => {
+      // Persist BEFORE dropping. The keeper already wrote on `visibilitychange`
+      // to hidden, but a hidden page's socket keeps delivering, so the tail can
+      // have advanced since — and `freeze` is the last code that runs, so a write
+      // skipped here is a write that never happens. The order matters only in that
+      // direction: the snapshot excludes browse cache by classification, so
+      // flushing first costs nothing and dropping first could lose a page of live
+      // tail on a page that never wakes.
+      scrollbackKeeper?.flush();
+      dropEveryBrowseCache();
+    },
+    { signal },
+  );
+  signal.addEventListener("abort", () => {
+    clearInterval(browseSweep);
+  });
+
   // --- Reconnect-on-wake ---
   document.addEventListener(
     "visibilitychange",
     () => {
       if (document.visibilityState === "visible") {
+        // No cache drop on the RETURN transition. An earlier version enforced the
+        // TTL the throttled hidden period owed, with hidden-page semantics
+        // (unconditional) — which deleted the rows the returning reader was
+        // parked on, in the one moment they are certain to look at them. The page
+        // is visible again the instant this fires, so the visible-page rule
+        // applies, and that is exactly what the periodic sweep does within its
+        // next tick. There is nothing left for this branch to add.
         if (connectionInitiated) {
           connection.reconnectNow();
         }
         focusTerminal();
+        return;
       }
+      // Hidden. This and pagehide are the last callbacks that reliably run
+      // before a discard, and a discard is the case scrollback persistence
+      // exists for, so write now rather than waiting for the background pass.
+      scrollbackKeeper?.flush();
     },
     { signal },
   );
@@ -746,6 +1074,22 @@ function buildTerminal(
         connection.reconnectNow();
       }
       focusTerminal();
+    },
+    { signal },
+  );
+  window.addEventListener(
+    "pagehide",
+    (event) => {
+      // Both halves of the last-chance write: visibilitychange fires when the
+      // page is backgrounded, pagehide when it is unloaded or frozen into
+      // bfcache. Chrome's page-lifecycle guidance is explicit that pagehide is
+      // not guaranteed to run, which is why the keeper also saves on a timer.
+      scrollbackKeeper?.flush();
+      if (event.persisted) {
+        // Into the back/forward cache: the page is frozen, so this is the last
+        // code that runs until it is restored — if it ever is.
+        dropEveryBrowseCache();
+      }
     },
     { signal },
   );
@@ -870,6 +1214,30 @@ function buildTerminal(
         loadingStatus.reason(message);
       },
       tablist: () => tablistController,
+      newLineStore: (sessionId) => {
+        // Registered on EVERY path, because this factory is the only way a store
+        // enters the app and the browse-cache sweep has to be able to reach a
+        // background tab's store (the renderer only ever sees the bound one).
+        const track = (store: LineStore, key: string): LineStore => {
+          knownStores.set(key, new WeakRef(store));
+          return store;
+        };
+        if (scrollbackKeeper !== null) {
+          if (sessionId !== undefined) {
+            // Hydrated from storage when a usable entry exists, and tracked for
+            // saving either way. Necessarily before this session connects: the
+            // caller is building the tab, and the kernel's switch (which opens
+            // the socket) happens afterwards.
+            const store = scrollbackKeeper.storeFor(sessionId);
+            if (store.highestIndex() >= 0) {
+              unverifiedRestores.add(sessionId);
+            }
+            return track(store, sessionId);
+          }
+          scrollbackKeeper.noteMissingSessionId();
+        }
+        return track(new LineStore(scrollbackLines), sessionId ?? IMPLICIT_STORE_KEY);
+      },
       layout: () => ({
         narrow: isNarrow(),
         coarse:
@@ -880,6 +1248,11 @@ function buildTerminal(
       },
       dropSession(id) {
         connection.forgetSession(id);
+        // A closed tab's scrollback should not outlive it. This is also the only
+        // collection path that runs promptly; the keeper's age bound covers the
+        // case this one cannot see, which is a tab the browser discarded without
+        // ever running a close.
+        scrollbackKeeper?.forget(id);
       },
       onError(fn) {
         errorHandlers.add(fn);
@@ -925,6 +1298,11 @@ function buildTerminal(
       return;
     }
     runtimeCleaned = true;
+    // Before anything is torn down: a deliberate teardown (a host closing an
+    // embedded panel, a reload path calling destroy()) is still a page the user
+    // may come back to, and the tracked stores are about to become unreachable.
+    scrollbackKeeper?.flush();
+    scrollbackKeeper?.stop();
     teardownFeatures();
     kernelAbort.abort();
     narrowObserver?.disconnect();
@@ -1075,6 +1453,41 @@ function buildTerminal(
   render.updateFontMetrics();
   composition.positionCompositionView();
   if (!sessionOwner) {
+    // A single unmanaged terminal has no feature to own its store, so the kernel
+    // hydrates the renderer's implicit one here — before connect(), because the
+    // resume announces what this client already holds (Callbacks.getHaveThrough)
+    // and a store hydrated afterwards has already asked for everything.
+    //
+    // The session id comes from the engine rather than from this library: an
+    // unmanaged terminal's identity is a per-tab, sessionStorage-backed id minted
+    // inside the connection layer, with exactly the semantics a persistence key
+    // needs (stable across a reload and an iOS tab restore, fresh in a genuinely
+    // new tab). Under a session owner the same work happens per session, through
+    // ctx.newLineStore(sessionId).
+    //
+    // Note what is deliberately NOT done: restored content does not dismiss the
+    // loading overlay. It is last session's output until the resume confirms it,
+    // and showing it as live is the same mistake the persisted epoch exists to
+    // prevent. The overlay still lifts on the first real frame — which now
+    // arrives sooner, because the replay behind it is a delta instead of a
+    // refill.
+    if (scrollbackKeeper !== null) {
+      const sessionId = connection.currentSessionId();
+      const restored = scrollbackKeeper.storeFor(sessionId);
+      if (restored.highestIndex() >= 0) {
+        render.bind(restored);
+        // Registered under the SAME id the resumeAck will report, so the guard
+        // can both verify and discard it. This store does not come through
+        // `newLineStore` — an unmanaged terminal has no feature to own it.
+        knownStores.set(sessionId, new WeakRef(restored));
+        unverifiedRestores.add(sessionId);
+      } else {
+        // Nothing usable was stored. Keep the renderer's own store and track
+        // that one instead of swapping in an empty replacement, so this path
+        // changes nothing about a terminal with no snapshot to restore.
+        scrollbackKeeper.track(sessionId, render.boundStore());
+      }
+    }
     connection.connect();
     connectionInitiated = true;
   }

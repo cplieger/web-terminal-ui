@@ -8,7 +8,7 @@
 // (ctx.notifySwitch), so the last-known screen paints instantly and the
 // background delta arrives after.
 
-import { LineStore, modes } from "@cplieger/web-terminal-engine";
+import { modes } from "@cplieger/web-terminal-engine";
 import type { SessionRef, TerminalContext, TerminalFeature } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
@@ -166,6 +166,22 @@ export interface TabsOptions {
 const CREATE_RETRY_MAX_TOTAL_MS = 1200000;
 const CREATE_RETRY_FALLBACK_MS = 5000;
 const CREATE_RETRY_REANNOUNCE_MS = 60000;
+
+/** How long the catching-up cue may wait for the render backlog to drain before
+ *  retiring itself. A backlog that never drains (the server stops mid-replay, the
+ *  socket drops) must not leave a "Catching up" badge on screen forever, and the
+ *  reconnect that follows will arm a fresh one. */
+const CATCHUP_MAX_MS = 30000;
+/** How long the render queue must stay empty before the restore counts as
+ *  finished. The queue empties BETWEEN the server's replay chunks, so a bare
+ *  "queue is empty" test declares victory several times per restore; this
+ *  hysteresis is what turns it into one honest completion signal. */
+const CATCHUP_SETTLE_MS = 250;
+/** Backlog that arms the cue, in queued rows. The renderer builds at most 300
+ *  rows per frame, so a backlog above this needs multiple frames and is worth
+ *  telling the user about; ordinary streaming queues a handful of rows per frame
+ *  and must never arm it (nor pay for the completion poll). */
+const CATCHUP_MIN_BACKLOG = 400;
 
 /** orderSignature collapses an arrangement into one comparable string, so the
  *  persist path can decide "did the order change?" with a string compare instead
@@ -646,6 +662,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       catchup.textContent = "Catching up\u2026";
       ctx.region("banner", "catchup").appendChild(catchup);
       let catchupTimer: ReturnType<typeof setTimeout> | null = null;
+      // Completion-poll state for the catching-up cue (see armCatchup).
+      let catchupPoll: number | null = null;
+      let catchupEmptySince = 0;
+      let catchupDeadline = 0;
 
       // --- Desktop right-click tab context menu (overlay region) ---
       // Replaces the old bar "Close all" button with a richer per-tab menu. Built
@@ -1283,7 +1303,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           nameSeq: 0,
           display: "",
           createdAt: info.createdAt,
-          store: new LineStore(),
+          // Through the kernel factory, never `new LineStore()`: the factory
+          // applies the consumer's scrollbackLines cap, so per-tab caches and
+          // the kernel's implicit store share one retained-line budget. The id
+          // is what lets it come back HYDRATED when the consumer enabled
+          // persistScrollback, and registers it to be saved.
+          store: ctx.newLineStore(info.id),
           el,
           label,
           dot,
@@ -1292,8 +1317,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // the REST list starts with none; the first status event fills it in.
           progress: normalizeProgress(info.progressValue),
           aria,
-          scrollTop: 0,
-          following: true,
+          view: null,
           reports: reportsOf(info.reportsActivity),
         };
         paintProgress(progressEl, renderedProgress(info.status, tab.progress));
@@ -1474,13 +1498,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             slide = to > from ? "next" : "prev";
           }
         }
-        // Detach the current tab: save its scroll memory (keep its cache).
-        // Read through the engine's scroll seam, never surface.scrollTop —
-        // the controller owns the container's scroll geometry.
+        // Detach the current tab: save its reading position (keep its cache).
+        // Read through the engine's view seam, never surface.scrollTop — the
+        // renderer owns the mapping from scroll position to absolute line, and a
+        // LINE is what survives the rebuild and the background output this tab's
+        // session may produce before we come back (engine
+        // docs/scroll-position-fidelity.md §3.1).
         const cur = tabList.find((t) => t.id === activeId);
         if (cur) {
-          cur.scrollTop = ctx.scroll.currentScrollTop();
-          cur.following = !ctx.scroll.isUserScrolledUp();
+          cur.view = ctx.render.captureViewMemory();
         }
         // Decide whether to animate the expanded list as a rotation: only a
         // swipe to an adjacent tab while the list is open. prepareReel snapshots
@@ -1504,6 +1530,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Attach the next tab: point the renderer at its cached store and
         // rebuild viewport-first, so the last-known screen paints with no
         // round-trip. Then let the kernel reconnect the WS to it (resume delta).
+        //
+        // The view goes in WITH the bind, which is what makes the swap atomic.
+        // The engine's follow flag is GLOBAL (one per kernel), so the first
+        // flush after a bind is gated on whatever state the tab we LEFT was in:
+        // binding a following tab right after being scrolled up in another left
+        // the controller holding, the post-flush stickToBottom() no-op'd, and the
+        // cached screen rendered above the viewport — a black gap until a touch
+        // scrolled it and re-engaged follow (the "content pops down when I
+        // wiggle it" symptom). bind adopts the incoming follow state
+        // synchronously, before the wipe, and re-asserts the incoming reading
+        // POSITION across the rebuild's frames until the line it names has
+        // actually been built. That second half is why this is no longer a
+        // fire-and-forget rAF: a single deferred write landed while only ~301 of
+        // up to 5000 rows existed, so the browser clamped it away and nothing
+        // retried (engine docs/scroll-position-fidelity.md §1.1, §3.3, §3.4).
         activeId = next.id;
         // Arriving on the tab that raised the switch-button cue resolves it
         // (a swipe through the tabs must dismiss the dot, not only opening the
@@ -1517,9 +1558,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         } catch {
           /* storage unavailable (private mode / disabled) — non-fatal */
         }
-        ctx.render.bind(next.store);
+        ctx.render.bind(next.store, { view: next.view });
         ctx.notifySwitch({ id: next.id });
-        armCatchup();
+        // Arm on a switch only when the user is actually about to wait: either
+        // the bind queued a backlog worth several frames, or the incoming tab has
+        // no cached content at all (a first visit, so its whole screen is coming
+        // over the network). A revisited tab with a warm store paints from cache
+        // in one frame and must not flash a cue at every switch.
+        if (
+          ctx.render.pendingRowCount() > CATCHUP_MIN_BACKLOG ||
+          ctx.render.getHighestIndex() < 0
+        ) {
+          armCatchup();
+        }
         flashSwitch(slide);
         // Mark the reconcile as reel-driven so renderSwitcherList suppresses its
         // add/remove row animation (the reel owns row motion here).
@@ -1527,49 +1578,89 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         syncChrome(); // reconciles the expanded list into the new order
         reelReconcile = false;
         playReel?.(); // FLIP the rows so the reorder reads as a rotation, not a reload
-        // Restore scroll memory best-effort after the async rebuild. The engine
-        // scroll controller's follow flag is GLOBAL (one per kernel) and still
-        // reflects the tab we just left, so binding a following tab right after
-        // being scrolled up in another tab left the controller in "holding":
-        // the renderer's post-flush stickToBottom() no-op'd and the cached
-        // screen rendered above the viewport (a black gap until a touch scrolled
-        // it and re-engaged follow — the "content pops down when I wiggle it"
-        // symptom). Re-assert here: scrollToBottom() snaps down AND re-engages
-        // follow (so the resume delta then pins correctly); a scrolled-up tab
-        // restores its saved read position instead.
-        const savedTop = next.scrollTop;
-        const following = next.following;
-        requestAnimationFrame(() => {
-          if (following) {
-            ctx.scroll.scrollToBottom();
-          } else {
-            // The write half of scroll memory goes through the same seam; the
-            // controller re-derives hold from the resulting scroll event.
-            ctx.scroll.restoreScrollTop(savedTop);
-          }
-        });
         ctx.announce(`Switched to ${next.display}`);
         focusAfterSwitch();
       }
 
-      // armCatchup shows the "catching up" cue only if the resume delta has not
-      // landed shortly after a switch; clearCatchup hides it when a screen frame
-      // arrives (subscribed below).
+      // armCatchup shows the "catching up" cue while the surface still has a
+      // large backlog of rows to build, and clearCatchup hides it and stops the
+      // completion poll.
+      //
+      // What it measures is the RENDER backlog (render.pendingRowCount): rows the
+      // store already holds that have not been built into DOM yet. That is the
+      // thing the user is actually waiting on, whatever produced it — a resume
+      // replay after a wake, the rebuild after a tab switch, or a program that
+      // printed a few thousand lines at once.
+      //
+      // Two earlier conditions were tried and are wrong, so do not go back to
+      // them. Clearing on the first screen frame fires long before a large
+      // restore has landed (the frame that carries the live window arrives
+      // first). Comparing the store's highest index against the resumeAck's
+      // `committed` fails for the same reason and more sharply: the window frame
+      // delivers the HIGHEST indices, so highest reaches the target while every
+      // history line below it is still in flight. Measured on a 4000-line phone
+      // restore: the cue cleared immediately and stayed clear for the whole fill.
+      // catchupWarranted: the surface still owes the user content. Either rows are
+      // queued for building (a resume replay, a switch rebuild, a large burst), or
+      // the tab holds nothing at all, which means its screen is still on the
+      // network. The second half matters as much as the first: without it, the
+      // case the cue is most needed for — switching into a tab that has never been
+      // viewed — has an empty queue and would never show it.
+      const catchupWarranted = (): boolean =>
+        ctx.render.pendingRowCount() > 0 || ctx.render.getHighestIndex() < 0;
+
       function armCatchup(): void {
-        if (catchupTimer !== null) {
-          clearTimeout(catchupTimer);
+        if (catchupTimer === null && !catchup.classList.contains("visible")) {
+          catchupTimer = setTimeout(() => {
+            catchupTimer = null;
+            // Re-check before showing. The delay is anti-flicker, so it has to
+            // ask again at the end of it: a burst that arms the cue and then
+            // drains inside the delay has nothing to report, and showing it
+            // anyway guaranteed a visible flash on every large-but-fast burst
+            // (the clear path needs CATCHUP_SETTLE_MS of quiet, so the flash
+            // outlived the backlog it described).
+            if (catchupWarranted()) {
+              catchup.classList.add("visible");
+            }
+          }, 150);
         }
-        catchup.classList.remove("visible");
-        catchupTimer = setTimeout(() => {
-          catchupTimer = null;
-          catchup.classList.add("visible");
-        }, 150);
+        catchupDeadline = Date.now() + CATCHUP_MAX_MS;
+        catchupEmptySince = 0;
+        if (catchupPoll === null) {
+          pollCatchup();
+        }
+      }
+      // pollCatchup runs on rAF because completion is a RENDER condition and the
+      // renderer has no event for "queue drained". It stops itself, so the loop
+      // only exists while the cue does.
+      function pollCatchup(): void {
+        catchupPoll = requestAnimationFrame(() => {
+          catchupPoll = null;
+          if (catchupWarranted()) {
+            catchupEmptySince = 0;
+          } else if (catchupEmptySince === 0) {
+            catchupEmptySince = Date.now();
+          } else if (Date.now() - catchupEmptySince >= CATCHUP_SETTLE_MS) {
+            clearCatchup();
+            return;
+          }
+          if (Date.now() > catchupDeadline) {
+            clearCatchup();
+            return;
+          }
+          pollCatchup();
+        });
       }
       function clearCatchup(): void {
         if (catchupTimer !== null) {
           clearTimeout(catchupTimer);
           catchupTimer = null;
         }
+        if (catchupPoll !== null) {
+          cancelAnimationFrame(catchupPoll);
+          catchupPoll = null;
+        }
+        catchupEmptySince = 0;
         catchup.classList.remove("visible");
       }
       // flashSwitch plays the switch animation the animations feature keys off
@@ -1594,9 +1685,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }, 360);
       }
 
-      // The first screen frame after a switch is the resume delta landing.
+      // Any frame can reveal a backlog worth telling the user about: a resume
+      // replay after a wake or reconnect, the rebuild after a tab switch, or a
+      // program that dumped thousands of lines at once. Arming off the backlog
+      // itself is what makes the cue fire on a wake, which is where it used to be
+      // blind (it was armed only by an explicit tab switch). The threshold keeps
+      // ordinary streaming out of it entirely, so the completion poll only exists
+      // while there is something to complete.
       ctx.on("wire:screen", () => {
-        clearCatchup();
+        if (ctx.render.pendingRowCount() > CATCHUP_MIN_BACKLOG) {
+          armCatchup();
+        }
       });
 
       // Live window-title updates for the active session: the engine sends a
@@ -1968,6 +2067,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // closed tab -- mirrors the single-close path in dropTab (h-f2).
           tombstones.add(t.id);
           acknowledgeSwitchNotify(t.id); // a cue for a closed tab is moot
+          // ...and its stored acknowledgement goes with it, for the reason dropTab
+          // gives: the session is gone, so the entry would only sit in storage
+          // until the 200-entry cap evicted it. The bulk path drops tabs itself
+          // rather than through dropTab, so every per-session store it touches has
+          // to be listed here too.
+          forgetCueSeen(t.id);
           t.aria.remove();
           t.el.remove();
           ctx.dropSession(t.id);
@@ -2260,14 +2365,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       //
       // menuSwallow covers the contextmenu-then-touchend race: iPadOS Safari
       // raises a context menu from a LONG-PRESS, and the same gesture emits a
-      // click on release which onDocClickMenu would read as a click-away. The
-      // terminal menu has guarded this since it shipped; this one did not, so a
-      // long-pressed tab menu closed itself on release — on the one platform
-      // where the desktop strip is the chrome you touch. menuTouch records
-      // whether the press that raised the menu was a finger, since only touch
-      // emits that trailing click.
+      // click on release which onDocClickMenu would read as a click-away.
+      // menuTouch records whether the press that raised the menu was a finger,
+      // since only touch emits that trailing click.
+      //
+      // The window is a fixed 350ms, so arming it here — mid-press, when the
+      // platform delivers `contextmenu` — only covers a release that comes within
+      // 350ms; hold the chip a beat longer and the menu still dismissed itself on
+      // release. menuOpenedInPress carries the fact that THIS press opened the
+      // menu through to its pointerup, which re-arms on the release edge. The
+      // flag is what keeps that re-arm off an unrelated later tap, whose click is
+      // a genuine dismiss.
       const menuSwallow = createClickSwallow();
       let menuTouch = false;
+      let menuOpenedInPress = false;
       // One listener on the bar rather than one per chip: chips are created and
       // destroyed as sessions come and go, and both facts recorded here (the
       // gesture's pointer type, and whether it took the keyboard off the
@@ -2276,11 +2387,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         "pointerdown",
         (e) => {
           menuTouch = e.pointerType === "touch";
+          menuOpenedInPress = false;
           noteChromePress();
           notifier.gesture();
         },
         { passive: true },
       );
+      // The release edge of the press that opened the menu. pointercancel counts:
+      // iPadOS cancels the pointer when it takes the gesture over for its own
+      // long-press handling, and that release still emits the trailing click.
+      const onBarPointerRelease = (): void => {
+        if (menuOpenedInPress) {
+          menuOpenedInPress = false;
+          menuSwallow.arm();
+        }
+      };
+      bar.addEventListener("pointerup", onBarPointerRelease, { passive: true });
+      bar.addEventListener("pointercancel", onBarPointerRelease, { passive: true });
       // The switcher's half of that snapshot (its rows and the x are buttons, so
       // pressing one focuses it and blurs the terminal exactly as a chip does).
       // It is also the mobile half of the notification-permission gesture.
@@ -2366,7 +2489,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         tabMenu.classList.add("visible");
         placeMenuAt(tabMenu, x, y);
         if (menuTouch) {
+          // A floor for the case where no pointerup follows (the release edge is
+          // where onBarPointerRelease re-arms it).
           menuSwallow.arm();
+          menuOpenedInPress = true;
         }
       }
 

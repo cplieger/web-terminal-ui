@@ -22,11 +22,11 @@ export function scrollToBottom(): TerminalFeature {
 
       // Jump to the bottom. With motion allowed, smooth-scroll the surface so
       // the jump is animated rather than an instant teleport; the engine's
-      // scroll controller re-derives its follow state from the scroll position
-      // (its listener sees the animation land at the bottom), so following
-      // re-engages with no programmatic flag, consistent with the engine's
-      // position-only model. Under prefers-reduced-motion, fall back to the
-      // engine's instant scrollToBottom (which re-engages following synchronously).
+      // scroll controller then re-engages follow when it sees the animation land
+      // at the bottom (a downward move reaching the tail), so the animation needs
+      // no programmatic flag and the render pin does not fight it mid-flight.
+      // Under prefers-reduced-motion, fall back to the engine's instant
+      // scrollToBottom (which re-engages following synchronously).
       const jump = (): void => {
         const reduce =
           typeof window.matchMedia === "function" &&
@@ -36,6 +36,17 @@ export function scrollToBottom(): TerminalFeature {
           return;
         }
         const surface = ctx.surface();
+        // Already AT the bottom but possibly holding: a program erasing its
+        // scrollback (ED3) clamps a scrolled-up reader to the bottom without
+        // engaging follow, which is a durable state since the engine stopped
+        // letting an upward clamp engage it. A smooth scroll with zero distance
+        // to travel fires no scroll event, so nothing would re-derive the state
+        // and this button — whose entire job is resuming follow — would be inert
+        // until new output happened to arrive. State the intent directly instead.
+        if (surface.scrollHeight - surface.clientHeight - surface.scrollTop <= 0) {
+          ctx.scroll.scrollToBottom();
+          return;
+        }
         surface.scrollTo({ top: surface.scrollHeight, behavior: "smooth" });
       };
 

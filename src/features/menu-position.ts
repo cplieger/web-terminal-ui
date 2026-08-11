@@ -21,16 +21,22 @@ const FLIP_GAP = 16;
 const SWALLOW_MS = 350;
 
 /** createClickSwallow returns the two halves a point-anchored menu needs to
- *  survive the contextmenu-then-touchend race: `arm()` right after a TOUCH-opened
- *  menu becomes visible, and `swallowing()` as the first guard in the
- *  outside-click dismiss.
+ *  survive the contextmenu-then-touchend race: `arm()` and `swallowing()` as the
+ *  first guard in the outside-click dismiss.
+ *
+ *  **Arm on the RELEASE edge, not when the menu opens.** The window is a fixed
+ *  350ms from `arm()`, so arming it while the finger is still down only covers
+ *  the release if the user lifts within 350ms. Both menus shipped that way and
+ *  both dismissed themselves on release whenever the press was held a beat
+ *  longer: the terminal menu opened from a 550ms hold timer, so anything past
+ *  ~900ms of hold lost its guard, and the tab menu armed from a mid-press
+ *  `contextmenu`. The terminal menu now opens from `touchend` itself, so its
+ *  arm() is on the release by construction; the tab menu opens mid-press and
+ *  re-arms when the opening gesture's pointer goes up.
  *
  *  It lives here, beside the shared placement math, because both point-anchored
  *  menus need it and a hand-synced second copy is what this module was extracted
- *  to stop. The tab menu shipped without the guard entirely, so on iPadOS Safari
- *  — which fires `contextmenu` on a long-press, and where the desktop tab strip
- *  is the chrome that shows — a long-pressed tab menu dismissed itself on
- *  release. Arm it only for touch: a mouse right-click emits no trailing click,
+ *  to stop. Arm it only for touch: a mouse right-click emits no trailing click,
  *  and swallowing there would eat a genuine dismiss. */
 export function createClickSwallow(): { arm: () => void; swallowing: () => boolean } {
   let until = 0;

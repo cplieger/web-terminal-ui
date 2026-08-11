@@ -18,6 +18,20 @@ function fakeCtx(): {
   const slot = document.createElement("div");
   const surface = document.createElement("div");
   surface.scrollTo = vi.fn();
+  // happy-dom has no layout, so the scroll geometry is declared. The default is
+  // "there is somewhere to scroll to" (700px of range, parked at the top), which
+  // is the state the button exists for; the zero-distance case gets its own test
+  // because the feature branches on it.
+  let scrollTopValue = 0;
+  Object.defineProperty(surface, "scrollHeight", { get: () => 1000, configurable: true });
+  Object.defineProperty(surface, "clientHeight", { get: () => 300, configurable: true });
+  Object.defineProperty(surface, "scrollTop", {
+    get: () => scrollTopValue,
+    set: (v: number) => {
+      scrollTopValue = v;
+    },
+    configurable: true,
+  });
   const scrollToBottomSpy = vi.fn();
   const offSpy = vi.fn();
   let scrollHandler: ((p: { scrolledUp: boolean }) => void) | undefined;
@@ -65,6 +79,22 @@ describe("scrollToBottom feature", () => {
     button(slot)?.click();
     expect(surface.scrollTo).toHaveBeenCalledWith(expect.objectContaining({ behavior: "smooth" }));
     expect(scrollToBottomSpy).not.toHaveBeenCalled();
+  });
+
+  it("re-engages follow directly when there is no distance to animate", () => {
+    // The state that makes this necessary: a program erasing its scrollback
+    // clamps a scrolled-up reader to the bottom WITHOUT engaging follow, and the
+    // engine now keeps them there (an upward clamp may not engage follow). A
+    // smooth scroll with zero distance fires no scroll event, so nothing would
+    // re-derive the state and this button — whose whole job is resuming follow —
+    // would be inert until output happened to arrive.
+    stubMatchMedia(false);
+    const { ctx, slot, surface, scrollToBottomSpy } = fakeCtx();
+    surface.scrollTop = 700; // already at the bottom of the 1000/300 geometry
+    scrollToBottom().setup(ctx);
+    button(slot)?.click();
+    expect(scrollToBottomSpy).toHaveBeenCalledTimes(1);
+    expect(surface.scrollTo).not.toHaveBeenCalled();
   });
 
   it("toggles the scrolled-up class on the region from the scroll:state event", () => {
