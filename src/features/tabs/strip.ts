@@ -21,24 +21,35 @@ import { statusPhrase, statusRevealsDot } from "./model.js";
 // motion is spelled in — index.ts owns the mechanism, strip.ts owns the values,
 // the same split switcher.ts keeps for the mobile swipe.
 
-/** The quiet window (ms) that means the pointer has STOPPED. When it elapses with no
- *  movement, the strip opens the slot the pointer is over.
+/** How long (ms) the pointer must have been un-moved before a stationary `dragover` is
+ *  believed as "stopped".
  *
- *  This is a rest detector, not a hold: it is re-armed by MOVEMENT, so it expires a
- *  rest window after the last movement rather than a fixed time after a decision.
- *  Sweeping the strip rearranges nothing; stopping is what commits.
+ *  This is the number that decides how fast the slot opens, and it is small because a
+ *  `dragover` at an UNCHANGED position is positive evidence of rest — far better
+ *  evidence than the absence of events, which is all the fallback below has. The drag
+ *  loop keeps delivering events while the pointer is held still, so a genuinely stopped
+ *  pointer announces itself; this only filters the coincidence where one event of a
+ *  sweep happens to land within REORDER_MOVE_EPS_PX of the previous one (a direction
+ *  reversal, or a frame where the motion was almost entirely vertical). */
+export const REORDER_STILL_MS = 90;
+
+/** Fallback guard (ms): commit the pending slot this long after the last MOVEMENT, for
+ *  the case where `dragover` stops arriving altogether and no stationary event ever
+ *  confirms the stop.
  *
- *  **The floor is set by the drag loop, not by taste.** HTML5 drag-and-drop only
- *  guarantees a `dragover` every 350ms — the processing model runs on that cadence,
- *  not per mouse movement — so any window at or below it expires BETWEEN two events
- *  of a fast sweep, and the strip commits every slot the pointer crosses. That is
- *  exactly what 120ms did in production: a quick pass over five tabs moved all five.
- *  500ms clears the cadence with margin and is the reason this number is not smaller.
+ *  **Its floor is set by the platform, not by taste, and this is the timer that floor
+ *  applies to.** HTML5 drag-and-drop only guarantees a `dragover` every 350ms — the drag
+ *  loop runs on that cadence, not per mouse movement — so a guard at or below it can
+ *  expire BETWEEN two events of a fast sweep, and the strip then commits every slot the
+ *  pointer crosses. Measured in production: at 120ms a quick pass over five tabs moved
+ *  all five.
  *
- *  It costs a decisive user nothing, which is what makes the margin affordable: a
- *  release commits whatever slot is pending at once (flushRest), so the window is only
- *  ever felt by a pointer that has stopped and is waiting to see the gap open. */
-export const REORDER_REST_MS = 500;
+ *  A pure quiet-window design has to make this ONE number carry both jobs, which is why
+ *  it could not be shortened — the same timer that decides responsiveness was the one
+ *  that had to out-wait the cadence, so 500ms was safe and felt slow. Splitting rest
+ *  DETECTION (the stationary event above) from the no-events NET (here) lets each be
+ *  sized for its own job. This one is rarely the deciding signal at all. */
+export const REORDER_REST_MS = 450;
 
 /** Movement (px) between two dragover events below which the pointer counts as still.
  *  A hand resting on a mouse is never perfectly still, and treating a 1px tremor as a
