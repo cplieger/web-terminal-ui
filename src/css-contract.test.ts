@@ -143,6 +143,51 @@ describe("press-class contract for the focus-holding buttons", () => {
   });
 });
 
+// The desktop reorder preview is CSS-only where it is visible (happy-dom applies
+// no styles and reports zero geometry, so the feature's own suite can prove the
+// state machine but not one pixel of the result). These are grep-level guards on
+// the three decisions that would fail silently.
+describe("reorder drop-slot contract", () => {
+  it("renders the dragged chip as a dashed outline, not a dimmed copy of the tab", () => {
+    // The whole point of the slot: one solid thing under the pointer, one hollow
+    // thing where it will land. An opacity-dimmed chip is what this replaced, and
+    // it is the shape a future edit would most plausibly regress to.
+    const slot = /\.wt-tab\.wt-tab-dragging\s*\{[^}]*\}/.exec(tabs)?.[0] ?? "";
+    expect(slot, ".wt-tab.wt-tab-dragging rule exists").not.toBe("");
+    expect(/border-style:\s*dashed/.test(slot), "the slot is dashed").toBe(true);
+    expect(/opacity/.test(slot), "the slot does not dim the chip itself").toBe(false);
+    // ...and its content is what goes, so the dashes keep full strength.
+    expect(
+      /\.wt-tab\.wt-tab-dragging\s*>\s*\*\s*\{[^}]*opacity:\s*0/.test(tabs),
+      "the chip's content fades instead",
+    ).toBe(true);
+  });
+
+  it("scopes the slot through .wt-tab-scroll so it out-ranks the press rung", () => {
+    // A mousedown that starts a drag leaves the chip :active for the whole gesture
+    // in Blink, and .wt-tab:not(.wt-tab-active):active is (0,3,0). Without the
+    // extra compound the slot paints as a pressed tab under the dashes.
+    expect(/\.wt-tab-scroll\s+\.wt-tab\.wt-tab-dragging/.test(tabs)).toBe(true);
+  });
+
+  it("gates the slot's fade on .wt-animate and defines the keyframes it names", () => {
+    expect(/:where\(\.wt-root\.wt-animate\)\s+\.wt-tab-slotted/.test(animations)).toBe(true);
+    // stylelint's no-unknown-animations covers this too; asserted here because the
+    // keyframe name is the only link between the class and the motion.
+    expect(/@keyframes\s+wt-slot-in/.test(animations)).toBe(true);
+  });
+
+  it("carries no dwell progress bar", () => {
+    // Deliberately a NEGATIVE assertion. The first version of the preview gated
+    // every commit behind a fixed hold and drew a filling rail on the target edge
+    // to explain the wait; both were removed because the wait itself was the
+    // defect (the reorder now commits when the pointer comes to rest). A rail is
+    // the natural thing to re-add when someone reintroduces a delay, so this fails
+    // the moment the class comes back and points at the reason.
+    expect(/wt-tab-dwell/.test(tabs), "no .wt-tab-dwell rail in the tabs CSS").toBe(false);
+  });
+});
+
 // The activity-dot vocabulary is CSS-only (happy-dom applies no styles), so the
 // visual decisions the OSC 9 states rest on have no other automated guard. Same
 // grep-level posture as the rules above, plus one genuinely computed check: the
