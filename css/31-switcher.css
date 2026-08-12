@@ -326,22 +326,51 @@
 /* Latest-wins background-tab notification dot on the switch button — the moved
    attention cue: the input colour when a background terminal needs input, the
    done colour when a background turn finished, the failed red when a background
-   process crashed. Those three only — the rule the user set is "only states that
-   want the user, like a notification", so the ongoing progress states (working /
-   warning / failed) never raise it. Reuses the exact .wt-status-dot rules
-   (30-tabs.css, --status-* tokens) so it matches the per-tab dots. Hidden until
-   the tabs feature sets data-status; cleared when the list opens
-   (expandSwitcher). */
+   process crashed or reported an error. Those four only (CueStatus) — the rule
+   the user set is "only states that want the user, like a notification", so the
+   ongoing progress states (working / warning) never raise it. `failed` DOES,
+   because OSC 9;4 state 2 is a result the program parked rather than a phase in
+   progress; the override below is what keeps it looking like a notification here.
+   Reuses the exact .wt-status-dot rules (30-tabs.css, --status-* tokens) so it
+   matches the per-tab dots. Hidden until the tabs feature sets data-status;
+   cleared when the list opens (expandSwitcher). */
 :where(.wt-root) .wt-switcher-switch-dot {
   position: absolute;
   top: 6px;
   right: 6px;
 }
 
+/* `failed` is one of 30-tabs.css's three ANIMATED states, and on this surface it
+   must not be. That rule set is why this override exists at all rather than the
+   dot simply inheriting:
+
+   - `.wt-status-dot[data-status="failed"]` is specificity (0,2,0) and sets
+     `position: relative`, which BEATS the (0,1,0) `position: absolute` above
+     (`:where()` contributes nothing), so the dot would leave its badge corner and
+     land in the button's normal flow, displacing the icon.
+   - It also attaches the glow ::before and the travelling-wave ::after, pinning a
+     perpetual animation to the switch button for a state that persists until the
+     program's next status change.
+
+   So `failed` renders here the way `crashed` already does: static solid red in the
+   badge corner. Colour needs no restating — background/border-color resolve
+   through --dot-color to the same --status-failed either way. */
+:where(.wt-root) .wt-switcher-switch-dot[data-status="failed"] {
+  position: absolute;
+  animation: none;
+  transform: none;
+}
+
+:where(.wt-root) .wt-switcher-switch-dot[data-status="failed"]::before,
+:where(.wt-root) .wt-switcher-switch-dot[data-status="failed"]::after {
+  content: none;
+}
+
 /* The dot carries the .wt-status-dot class, so its size, shape, and colour come
-   straight from the shared .wt-status-dot[data-status="input"|"done"|"crashed"]
-   rules (30-tabs.css) — the SAME dot colours every tab already uses, defined
-   once. None of the three animates, so nothing here can pin a wave layer.
+   straight from the shared .wt-status-dot[data-status="input"|"done"|"crashed"|
+   "failed"] rules (30-tabs.css) — the SAME dot colours every tab already uses,
+   defined once. Three of the four animate nothing; `failed` is neutralised
+   directly above, so nothing here can pin a wave layer.
    .wt-status-dot is display:none by default; force it visible only while a
    notification is set (data-status present). */
 :where(.wt-root) .wt-switcher-switch-dot[data-status] {

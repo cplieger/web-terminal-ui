@@ -27,7 +27,22 @@ import { presetSingle } from "./single.js";
  *  foreground-process/cwd inference — and both presets render what it reports. A
  *  browser that re-derived any of that could only disagree with the server and
  *  with every other client attached to the same session. */
-export function buildTabbed(agentShell: boolean): TerminalFeature<unknown>[] {
+/** Options shared by the two tabbed presets, passed through to the tabs feature.
+ *  A preset that takes arguments is called as `features: () =>
+ *  presetTabbed({...})`, which keeps the call inside createTerminal's failure
+ *  boundary (see CreateTerminalOptions.features). */
+export interface TabbedPresetOptions {
+  /** Swap the page's icon links to a status variant while a background session
+   *  wants the user. Off by default, and enabling it is a promise that the
+   *  variant assets are served — see TabsOptions.attentionIcons for the naming
+   *  contract and scripts/gen-attention-icons.py, which writes them. */
+  attentionIcons?: boolean;
+}
+
+export function buildTabbed(
+  agentShell: boolean,
+  opts: TabbedPresetOptions = {},
+): TerminalFeature<unknown>[] {
   const kb = mobileToolbar({ externalToggle: true });
   const monitor = activityMonitor();
   return [
@@ -38,6 +53,7 @@ export function buildTabbed(agentShell: boolean): TerminalFeature<unknown>[] {
       keyboardToggle: kb,
       activityMonitor: monitor,
       presumeReports: agentShell,
+      attentionIcons: opts.attentionIcons === true,
     }),
     animations(),
   ];
@@ -49,6 +65,6 @@ export function buildTabbed(agentShell: boolean): TerminalFeature<unknown>[] {
  *  activity dot stays hidden until its session reports activity via OSC 9;4
  *  progress (kiro-cli, Claude Code, …), so a plain bash/sh keeps clean,
  *  label-only tabs. */
-export function presetTabbed(): TerminalFeature<unknown>[] {
-  return buildTabbed(false);
+export function presetTabbed(opts: TabbedPresetOptions = {}): TerminalFeature<unknown>[] {
+  return buildTabbed(false, opts);
 }

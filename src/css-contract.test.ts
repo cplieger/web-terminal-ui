@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { LOADING_OVERLAY_CLASSES, PUBLIC_THEME_TOKENS } from "./kernel/style-contract.js";
 import { SWITCH_ANIMATIONS } from "./features/tabs/switch-anim.js";
+import { CUE_SEVERITY } from "./features/tabs/model.js";
 
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cssDir = path.join(packageDir, "css");
@@ -605,5 +606,81 @@ describe("switch-animation name contract (tabs feature vs 40-animations.css)", (
     // name would make a completed switch able to end the next one.
     const names = Object.values(SWITCH_ANIMATIONS);
     expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+describe("the switcher's aggregate cue dot survives every cue-worthy status", () => {
+  // The switch button's dot reuses .wt-status-dot for colour and shape, and one
+  // of its four cue statuses — `failed` — is ALSO one of 30-tabs.css's three
+  // animated progress states. That rule set is specificity (0,2,0) and sets
+  // `position: relative`, which beats the dot's own (0,1,0) `position: absolute`
+  // badge placement (`:where()` contributes nothing), and it attaches a glow and
+  // a travelling-wave pseudo-element. Inherited, `failed` would drop the dot out
+  // of the button's corner into its normal flow AND pin a perpetual animation to
+  // it for a state that persists until the program's next status change.
+  //
+  // happy-dom applies no CSS, so the behavioural test in features/tabs cannot see
+  // any of that: it asserts data-status and a tooltip, and passes either way. This
+  // is the grep-level guard instead, and it is derived from CueStatus rather than a
+  // literal list so a fifth cue status cannot be added without answering it.
+
+  /** The animated per-tab states, read out of 30-tabs.css itself rather than
+   *  restated, so this cannot drift from the rule it is guarding against. */
+  function animatedStates(): Set<string> {
+    // A line scan rather than one regex: the rule's selectors are one per line and
+    // its brace sits on the last of them, which a single pattern reads badly.
+    const lines = tabs.split("\n");
+    // Selected by BODY, not by being the first status rule in the file: several
+    // status rules open the same way (idle, done, crashed) and only one introduces
+    // the `position: relative` the switcher dot needs overridden.
+    const opener = lines.findIndex((line, i) => {
+      if (!line.includes(".wt-status-dot[data-status=") || !line.trimEnd().endsWith("{")) {
+        return false;
+      }
+      const end = lines.indexOf("}", i);
+      const body = lines.slice(i + 1, end === -1 ? i + 12 : end);
+      return body.some((l) => l.includes("position: relative"));
+    });
+    expect(opener, "the animated-state disc rule still exists in 30-tabs.css").toBeGreaterThan(-1);
+    // Walk back over the comma-continued selector lines to collect the whole set.
+    const found = new Set<string>();
+    for (let i = opener; i >= 0; i--) {
+      const line = lines[i]!;
+      const match = /data-status="([a-z]+)"/.exec(line);
+      if (!match) {
+        break;
+      }
+      found.add(match[1]!);
+      if (i < opener && !line.trimEnd().endsWith(",")) {
+        break;
+      }
+    }
+    return found;
+  }
+
+  it("neutralises every cue status that is also an animated per-tab state", () => {
+    const animated = animatedStates();
+    // Guard the guard: an empty set would make the loop below vacuous.
+    expect(animated.size).toBeGreaterThanOrEqual(3);
+
+    const overlap = CUE_SEVERITY.filter((status) => animated.has(status));
+    // `failed` is the overlap today. If this is ever empty the override is dead
+    // code and should be deleted rather than left to rot.
+    expect(overlap.length).toBeGreaterThan(0);
+
+    for (const status of overlap) {
+      const selector = `\\.wt-switcher-switch-dot\\[data-status="${status}"\\]`;
+      const disc = new RegExp(`${selector}\\s*\\{([^}]*)\\}`).exec(switcher);
+      expect(disc, `31-switcher.css overrides the ${status} dot`).not.toBeNull();
+      // The badge placement the animated rule would otherwise steal.
+      expect(disc![1], `${status}: keeps its badge placement`).toContain("position: absolute");
+      expect(disc![1], `${status}: no disc animation`).toContain("animation: none");
+      // Both pseudo-element layers must be removed, or the wave still paints.
+      for (const pseudo of ["before", "after"]) {
+        const rule = new RegExp(`${selector}::${pseudo}[^{]*\\{([^}]*)\\}`).exec(switcher);
+        expect(rule, `31-switcher.css removes the ${status} ::${pseudo} layer`).not.toBeNull();
+        expect(rule![1], `${status} ::${pseudo}`).toContain("content: none");
+      }
+    }
   });
 });

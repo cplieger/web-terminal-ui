@@ -1,7 +1,7 @@
 // presetAgentTabbed: the tabbed composition tuned for an agent shell.
 
 import type { TerminalFeature } from "../kernel/types.js";
-import { buildTabbed } from "./tabbed.js";
+import { type TabbedPresetOptions, buildTabbed } from "./tabbed.js";
 
 /** Tabbed UI for an agent shell (web-terminal-kiro). Same features as
  *  presetTabbed, tuned for sessions that ARE agents:
@@ -15,6 +15,6 @@ import { buildTabbed } from "./tabbed.js";
  *  status classifier that maps OSC 9 notifications to done/needs-input, and the
  *  input-derived session name (terminal.WithInputTitle), which the agent host
  *  enables because its program's own window title is not worth showing. */
-export function presetAgentTabbed(): TerminalFeature<unknown>[] {
-  return buildTabbed(true);
+export function presetAgentTabbed(opts: TabbedPresetOptions = {}): TerminalFeature<unknown>[] {
+  return buildTabbed(true, opts);
 }

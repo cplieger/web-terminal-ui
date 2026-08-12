@@ -32,6 +32,7 @@ import {
   hasPinnedName,
   isCueStatus,
   isEndedStatus,
+  isUnseenCue,
   normalizeProgress,
   orderedInsertIndex,
   parseCueSeen,
@@ -41,6 +42,7 @@ import {
   statusPhrase,
   tabAccessibleName,
 } from "./model.js";
+import { NO_ATTENTION, browserAttentionEnv, createAttention, summarize } from "./attention.js";
 import { browserNotifierEnv, createNotifier } from "./notify.js";
 import {
   REORDER_MOVE_EPS_PX,
@@ -133,6 +135,25 @@ export interface TabsOptions {
    *  then merely confirms. Default false (evidence-driven reveal: a plain
    *  shell keeps clean, label-only tabs). presetAgentTabbed enables this. */
   presumeReports?: boolean;
+  /** Swap the page's icon links to a status variant while a background session
+   *  holds an unacknowledged cue, so the browser tab icon carries the same colour
+   *  its chip's dot does. Default false, because it needs asset files the library
+   *  cannot ship: the dot's colour comes from the app's own `--status-*` theme, so
+   *  the variants are per-app artifacts.
+   *
+   *  Enabling it is a promise that those files exist. For every
+   *  `link[rel=icon]` whose filename starts with `favicon`, three variants must
+   *  be served alongside it with `-input`, `-done` and `-alert` inserted after
+   *  that token (`/favicon.svg` needs `/favicon-input.svg`; `/favicon-32x32.png`
+   *  needs `/favicon-input-32x32.png`). Generate them with
+   *  `scripts/gen-attention-icons.py`, which writes exactly those names, and
+   *  assert their presence in the APP's own tests — the library cannot check a
+   *  file it does not ship, and a missing variant is a blank tab icon.
+   *
+   *  Not every platform honours it: Safari caches the first icon it fetched and
+   *  ignores later changes, and an installed app has no tab icon at all. The
+   *  title count is not gated on this, so those cases lose nothing. */
+  attentionIcons?: boolean;
 }
 
 // looksLikeHardwareKey reports whether a keydown could only have come from a
@@ -486,8 +507,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // by each qualifying background-tab event (applyStatus) and cleared when
       // the list opens (expandSwitcher) or the raising tab is visited or closed
       // (acknowledgeSwitchNotify). "" = no pending cue; the dot is hidden. The
-      // cue-worthy set is CueStatus (input / done / crashed — the states that
-      // want the user), declared once in model.ts beside isCueStatus.
+      // cue-worthy set is CueStatus (input / done / crashed / failed — the states
+      // that want the user), declared once in model.ts beside isCueStatus.
       let switchNotify: "" | CueStatus = "";
       // The session that raised the pending cue, so arriving on that tab (a
       // swipe or any switch) acknowledges it without opening the list.
@@ -522,6 +543,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           cueSeen.delete(oldest);
         }
         writeCueSeen(cueSeen);
+        // An acknowledgement can change the unseen count without touching the tab
+        // list, so syncChrome's sweep is not enough on its own: opening the tray
+        // and arriving on a tab both land here and neither adds or removes a chip.
+        paintAttention();
       }
       // forgetCueSeen drops an acknowledgement, so the session's NEXT input/done
       // is a fresh cue: called when its status moves off the acknowledged value
@@ -529,6 +554,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       function forgetCueSeen(id: string): void {
         if (cueSeen.delete(id)) {
           writeCueSeen(cueSeen);
+          paintAttention();
         }
       }
       // OSC 9 Form B notifications: the one signal the specs say to surface
@@ -538,6 +564,60 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // degradation — lives in notify.ts; this feature only feeds it events and
       // gestures.
       const notifier = createNotifier(browserNotifierEnv());
+      // The out-of-page surfaces for the SAME unseen-cue set the switch dot
+      // shows: the document-title count, the installed app's icon badge, and the
+      // tab icon. Constructed here so every capability decision is made once,
+      // and fed only through paintAttention below.
+      const attention = createAttention(
+        browserAttentionEnv((text) => {
+          ctx.titlePrefix(text);
+        }, opts.attentionIcons === true),
+      );
+      // pageVisible is the "can the user see this page at all" test, and
+      // visibilityState is the only reliable one: document.hasFocus() is false for
+      // a visible-but-unfocused window, where the terminal IS on screen. Same
+      // signal notify.ts reads, for the same decision.
+      function pageVisible(): boolean {
+        return document.visibilityState !== "hidden";
+      }
+
+      // onPageVisible is the DEFERRED half of the active-tab acknowledgement in
+      // applyStatus: a cue that latched while the page was hidden was deliberately
+      // not acknowledged then, so it could raise the out-of-page surfaces, and this
+      // acknowledges it the moment the user can actually see the terminal.
+      //
+      // Scoped to the ACTIVE tab only. A wholesale clear on becoming visible is the
+      // obvious shortcut and it is wrong: the tab the user returns to is not
+      // necessarily the one that was waiting, and blanking a background tab's cue
+      // it never saw is how a viewer loses the thing it came back for.
+      function onPageVisible(): void {
+        if (!pageVisible() || activeId === null) {
+          return;
+        }
+        const active = tabList.find((t) => t.id === activeId);
+        if (active) {
+          markCueSeen(active.id, statusOf(active));
+        }
+      }
+      document.addEventListener("visibilitychange", onPageVisible);
+
+      // paintAttention re-derives the whole attention state from the tab list and
+      // this viewer's acknowledgements, and hands it to the surfaces.
+      //
+      // A FOLD rather than incremental bookkeeping, for the reason applyServerOrder
+      // is one: there is no state of its own to get out of step, so no path can
+      // leave it stale, and it is cheap enough to run on every tick (a loop over a
+      // handful of tabs, then sinks that no-op when nothing changed). The dot is
+      // the store — statusOf reads each tab's status back off it — so this reads
+      // exactly what the user is looking at.
+      function paintAttention(): void {
+        attention.apply(
+          summarize(
+            tabList.map((t) => ({ id: t.id, status: statusOf(t) })),
+            cueSeen,
+          ),
+        );
+      }
       function paintSwitchDot(): void {
         // Reuse the per-tab status-dot colours (single source, css/05-tabs.css
         // .wt-status-dot[data-status="input"|"done"|"crashed"]) instead of
@@ -552,6 +632,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           swSwitchDot.dataset["status"] = switchNotify;
           swSwitchDot.title = statusPhrase(switchNotify);
         }
+        // The out-of-page surfaces answer to the same set, so they repaint
+        // wherever this does: a raise, and every clear through clearSwitchNotify.
+        paintAttention();
       }
       function clearSwitchNotify(): void {
         switchNotify = "";
@@ -1154,6 +1237,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         maybeSwipeHint();
         applyServerOrder();
+        // Hung off syncChrome for the reason applyServerOrder is: it is the one
+        // function every list mutation already ends with (reorder, create, adopt,
+        // close, reconcile), so no path can forget the out-of-page surfaces. The
+        // fold is idempotent and the sinks no-op when unchanged, so running it
+        // this often costs a comparison.
+        paintAttention();
       }
 
       // The percentage is deliberately NOT written into the browser document
@@ -1165,6 +1254,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // the bookmark name, and it invites reading one session's progress as the
       // window's. The per-chip prefix carries the same information without the
       // conflict, because each chip shows its own session. Do not add it back.
+      //
+      // What DOES go there is the unseen-cue COUNT (see paintAttention), and it
+      // is not a softening of this rule: a count names no session, so it needs no
+      // arbitrary choice, and it changes only when a cue is raised or acknowledged
+      // rather than on every progress tick. A per-session value in that prefix
+      // would be this same mistake in a new place.
 
       // applyServerOrder re-sorts the strip into the order the SERVER holds, and
       // is the read half of tab-order sync: a drag on another device arrives as a
@@ -3162,11 +3257,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // acknowledgement so the next latch is a fresh cue.
         if (!isCueStatus(rec.status)) {
           forgetCueSeen(rec.id);
-        } else if (rec.id === activeId) {
+        } else if (rec.id === activeId && pageVisible()) {
           // The user is looking at this terminal as it latches, so there is
           // nothing to notify — and nothing to re-raise once they move away.
+          //
+          // BOTH halves are required, for the reason notify.ts states for its own
+          // suppression rule: keyed on "is this the active tab" alone, this
+          // swallowed the cue of the very session the user left running. That is
+          // the single-session case — one tab is necessarily the active one — and
+          // it is precisely the case the out-of-page surfaces exist for, so a
+          // latch arriving on a HIDDEN page now raises them and is acknowledged
+          // when the user comes back (see onPageVisible).
           markCueSeen(rec.id, rec.status);
-        } else if (cueSeen.get(rec.id) !== rec.status) {
+        } else if (isUnseenCue(rec.status, rec.id, cueSeen)) {
           switchNotify = rec.status;
           switchNotifyId = rec.id;
           paintSwitchDot();
@@ -3977,6 +4080,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             tabList.map((t) => ({ id: t.id, title: t.display, active: t.id === activeId })),
         },
         teardown() {
+          // Restore the out-of-page surfaces first, while the sinks still exist.
+          // The kernel clears the title prefix on its own teardown, but the app
+          // badge and the icon links are OUR state and nothing else will clear
+          // them: the badge is OS-level and outlives the page entirely, and a
+          // destroyed terminal in an embedded panel leaves the document's icon
+          // pointed at a status variant for a tab that no longer exists.
+          // Change-gated, so this is a no-op when nothing was lit.
+          attention.apply(NO_ATTENTION);
           tornDown = true;
           resolveImpl = null;
           offStatus?.();
@@ -3985,6 +4096,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           offArmed?.();
           offMenuKey();
           document.removeEventListener("click", onDocClickMenu);
+          document.removeEventListener("visibilitychange", onPageVisible);
           document.removeEventListener("contextmenu", onDocContextMenu);
           document.removeEventListener("pointerup", onDocTapDismiss, true);
           document.removeEventListener("dragover", onDocTabDrop);

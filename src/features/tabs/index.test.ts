@@ -239,10 +239,20 @@ beforeEach(async () => {
   ({ tabs } = await import("./index.js"));
 });
 
+// Page visibility is a FIXTURE here, not ambient state: two suites decide behaviour
+// on it (the notification suppression rule, and the active-tab acknowledgement that
+// defers while hidden), and a test that inherited whatever the previous one left
+// would pass or fail by ordering.
+function setVisibility(state: "visible" | "hidden"): void {
+  Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+}
+
 afterEach(() => {
   term?.destroy();
   term = undefined;
   vi.unstubAllGlobals();
+  // Reset for every test, so a case that throws mid-way cannot leak "hidden".
+  setVisibility("visible");
 });
 
 async function until(pred: () => boolean, tries = 20): Promise<void> {
@@ -2204,17 +2214,94 @@ describe("tabs OSC 9 status chrome", () => {
     expect(document.title).toBe("Host page");
   });
 
-  it("raises the switcher's aggregate cue for exactly input, done and crashed", async () => {
+  it("composes the unseen-cue count onto the document title, and cleans it up", async () => {
+    // The COUNT is what the title carries, and it is a different proposal from the
+    // percentage above rather than a softening of it: a count names no session, so
+    // it needs no arbitrary choice among them.
+    //
+    // This is also the only test of the kernel's title composition. The kernel owns
+    // document.title precisely so a program's OSC 0/2 window title cannot erase a
+    // feature's prefix, and nothing else asserts that: attention.test.ts checks the
+    // sink is CALLED with the right string, which passes just as well if the kernel
+    // appends the prefix after the base, ignores it, or drops it on destroy.
+    document.title = "Host page";
+    const { root, monitor } = await withMonitor();
+    expect(document.title).toBe("Host page");
+
+    // A background tab wanting the user puts the count FIRST, where a truncating
+    // tab strip still shows it.
+    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    expect(document.title).toBe("(1) Host page");
+
+    // Acknowledging the cue drops the prefix and leaves the base alone. (The
+    // prefix surviving a program's OSC 0/2 title is the other half of the kernel's
+    // composition contract; it needs a wire frame, so it is asserted in
+    // kernel.test.ts where the connection callbacks are reachable.)
+    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
+    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
+    expect(document.title).toBe("Host page");
+
+    // And a destroy with a cue still raised must not strand the count on a page
+    // the user comes back to.
+    monitor.emit({ id: "s2", status: "crashed", title: "two", createdAt: "2" });
+    expect(document.title).toBe("(1) Host page");
+    term?.destroy();
+    term = undefined;
+    expect(document.title).toBe("Host page");
+  });
+
+  it("raises the attention surfaces for the ACTIVE tab when the page is hidden", async () => {
+    // The single-session case, and the one the out-of-page surfaces exist for: with
+    // one tab that tab is necessarily the active one, so an acknowledgement keyed on
+    // "is this the active tab" alone swallowed the cue of the very session the user
+    // left running. notify.ts states the same rule for notifications; these surfaces
+    // now read it too.
+    document.title = "Host page";
+    const { root, monitor } = await withMonitor();
+
+    // Visible + active: nothing to tell anyone, exactly as before.
+    monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1" });
+    expect(document.title).toBe("Host page");
+
+    // Hidden + active: the user cannot see the terminal, so it raises.
+    setVisibility("hidden");
+    monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
+    expect(document.title).toBe("(1) Host page");
+
+    // Coming back acknowledges it, because now they ARE looking at it. Deferred
+    // rather than dropped: this is the same acknowledgement, at the moment it
+    // becomes true.
+    setVisibility("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(document.title).toBe("Host page");
+
+    // ...and only for the ACTIVE tab. A background tab's cue must survive a return
+    // to a DIFFERENT tab, or the viewer loses the thing it came back for.
+    setVisibility("hidden");
+    monitor.emit({ id: "s2", status: "crashed", title: "two", createdAt: "2" });
+    expect(document.title).toBe("(1) Host page");
+    setVisibility("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(document.title).toBe("(1) Host page");
+    void root;
+  });
+
+  it("raises the switcher's aggregate cue for exactly input, done, crashed and failed", async () => {
     const { root, monitor } = await withMonitor();
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
     // s2 is a BACKGROUND tab (s1 is active), which is what the aggregate is for.
-    for (const status of ["input", "done", "crashed"] as const) {
+    for (const status of ["input", "done", "crashed", "failed"] as const) {
       monitor.emit({ id: "s2", status, title: "two", createdAt: "2" });
       expect(dot?.dataset["status"], status).toBe(status);
       // Same wording map as the per-tab dots, so the aggregate cue explains
       // itself on hover instead of being an unexplained coloured dot.
       expect(dot?.title, status).toBe(
-        { input: "waiting for you", done: "turn finished", crashed: "process crashed" }[status],
+        {
+          input: "waiting for you",
+          done: "turn finished",
+          crashed: "process crashed",
+          failed: "error reported",
+        }[status],
       );
       // Reset via the tab's own acknowledgement path (a working phase drops it).
       monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
@@ -2223,10 +2310,10 @@ describe("tabs OSC 9 status chrome", () => {
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click(); // collapse again
     expect(dot?.dataset["status"]).toBeUndefined();
 
-    // The other five states never raise it: working/warning/failed are ongoing
-    // and informational (an animated dot pinned to the button would nag), and
-    // idle/exited ask nothing of anyone.
-    for (const status of ["working", "warning", "failed", "idle", "exited"] as const) {
+    // The other four states never raise it: working/warning are ongoing and
+    // informational (an animated dot pinned to the button would nag with nothing
+    // to act on), and idle/exited ask nothing of anyone.
+    for (const status of ["working", "warning", "idle", "exited"] as const) {
       monitor.emit({ id: "s2", status, title: "two", createdAt: "2" });
       expect(dot?.dataset["status"], status).toBeUndefined();
     }
@@ -2292,10 +2379,6 @@ describe("tabs OSC 9 notifications", () => {
     vi.stubGlobal("Notification", FakeNotification);
     return { posts, requestPermission };
   }
-  function setVisibility(state: "visible" | "hidden"): void {
-    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
-  }
-
   afterEach(() => {
     setVisibility("visible");
   });

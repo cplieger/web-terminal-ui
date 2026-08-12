@@ -248,14 +248,14 @@ describe("parseCueSeen rejects anything the acknowledgement store cannot trust",
 });
 
 describe("isCueStatus declares the cue-worthy statuses in one place", () => {
-  it("accepts exactly the three states that want the user, and nothing else", () => {
-    // The switcher's aggregate dot is "like a notification": it shows only the
-    // states that ask something of the user. The five it must NOT show are the
-    // three ongoing/informational progress states plus idle and a clean exit.
-    expect(["input", "done", "crashed"].every(isCueStatus)).toBe(true);
-    expect(["working", "warning", "failed", "idle", "exited", "", "DONE"].some(isCueStatus)).toBe(
-      false,
-    );
+  it("accepts exactly the four states that want the user, and nothing else", () => {
+    // The switcher's aggregate dot and the out-of-page attention surfaces are
+    // "like a notification": they show only the states that ask something of the
+    // user. `failed` is one of them — OSC 9;4 state 2 is a result the program
+    // parked, not an ongoing phase — while `working` and `warning` are genuinely
+    // ongoing, and idle and a clean exit ask nothing of anyone.
+    expect(["input", "done", "crashed", "failed"].every(isCueStatus)).toBe(true);
+    expect(["working", "warning", "idle", "exited", "", "DONE"].some(isCueStatus)).toBe(false);
   });
 });
 

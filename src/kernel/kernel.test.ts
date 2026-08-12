@@ -1242,3 +1242,84 @@ describe("browse-cache TTL", () => {
     expect(bgDrop).toHaveBeenCalledWith(-1, false);
   });
 });
+
+describe("the document title is composed from a base and a feature prefix", () => {
+  // The kernel owns document.title precisely so these two inputs cannot erase each
+  // other. Before it did, the OSC 0/2 branch assigned the title directly, so any
+  // shell or editor in any tab wiped a feature's attention prefix, and no ordering
+  // fixed it because both inputs change on their own schedule.
+  //
+  // ctx.titlePrefix is exercised here through a throwaway feature rather than
+  // through tabs, so this asserts the KERNEL's contract and not the tabs feature's
+  // use of it.
+
+  /** Mount a terminal carrying one feature that captures ctx, so a test can drive
+   *  ctx.titlePrefix directly. */
+  async function withTitleFeature(): Promise<{
+    setPrefix: (text: string) => void;
+    emitTitle: (title: string) => void;
+    destroy: () => void;
+  }> {
+    let ctxRef: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "title-probe",
+      setup(ctx) {
+        ctxRef = ctx;
+        // FeatureInstance requires teardown; this probe owns no DOM, so it has
+        // nothing to release. vi.fn keeps it a real function without an empty body.
+        return { api: undefined, teardown: vi.fn() };
+      },
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const term = createTerminal(root, { features: () => [probe] });
+    await tick();
+    if (!ctxRef) {
+      throw new Error("the probe feature never ran");
+    }
+    const captured = ctxRef;
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    return {
+      setPrefix: (text) => captured.titlePrefix(text),
+      emitTitle: (title) => cbs.onMessage?.({ type: "title", title } as never),
+      destroy: () => term.destroy(),
+    };
+  }
+
+  it("puts the prefix first and keeps it across a later OSC 0/2 title", async () => {
+    document.title = "Served page";
+    const t = await withTitleFeature();
+
+    t.setPrefix("(2) ");
+    expect(document.title).toBe("(2) Served page");
+
+    // The program's title replaces the BASE only. This is the assertion the whole
+    // kernel-owns-the-title change exists for.
+    t.emitTitle("vim README.md");
+    expect(document.title).toBe("(2) vim README.md");
+
+    // A blank OSC title is ignored, so a shell redrawing its prompt cannot flicker
+    // the page title to the bare prefix.
+    t.emitTitle("   ");
+    expect(document.title).toBe("(2) vim README.md");
+
+    // Clearing the prefix leaves the program's title in place.
+    t.setPrefix("");
+    expect(document.title).toBe("vim README.md");
+    t.destroy();
+  });
+
+  it("clears a SET prefix on destroy, leaving the base alone", async () => {
+    // The pre-existing destroy assertion in features/tabs runs with the prefix
+    // already empty, so paintTitle is a no-op there and the cleanup could be
+    // deleted with that suite green. This is the case that actually pins it.
+    document.title = "Served page";
+    const t = await withTitleFeature();
+
+    t.setPrefix("(1) ");
+    expect(document.title).toBe("(1) Served page");
+
+    t.destroy();
+    expect(document.title).toBe("Served page");
+  });
+});

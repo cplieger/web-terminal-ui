@@ -19,4 +19,5 @@
 export { presetSingle } from "./presets/single.js";
 export { presetTouch } from "./presets/touch.js";
 export { presetTabbed } from "./presets/tabbed.js";
+export type { TabbedPresetOptions } from "./presets/tabbed.js";
 export { presetAgentTabbed } from "./presets/agent-tabbed.js";

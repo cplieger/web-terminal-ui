@@ -274,6 +274,21 @@ export interface TerminalContext {
    *  re-read the same sentence every few seconds. Also a no-op once the overlay
    *  has been dismissed, so a late retry cannot resurrect it. */
   loadingReason(message: string): void;
+  /** Set the prefix the kernel composes onto the document title, or "" to clear
+   *  it. The kernel is the only writer of `document.title`: it holds the base
+   *  (the served `<title>`, replaced by a program's OSC 0/2 window title) and
+   *  this prefix, and re-composes on either change. A feature that assigned
+   *  `document.title` directly would be erased by the next OSC 2 from any shell
+   *  or editor running in a session, with no ordering that avoids it.
+   *
+   *  Idempotent and safe on every status tick: an unchanged result is not
+   *  re-assigned, because the title doubles as the browser-tab label and the
+   *  bookmark name. Cleared automatically when the terminal is destroyed.
+   *
+   *  Keep it an AGGREGATE. A page has one title while this UI multiplexes many
+   *  sessions, so any per-session value has to pick a session arbitrarily (see
+   *  the standing decision against writing progress here in features/tabs). */
+  titlePrefix(text: string): void;
   /** The kernel's tablist/tabpanel ARIA controller (used by tabs). */
   tablist(): TablistController;
 

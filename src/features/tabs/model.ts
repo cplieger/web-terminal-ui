@@ -192,20 +192,79 @@ export const ACTIVE_TAB_KEY = "wt-active-session";
 // One-time "swipe to switch" hint, remembered across loads.
 export const SWIPE_HINT_KEY = "wt-swipe-hint-seen";
 
-/** The session statuses that raise the mobile switcher's aggregate attention
- *  cue. The rule is "only states that want the user — it's like a notification":
- *  a background terminal blocked on the user ("input"), one whose turn finished
- *  ("done"), and one whose process died badly ("crashed"). The three animated
- *  progress states are deliberately excluded — working / warning / failed are
- *  ongoing and informational, and an animated dot pinned to the switch button
- *  would nag with nothing to act on. Declared once here so the raise test and
- *  the acknowledgement store cannot disagree about which statuses are
- *  cue-worthy. */
-export type CueStatus = "input" | "done" | "crashed";
+/** The session statuses that raise an attention cue: the mobile switcher's
+ *  aggregate dot, and the three out-of-page surfaces derived from the same set
+ *  (see attention.ts). The rule is "only states that want the user — it's like a
+ *  notification": a background terminal blocked on the user ("input"), one whose
+ *  turn finished ("done"), one whose process died badly ("crashed"), and one that
+ *  reported an error ("failed").
+ *
+ *  `working` and `warning` are excluded because they are ONGOING and
+ *  informational: an animated dot pinned to the switch button would nag with
+ *  nothing to act on. `failed` was excluded on the same reasoning and that was
+ *  wrong — OSC 9;4 state 2 is not ongoing, it is a result the program parked and
+ *  does not revisit until its next state change, which is exactly the shape of a
+ *  thing to tell the user about. It is also the half of "red" a viewer cares most
+ *  about: `crashed` was already here, so an errored turn raised nothing while a
+ *  dead process raised everything.
+ *
+ *  Declared once here so the raise test, the acknowledgement store and every
+ *  attention sink cannot disagree about which statuses are cue-worthy. */
+export type CueStatus = "input" | "done" | "crashed" | "failed";
+
+/** Severity order over CueStatus, most severe first, AND the complete set: this
+ *  array is what isCueStatus tests against, so the type and the runtime list
+ *  cannot drift the way two hand-maintained four-way checks could.
+ *
+ *  The order is read by the one surface that can show a single state (the browser
+ *  tab icon), which paints the most severe unseen cue. That is a total order and
+ *  so a defensible rule, unlike picking a session.
+ *
+ *  A dead process outranks a reported error (the session is gone, not merely
+ *  unhappy), an error outranks a request for input, and a finished turn is the
+ *  mildest thing worth a cue at all. */
+export const CUE_SEVERITY: readonly CueStatus[] = [STATUS_CRASHED, STATUS_FAILED, "input", "done"];
 
 /** isCueStatus narrows a raw server status to a cue-worthy one. */
 export function isCueStatus(status: string): status is CueStatus {
-  return status === "input" || status === "done" || status === STATUS_CRASHED;
+  return (CUE_SEVERITY as readonly string[]).includes(status);
+}
+
+/** worseCue returns whichever of two cues is more severe; "" means no cue. */
+export function worseCue(a: CueStatus | "", b: CueStatus | ""): CueStatus | "" {
+  if (a === "") {
+    return b;
+  }
+  if (b === "") {
+    return a;
+  }
+  return CUE_SEVERITY.indexOf(a) <= CUE_SEVERITY.indexOf(b) ? a : b;
+}
+
+/** The icon variant a cue paints, which is NOT one per status: `crashed` and
+ *  `failed` both render --status-failed, so they share one asset. An app ships
+ *  one icon per name returned here (see scripts/gen-attention-icons.py). */
+export function cueIconName(status: CueStatus): "input" | "done" | "alert" {
+  if (status === "input" || status === "done") {
+    return status;
+  }
+  return "alert";
+}
+
+/** isUnseenCue reports whether a session's CURRENT status is a cue this viewer
+ *  has not acknowledged. The single predicate behind both the raise and the
+ *  attention count, so a dot can never light for a session the count omits.
+ *
+ *  Note what it does NOT consider: whether the session is the active tab. A
+ *  latch arriving on the active tab is acknowledged at arrival (applyStatus), so
+ *  it is already absent from the unseen set by the time anything folds over it,
+ *  and no caller needs a special case. */
+export function isUnseenCue(
+  status: string,
+  id: string,
+  seen: ReadonlyMap<string, CueStatus>,
+): status is CueStatus {
+  return isCueStatus(status) && seen.get(id) !== status;
 }
 
 /** localStorage key for the cues this viewer has already SEEN: session id -> the
