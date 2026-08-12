@@ -31,7 +31,7 @@ import { statusPhrase, statusRevealsDot } from "./model.js";
  *  pointer announces itself; this only filters the coincidence where one event of a
  *  sweep happens to land within REORDER_MOVE_EPS_PX of the previous one (a direction
  *  reversal, or a frame where the motion was almost entirely vertical). */
-export const REORDER_STILL_MS = 90;
+export const REORDER_STILL_MS = 50;
 
 /** Fallback guard (ms): commit the pending slot this long after the last MOVEMENT, for
  *  the case where `dragover` stops arriving altogether and no stationary event ever

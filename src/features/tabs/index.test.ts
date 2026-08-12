@@ -1173,6 +1173,40 @@ describe("tabs feature", () => {
     expect(labels[1]).toBe("kiro: workspace (2)");
   });
 
+  it("keeps the suffix with its own session across a reorder", async () => {
+    // The number is an IDENTITY, not a rank, so it is keyed on age and never on
+    // position. It used to be assigned by encounter order while walking the list,
+    // which made it a property of the SLOT: two tabs called the same thing always
+    // read "x" then "x (2)" whichever way round they sat, so the label text stayed
+    // put while the sessions moved underneath it. A reorder of same-titled tabs was
+    // invisible on screen even though it had worked correctly all along, server
+    // included -- and dragging one tab renumbered the other, which is the clearest
+    // sign the number belonged to the wrong thing.
+    //
+    // Prioritisation applies to the ORDER (a custom arrangement outranks age,
+    // compareTabOrder) and deliberately NOT to the identity: feeding the custom
+    // order into the numbering is exactly what made the reorder invisible.
+    listBody = [
+      { id: "s1", title: "kiro: workspace", createdAt: "1", status: "idle" },
+      { id: "s2", title: "kiro: workspace", createdAt: "2", status: "idle" },
+    ];
+    const feature = tabs();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [feature] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    const labels = (): (string | null)[] =>
+      [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
+    expect(labels()).toEqual(["kiro: workspace", "kiro: workspace (2)"]);
+
+    // Move the younger tab to the front. Its number must travel with it, so the
+    // strip now reads "(2)" FIRST -- which is what makes the move visible at all.
+    menuItem(openTabMenu(root, 1), "Move left")?.click();
+
+    expect(feature.api?.list().map((t) => t.id)).toEqual(["s2", "s1"]);
+    expect(labels()).toEqual(["kiro: workspace (2)", "kiro: workspace"]);
+  });
+
   it("creates one session when the list is empty", async () => {
     listBody = [];
     const root = document.createElement("div");
