@@ -233,11 +233,17 @@ async function createSessionHonouringRetry(
       // First refusal always speaks; after that only every
       // CREATE_RETRY_REANNOUNCE_MS, so a multi-minute wait is neither silent nor
       // a toast storm.
+      //
+      // The suffix says the page is WAITING, not recovering from a failure. It
+      // used to say "retrying", which read as an error loop when the server had
+      // only said "not yet" -- and the first announcement fires before any retry
+      // has happened at all, so a user two seconds into a boot was told
+      // "retrying" about a request that had been made exactly once.
       if (lastAnnouncedAt === 0 || elapsed - lastAnnouncedAt >= CREATE_RETRY_REANNOUNCE_MS) {
         lastAnnouncedAt = elapsed;
-        const waiting = err.serverMessage ?? "Server is not ready yet";
-        ctx.toast(`${waiting}; retrying`, 8000);
-        ctx.announce(`${waiting}; retrying`);
+        const reason = err.serverMessage ?? "Server is not ready yet";
+        ctx.toast(`${reason}; waiting…`, 8000);
+        ctx.announce(`${reason}; waiting…`);
       }
       // Separate from the throttled pair above, and unthrottled: this writes the
       // reason onto the loading OVERLAY, which is the only surface a user can
@@ -246,7 +252,7 @@ async function createSessionHonouringRetry(
       // stacking notifications, so there is no storm to throttle, and repeating
       // the same string is idempotent. This is what turns the black screen of a
       // twenty-minute tools install into a screen that says why it is waiting.
-      ctx.loadingReason(`${err.serverMessage ?? "Server is not ready yet"} — retrying…`);
+      ctx.loadingReason(`${err.serverMessage ?? "Server is not ready yet"}; waiting…`);
       await new Promise((resolve) => {
         window.setTimeout(resolve, err.retryAfterMs ?? CREATE_RETRY_FALLBACK_MS);
       });
