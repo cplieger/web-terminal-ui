@@ -495,39 +495,6 @@
   }
 }
 
-/* ===== Pending drop edge (tabs feature, desktop drag) =====
-   The exact boundary the dragged tab will be inserted at, marked while the hold runs
-   and filling from nothing to full over the hold's own duration (the tabs feature
-   sets the duration inline from REORDER_DWELL_MS, so the bar and the timer cannot
-   drift apart).
-
-   It rides the neighbouring chip: the leading edge of the chip being pushed aside,
-   or the trailing edge of the last chip when the tab is heading past the end of the
-   strip (.wt-tab-dwell-end). The chip is already position: relative for its progress
-   bar, and its overflow clip keeps the rail inside the same rounded padding box.
-
-   3px of solid accent rather than a dashed treatment: the dashed vocabulary belongs
-   to the SLOT, which is a destination that has been decided. This is a boundary
-   still being chosen, so it reads as a caret. inset-block keeps it clear of the
-   chip's rounded corners without needing its own radius arithmetic. */
-:where(.wt-root) .wt-tab-dwell {
-  position: absolute;
-  inset-block: var(--sp-1);
-  inset-inline-start: 0;
-  width: 3px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  /* Grows upward like a gauge. The feature writes scaleY inline; a transform on this
-     element cannot collide with the chip's own animations because it is a separate
-     element, which is the whole reason the rail is not a pseudo-element on the chip. */
-  transform-origin: bottom;
-  pointer-events: none;
-}
-
-:where(.wt-root) .wt-tab-dwell-end {
-  inset-inline: auto 0;
-}
-
 /* ===== Reorder drop slot (tabs feature, desktop drag) =====
    The dragged chip stays in the strip's flow for the whole gesture and renders as
    the SLOT it will land in: an empty dashed outline in the accent over a faint

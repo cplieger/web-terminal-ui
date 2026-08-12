@@ -43,8 +43,9 @@ import {
 } from "./model.js";
 import { browserNotifierEnv, createNotifier } from "./notify.js";
 import {
-  REORDER_DWELL_MS,
   REORDER_LEAN_PX,
+  REORDER_MOVE_EPS_PX,
+  REORDER_REST_MS,
   REORDER_SETTLE_MS,
   REORDER_SHIFT_TRANS,
   REORDER_SLOT_FADE_MS,
@@ -672,21 +673,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // to hand every one of them back to the stylesheet.
       const shifted = new Set<HTMLElement>();
       let shiftTimer: ReturnType<typeof setTimeout> | null = null;
-      // The pending slot and its hold. `dwellTimer !== null` is the only "a slot is
-      // pending" flag — `dwellBefore` cannot be one, because null is a legitimate
-      // value there meaning "past the last chip".
-      let dwellTimer: ReturnType<typeof setTimeout> | null = null;
-      let dwellBefore: HTMLElement | null = null;
+      // The slot waiting to open and the rest window that will open it.
+      // `restTimer !== null` is the only "a slot is pending" flag — `restBefore` cannot
+      // be one, because null is a legitimate value there meaning "past the last chip".
+      // restX is the last pointer position seen, which is how movement is told from
+      // stillness (see trackRest).
+      let restTimer: ReturnType<typeof setTimeout> | null = null;
+      let restBefore: HTMLElement | null = null;
+      let restX: number | null = null;
       // Whether a `drop` fired for the drag in flight. It is the exact signal for
       // "the user released deliberately" as opposed to "the drag was abandoned":
       // Escape and a refused release fire dragend with no drop at all. dragend
       // without it reverts the preview, which is the cancel this reorder never had.
       let dropped = false;
-      // The pending-drop rail: ONE element, moved to whichever edge the current hold
-      // is counting down on (see showDwellRail).
-      const dwellRail = document.createElement("span");
-      dwellRail.className = "wt-tab-dwell";
-      dwellRail.setAttribute("aria-hidden", "true");
       // The chip mid slot-fade, and the timer that ends it.
       let slotFadeEl: HTMLElement | null = null;
       let slotFadeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1826,7 +1825,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // --- Desktop reorder preview: hold, lean, slide -------------------------
+      // --- Desktop reorder preview: sweep, rest, slide ------------------------
       //
       // The old reorder moved the dragged chip on EVERY dragover, so the strip
       // rearranged itself continuously under the pointer and — every chip being
@@ -1834,22 +1833,33 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // in. The chip you were dragging looked like the slot it left, the slot it
       // was over, and the slot it would end up in.
       //
-      // The reorder now runs in three stages, and the dragged chip stays in the
-      // flow throughout as the slot it will land in (`.wt-tab-dragging`, which
-      // 30-tabs.css renders as an empty dashed outline rather than a dimmed copy
-      // of the tab — the solid copy is the drag image under the pointer, and one
-      // of the two had to stop pretending to be the tab):
+      // The preview splits that into two different answers for two different
+      // actions, and the dragged chip stays in the flow throughout as the slot it
+      // will land in (`.wt-tab-dragging`, which 30-tabs.css renders as an empty
+      // dashed outline rather than a dimmed copy of the tab — the solid copy is
+      // the drag image under the pointer, and one of the two had to stop
+      // pretending to be the tab):
       //
-      //  1. dragover picks a candidate slot and ARMS a hold. Nothing reorders.
-      //  2. Every chip the commit would displace LEANS a few px toward where it
-      //     is going, at once, so the hold reads as "held here, opening that way"
-      //     instead of as a second of nothing.
-      //  3. After REORDER_DWELL_MS on the same candidate the slot COMMITS: one
-      //     DOM move, the displaced chips slide from their old positions to their
-      //     new ones, and the slot fades in at its new home.
+      //  - SWEEPING across the strip only LEANS the chips a commit would displace,
+      //    a few px toward where they would go (leanToward). Instant, and it is
+      //    what says where the tab will fall while you are still looking for the
+      //    spot. Nothing is rearranged, so crossing five tabs does not reshuffle
+      //    the strip five times.
+      //  - COMING TO REST opens the slot for real (trackRest -> commitSlot): one
+      //    DOM move, the displaced chips slide from their old positions to their
+      //    new ones, and the slot fades in at its new home.
       //
-      // A release never waits for the hold: `drop` commits whatever slot is
-      // pending (flushDwell), so a fast drag-and-drop reorders exactly as before.
+      // Rest is DETECTED, not waited out: REORDER_REST_MS is re-armed by movement,
+      // so it expires a rest window after the last movement rather than a fixed
+      // time after a decision. An earlier version made every commit serve a fixed
+      // hold, which is the wrong shape for a direct manipulation — it delayed the
+      // one case that should be instant (you found the spot and stopped) to
+      // protect a case the lean already covers (you are still moving). It also
+      // grew a progress bar to explain the wait, which is the tell that the wait
+      // should not have been there.
+      //
+      // A release never waits either: `drop` commits whatever slot is pending
+      // (flushRest), so dropping mid-sweep lands the tab where the lean said.
       //
       // dropTargetBefore returns the first tab whose horizontal midpoint is past
       // x (the element the dragged tab should sit before), or null to drop at the
@@ -1933,9 +1943,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // leanToward tips the chips a commit would displace a few px toward their
-      // destination, for as long as the hold lasts. No settle timer: the lean is a
-      // held state, not an animation with an end, and a timer that expired mid-hold
-      // would snap it away while the user is still waiting on it.
+      // destination, for as long as the pointer is still choosing. No settle timer: the
+      // lean is a held state, not an animation with an end, and a timer that expired
+      // under it would snap it away mid-sweep.
+      //
+      // This is the SWEEP preview and it is the only thing a moving pointer produces:
+      // it says where the tab will fall without rearranging anything, which is what lets
+      // a drag cross five tabs without the strip reshuffling five times.
       //
       // Chips that were leaning and no longer would be are written back to zero in
       // the SAME pass, so a changed candidate eases from one lean into the other
@@ -1974,9 +1988,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         applyShift(next, REORDER_SHIFT_TRANS);
       }
       // releaseLean eases every leaning chip back to rest and settles it, for when
-      // a candidate is withdrawn (the pointer came back to the committed slot, or
-      // left the strip). endShift would be wrong here: it strips the transition in
-      // the same write, so the lean would snap home.
+      // a candidate is withdrawn (the pointer came back to the committed slot, or left
+      // the strip). endShift would be wrong here: it strips the transition in the same
+      // write, so the lean would snap home.
       function releaseLean(): void {
         if (shifted.size === 0) {
           return;
@@ -1994,101 +2008,82 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         applyShift(rest, REORDER_SHIFT_TRANS);
         shiftTimer = setTimeout(endShift, REORDER_SETTLE_MS);
       }
-      // showDwellRail marks the exact boundary the tab will be inserted at, on the edge
-      // of the chip beside it, and fills that mark over the hold's own duration.
+      // trackRest is the whole gate, called on every dragover over the strip.
       //
-      // Without it the hold was a second of near-silence, and the silence was worse than
-      // it sounds: the most authoritative thing on screen is the dashed slot, and the
-      // slot sits at the tab's CURRENT position, so the strongest cue was describing the
-      // state being left rather than the one being chosen. The 7px lean says which
-      // DIRECTION the strip will open without saying which boundary, and nothing at all
-      // said how much longer. The rail answers both of those, which makes the gesture
-      // read as three ordered states: the tab under the pointer, the edge about to open,
-      // then the gap that opened.
+      // Sweeping and settling are DIFFERENT actions and get different answers. While the
+      // pointer is still travelling the strip only LEANS the chips it would displace
+      // (leanToward): instant, cheap, and it is what says where the tab will fall while
+      // you are still looking for the spot. Nothing is rearranged, so crossing five tabs
+      // does not rearrange the strip five times. The moment the pointer comes to REST the
+      // slot opens for real.
       //
-      // The fill duration comes from REORDER_DWELL_MS, so the bar and the timer it
-      // depicts cannot drift apart. That is also why the rail is a real element rather
-      // than a pseudo-element on the chip: a pseudo-element's duration would have to
-      // travel through a custom property, which is a second place to keep in step.
-      function showDwellRail(before: HTMLElement | null): void {
-        // The leading edge of the chip being pushed aside, or the trailing edge of the
-        // last chip when the tab is heading past the end of the strip.
-        const host = before ?? scroller.querySelector<HTMLElement>(".wt-tab:last-of-type");
-        if (host === null || host === draggingEl) {
-          hideDwellRail();
+      // Rest is detected, not waited out. An earlier version made every commit wait a
+      // fixed hold, which is the wrong shape for a direct manipulation: it delayed the
+      // one case that should be instant (you have found the spot and stopped) in order to
+      // protect the case that never needed protecting (you are still moving, and the lean
+      // already covers it). The timer here is re-armed by MOVEMENT, so it expires a rest
+      // window after the last movement rather than a fixed time after a decision.
+      function trackRest(clientX: number): void {
+        const dragged = draggingEl;
+        if (!dragged) {
           return;
         }
-        dwellRail.classList.toggle("wt-tab-dwell-end", before === null);
-        host.appendChild(dwellRail);
-        if (prefersReduce()) {
-          // No countdown, but the boundary still has to be legible, so show it filled.
-          dwellRail.style.transition = "none";
-          dwellRail.style.transform = "scaleY(1)";
+        const moved = restX === null || Math.abs(clientX - restX) > REORDER_MOVE_EPS_PX;
+        restX = clientX;
+        const before = dropTargetBefore(clientX);
+        // Already the slot the tab holds, so there is nothing to preview or commit.
+        // Withdraw anything pending: the pointer came back.
+        if (before === dragged || before === dragged.nextElementSibling) {
+          cancelRest();
           return;
         }
-        dwellRail.style.transition = "none";
-        dwellRail.style.transform = "scaleY(0)";
-        dwellRail.getBoundingClientRect(); // commit the from-state before the fill
-        dwellRail.style.transition = `transform ${String(REORDER_DWELL_MS)}ms linear`;
-        dwellRail.style.transform = "scaleY(1)";
+        // Lean toward a NEW candidate. The test is guarded on a pending rest rather than
+        // on `before !== restBefore` alone, because null is a legitimate candidate here
+        // ("past the last chip") and would otherwise be indistinguishable from the
+        // initial "nothing pending" state — which is exactly how the first sweep of a
+        // drag toward the end of the strip ended up leaning nothing at all.
+        if (restTimer === null || before !== restBefore) {
+          restBefore = before;
+          leanToward(before); // the sweep preview: where this will fall
+        }
+        // Movement pushes the commit out; stillness lets the armed timer run down to it.
+        // A stationary pointer that has nothing armed still needs one — a browser may
+        // deliver dragover repeatedly at an unchanged position, and the first of those is
+        // the only signal that the pointer arrived and stopped.
+        if (moved || restTimer === null) {
+          if (restTimer !== null) {
+            clearTimeout(restTimer);
+          }
+          restTimer = setTimeout(() => {
+            restTimer = null;
+            const target = restBefore;
+            restBefore = null;
+            commitSlot(target);
+          }, REORDER_REST_MS);
+        }
       }
-      function hideDwellRail(): void {
-        dwellRail.remove(); // idempotent: removing a detached node does nothing
-      }
-
-      // armDwell registers the slot a release would land in and starts (or keeps)
-      // the hold that commits it. Called on every dragover, so it must be cheap
-      // and idempotent for an unchanged candidate: restarting the timer on each
-      // event would mean a hand that never holds perfectly still could never
-      // commit anything, which is the bug a naive dwell always ships with.
-      function armDwell(before: HTMLElement | null): void {
-        if (!draggingEl) {
+      function cancelRest(): void {
+        if (restTimer === null) {
           return;
         }
-        // Already the committed slot, so there is nothing to preview. Withdraw any
-        // pending commitment — the pointer came back.
-        if (before === draggingEl || before === draggingEl.nextElementSibling) {
-          cancelDwell();
-          return;
-        }
-        if (dwellTimer !== null && before === dwellBefore) {
-          return; // same candidate, still holding
-        }
-        if (dwellTimer !== null) {
-          clearTimeout(dwellTimer);
-        }
-        dwellBefore = before;
-        leanToward(before);
-        showDwellRail(before);
-        dwellTimer = setTimeout(() => {
-          dwellTimer = null;
-          commitSlot(before);
-        }, REORDER_DWELL_MS);
-      }
-      function cancelDwell(): void {
-        hideDwellRail();
-        if (dwellTimer === null) {
-          return;
-        }
-        clearTimeout(dwellTimer);
-        dwellTimer = null;
-        dwellBefore = null;
+        clearTimeout(restTimer);
+        restTimer = null;
+        restBefore = null;
         releaseLean();
       }
-      // flushDwell commits a pending slot at once. A release is a decision, so a
-      // drop does not have to wait out a hold it interrupted: this is what keeps a
-      // quick drag-and-drop reordering exactly as it did before the preview
-      // existed, and it is why the hold can afford to be a full second. Only a
-      // `drop` calls it; an abandoned drag reaches dragend without one and reverts.
-      function flushDwell(): void {
-        if (dwellTimer === null) {
+      // flushRest commits a pending slot at once, because a release is a decision. It is
+      // what stops the rest window from ever being felt as a floor on the gesture: drop
+      // mid-sweep and the tab lands where the lean said it would. Only a `drop` calls it;
+      // an abandoned drag reaches dragend without one and reverts.
+      function flushRest(): void {
+        if (restTimer === null) {
           return;
         }
-        const before = dwellBefore;
-        clearTimeout(dwellTimer);
-        dwellTimer = null;
-        dwellBefore = null;
-        commitSlot(before);
+        const target = restBefore;
+        clearTimeout(restTimer);
+        restTimer = null;
+        restBefore = null;
+        commitSlot(target);
       }
 
       // flipTo runs a rearranging mutation and animates its result: every chip that
@@ -2165,22 +2160,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // whatever the pointer is hovering.
       //
       // Every early return releases the lean, and that is not belt-and-braces. The
-      // caller nulls `dwellTimer` BEFORE calling in (both the timer callback and
-      // flushDwell do), so by the time control arrives here `cancelDwell` has already
-      // become a no-op and nothing else would ever hand those chips back.
+      // caller nulls `restTimer` BEFORE calling in (both the rest timer and flushRest
+      // do), so by the time control arrives here `cancelRest` has already become a no-op
+      // and nothing else would ever hand those chips back.
       function commitSlot(before: HTMLElement | null): void {
-        // The countdown is over however this call ends: the rail's whole job was to
-        // depict a hold that has now expired.
-        hideDwellRail();
         const dragged = draggingEl;
         if (!dragged?.isConnected) {
           releaseLean();
-          return; // the dragged session was closed elsewhere mid-hold
+          return; // the dragged session was closed elsewhere mid-gesture
         }
-        // The hold captured a live DOM node a whole second ago. A session closed in
-        // another window (an SSE push, or the poll reconcile) removes chips through
-        // dropTab while this gesture is still open, so the reference node may be gone
-        // — and insertBefore throws NotFoundError on a reference that is no longer a
+        // The pending slot was chosen a rest window ago, and a session closed in another
+        // window (an SSE push, or the poll reconcile) removes chips through dropTab while
+        // this gesture is still open — so the reference node may be gone by now, and
+        // insertBefore throws NotFoundError on a reference that is no longer a
         // child, which would abandon the drop mid-way and leave DOM order and tabList
         // disagreeing. null stays legal: it means "past the last chip".
         if (before !== null && before.parentNode !== scroller) {
@@ -2289,8 +2281,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // start from rest, and a torn-down feature may leave no inline style on an
       // element it no longer owns.
       function endReorderPreview(): void {
-        cancelDwell();
-        hideDwellRail(); // cancelDwell returns early when no hold was pending
+        cancelRest();
+        restX = null;
         endSlotFade();
       }
 
@@ -2309,8 +2301,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       //    in progress" and so would preventDefault every unrelated file or text drop on
       //    the page from then on.
       function abortReorderFor(removed: HTMLElement): void {
-        if (removed === dwellBefore) {
-          cancelDwell();
+        if (removed === restBefore) {
+          cancelRest();
         }
         if (removed !== draggingEl) {
           return;
@@ -3360,9 +3352,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         return false;
       });
-      // Arm the reorder preview while dragging a tab over the strip. This no longer
-      // reorders anything: it picks the slot a release would land in and starts the
-      // hold that commits it (see the reorder-preview block above).
+      // Drive the reorder preview while dragging a tab over the strip. A sweep only
+      // leans the chips; the slot opens when the pointer comes to rest (trackRest).
       bar.addEventListener("dragover", (e) => {
         if (!draggingEl) {
           return;
@@ -3371,7 +3362,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (e.dataTransfer) {
           e.dataTransfer.dropEffect = "move";
         }
-        armDwell(dropTargetBefore(e.clientX));
+        trackRest(e.clientX);
       });
       // Commit on drop — and, load-bearing, CANCEL the drop's default action. An
       // uncancelled drop leaves the browser free to act on the drag payload
@@ -3386,16 +3377,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         e.preventDefault();
         dropped = true;
-        flushDwell(); // a release decides: do not make a fast drag wait out the hold
+        flushRest(); // a release decides: never make a drop wait on the rest window
         syncOrderFromDom();
         announceMoved(moved); // the ONE completed-move announcement per gesture
       });
-      // Leaving the strip stands a pending hold down. The document dragover below
-      // does this too and covers more ground, but it cannot cover the case that
-      // matters most here: the strip is docked at the viewport EDGE, so a pointer can
-      // leave it by leaving the window entirely, and then no other element in the
-      // document receives a dragover to notice with. Without this listener the hold
-      // would run to completion and commit a slot the pointer had already abandoned.
+      // Leaving the strip withdraws a pending slot. The document dragover below does
+      // this too and covers more ground, but it cannot cover the case that matters most
+      // here: the strip is docked at the viewport EDGE, so a pointer can leave it by
+      // leaving the window entirely, and then no other element in the document receives a
+      // dragover to notice with. A pointer that leaves the window is also, by definition,
+      // one that has stopped moving over the strip — so without this the rest window
+      // would run down and open a slot the pointer had already abandoned.
       //
       // relatedTarget is what makes dragleave usable at all: it fires on every
       // child-to-child transition inside the bar (chip to label, label to close), and
@@ -3408,7 +3400,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         const next = e.relatedTarget;
         if (next === null || !bar.contains(next as Node)) {
-          cancelDwell();
+          cancelRest();
         }
       });
       // A tab released anywhere OTHER than the strip — over the terminal, over
@@ -3435,17 +3427,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // refused release fell through to dragend and reverted. That distinction is
           // invisible to the person doing the dragging.
           //
-          // So: leave `dropped` false, stand the hold down, and let dragend run the
+          // So: leave `dropped` false, withdraw anything pending, and let dragend run the
           // revert. Nothing is lost silently — the revert animates and announces, so a
           // mis-release reads as "that did not take" rather than as a mystery.
-          cancelDwell();
+          cancelRest();
           return;
         }
-        // dragover, off the strip: no candidate slot exists out here, so stand a
-        // pending hold down rather than let it open a gap for a target the pointer
-        // has already left. A slot already COMMITTED stays put; the pointer may yet
-        // come back onto the strip and release there.
-        cancelDwell();
+        // dragover, off the strip: no candidate slot exists out here, so withdraw a
+        // pending one rather than let the rest window open a gap for a target the pointer
+        // has already left. A slot already COMMITTED stays put; the pointer may yet come
+        // back onto the strip and release there.
+        cancelRest();
       };
       document.addEventListener("dragover", onDocTabDrop);
       document.addEventListener("drop", onDocTabDrop);
