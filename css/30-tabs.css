@@ -875,9 +875,10 @@
    opacity only, so it composites without repaints (a gradient background is
    rasterized once, unlike an animated box-shadow spread, which repaints every
    frame). It exists only in the three animated states — no stale layer to pin
-   when a dot changes status. (The switcher notification dot never shows any of
-   them — input/done/crashed only — so its position: absolute placement never
-   meets this rule's position: relative.)
+   when a dot changes status. (The switcher notification dot can now show one of
+   them, `failed`, since that status became cue-worthy; 31-switcher.css neutralises
+   this rule and the position: relative above for that surface, so its
+   position: absolute badge placement still holds.)
 
    The final scale is deliberately capped at today's 27px footprint: the mobile
    overview row (.wt-switcher-row-select) clips at overflow: hidden 12.5px from

@@ -258,6 +258,31 @@ function buildTerminal(
     narrowObserver.observe(root);
   }
 
+  // --- Document title (kernel-owned, composed from two inputs) ---
+  //
+  // The page has ONE title and two things want to write it: a program's OSC 0/2
+  // window title, and a feature's attention prefix (tabs' unseen-cue count). So
+  // the kernel holds both and is the only assigner. Two direct writers was the
+  // alternative and it cannot work: whichever ran last won, so a shell or an
+  // editor emitting OSC 2 silently erased the prefix, and there is no ordering
+  // that fixes it because both inputs change on their own schedule.
+  //
+  // The base starts as whatever the served document declared, so a consumer that
+  // never receives an OSC title (web-terminal-kiro sets kiro-cli's
+  // chat.terminalTitle=false) keeps its own <title> as the base rather than
+  // needing to declare it twice.
+  let baseTitle = document.title;
+  let titlePrefixText = "";
+  function paintTitle(): void {
+    const next = titlePrefixText + baseTitle;
+    // Idempotent: the title doubles as the browser-tab label and the bookmark
+    // name, and this runs on every status sweep, so an unchanged assignment must
+    // not churn it.
+    if (document.title !== next) {
+      document.title = next;
+    }
+  }
+
   // Toast surface (kernel-owned shared primitive, section 22.3).
   const toastEl = document.createElement("div");
   toastEl.className = "wt-toast";
@@ -607,7 +632,8 @@ function buildTerminal(
         // when it redraws its prompt after idling, so hold the last-good browser
         // title instead of flickering blank.
         if (msg.title.trim() !== "") {
-          document.title = msg.title;
+          baseTitle = msg.title;
+          paintTitle();
         }
         bus.emit("wire:title", { session: activeSession?.id ?? "", title: msg.title });
       } else if (msg.type === "modes") {
@@ -1216,6 +1242,10 @@ function buildTerminal(
         // place rather than at each caller.
         loadingStatus.reason(message);
       },
+      titlePrefix: (text) => {
+        titlePrefixText = text;
+        paintTitle();
+      },
       tablist: () => tablistController,
       newLineStore: (sessionId) => {
         // Registered on EVERY path, because this factory is the only way a store
@@ -1307,6 +1337,12 @@ function buildTerminal(
     scrollbackKeeper?.flush();
     scrollbackKeeper?.stop();
     teardownFeatures();
+    // A destroyed terminal must not leave its attention prefix on the page: the
+    // tab it counted is gone, and the title outlives this runtime (an embedded
+    // panel closing, a reload path). The base is left alone -- it belongs to the
+    // document, not to us.
+    titlePrefixText = "";
+    paintTitle();
     kernelAbort.abort();
     narrowObserver?.disconnect();
     narrowObserver = null;
