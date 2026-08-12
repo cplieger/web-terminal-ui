@@ -139,16 +139,16 @@ describe("loading overlay status text", () => {
     settleSwap();
 
     // The server's own words, arriving from the session owner's retry loop.
-    status.reason("tools installing — retrying…");
+    status.reason("tools installing; waiting…");
     settleSwap();
-    expect(visibleText(o)).toBe("tools installing — retrying…");
-    expect(announcedText(o)).toBe("tools installing — retrying…");
+    expect(visibleText(o)).toBe("tools installing; waiting…");
+    expect(announcedText(o)).toBe("tools installing; waiting…");
 
     // Rotation must not resume and overwrite a real reason with reassurance:
     // alternating between "installing tools" and "almost there" is incoherent.
     vi.advanceTimersByTime(ROTATE_EVERY_MS * 3);
     settleSwap();
-    expect(visibleText(o)).toBe("tools installing — retrying…");
+    expect(visibleText(o)).toBe("tools installing; waiting…");
   });
 
   it("keeps an EARLY reason when the rotation threshold arrives later", () => {
@@ -161,15 +161,15 @@ describe("loading overlay status text", () => {
     // a user reading "tools installing" at 0:05 would see it replaced by generic
     // reassurance at 1:00 -- losing the only useful information on the screen.
     vi.advanceTimersByTime(1500);
-    status.reason("tools installing — retrying…");
+    status.reason("tools installing; waiting…");
     settleSwap();
-    expect(visibleText(o)).toBe("tools installing — retrying…");
+    expect(visibleText(o)).toBe("tools installing; waiting…");
 
     vi.advanceTimersByTime(WAITING_AFTER_MS + ROTATE_EVERY_MS * 4);
     settleSwap();
-    expect(visibleText(o)).toBe("tools installing — retrying…");
+    expect(visibleText(o)).toBe("tools installing; waiting…");
     // ...and the initial scripted line never appeared either.
-    expect(announcedText(o)).toBe("tools installing — retrying…");
+    expect(announcedText(o)).toBe("tools installing; waiting…");
   });
 
   it("is idempotent per reason, so a retry loop may call it every tick", () => {
