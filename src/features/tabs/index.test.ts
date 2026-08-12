@@ -18,12 +18,12 @@ import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // the (dynamically re-imported) feature under test is safe.
 import { CUE_SEEN_KEY } from "./model.js";
 // The reorder preview's timings, imported rather than restated: the tests below
-// pin that a hold is REQUIRED and that a release short-circuits it, not what the
-// numbers happen to be, so a deliberate retune moves one definition and not five
-// magic numbers in a test file.
+// pin the SHAPE of the interaction (a sweep only leans, rest opens the slot, a drop
+// never waits), not what the numbers happen to be, so a deliberate retune moves one
+// definition and not a dozen magic numbers in a test file.
 import {
-  REORDER_DWELL_MS,
   REORDER_LEAN_PX,
+  REORDER_REST_MS,
   REORDER_SETTLE_MS,
   REORDER_SLOT_FADE_MS,
 } from "./strip.js";
@@ -275,9 +275,15 @@ function fakeDataTransfer(): FakeDataTransfer {
   };
 }
 function dragEvent(type: string, dt: FakeDataTransfer): Event {
+  return dragAt(type, dt, 0);
+}
+// A dragover at a specific x. The reorder preview distinguishes a MOVING pointer from a
+// stopped one, so a test that wants to say "still sweeping" has to change the
+// coordinate; repeating one is how it says "stopped".
+function dragAt(type: string, dt: FakeDataTransfer, clientX: number): Event {
   const e = new Event(type, { bubbles: true, cancelable: true });
   Object.defineProperty(e, "dataTransfer", { value: dt });
-  Object.defineProperty(e, "clientX", { value: 0 });
+  Object.defineProperty(e, "clientX", { value: clientX });
   Object.defineProperty(e, "clientY", { value: 0 });
   return e;
 }
@@ -2671,23 +2677,24 @@ describe("tabs switch-animation lifecycle", () => {
   });
 });
 
-// --- Desktop reorder preview: hold, lean, slide, cancel ---------------------
+// --- Desktop reorder preview: sweep, rest, slide, cancel --------------------
 //
-// The reorder used to move the dragged chip on every dragover, which is what these
-// pin the end of: a candidate slot is now HELD before the strip opens it, a release
-// commits whatever is pending without waiting, and an abandoned drag puts the strip
-// back.
+// The reorder answers a moving pointer and a stopped one differently, and these pin
+// that split: sweeping across the strip only LEANS the chips it would displace, and the
+// slot opens when the pointer comes to REST. Rest is detected by re-arming a short
+// window on movement, so it is not a hold — stopping commits, and a drop never waits
+// for it at all.
 //
 // What these CANNOT prove: happy-dom applies no stylesheet and reports every rect as
-// zero, so the slide itself never runs (an all-zero FLIP has nothing to invert) and
-// the dashed slot's appearance is unverifiable here. The lean IS checkable, because
-// its direction and distance come from DOM index arithmetic rather than geometry, and
-// so is every stage's inline-style bookkeeping. How the motion FEELS, and that the
-// hold is the right length for a hand, are on the manual checklist.
+// zero, so the slide only runs where a test stubs geometry, and the dashed slot's
+// appearance is unverifiable here. The lean IS checkable, because its direction and
+// distance come from DOM index arithmetic rather than geometry, and so is every stage's
+// inline-style bookkeeping. How the motion FEELS is on the manual checklist.
 //
-// Zero rects also mean dropTargetBefore never finds a midpoint past clientX=0, so
-// every candidate below is "past the last chip" — enough to exercise the machinery,
-// and the reason the expected orders all rotate the dragged tab to the end.
+// Zero layout offsets also mean dropTargetBefore never finds a midpoint past clientX,
+// so every candidate below is "past the last chip" — enough to exercise the machinery,
+// and the reason the expected orders all rotate the dragged tab to the end. Movement is
+// expressed by passing a different clientX, which is what `dragAt` is for.
 describe("tabs reorder preview", () => {
   async function mountDrag(
     count: number,
@@ -2700,6 +2707,7 @@ describe("tabs reorder preview", () => {
     chips: () => HTMLElement[];
     live: () => string;
     ids: () => string[];
+    sweepTo: (x: number) => void;
     stubRects: () => void;
   }> {
     if (opts.reducedMotion === true) {
@@ -2724,11 +2732,11 @@ describe("tabs reorder preview", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === count);
     const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
     const surface = root.querySelector<HTMLElement>(".term");
-    const scroller = root.querySelector<HTMLElement>(".wt-tab-scroll");
-    if (!bar || !surface || !scroller) {
+    if (!bar || !surface) {
       throw new Error("strip chrome missing");
     }
     const chips = (): HTMLElement[] => [...root.querySelectorAll<HTMLElement>(".wt-tab")];
+    const dt = fakeDataTransfer();
     // Only the timers, and only AFTER the async mount: until() drives itself on
     // setTimeout, and the tabs feature's status poll is a setInterval that must keep
     // running on the real clock (freezing it deadlocks teardown).
@@ -2737,7 +2745,7 @@ describe("tabs reorder preview", () => {
       root,
       bar,
       surface,
-      dt: fakeDataTransfer(),
+      dt,
       chips,
       live: () => root.querySelector('[aria-live="polite"]')?.textContent ?? "",
       // The feature's OWN order, which is what a drop commits (syncOrderFromDom writes
@@ -2745,6 +2753,12 @@ describe("tabs reorder preview", () => {
       // separate concern with its own tests, and asserting it here couples this suite to
       // a storage backend two layers away from the seam under test.
       ids: () => feature.api?.list().map((t) => t.id) ?? [],
+      // One dragover at a given x. Passing a NEW x is how a test says "still moving";
+      // repeating the last x is how it says "stopped", which is the distinction the
+      // whole preview turns on.
+      sweepTo: (x: number) => {
+        bar.dispatchEvent(dragAt("dragover", dt, x));
+      },
       // Give the chips real horizontal geometry, derived from their LIVE DOM index so a
       // reorder changes what they report. Without this the FLIP finds every delta zero
       // and returns before writing a style, which silently makes any assertion about
@@ -2784,94 +2798,69 @@ describe("tabs reorder preview", () => {
   function translateOf(el: HTMLElement): string {
     return (el.style.translate as string | undefined) ?? "";
   }
+  const leanLeft = `-${String(REORDER_LEAN_PX)}px`;
 
-  it("does not reorder on dragover: a candidate slot has to be held first", async () => {
-    const h = await mountDrag(3);
-    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-
-    // The whole point. Passing over a slot previews it; it does not take it.
-    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
-    vi.advanceTimersByTime(REORDER_DWELL_MS - 1);
-    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
-
-    vi.advanceTimersByTime(1);
-    expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
-  });
-
-  it("leans the chips a commit would displace, and fades the slot in when it lands", async () => {
+  it("leans while the pointer sweeps and rearranges nothing", async () => {
+    // The reason a sweep is cheap: crossing the strip must not reshuffle it. The lean is
+    // the whole answer during movement, and it is instant.
     const h = await mountDrag(3);
     const [dragged, second, third] = h.chips();
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
 
-    // Immediate feedback that a slot is pending and which way the strip will open:
-    // the two chips the move would displace tip LEFT (the dragged tab is heading
-    // right past them). Negative, and it is the direction that matters.
-    //
-    // `translate`, not `transform`: a running CSS animation out-ranks inline style, so
-    // an inline `transform` would be ignored outright by a chip mid `wt-slot-in` or
-    // `wt-tab-in`. Asserting the property here is what pins that choice.
-    expect(translateOf(second!)).toBe(`-${String(REORDER_LEAN_PX)}px`);
-    expect(translateOf(third!)).toBe(`-${String(REORDER_LEAN_PX)}px`);
+    h.sweepTo(10);
+    expect(translateOf(second!)).toBe(leanLeft);
+    expect(translateOf(third!)).toBe(leanLeft);
     // The slot itself never leans: it is the hole, and the pointer already carries a
     // solid copy of the tab.
     expect(translateOf(dragged!)).toBe("");
-    // The pending boundary is marked, and the mark fills over the hold's own duration
-    // rather than a duration CSS restates. Every layout offset is zero here, so the
-    // candidate is always "past the last chip" and the rail takes the trailing edge.
-    const rail = h.root.querySelector<HTMLElement>(".wt-tab-dwell");
-    expect(rail?.parentElement).toBe(third);
-    expect(rail?.classList.contains("wt-tab-dwell-end")).toBe(true);
-    expect(rail?.style.transition).toBe(`transform ${String(REORDER_DWELL_MS)}ms linear`);
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
 
-    vi.advanceTimersByTime(REORDER_DWELL_MS);
-    // The countdown is spent, so its mark goes; the slot fades in at its new home.
-    expect(h.root.querySelector(".wt-tab-dwell")).toBeNull();
-    expect(dragged?.classList.contains("wt-tab-slotted")).toBe(true);
-    vi.advanceTimersByTime(REORDER_SLOT_FADE_MS);
-    expect(dragged?.classList.contains("wt-tab-slotted")).toBe(false);
+    // Still moving, so still nothing rearranged however long the sweep lasts.
+    for (const x of [30, 60, 90, 120]) {
+      vi.advanceTimersByTime(REORDER_REST_MS - 20);
+      h.sweepTo(x);
+    }
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
   });
 
-  it("moves the mark to the last chip's trailing edge for a drop past the end", async () => {
-    // The insertion boundary for `before === null` is not on any chip's leading edge,
-    // so the rail has to flip sides rather than simply not render. It rides the LAST
-    // chip, never the dragged one, even though that chip is the one leaving.
+  it("opens the slot as soon as the pointer stops, without a hold", async () => {
     const h = await mountDrag(3);
-    const chips = h.chips();
-    chips[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(10);
+    h.sweepTo(40);
 
-    const rail = h.root.querySelector<HTMLElement>(".wt-tab-dwell");
-    expect(rail?.classList.contains("wt-tab-dwell-end")).toBe(true);
-    expect(rail?.parentElement).toBe(chips[2]);
-    expect(rail?.parentElement).not.toBe(chips[0]);
+    // The pointer has found its spot. One rest window later the strip has opened, and
+    // that window is short enough not to read as a wait.
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+    vi.advanceTimersByTime(REORDER_REST_MS);
+    expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
+    expect(REORDER_REST_MS).toBeLessThan(200);
   });
 
-  it("keeps the hold running across a stream of dragover events on one candidate", async () => {
-    // A hand does not hold perfectly still, so dragover fires continuously while the
-    // pointer rests. Re-arming on each of them would restart the countdown every few
-    // milliseconds and nothing could ever commit — the bug a naive dwell ships with.
-    const h = await mountDrag(2);
+  it("treats a hand's tremor as stillness, not as a sweep", async () => {
+    // A hand resting on a mouse is never perfectly still. Re-arming on a 1px tremor
+    // would push the commit out for as long as someone held the tab, which is the bug a
+    // naive movement check ships with.
+    const h = await mountDrag(3);
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    h.sweepTo(50);
 
-    vi.advanceTimersByTime(REORDER_DWELL_MS - 100);
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-    vi.advanceTimersByTime(100);
-
-    expect(idsOf(h.root)).toEqual(["two", "one"]);
+    for (let i = 0; i < 6; i++) {
+      vi.advanceTimersByTime(REORDER_REST_MS - 20);
+      h.sweepTo(50 + (i % 2)); // 1px of jitter, under REORDER_MOVE_EPS_PX
+    }
+    vi.advanceTimersByTime(30);
+    expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
   });
 
-  it("commits a pending slot on release rather than making a fast drag wait", async () => {
-    // What keeps the hold affordable: it buys the animation on a slow drag and costs
-    // a quick drag-and-drop nothing at all.
+  it("commits on release without waiting for the rest window at all", async () => {
+    // A release is a decision, so dropping mid-sweep lands the tab where the lean said
+    // it would rather than discarding the gesture.
     const h = await mountDrag(2);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-    vi.advanceTimersByTime(50);
+    h.sweepTo(10);
     expect(idsOf(h.root)).toEqual(["one", "two"]);
 
     dragged?.dispatchEvent(dragEvent("drop", h.dt));
@@ -2881,51 +2870,63 @@ describe("tabs reorder preview", () => {
     expect(h.ids()).toEqual(["s2", "s1"]);
   });
 
-  it("stands a pending hold down when the pointer leaves the strip", async () => {
+  it("fades the slot in at the position the rest opened", async () => {
+    const h = await mountDrag(3);
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(10);
+    vi.advanceTimersByTime(REORDER_REST_MS);
+
+    expect(dragged?.classList.contains("wt-tab-slotted")).toBe(true);
+    vi.advanceTimersByTime(REORDER_SLOT_FADE_MS);
+    expect(dragged?.classList.contains("wt-tab-slotted")).toBe(false);
+  });
+
+  it("withdraws a pending slot when the pointer leaves the strip", async () => {
     const h = await mountDrag(3);
     const [, second] = h.chips();
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-    expect(translateOf(second!)).toBe(`-${String(REORDER_LEAN_PX)}px`);
+    h.sweepTo(10);
+    expect(translateOf(second!)).toBe(leanLeft);
 
-    // Off the strip there is no candidate, so the countdown stops and the lean eases
-    // home. The document handler is what sees this: dragleave alone cannot be trusted,
-    // because it fires on every child-to-child transition inside the bar.
+    // Off the strip there is no candidate, so the lean eases home and no rest can open a
+    // slot for a target the pointer has already left.
     h.surface.dispatchEvent(dragEvent("dragover", h.dt));
     expect(translateOf(second!)).toBe("0px");
 
-    vi.advanceTimersByTime(REORDER_DWELL_MS * 2);
+    vi.advanceTimersByTime(REORDER_REST_MS * 4);
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
-    // ...and the eased-back chip is handed back to the stylesheet, not left holding
-    // an inline translate for the rest of the session.
+    // ...and the eased-back chip is handed back to the stylesheet, not left holding an
+    // inline translate for the rest of the session.
     expect(translateOf(second!)).toBe("");
     expect(second?.style.transition).toBe("");
   });
 
-  it("stands the hold down when the pointer leaves through the window edge", async () => {
-    // The strip is docked at the viewport EDGE, so a pointer can leave it by leaving
-    // the window, and then no other element receives a dragover to notice with. Only
+  it("withdraws a pending slot when the pointer leaves through the window edge", async () => {
+    // The strip is docked at the viewport EDGE, so a pointer can leave it by leaving the
+    // window, and then no other element receives a dragover to notice with. Only
     // dragleave sees this, which is why the bar carries one despite the child-churn
-    // problem: a null relatedTarget is the window exit.
+    // problem: a null relatedTarget is the window exit. A pointer that left the window
+    // is also, by definition, one that has stopped moving over the strip, so the rest
+    // window would otherwise run down and commit.
     const h = await mountDrag(3);
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    h.sweepTo(10);
 
     const leave = dragEvent("dragleave", h.dt);
     Object.defineProperty(leave, "relatedTarget", { value: null });
     h.bar.dispatchEvent(leave);
 
-    vi.advanceTimersByTime(REORDER_DWELL_MS * 2);
+    vi.advanceTimersByTime(REORDER_REST_MS * 4);
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
   });
 
-  it("keeps the hold when dragleave is only a move between the bar's own children", async () => {
-    // The reason dragleave cannot be used bare: crossing from a chip to its label
-    // fires one, and treating that as an exit would make the hold unreachable.
+  it("keeps a pending slot when dragleave is only a move between the bar's own children", async () => {
+    // The reason dragleave cannot be used bare: crossing from a chip to its label fires
+    // one, and treating that as an exit would make the strip unreorderable.
     const h = await mountDrag(3);
-    const dragged = h.chips()[0];
-    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(10);
 
     const inner = dragEvent("dragleave", h.dt);
     Object.defineProperty(inner, "relatedTarget", {
@@ -2933,7 +2934,7 @@ describe("tabs reorder preview", () => {
     });
     h.bar.dispatchEvent(inner);
 
-    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    vi.advanceTimersByTime(REORDER_REST_MS);
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
   });
 
@@ -2946,8 +2947,8 @@ describe("tabs reorder preview", () => {
     const h = await mountDrag(3);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    h.sweepTo(10);
+    vi.advanceTimersByTime(REORDER_REST_MS);
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
 
     const offStrip = dragEvent("drop", h.dt);
@@ -2966,14 +2967,14 @@ describe("tabs reorder preview", () => {
   it("reverts the whole preview when a drag is abandoned without a drop", async () => {
     // Escape (and any release the browser refuses) fires dragend with no drop at all,
     // which is the exact signal for "cancel". The old reorder had no revert path: it
-    // committed whatever the strip happened to be showing, so an abandoned drag left
-    // the tabs rearranged. Nothing is snapshotted to make this work — tabList is
-    // untouched for the whole gesture, so the original order is simply re-projected.
+    // committed whatever the strip happened to be showing, so an abandoned drag left the
+    // tabs rearranged. Nothing is snapshotted to make this work — tabList is untouched
+    // for the whole gesture, so the original order is simply re-projected.
     const h = await mountDrag(3);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    h.sweepTo(10);
+    vi.advanceTimersByTime(REORDER_REST_MS);
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
 
     dragged?.dispatchEvent(dragEvent("dragend", h.dt));
@@ -2982,21 +2983,20 @@ describe("tabs reorder preview", () => {
     // The model never moved at all: commitSlot writes the DOM only, so a cancelled
     // gesture leaves nothing to undo in tabList and nothing to persist downstream.
     expect(h.ids()).toEqual(["s1", "s2", "s3"]);
-    // And it is said out loud: the drag path announced nothing at all before this.
     vi.advanceTimersByTime(150);
     expect(h.live()).toBe("Move cancelled");
   });
 
-  it("announces a pending slot as a target, not as a completed move", async () => {
-    // commitSlot moves the DOM but not tabList, so a committed slot is a PREVIEW that
+  it("announces an opened slot as a target, not as a completed move", async () => {
+    // commitSlot moves the DOM but not tabList, so an opened slot is a PREVIEW that
     // Escape can still undo. Announcing it as "Moved one to position 2" told a
-    // screen-reader user a reversible hover state was a finished action, once per
-    // dwell, sometimes followed by "Move cancelled" contradicting all of it.
+    // screen-reader user a reversible state was a finished action, sometimes followed by
+    // "Move cancelled" contradicting it.
     const h = await mountDrag(2);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    h.sweepTo(10);
+    vi.advanceTimersByTime(REORDER_REST_MS);
 
     vi.advanceTimersByTime(150);
     expect(h.live()).toBe("Drop position 2");
@@ -3009,41 +3009,37 @@ describe("tabs reorder preview", () => {
 
   it("previews nothing when the candidate is the slot the tab already holds", async () => {
     // Dragging the LAST tab past the end of the strip: with zero layout offsets the
-    // candidate is "after everything", which is where it already is. No hold, no lean,
-    // no rail, no announcement — the cheap idempotent path every dragover takes when
-    // the pointer has not actually chosen anything new.
+    // candidate is "after everything", which is where it already is. No lean, no rest, no
+    // announcement — the cheap idempotent path every dragover takes when the pointer has
+    // not actually chosen anything new.
     const h = await mountDrag(3);
     const chips = h.chips();
     chips[2]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    h.sweepTo(10);
 
     expect(chips.map(translateOf)).toEqual(["", "", ""]);
-    expect(h.root.querySelector(".wt-tab-dwell")).toBeNull();
-    vi.advanceTimersByTime(REORDER_DWELL_MS * 2);
+    vi.advanceTimersByTime(REORDER_REST_MS * 4);
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
     vi.advanceTimersByTime(150);
     expect(h.live()).toBe("");
   });
 
-  it("survives the pending target being closed from another window mid-hold", async () => {
-    // The hold captures a live DOM node for a whole second. A session closed elsewhere
-    // removes chips underneath it, and insertBefore throws NotFoundError on a reference
-    // that is no longer a child — which would abandon the reorder half-done and leave
-    // the lean stranded, because the timer has already nulled the pending flag by then
-    // and cancelDwell can no longer reach it.
+  it("survives the pending target being closed from another window", async () => {
+    // insertBefore throws NotFoundError on a reference node that is no longer a child,
+    // which would abandon the reorder half-done and leave the lean stranded — the rest
+    // timer has already nulled the pending flag by then, so cancelRest can no longer
+    // reach it.
     const h = await mountDrag(3);
     const [dragged, second] = h.chips();
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-    expect(translateOf(second!)).toBe(`-${String(REORDER_LEAN_PX)}px`);
+    h.sweepTo(10);
+    expect(translateOf(second!)).toBe(leanLeft);
 
-    // The chip the hold is counting down against goes away.
-    h.chips()[1]?.remove();
+    h.chips()[1]?.remove(); // the chip the pending slot is anchored to goes away
     expect(() => {
-      vi.advanceTimersByTime(REORDER_DWELL_MS);
+      vi.advanceTimersByTime(REORDER_REST_MS);
     }).not.toThrow();
 
-    // No half-applied reorder, and the removed chip's neighbours are not left leaning.
     vi.advanceTimersByTime(REORDER_SETTLE_MS);
     for (const chip of h.chips()) {
       expect(translateOf(chip)).toBe("");
@@ -3052,18 +3048,16 @@ describe("tabs reorder preview", () => {
   });
 
   it("ends the gesture when the dragged tab itself is closed from another window", async () => {
-    // There is no source left to deliver a dragend, and a browser is not obliged to
-    // fire one for a removed source. Without an explicit abort the feature would hold
-    // `draggingEl` on a detached node forever, and the document-level guard reads that
-    // as "a tab drag is in progress" and would swallow every unrelated drop on the page
-    // from then on.
+    // There is no source left to deliver a dragend, and a browser is not obliged to fire
+    // one for a removed source. Without an explicit abort the feature would hold
+    // `draggingEl` on a detached node forever, and the document-level guard reads that as
+    // "a tab drag is in progress" and would swallow every unrelated drop on the page from
+    // then on.
     const h = await mountDrag(3);
-    const dragged = h.chips()[0];
-    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(10);
 
-    const feature = h.root.querySelector<HTMLElement>(".wt-tab-close");
-    feature?.click(); // closes tab one, which is the tab being dragged
+    h.root.querySelector<HTMLElement>(".wt-tab-close")?.click(); // closes the dragged tab
     await until(() => h.chips().length === 2);
 
     // No dragend is dispatched. An unrelated drag must be the browser's business again.
@@ -3074,30 +3068,22 @@ describe("tabs reorder preview", () => {
       expect(translateOf(chip)).toBe("");
       expect(chip.classList.contains("wt-tab-dragging")).toBe(false);
     }
-    expect(h.root.querySelector(".wt-tab-dwell")).toBeNull();
   });
 
   it("writes no inline transition at all under reduced motion", async () => {
     // The lean and the slide are inline transitions, so no stylesheet gate can reach
-    // them: .wt-animate and the scoped prefers-reduced-motion reset in 01-scope.css
-    // both govern CSS only. The reorder has to check the preference itself, and it has
-    // to still REORDER — motion is what the user opted out of, not the feature.
+    // them: .wt-animate and the scoped prefers-reduced-motion reset in 01-scope.css both
+    // govern CSS only. The reorder has to check the preference itself, and it has to
+    // still REORDER — motion is what the user opted out of, not the feature.
     const h = await mountDrag(3, { reducedMotion: true });
-    const dragged = h.chips()[0];
-    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(10);
 
     for (const chip of h.chips()) {
       expect(translateOf(chip)).toBe("");
       expect(chip.style.transition).toBe("");
     }
-    // The pending boundary is still MARKED, because a mark is not motion. It just does
-    // not count down.
-    const rail = h.root.querySelector<HTMLElement>(".wt-tab-dwell");
-    expect(rail?.style.transform).toBe("scaleY(1)");
-    expect(rail?.style.transition).toBe("none");
-
-    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    vi.advanceTimersByTime(REORDER_REST_MS);
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
     for (const chip of h.chips()) {
       expect(chip.style.transition).toBe("");
@@ -3105,17 +3091,17 @@ describe("tabs reorder preview", () => {
   });
 
   it("leaves no inline style on any chip once a real slide has run", async () => {
-    // happy-dom reports every rect as zero, so an unstubbed FLIP finds nothing to
-    // invert and returns before writing a single style — which made an earlier version
-    // of this test vacuous for the half it names. Stubbing rects from live DOM index
-    // makes the slide branch actually execute, so this can prove the settle timer hands
-    // every chip back.
+    // happy-dom reports every rect as zero, so an unstubbed FLIP finds nothing to invert
+    // and returns before writing a single style — which made an earlier version of this
+    // test vacuous for the half it names. Stubbing rects from live DOM index makes the
+    // slide branch actually execute, so this can prove the settle timer hands every chip
+    // back.
     const h = await mountDrag(3);
     h.stubRects();
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.bar.dispatchEvent(dragEvent("dragover", h.dt));
-    vi.advanceTimersByTime(REORDER_DWELL_MS);
+    h.sweepTo(10);
+    vi.advanceTimersByTime(REORDER_REST_MS);
 
     // The slide is really running: the displaced chips are mid-transition.
     const sliding = h.chips().filter((c) => c.style.transition !== "");
@@ -3132,6 +3118,5 @@ describe("tabs reorder preview", () => {
       expect(chip.classList.contains("wt-tab-dragging")).toBe(false);
       expect(chip.classList.contains("wt-tab-slotted")).toBe(false);
     }
-    expect(h.root.querySelector(".wt-tab-dwell")).toBeNull();
   });
 });

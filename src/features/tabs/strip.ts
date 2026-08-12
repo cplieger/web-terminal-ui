@@ -21,28 +21,35 @@ import { statusPhrase, statusRevealsDot } from "./model.js";
 // motion is spelled in — index.ts owns the mechanism, strip.ts owns the values,
 // the same split switcher.ts keeps for the mobile swipe.
 
-/** How long (ms) the pointer holds over one candidate slot before the strip
- *  opens it.
+/** The quiet window (ms) that means the pointer has STOPPED. When it elapses with no
+ *  movement, the strip opens the slot the pointer is over.
  *
- *  Long on purpose. A sweep across a six-tab strip crosses five slots, and
- *  committing each one in passing is what made the old reorder unreadable: the
- *  strip rearranged itself continuously and the user chose a slot by stopping the
- *  mouse at the right millisecond. A hold is a deliberate act, so the strip only
- *  rearranges where the pointer actually rests.
+ *  This is a rest detector, not a hold. The difference is the whole interaction: a hold
+ *  makes you wait a fixed time whatever you do, which is exactly the wrong shape here —
+ *  a reorder is a direct manipulation and the answer to "when does it move" is "when you
+ *  stop looking for the spot". Sweeping across the strip only leans the chips (cheap,
+ *  instant, and it is what says where the tab will fall); coming to rest is what commits.
  *
- *  It costs a fast drag nothing, because a release COMMITS the pending slot
- *  (flushDwell) instead of discarding it: drop early and the reorder lands
- *  immediately, exactly as it did before the preview existed. The hold is what
- *  buys the animation, not a floor on the gesture. */
-export const REORDER_DWELL_MS = 1000;
+ *  Sized to sit above the gap between two dragover events during a real sweep and below
+ *  human perception of delay, so stopping reads as immediate. If a browser's dragover
+ *  cadence is ever slower than this, the failure mode is benign: the strip commits the
+ *  slot the pointer is over slightly eagerly, which is what it would have done anyway.
+ *
+ *  A release never waits for it either — a drop commits whatever is pending (flushRest). */
+export const REORDER_REST_MS = 120;
 
-/** How far (px) each chip a commit would displace leans toward its destination
- *  while the hold runs.
+/** Movement (px) between two dragover events below which the pointer counts as still.
+ *  A hand resting on a mouse is never perfectly still, and treating a 1px tremor as a
+ *  sweep would keep pushing the commit out for as long as someone held the tab. */
+export const REORDER_MOVE_EPS_PX = 3;
+
+/** How far (px) each chip a commit would displace leans toward its destination while
+ *  the pointer is still sweeping.
  *
  *  Small enough to read as a lean rather than a move, and large enough to be
- *  unambiguous at a glance — it answers "the strip heard me, and it is about to
- *  open THAT way" during a wait that is otherwise a second of nothing. The same
- *  purpose the mobile switcher's PREVIEW_PEEK_MAX serves for its live swipe. */
+ *  unambiguous at a glance: it is what answers "where will this fall" during the sweep,
+ *  before anything has actually moved. The same purpose the mobile switcher's
+ *  PREVIEW_PEEK_MAX serves for its live swipe. */
 export const REORDER_LEAN_PX = 7;
 
 /** The one transition both preview stages use (the lean, and the slide that
