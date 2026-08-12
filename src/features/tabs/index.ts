@@ -678,13 +678,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // back to the stylesheet — including when a second drag interrupts the first.
       const shifted = new Set<HTMLElement>();
       let shiftTimer: ReturnType<typeof setTimeout> | null = null;
-      // The slot waiting to open and the rest window that will open it.
-      // `restTimer !== null` is the only "a slot is pending" flag — `restBefore` cannot
-      // be one, because null is a legitimate value there meaning "past the last chip".
-      // restX is the last pointer position seen, which is how movement is told from
-      // stillness (see trackRest).
+      // The no-events fallback timer. It carries its own target, so there is
+      // deliberately NO pending-slot field here: one was the cause of the reorder
+      // dropping commits (see trackRest). restX is the last pointer position seen, which
+      // is how movement is told from stillness.
       let restTimer: ReturnType<typeof setTimeout> | null = null;
-      let restBefore: HTMLElement | null = null;
       let restX: number | null = null;
       // When the pointer last actually MOVED. A stationary dragover this long after it
       // is believed as a stop (see trackRest).
@@ -1896,7 +1894,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // was too small to tell them apart).
       //
       // A release never waits either: `drop` commits whatever slot is pending
-      // (flushRest), so dropping mid-sweep still lands the tab where it was headed.
+      // (the drop handler commits the slot under the pointer), so dropping mid-sweep
+      // still lands the tab exactly where it was headed.
       //
       // dropTargetBefore returns the first tab whose horizontal midpoint is past
       // x (the element the dragged tab should sit before), or null to drop at the
@@ -2003,21 +2002,30 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!dragged) {
           return;
         }
+        const now = Date.now();
         const moved = restX === null || Math.abs(clientX - restX) > REORDER_MOVE_EPS_PX;
         restX = clientX;
-        const before = dropTargetBefore(clientX);
-        // Already the slot the tab holds, so there is nothing to preview or commit.
-        // Withdraw anything pending: the pointer came back.
-        if (before === dragged || before === dragged.nextElementSibling) {
-          cancelRest();
-          return;
-        }
-        restBefore = before;
-        const now = Date.now();
         if (moved) {
-          // Still travelling. Push the net out and wait.
           restMovedAt = now;
-          armRestNet();
+        }
+        // The candidate is recomputed from THIS event, every time, and the commit below
+        // uses that value rather than anything stored. That is the fix for a real
+        // unreliability, so it must not be refactored back into a pending-target field:
+        //
+        // There used to be a `restBefore` holding the pending slot, and both the
+        // already-there branch and the leave-the-strip paths nulled it. So a drag that
+        // passed through "already there" on its way somewhere else lost the pending
+        // state, and the stillness branch below — which then early-returned because no
+        // timer was armed — committed NOTHING when the pointer stopped. The tab stayed on
+        // its previous slot until the user jiggled the mouse to re-arm, which is exactly
+        // the reported "it does not let go of the old drop spot". It hit leftward drags
+        // hardest, because after each commit the dragged chip sits immediately left of
+        // where the pointer is heading, so `nextElementSibling` matches constantly.
+        const before = dropTargetBefore(clientX);
+        // Already the slot it would land in, so there is nothing to commit. Only the net
+        // is dropped; there is no pending target left to lose.
+        if (before === dragged.nextElementSibling) {
+          endRestNet();
           return;
         }
         // A dragover at an UNCHANGED position is positive evidence that the pointer has
@@ -2026,48 +2034,31 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // cadence. The elapsed check filters the coincidence where one event of a sweep
         // lands within REORDER_MOVE_EPS_PX of the previous (a reversal, or a frame whose
         // motion was almost all vertical); a real stop clears it on the next event.
-        if (now - restMovedAt >= REORDER_STILL_MS) {
-          flushRest();
+        if (!moved && now - restMovedAt >= REORDER_STILL_MS) {
+          endRestNet();
+          commitSlot(before);
           return;
         }
-        armRestNet(); // too soon to believe; keep the net alive
+        armRestNet(before);
       }
       // armRestNet is the no-events fallback: if dragover stops arriving altogether, no
-      // stationary event will ever confirm the stop, so this commits anyway. Sized to
-      // out-wait the cadence (see REORDER_REST_MS) because it is the one timer that a
-      // fast sweep could otherwise expire between two of its own events.
-      function armRestNet(): void {
-        if (restTimer !== null) {
-          clearTimeout(restTimer);
-        }
+      // stationary event will ever confirm the stop, so this commits anyway. It carries
+      // its own target for the same reason trackRest recomputes one — a net whose target
+      // lived in shared mutable state was how the old pending slot got lost. Sized to
+      // out-wait the cadence (see REORDER_REST_MS) because it is the one timer a fast
+      // sweep could otherwise expire between two of its own events.
+      function armRestNet(before: HTMLElement | null): void {
+        endRestNet();
         restTimer = setTimeout(() => {
           restTimer = null;
-          const target = restBefore;
-          restBefore = null;
-          commitSlot(target);
+          commitSlot(before);
         }, REORDER_REST_MS);
       }
-      function cancelRest(): void {
-        if (restTimer === null) {
-          return;
+      function endRestNet(): void {
+        if (restTimer !== null) {
+          clearTimeout(restTimer);
+          restTimer = null;
         }
-        clearTimeout(restTimer);
-        restTimer = null;
-        restBefore = null;
-      }
-      // flushRest commits a pending slot at once, because a release is a decision. It is
-      // what stops the rest window from ever being felt as a floor on the gesture: drop
-      // mid-sweep and the tab still lands where it was headed. Only a `drop` calls it;
-      // an abandoned drag reaches dragend without one and reverts.
-      function flushRest(): void {
-        if (restTimer === null) {
-          return;
-        }
-        const target = restBefore;
-        clearTimeout(restTimer);
-        restTimer = null;
-        restBefore = null;
-        commitSlot(target);
       }
 
       // flipTo runs a rearranging mutation and animates its result: every chip that
@@ -2263,7 +2254,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // start from rest, and a torn-down feature may leave no inline style on an
       // element it no longer owns.
       function endReorderPreview(): void {
-        cancelRest();
+        endRestNet();
         restX = null;
         endSlotFade();
       }
@@ -2283,9 +2274,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       //    in progress" and so would preventDefault every unrelated file or text drop on
       //    the page from then on.
       function abortReorderFor(removed: HTMLElement): void {
-        if (removed === restBefore) {
-          cancelRest();
-        }
         if (removed !== draggingEl) {
           return;
         }
@@ -3359,7 +3347,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         e.preventDefault();
         dropped = true;
-        flushRest(); // a release decides: never make a drop wait on the rest window
+        // A release decides, and it decides by POSITION: commit the slot the pointer is
+        // actually over rather than whatever a timer had pending. commitSlot no-ops when
+        // the tab already sits there, so a drop with nothing to move costs nothing.
+        endRestNet();
+        commitSlot(dropTargetBefore(e.clientX));
         syncOrderFromDom();
         announceMoved(moved); // the ONE completed-move announcement per gesture
       });
@@ -3382,7 +3374,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         const next = e.relatedTarget;
         if (next === null || !bar.contains(next as Node)) {
-          cancelRest();
+          endRestNet();
         }
       });
       // A tab released anywhere OTHER than the strip — over the terminal, over
@@ -3412,14 +3404,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // So: leave `dropped` false, withdraw anything pending, and let dragend run the
           // revert. Nothing is lost silently — the revert animates and announces, so a
           // mis-release reads as "that did not take" rather than as a mystery.
-          cancelRest();
+          endRestNet();
           return;
         }
         // dragover, off the strip: no candidate slot exists out here, so withdraw a
         // pending one rather than let the rest window open a gap for a target the pointer
         // has already left. A slot already COMMITTED stays put; the pointer may yet come
         // back onto the strip and release there.
-        cancelRest();
+        endRestNet();
       };
       document.addEventListener("dragover", onDocTabDrop);
       document.addEventListener("drop", onDocTabDrop);

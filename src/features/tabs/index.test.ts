@@ -2741,6 +2741,7 @@ describe("tabs reorder preview", () => {
     live: () => string;
     ids: () => string[];
     sweepTo: (x: number) => void;
+    stubLayout: () => void;
     stubRects: () => void;
   }> {
     if (opts.reducedMotion === true) {
@@ -2800,6 +2801,15 @@ describe("tabs reorder preview", () => {
       // the slide vacuous. Deliberately does not stub offsetLeft/offsetWidth: the hit
       // test reads those, and leaving them at zero keeps every candidate "past the last
       // chip", which is the one target this environment can express.
+      // Give the chips real LAYOUT geometry (what dropTargetBefore reads), so a test can
+      // aim at a specific slot. Without it every offset is zero and the only expressible
+      // candidate is "past the last chip".
+      stubLayout: () => {
+        chips().forEach((chip, i) => {
+          Object.defineProperty(chip, "offsetLeft", { value: i * 100, configurable: true });
+          Object.defineProperty(chip, "offsetWidth", { value: 100, configurable: true });
+        });
+      },
       stubRects: () => {
         for (const chip of chips()) {
           chip.getBoundingClientRect = (): DOMRect => {
@@ -2902,6 +2912,38 @@ describe("tabs reorder preview", () => {
     h.sweepTo(11); // within REORDER_MOVE_EPS_PX: reads as stationary, but far too soon
 
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+  });
+
+  it("lets go of a committed slot when the pointer moves to another one", async () => {
+    // The reported unreliability, and it was not flaky so much as state-dependent: once a
+    // slot had been committed, moving to a different one did not always let go of the old
+    // one, and the user had to jiggle the mouse until it took. Worst on leftward drags.
+    //
+    // Cause: the pending slot lived in a field, and the "already in that slot" branch
+    // nulled it. Right after a commit the dragged chip sits immediately beside where the
+    // pointer is heading, so that branch fires constantly — and once it had nulled the
+    // field, the stillness branch had nothing to commit and bailed. The candidate is now
+    // recomputed from the current event, so passing through "already there" cannot lose it.
+    const h = await mountDrag(4);
+    h.stubLayout();
+    const dragged = h.chips()[3];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+
+    // Land it in slot 2 (before the third chip, whose midpoint sits at 250).
+    h.sweepTo(210);
+    vi.advanceTimersByTime(REORDER_STILL_MS);
+    h.sweepTo(210);
+    expect(idsOf(h.root)).toEqual(["one", "two", "four", "three"]);
+
+    // Now move LEFT to the first slot, crossing the position the dragged chip now holds
+    // (which is what used to null the pending target), and stop.
+    h.stubLayout();
+    h.sweepTo(120);
+    h.sweepTo(40);
+    vi.advanceTimersByTime(REORDER_STILL_MS);
+    h.sweepTo(40);
+
+    expect(idsOf(h.root)).toEqual(["four", "one", "two", "three"]);
   });
 
   it("commits from the fallback when dragover stops arriving at all", async () => {
@@ -3100,8 +3142,7 @@ describe("tabs reorder preview", () => {
   it("survives the pending target being closed from another window", async () => {
     // insertBefore throws NotFoundError on a reference node that is no longer a child,
     // which would abandon the reorder half-done and leave the lean stranded — the rest
-    // timer has already nulled the pending flag by then, so cancelRest can no longer
-    // reach it.
+    // net has already been dropped by then, so nothing else would clear it.
     const h = await mountDrag(3);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
