@@ -45,6 +45,7 @@ import { browserNotifierEnv, createNotifier } from "./notify.js";
 import {
   REORDER_MOVE_EPS_PX,
   REORDER_REST_MS,
+  REORDER_STILL_MS,
   REORDER_SETTLE_MS,
   REORDER_SHIFT_TRANS,
   REORDER_SLOT_FADE_MS,
@@ -679,6 +680,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let restTimer: ReturnType<typeof setTimeout> | null = null;
       let restBefore: HTMLElement | null = null;
       let restX: number | null = null;
+      // When the pointer last actually MOVED. A stationary dragover this long after it
+      // is believed as a stop (see trackRest).
+      let restMovedAt = 0;
       // Whether a `drop` fired for the drag in flight. It is the exact signal for
       // "the user released deliberately" as opposed to "the drag was abandoned":
       // Escape and a refused release fire dragend with no drop at all. dragend
@@ -1943,12 +1947,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // travelling pointer rearranges nothing at all; the moment it comes to REST the
       // slot opens.
       //
-      // Rest is detected, not waited out: the timer is re-armed by MOVEMENT, so it
-      // expires a rest window after the last movement rather than a fixed time after a
-      // decision. The window has a hard FLOOR set by the platform rather than by taste —
-      // HTML5 drag-and-drop only guarantees a `dragover` every 350ms, so a window at or
-      // below that cadence expires between two events of a fast sweep and commits every
-      // slot the pointer crosses (see REORDER_REST_MS).
+      // Rest is detected from TWO signals, and separating them is what lets the slot
+      // open promptly without a fast sweep committing every slot it crosses:
+      //
+      //  - a `dragover` at an unchanged position is POSITIVE evidence of a stop, so it
+      //    commits after a short REORDER_STILL_MS confirmation. This is the signal that
+      //    normally decides, and the reason the delay is short.
+      //  - the absence of events is only a FALLBACK (armRestNet), for a browser that
+      //    stops delivering dragover entirely. That one has to out-wait the drag loop's
+      //    350ms cadence, so it is long — and it is rarely what decides.
+      //
+      // One quiet window had to serve both jobs before this, which is why it could not be
+      // shortened: the timer deciding responsiveness was the same one that had to survive
+      // the cadence.
       function trackRest(clientX: number): void {
         const dragged = draggingEl;
         if (!dragged) {
@@ -1964,21 +1975,39 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         restBefore = before;
-        // Movement pushes the commit out; stillness lets the armed timer run down to it.
-        // A stationary pointer that has nothing armed still needs one — a browser may
-        // deliver dragover repeatedly at an unchanged position, and the first of those is
-        // the only signal that the pointer arrived and stopped.
-        if (moved || restTimer === null) {
-          if (restTimer !== null) {
-            clearTimeout(restTimer);
-          }
-          restTimer = setTimeout(() => {
-            restTimer = null;
-            const target = restBefore;
-            restBefore = null;
-            commitSlot(target);
-          }, REORDER_REST_MS);
+        const now = Date.now();
+        if (moved) {
+          // Still travelling. Push the net out and wait.
+          restMovedAt = now;
+          armRestNet();
+          return;
         }
+        // A dragover at an UNCHANGED position is positive evidence that the pointer has
+        // stopped, which is a far stronger signal than the absence of events — and it is
+        // what lets the slot open promptly instead of out-waiting the drag loop's 350ms
+        // cadence. The elapsed check filters the coincidence where one event of a sweep
+        // lands within REORDER_MOVE_EPS_PX of the previous (a reversal, or a frame whose
+        // motion was almost all vertical); a real stop clears it on the next event.
+        if (now - restMovedAt >= REORDER_STILL_MS) {
+          flushRest();
+          return;
+        }
+        armRestNet(); // too soon to believe; keep the net alive
+      }
+      // armRestNet is the no-events fallback: if dragover stops arriving altogether, no
+      // stationary event will ever confirm the stop, so this commits anyway. Sized to
+      // out-wait the cadence (see REORDER_REST_MS) because it is the one timer that a
+      // fast sweep could otherwise expire between two of its own events.
+      function armRestNet(): void {
+        if (restTimer !== null) {
+          clearTimeout(restTimer);
+        }
+        restTimer = setTimeout(() => {
+          restTimer = null;
+          const target = restBefore;
+          restBefore = null;
+          commitSlot(target);
+        }, REORDER_REST_MS);
       }
       function cancelRest(): void {
         if (restTimer === null) {

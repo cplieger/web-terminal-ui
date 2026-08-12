@@ -17,11 +17,17 @@ import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
 import { CUE_SEEN_KEY } from "./model.js";
-// The reorder preview's timings, imported rather than restated: the tests below
-// pin the SHAPE of the interaction (a sweep only leans, rest opens the slot, a drop
-// never waits), not what the numbers happen to be, so a deliberate retune moves one
-// definition and not a dozen magic numbers in a test file.
-import { REORDER_REST_MS, REORDER_SETTLE_MS, REORDER_SLOT_FADE_MS } from "./strip.js";
+// The reorder preview's timings, imported rather than restated: the tests below pin the
+// SHAPE of the interaction (a sweep rearranges nothing, a stationary dragover opens the
+// slot, the no-events fallback clears the drag loop's cadence, a drop never waits), not
+// what the numbers happen to be, so a deliberate retune moves one definition and not a
+// dozen magic numbers in a test file.
+import {
+  REORDER_REST_MS,
+  REORDER_SETTLE_MS,
+  REORDER_SLOT_FADE_MS,
+  REORDER_STILL_MS,
+} from "./strip.js";
 
 // A fake activityMonitor feature: lets a test push status events into tabs
 // without the real SSE. tabs reads it via ctx.use, so passing the same feature
@@ -2732,8 +2738,10 @@ describe("tabs reorder preview", () => {
     const dt = fakeDataTransfer();
     // Only the timers, and only AFTER the async mount: until() drives itself on
     // setTimeout, and the tabs feature's status poll is a setInterval that must keep
-    // running on the real clock (freezing it deadlocks teardown).
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // running on the real clock (freezing it deadlocks teardown). Date is faked with
+    // them because rest detection compares Date.now() against the last movement, so the
+    // clock the assertions advance has to be the clock the feature reads.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     return {
       root,
       bar,
@@ -2825,21 +2833,53 @@ describe("tabs reorder preview", () => {
     }
 
     expect(idsOf(h.root)).toEqual(["one", "two", "three", "four"]);
-    // The guarantee, stated as the assertion rather than left implicit in the number.
+    // The guarantee, stated as the assertion rather than left implicit in the number:
+    // only the no-events fallback can expire mid-sweep, so only it must clear 350ms.
     expect(REORDER_REST_MS).toBeGreaterThan(350);
   });
 
-  it("opens the slot as soon as the pointer stops, without a hold", async () => {
+  it("opens the slot on the first stationary dragover, not on a long quiet window", async () => {
+    // The signal that normally decides. A dragover at an unchanged position is positive
+    // evidence the pointer stopped, so the slot opens after a short confirmation rather
+    // than after the no-events fallback runs down.
     const h = await mountDrag(3);
-    const dragged = h.chips()[0];
-    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
     h.sweepTo(10);
+    h.sweepTo(40); // still moving
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+
+    // The pointer stops. The drag loop keeps delivering events at the same position.
+    vi.advanceTimersByTime(REORDER_STILL_MS);
     h.sweepTo(40);
 
-    // The pointer has found its spot. One rest window later the strip has opened, and
-    // that window is short enough not to read as a wait.
+    expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
+    // ...and it did NOT need the fallback, which is the whole point of the split.
+    expect(REORDER_STILL_MS).toBeLessThan(REORDER_REST_MS / 4);
+  });
+
+  it("ignores a single stationary frame in the middle of a sweep", async () => {
+    // One event of a fast sweep can land within the movement epsilon of the previous —
+    // a direction reversal, or a frame whose motion was almost all vertical. That is not
+    // a stop, so the confirmation window has to outlast it.
+    const h = await mountDrag(3);
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(10);
+    vi.advanceTimersByTime(16); // one frame
+    h.sweepTo(11); // within REORDER_MOVE_EPS_PX: reads as stationary, but far too soon
+
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
-    vi.advanceTimersByTime(REORDER_REST_MS);
+  });
+
+  it("commits from the fallback when dragover stops arriving at all", async () => {
+    // No stationary event ever comes, so the only remaining signal is the absence of
+    // events. Slow on purpose: it has to out-wait the drag loop's cadence.
+    const h = await mountDrag(3);
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(10);
+
+    vi.advanceTimersByTime(REORDER_REST_MS - 1);
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+    vi.advanceTimersByTime(1);
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
   });
 
@@ -2851,11 +2891,8 @@ describe("tabs reorder preview", () => {
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
     h.sweepTo(50);
 
-    for (let i = 0; i < 6; i++) {
-      vi.advanceTimersByTime(REORDER_REST_MS - 20);
-      h.sweepTo(50 + (i % 2)); // 1px of jitter, under REORDER_MOVE_EPS_PX
-    }
-    vi.advanceTimersByTime(30);
+    vi.advanceTimersByTime(REORDER_STILL_MS);
+    h.sweepTo(51); // 1px of jitter, under REORDER_MOVE_EPS_PX: still a stop
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
   });
 
