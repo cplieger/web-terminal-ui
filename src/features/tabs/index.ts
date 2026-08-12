@@ -744,26 +744,58 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // name, `list()` reports the real name, and clearing the progress needs no
       // cleanup — the next paint simply stops adding it.
       function relabelAll(): void {
-        // Count only real (non-fallback) labels, so multiple untitled tabs all
-        // read "New tab" without a numeric suffix.
-        const counts = new Map<string, number>();
+        // De-duplicate identical labels with a "(k)" suffix, numbered by the session's
+        // AGE — never by its position in the strip.
+        //
+        // The suffix used to be assigned by encounter order while walking tabList, which
+        // made it a property of the SLOT: two tabs both called "workspace" always read
+        // "workspace" then "workspace (2)" whichever way round they sat, so the label
+        // text stayed put while the sessions moved underneath it. Dragging one of them
+        // changed nothing on screen, and the reorder — which had worked correctly all
+        // along, server included — was invisible. It also meant dragging tab A could
+        // renumber tab B, which is the clearest sign the number belonged to the wrong
+        // thing.
+        //
+        // A label answers "which session is this", so it has to be a property of the
+        // session: stable while other tabs move, and travelling with its own tab. Age is
+        // that key. createdAt (the server's, tie-broken by id) rather than the local
+        // `born` counter, so every device and every reload agrees on which "workspace"
+        // is (2) — `born` is adoption order, which races.
+        //
+        // Numbering is recomputed over the LIVE group each time, so it stays contiguous:
+        // closing "(2)" of three renumbers the survivor rather than leaving a hole. That
+        // is a renumber with a visible cause the user just performed, which is the one
+        // kind that reads as sensible.
+        const groups = new Map<string, Tab[]>();
         for (const t of tabList) {
           const { text, fallback } = baseLabel(t);
-          if (!fallback) {
-            counts.set(text, (counts.get(text) ?? 0) + 1);
+          // Fallback labels are not real names: several untitled tabs all read
+          // "New tab" with no numbering, which is the pre-existing behaviour.
+          if (fallback) {
+            continue;
+          }
+          const group = groups.get(text);
+          if (group) {
+            group.push(t);
+          } else {
+            groups.set(text, [t]);
           }
         }
-        const seen = new Map<string, number>();
-        for (const t of tabList) {
-          const { text, fallback } = baseLabel(t);
-          let display = text;
-          if (!fallback && (counts.get(text) ?? 0) > 1) {
-            const k = (seen.get(text) ?? 0) + 1;
-            seen.set(text, k);
-            if (k > 1) {
-              display = `${text} (${String(k)})`;
-            }
+        const ordinals = new Map<Tab, number>();
+        for (const group of groups.values()) {
+          if (group.length < 2) {
+            continue; // nothing to disambiguate from, so no suffix at all
           }
+          [...group]
+            .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+            .forEach((t, i) => {
+              ordinals.set(t, i + 1);
+            });
+        }
+        for (const t of tabList) {
+          const { text } = baseLabel(t);
+          const k = ordinals.get(t);
+          const display = k !== undefined && k > 1 ? `${text} (${String(k)})` : text;
           t.display = display;
           t.label.textContent = display;
           // The accessible name carries the state and the percentage as well as
