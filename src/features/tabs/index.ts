@@ -43,7 +43,6 @@ import {
 } from "./model.js";
 import { browserNotifierEnv, createNotifier } from "./notify.js";
 import {
-  REORDER_LEAN_PX,
   REORDER_MOVE_EPS_PX,
   REORDER_REST_MS,
   REORDER_SETTLE_MS,
@@ -667,10 +666,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let activeId: string | null = null;
       let draggingEl: HTMLElement | null = null;
       // --- Desktop reorder preview state (mechanism below, near dragTargetBefore) ---
-      // The chips currently carrying an inline transform: the lean during a hold,
-      // or the slide that commits it. One set, because both stages write the same
-      // two properties on the same elements and one settle function has to be able
-      // to hand every one of them back to the stylesheet.
+      // The chips currently carrying an inline displacement from the commit slide.
+      // A set plus one settle function, so whatever a slide wrote can always be handed
+      // back to the stylesheet — including when a second drag interrupts the first.
       const shifted = new Set<HTMLElement>();
       let shiftTimer: ReturnType<typeof setTimeout> | null = null;
       // The slot waiting to open and the rest window that will open it.
@@ -1833,33 +1831,30 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // in. The chip you were dragging looked like the slot it left, the slot it
       // was over, and the slot it would end up in.
       //
-      // The preview splits that into two different answers for two different
-      // actions, and the dragged chip stays in the flow throughout as the slot it
-      // will land in (`.wt-tab-dragging`, which 30-tabs.css renders as an empty
-      // dashed outline rather than a dimmed copy of the tab — the solid copy is
-      // the drag image under the pointer, and one of the two had to stop
-      // pretending to be the tab):
+      // The preview answers a MOVING pointer and a STOPPED one differently, and the
+      // dragged chip stays in the flow throughout as the slot it will land in
+      // (`.wt-tab-dragging`, which 30-tabs.css renders as an empty dashed outline
+      // rather than a dimmed copy of the tab — the solid copy is the drag image
+      // under the pointer, and one of the two had to stop pretending to be the tab):
       //
-      //  - SWEEPING across the strip only LEANS the chips a commit would displace,
-      //    a few px toward where they would go (leanToward). Instant, and it is
-      //    what says where the tab will fall while you are still looking for the
-      //    spot. Nothing is rearranged, so crossing five tabs does not reshuffle
-      //    the strip five times.
-      //  - COMING TO REST opens the slot for real (trackRest -> commitSlot): one
-      //    DOM move, the displaced chips slide from their old positions to their
-      //    new ones, and the slot fades in at its new home.
+      //  - SWEEPING across the strip rearranges NOTHING. Crossing five tabs used to
+      //    move all five, which is the whole complaint.
+      //  - COMING TO REST opens the slot (trackRest -> commitSlot): one DOM move,
+      //    the displaced chips slide from their old positions to their new ones, and
+      //    the slot fades in at its new home.
       //
-      // Rest is DETECTED, not waited out: REORDER_REST_MS is re-armed by movement,
-      // so it expires a rest window after the last movement rather than a fixed
-      // time after a decision. An earlier version made every commit serve a fixed
-      // hold, which is the wrong shape for a direct manipulation — it delayed the
-      // one case that should be instant (you found the spot and stopped) to
-      // protect a case the lean already covers (you are still moving). It also
-      // grew a progress bar to explain the wait, which is the tell that the wait
-      // should not have been there.
+      // Rest is DETECTED, not waited out: REORDER_REST_MS is re-armed by movement, so
+      // it expires a rest window after the last MOVEMENT rather than a fixed time
+      // after a decision. Two shapes were tried and removed before this one, and both
+      // failures are worth keeping: a fixed one-second HOLD (wrong shape for a direct
+      // manipulation — it delayed the one case that should be instant, and grew a
+      // progress bar to explain the wait, which is the tell that the wait should not
+      // have been there), and a sweep-time LEAN of the chips a commit would displace
+      // (it read as a second, competing preview and its distance from the real move
+      // was too small to tell them apart).
       //
       // A release never waits either: `drop` commits whatever slot is pending
-      // (flushRest), so dropping mid-sweep lands the tab where the lean said.
+      // (flushRest), so dropping mid-sweep still lands the tab where it was headed.
       //
       // dropTargetBefore returns the first tab whose horizontal midpoint is past
       // x (the element the dragged tab should sit before), or null to drop at the
@@ -1869,8 +1864,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       //
       // It hit-tests LAYOUT geometry (offsetLeft/offsetWidth), never
       // getBoundingClientRect. That is not an optimisation, it is what makes an
-      // animated reorder hit-testable at all: a rect read while a chip is mid-lean or
-      // mid-slide returns the INTERPOLATED position, so the preview's own motion feeds
+      // animated reorder hit-testable at all: a rect read while a chip is mid-slide
+      // returns the INTERPOLATED position, so the preview's own motion feeds
       // back into the decision that produced it and the strip oscillates between two
       // slots for as long as the pointer sits near a boundary. Layout offsets are the
       // chip's position in the FLOW, which a transform does not affect at all.
@@ -1942,87 +1937,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         shifted.clear();
       }
 
-      // leanToward tips the chips a commit would displace a few px toward their
-      // destination, for as long as the pointer is still choosing. No settle timer: the
-      // lean is a held state, not an animation with an end, and a timer that expired
-      // under it would snap it away mid-sweep.
-      //
-      // This is the SWEEP preview and it is the only thing a moving pointer produces:
-      // it says where the tab will fall without rearranging anything, which is what lets
-      // a drag cross five tabs without the strip reshuffling five times.
-      //
-      // Chips that were leaning and no longer would be are written back to zero in
-      // the SAME pass, so a changed candidate eases from one lean into the other
-      // rather than snapping through rest first.
-      function leanToward(before: HTMLElement | null): void {
-        if (!draggingEl) {
-          return;
-        }
-        // The preference is read live, so it can flip mid-gesture. Clearing here rather
-        // than returning bare is what honours a mid-hold opt-in: a bare return would
-        // leave the lean already applied under the previous preference sitting there.
-        if (prefersReduce()) {
-          endShift();
-          return;
-        }
-        const chips = [...scroller.querySelectorAll<HTMLElement>(".wt-tab")];
-        const from = chips.indexOf(draggingEl);
-        const to = before === null ? chips.length : chips.indexOf(before);
-        if (from < 0 || to < 0) {
-          return;
-        }
-        // Moving right past the chips in between shifts them LEFT, and moving left
-        // shifts the chips it displaces RIGHT — the direction the user reads as
-        // "that tab is getting out of the way".
-        const movers = from < to ? chips.slice(from + 1, to) : chips.slice(to, from);
-        const dx = from < to ? -REORDER_LEAN_PX : REORDER_LEAN_PX;
-        const next = new Map<HTMLElement, number>();
-        for (const el of movers) {
-          next.set(el, dx);
-        }
-        for (const el of shifted) {
-          if (!next.has(el)) {
-            next.set(el, 0);
-          }
-        }
-        applyShift(next, REORDER_SHIFT_TRANS);
-      }
-      // releaseLean eases every leaning chip back to rest and settles it, for when
-      // a candidate is withdrawn (the pointer came back to the committed slot, or left
-      // the strip). endShift would be wrong here: it strips the transition in the same
-      // write, so the lean would snap home.
-      function releaseLean(): void {
-        if (shifted.size === 0) {
-          return;
-        }
-        // ...except under reduced motion, where snapping IS the requested behaviour and
-        // easing back would animate the very motion the preference opted out of.
-        if (prefersReduce()) {
-          endShift();
-          return;
-        }
-        const rest = new Map<HTMLElement, number>();
-        for (const el of shifted) {
-          rest.set(el, 0);
-        }
-        applyShift(rest, REORDER_SHIFT_TRANS);
-        shiftTimer = setTimeout(endShift, REORDER_SETTLE_MS);
-      }
       // trackRest is the whole gate, called on every dragover over the strip.
       //
-      // Sweeping and settling are DIFFERENT actions and get different answers. While the
-      // pointer is still travelling the strip only LEANS the chips it would displace
-      // (leanToward): instant, cheap, and it is what says where the tab will fall while
-      // you are still looking for the spot. Nothing is rearranged, so crossing five tabs
-      // does not rearrange the strip five times. The moment the pointer comes to REST the
-      // slot opens for real.
+      // Sweeping and settling are DIFFERENT actions and get different answers. A
+      // travelling pointer rearranges nothing at all; the moment it comes to REST the
+      // slot opens.
       //
-      // Rest is detected, not waited out. An earlier version made every commit wait a
-      // fixed hold, which is the wrong shape for a direct manipulation: it delayed the
-      // one case that should be instant (you have found the spot and stopped) in order to
-      // protect the case that never needed protecting (you are still moving, and the lean
-      // already covers it). The timer here is re-armed by MOVEMENT, so it expires a rest
-      // window after the last movement rather than a fixed time after a decision.
+      // Rest is detected, not waited out: the timer is re-armed by MOVEMENT, so it
+      // expires a rest window after the last movement rather than a fixed time after a
+      // decision. The window has a hard FLOOR set by the platform rather than by taste —
+      // HTML5 drag-and-drop only guarantees a `dragover` every 350ms, so a window at or
+      // below that cadence expires between two events of a fast sweep and commits every
+      // slot the pointer crosses (see REORDER_REST_MS).
       function trackRest(clientX: number): void {
         const dragged = draggingEl;
         if (!dragged) {
@@ -2037,15 +1963,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           cancelRest();
           return;
         }
-        // Lean toward a NEW candidate. The test is guarded on a pending rest rather than
-        // on `before !== restBefore` alone, because null is a legitimate candidate here
-        // ("past the last chip") and would otherwise be indistinguishable from the
-        // initial "nothing pending" state — which is exactly how the first sweep of a
-        // drag toward the end of the strip ended up leaning nothing at all.
-        if (restTimer === null || before !== restBefore) {
-          restBefore = before;
-          leanToward(before); // the sweep preview: where this will fall
-        }
+        restBefore = before;
         // Movement pushes the commit out; stillness lets the armed timer run down to it.
         // A stationary pointer that has nothing armed still needs one — a browser may
         // deliver dragover repeatedly at an unchanged position, and the first of those is
@@ -2069,11 +1987,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         clearTimeout(restTimer);
         restTimer = null;
         restBefore = null;
-        releaseLean();
       }
       // flushRest commits a pending slot at once, because a release is a decision. It is
       // what stops the rest window from ever being felt as a floor on the gesture: drop
-      // mid-sweep and the tab lands where the lean said it would. Only a `drop` calls it;
+      // mid-sweep and the tab still lands where it was headed. Only a `drop` calls it;
       // an abandoned drag reaches dragend without one and reverts.
       function flushRest(): void {
         if (restTimer === null) {
@@ -2103,18 +2020,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // belongs HERE and not only in the CSS, because these transitions are written
         // inline and no stylesheet gate can reach them; the switcher's release reel
         // guards its own call site the same way. Read live, so toggling the OS setting
-        // mid-drag takes effect on the next commit and strips any existing lean.
+        // mid-drag takes effect on the very next commit.
         if (prefersReduce()) {
           endShift();
           mutate();
           return;
         }
-        // FIRST — where each chip is right now, LEAN INCLUDED, so a slide continues
-        // out of the lean instead of jumping back through rest first. The switcher's
-        // release reel captures its live swipe preview the same way, and for the
-        // same reason. Rects, not layout offsets: this is VISUAL position, which is
-        // what the animation interpolates (hit-testing wants the opposite, see
-        // dropTargetBefore).
+        // FIRST — where each chip is right now, MID-SLIDE INCLUDED, so a second commit
+        // continues from wherever the first one got to instead of jumping back through
+        // rest first. The switcher's release reel captures its live swipe preview the
+        // same way, and for the same reason. Rects, not layout offsets: this is VISUAL
+        // position, which is what the animation interpolates (hit-testing wants the
+        // opposite, see dropTargetBefore).
         const first = new Map<HTMLElement, number>();
         for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab")) {
           if (el !== hold) {
@@ -2159,14 +2076,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // an OSC title) renders the committed order rather than flickering through
       // whatever the pointer is hovering.
       //
-      // Every early return releases the lean, and that is not belt-and-braces. The
-      // caller nulls `restTimer` BEFORE calling in (both the rest timer and flushRest
-      // do), so by the time control arrives here `cancelRest` has already become a no-op
-      // and nothing else would ever hand those chips back.
+      // The caller nulls `restTimer` BEFORE calling in (both the rest timer and
+      // flushRest do), so `cancelRest` is already a no-op by the time control arrives
+      // here: an early return must leave nothing behind that only cancelRest would
+      // Nothing exists pre-commit for it to have cleared, and a slide already in flight
+      // is owned by its own settle timer.
       function commitSlot(before: HTMLElement | null): void {
         const dragged = draggingEl;
         if (!dragged?.isConnected) {
-          releaseLean();
           return; // the dragged session was closed elsewhere mid-gesture
         }
         // The pending slot was chosen a rest window ago, and a session closed in another
@@ -2176,11 +2093,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // child, which would abandon the drop mid-way and leave DOM order and tabList
         // disagreeing. null stays legal: it means "past the last chip".
         if (before !== null && before.parentNode !== scroller) {
-          releaseLean();
           return;
         }
         if (before === dragged || before === dragged.nextElementSibling) {
-          releaseLean();
           return; // already in that slot
         }
         flipTo(() => {
@@ -2270,8 +2185,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // endReorderPreview ends the GESTURE's state: the pending hold (easing any
-      // lean home as it goes) and the slot's fade.
+      // endReorderPreview ends the GESTURE's state: the pending rest and the slot's
+      // fade.
       //
       // It deliberately does NOT stop a slide that is already playing. A slide is an
       // animation with its own settle timer, and cutting it here is exactly what
@@ -2291,9 +2206,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // sweep). Two removals matter, for different reasons:
       //
       //  - the pending reference chip: commitSlot would hand a detached node to
-      //    insertBefore. It guards that too, but standing the hold down here means the
-      //    user's lean comes off at the moment the target vanishes rather than a second
-      //    later, and a fresh dragover can arm a slot that still exists.
+      //    insertBefore. It guards that too, but withdrawing the pending slot here means
+      //    a fresh dragover arms against a chip that still exists rather than waiting out
+      //    a rest window against one that does not.
       //  - the DRAGGED chip: the gesture is over and there is no source left to deliver
       //    a dragend. A browser is not obliged to fire one for a removed source, and
       //    without this the feature would keep `draggingEl` set to a detached node for
@@ -3353,7 +3268,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return false;
       });
       // Drive the reorder preview while dragging a tab over the strip. A sweep only
-      // leans the chips; the slot opens when the pointer comes to rest (trackRest).
+      // rearranges nothing; the slot opens when the pointer comes to rest (trackRest).
       bar.addEventListener("dragover", (e) => {
         if (!draggingEl) {
           return;

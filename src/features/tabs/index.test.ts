@@ -21,12 +21,7 @@ import { CUE_SEEN_KEY } from "./model.js";
 // pin the SHAPE of the interaction (a sweep only leans, rest opens the slot, a drop
 // never waits), not what the numbers happen to be, so a deliberate retune moves one
 // definition and not a dozen magic numbers in a test file.
-import {
-  REORDER_LEAN_PX,
-  REORDER_REST_MS,
-  REORDER_SETTLE_MS,
-  REORDER_SLOT_FADE_MS,
-} from "./strip.js";
+import { REORDER_REST_MS, REORDER_SETTLE_MS, REORDER_SLOT_FADE_MS } from "./strip.js";
 
 // A fake activityMonitor feature: lets a test push status events into tabs
 // without the real SSE. tabs reads it via ctx.use, so passing the same feature
@@ -2680,16 +2675,14 @@ describe("tabs switch-animation lifecycle", () => {
 // --- Desktop reorder preview: sweep, rest, slide, cancel --------------------
 //
 // The reorder answers a moving pointer and a stopped one differently, and these pin
-// that split: sweeping across the strip only LEANS the chips it would displace, and the
-// slot opens when the pointer comes to REST. Rest is detected by re-arming a short
-// window on movement, so it is not a hold — stopping commits, and a drop never waits
-// for it at all.
+// that split: sweeping across the strip rearranges NOTHING, and the slot opens when the
+// pointer comes to REST. Rest is detected by re-arming a window on movement, so it is
+// not a hold — stopping commits, and a drop never waits for it at all.
 //
 // What these CANNOT prove: happy-dom applies no stylesheet and reports every rect as
 // zero, so the slide only runs where a test stubs geometry, and the dashed slot's
-// appearance is unverifiable here. The lean IS checkable, because its direction and
-// distance come from DOM index arithmetic rather than geometry, and so is every stage's
-// inline-style bookkeeping. How the motion FEELS is on the manual checklist.
+// appearance is unverifiable here. Every stage's inline-style bookkeeping IS checkable.
+// How the motion FEELS is on the manual checklist.
 //
 // Zero layout offsets also mean dropTargetBefore never finds a midpoint past clientX,
 // so every candidate below is "past the last chip" — enough to exercise the machinery,
@@ -2798,29 +2791,42 @@ describe("tabs reorder preview", () => {
   function translateOf(el: HTMLElement): string {
     return (el.style.translate as string | undefined) ?? "";
   }
-  const leanLeft = `-${String(REORDER_LEAN_PX)}px`;
-
-  it("leans while the pointer sweeps and rearranges nothing", async () => {
-    // The reason a sweep is cheap: crossing the strip must not reshuffle it. The lean is
-    // the whole answer during movement, and it is instant.
+  it("rearranges nothing while the pointer sweeps, however long the sweep lasts", async () => {
     const h = await mountDrag(3);
-    const [dragged, second, third] = h.chips();
+    const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
 
-    h.sweepTo(10);
-    expect(translateOf(second!)).toBe(leanLeft);
-    expect(translateOf(third!)).toBe(leanLeft);
-    // The slot itself never leans: it is the hole, and the pointer already carries a
-    // solid copy of the tab.
-    expect(translateOf(dragged!)).toBe("");
-    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
-
-    // Still moving, so still nothing rearranged however long the sweep lasts.
-    for (const x of [30, 60, 90, 120]) {
-      vi.advanceTimersByTime(REORDER_REST_MS - 20);
+    for (const x of [10, 40, 80, 130, 190]) {
       h.sweepTo(x);
+      vi.advanceTimersByTime(REORDER_REST_MS - 20);
     }
+
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+    // Nothing was displaced either: a moving pointer writes no inline style at all.
+    for (const chip of h.chips()) {
+      expect(translateOf(chip)).toBe("");
+      expect(chip.style.transition).toBe("");
+    }
+  });
+
+  it("does not commit between two dragover events of a FAST sweep", async () => {
+    // The production bug this window is sized against: HTML5 drag-and-drop only
+    // guarantees a `dragover` every 350ms — the drag loop runs on that cadence, not per
+    // mouse movement — so a window at or below it expires BETWEEN two events of a quick
+    // pass and the strip commits every slot the pointer crosses. At 120ms a fast sweep
+    // over five tabs moved all five. Simulated here at the platform's worst-case
+    // cadence, which is the case a shorter window cannot survive.
+    const h = await mountDrag(4);
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+
+    for (const x of [20, 90, 160, 240, 320]) {
+      h.sweepTo(x);
+      vi.advanceTimersByTime(350);
+    }
+
+    expect(idsOf(h.root)).toEqual(["one", "two", "three", "four"]);
+    // The guarantee, stated as the assertion rather than left implicit in the number.
+    expect(REORDER_REST_MS).toBeGreaterThan(350);
   });
 
   it("opens the slot as soon as the pointer stops, without a hold", async () => {
@@ -2835,7 +2841,6 @@ describe("tabs reorder preview", () => {
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
     vi.advanceTimersByTime(REORDER_REST_MS);
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
-    expect(REORDER_REST_MS).toBeLessThan(200);
   });
 
   it("treats a hand's tremor as stillness, not as a sweep", async () => {
@@ -2884,22 +2889,19 @@ describe("tabs reorder preview", () => {
 
   it("withdraws a pending slot when the pointer leaves the strip", async () => {
     const h = await mountDrag(3);
-    const [, second] = h.chips();
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
     h.sweepTo(10);
-    expect(translateOf(second!)).toBe(leanLeft);
 
-    // Off the strip there is no candidate, so the lean eases home and no rest can open a
-    // slot for a target the pointer has already left.
+    // Off the strip there is no candidate, so no rest can open a slot for a target the
+    // pointer has already left.
     h.surface.dispatchEvent(dragEvent("dragover", h.dt));
-    expect(translateOf(second!)).toBe("0px");
 
     vi.advanceTimersByTime(REORDER_REST_MS * 4);
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
-    // ...and the eased-back chip is handed back to the stylesheet, not left holding an
-    // inline translate for the rest of the session.
-    expect(translateOf(second!)).toBe("");
-    expect(second?.style.transition).toBe("");
+    for (const chip of h.chips()) {
+      expect(translateOf(chip)).toBe("");
+      expect(chip.style.transition).toBe("");
+    }
   });
 
   it("withdraws a pending slot when the pointer leaves through the window edge", async () => {
@@ -3030,10 +3032,9 @@ describe("tabs reorder preview", () => {
     // timer has already nulled the pending flag by then, so cancelRest can no longer
     // reach it.
     const h = await mountDrag(3);
-    const [dragged, second] = h.chips();
+    const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
     h.sweepTo(10);
-    expect(translateOf(second!)).toBe(leanLeft);
 
     h.chips()[1]?.remove(); // the chip the pending slot is anchored to goes away
     expect(() => {

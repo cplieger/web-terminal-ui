@@ -24,33 +24,26 @@ import { statusPhrase, statusRevealsDot } from "./model.js";
 /** The quiet window (ms) that means the pointer has STOPPED. When it elapses with no
  *  movement, the strip opens the slot the pointer is over.
  *
- *  This is a rest detector, not a hold. The difference is the whole interaction: a hold
- *  makes you wait a fixed time whatever you do, which is exactly the wrong shape here —
- *  a reorder is a direct manipulation and the answer to "when does it move" is "when you
- *  stop looking for the spot". Sweeping across the strip only leans the chips (cheap,
- *  instant, and it is what says where the tab will fall); coming to rest is what commits.
+ *  This is a rest detector, not a hold: it is re-armed by MOVEMENT, so it expires a
+ *  rest window after the last movement rather than a fixed time after a decision.
+ *  Sweeping the strip rearranges nothing; stopping is what commits.
  *
- *  Sized to sit above the gap between two dragover events during a real sweep and below
- *  human perception of delay, so stopping reads as immediate. If a browser's dragover
- *  cadence is ever slower than this, the failure mode is benign: the strip commits the
- *  slot the pointer is over slightly eagerly, which is what it would have done anyway.
+ *  **The floor is set by the drag loop, not by taste.** HTML5 drag-and-drop only
+ *  guarantees a `dragover` every 350ms — the processing model runs on that cadence,
+ *  not per mouse movement — so any window at or below it expires BETWEEN two events
+ *  of a fast sweep, and the strip commits every slot the pointer crosses. That is
+ *  exactly what 120ms did in production: a quick pass over five tabs moved all five.
+ *  500ms clears the cadence with margin and is the reason this number is not smaller.
  *
- *  A release never waits for it either — a drop commits whatever is pending (flushRest). */
-export const REORDER_REST_MS = 120;
+ *  It costs a decisive user nothing, which is what makes the margin affordable: a
+ *  release commits whatever slot is pending at once (flushRest), so the window is only
+ *  ever felt by a pointer that has stopped and is waiting to see the gap open. */
+export const REORDER_REST_MS = 500;
 
 /** Movement (px) between two dragover events below which the pointer counts as still.
  *  A hand resting on a mouse is never perfectly still, and treating a 1px tremor as a
  *  sweep would keep pushing the commit out for as long as someone held the tab. */
 export const REORDER_MOVE_EPS_PX = 3;
-
-/** How far (px) each chip a commit would displace leans toward its destination while
- *  the pointer is still sweeping.
- *
- *  Small enough to read as a lean rather than a move, and large enough to be
- *  unambiguous at a glance: it is what answers "where will this fall" during the sweep,
- *  before anything has actually moved. The same purpose the mobile switcher's
- *  PREVIEW_PEEK_MAX serves for its live swipe. */
-export const REORDER_LEAN_PX = 7;
 
 /** The one transition both preview stages use (the lean, and the slide that
  *  commits it).
