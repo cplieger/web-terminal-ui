@@ -31,7 +31,7 @@ export default defineConfig({
       concurrent: false,
       hooks: "stack",
     },
-    setupFiles: ["./src/fc-strict-setup.ts"],
+    setupFiles: ["./src/fc-strict-setup.ts", "./src/dom-isolation-setup.ts"],
     printConsoleTrace: true,
     expandSnapshotDiff: true,
     coverage: {
