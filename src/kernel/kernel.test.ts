@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as KernelModule from "./kernel.js";
 import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
+import { clipboard } from "../features/clipboard.js";
 import type { TerminalContext, TerminalFeature, TerminalStartupFailure } from "./types.js";
 
 const sendBinary = vi.fn<(buf: Uint8Array) => boolean>(() => true);
@@ -1033,6 +1034,469 @@ describe("mouse selection: a press never turns into a native text drag", () => {
     term?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
     press(root, { button: 0 });
     expect(collapsed()).toBe(false);
+  });
+});
+
+describe("type-to-focus: a mouse selection must not swallow the next keystroke", () => {
+  // The bug this pins: a mouse gesture over the display output leaves the browser
+  // no focusable target, so the key target becomes <body> and the hidden textarea
+  // stops receiving keys. Select one cell and typing silently does nothing. The
+  // click handler cannot fix it (focusing collapses the selection, so it declines
+  // while one exists), so a document-level listener takes the keyboard back on the
+  // first typed character, sending that character itself.
+  //
+  // happy-dom caveat, load-bearing for these tests: its KeyboardEvent aliases
+  // getModifierState("AltGraph") to `altKey` ("case 'alt': case 'altgraph': return
+  // this.altKey"), collapsing two modifier states a browser reports separately.
+  // Every event below therefore pins getModifierState explicitly, so a test
+  // asserts the kernel's rule rather than the harness's approximation. Real
+  // engines differ from each other here too, which is why the kernel grants the
+  // AltGraph exception only to a printable character: Firefox reports AltGraph
+  // for plain Option on macOS and for ordinary Ctrl+Alt on Windows.
+  const ta = (root: HTMLElement): HTMLTextAreaElement =>
+    root.querySelector(".term-input") as HTMLTextAreaElement;
+
+  /** Appends text to the output and selects part of it (both endpoints inside). */
+  function selectInOutput(root: HTMLElement, from = 0, to = 7): void {
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    const text = document.createTextNode("line 1 the quick brown fox");
+    output.appendChild(text);
+    const range = document.createRange();
+    range.setStart(text, from);
+    range.setEnd(text, to);
+    const sel = window.getSelection();
+    if (!sel) {
+      throw new Error("no selection");
+    }
+    sel.removeAllRanges();
+    sel.addRange(range);
+    expect(sel.isCollapsed).toBe(false);
+  }
+
+  /** A keydown on the document, as a body-targeted key arrives in a browser. */
+  function typeOnDocument(
+    init: KeyboardEventInit & { key: string },
+    opts: { altGraph?: boolean } = {},
+  ): KeyboardEvent {
+    const ev = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    Object.defineProperty(ev, "getModifierState", {
+      value: (name: string): boolean => (name === "AltGraph" ? (opts.altGraph ?? false) : false),
+    });
+    document.body.dispatchEvent(ev);
+    return ev;
+  }
+
+  const armed = (): HTMLElement => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    ta(root).blur();
+    selectInOutput(root);
+    return root;
+  };
+
+  it("sends the character and takes the keyboard back", () => {
+    const root = armed();
+    typeOnDocument({ key: "x" });
+    expect(sentText()).toBe("x");
+    expect(sendBinary).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(ta(root));
+    expect(window.getSelection()?.isCollapsed).toBe(true);
+  });
+
+  it("cancels the keystroke it sends, so no input event can duplicate it", () => {
+    armed();
+    const ev = typeOnDocument({ key: "x" });
+    expect(ev.defaultPrevented).toBe(true);
+  });
+
+  it("sends a space, and an astral character, as one character each", () => {
+    // A fresh arming per case: the first send focuses the input and collapses the
+    // selection, so a second key in the same state is correctly NOT armed.
+    for (const key of [" ", "\u{1F600}"]) {
+      sendBinary.mockClear();
+      document.body.replaceChildren();
+      armed();
+      typeOnDocument({ key });
+      expect(sentText()).toBe(key);
+    }
+  });
+
+  it("stays out of the way while the textarea holds focus", () => {
+    // The textarea path owns a focused terminal: its keydown maps a printable to
+    // "ignore" and the `input` event sends it. The document listener must not add
+    // a second send when that keydown bubbles up to it.
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    selectInOutput(root);
+    ta(root).focus();
+    ta(root).dispatchEvent(
+      new KeyboardEvent("keydown", { key: "x", bubbles: true, cancelable: true }),
+    );
+    expect(sentText()).toBe("");
+  });
+
+  it("sends nothing while any control holds focus", () => {
+    const cases: (() => void)[] = [
+      () => {
+        const b = document.createElement("button");
+        document.body.appendChild(b);
+        b.focus();
+      },
+      () => {
+        const i = document.createElement("input");
+        document.body.appendChild(i);
+        i.focus();
+      },
+      () => {
+        // The tabindex="0" ARIA widget: the standard accessible pattern, and the
+        // case a blocklist of interactive TAG NAMES would miss.
+        const w = document.createElement("div");
+        w.setAttribute("tabindex", "0");
+        w.setAttribute("role", "listbox");
+        document.body.appendChild(w);
+        w.focus();
+      },
+      () => {
+        // Focus inside a shadow tree: activeElement reports the HOST, which is
+        // still not the body, so the gate holds without knowing about shadow DOM.
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const sr = host.attachShadow({ mode: "open" });
+        const i = document.createElement("input");
+        sr.appendChild(i);
+        i.focus();
+      },
+    ];
+    for (const focusSomething of cases) {
+      sendBinary.mockClear();
+      document.body.replaceChildren();
+      const root = armed();
+      focusSomething();
+      typeOnDocument({ key: "x" });
+      expect(sentText()).toBe("");
+      expect(document.activeElement).not.toBe(ta(root));
+    }
+  });
+
+  it("sends nothing unless this terminal owns a real selection", () => {
+    // A caret is not a selection.
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    ta(root).blur();
+    const output = root.querySelector(".term-output");
+    const text = document.createTextNode("line 1 the quick brown fox");
+    output?.appendChild(text);
+    const caret = document.createRange();
+    caret.setStart(text, 3);
+    caret.setEnd(text, 3);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(caret);
+    typeOnDocument({ key: "x" });
+    expect(sentText()).toBe("");
+
+    // A selection in the host page is the host's business.
+    const hostText = document.createTextNode("host page paragraph");
+    document.body.appendChild(hostText);
+    const outside = document.createRange();
+    outside.setStart(hostText, 0);
+    outside.setEnd(hostText, 4);
+    sel?.removeAllRanges();
+    sel?.addRange(outside);
+    typeOnDocument({ key: "x" });
+    expect(sentText()).toBe("");
+  });
+
+  it("sends nothing for a selection that spans out of the output, either way", () => {
+    for (const reverse of [false, true]) {
+      sendBinary.mockClear();
+      document.body.replaceChildren();
+      const root = rootIn();
+      createTerminal(root, { features: () => [] });
+      ta(root).blur();
+      const output = root.querySelector(".term-output");
+      const inside = document.createTextNode("terminal output text");
+      output?.appendChild(inside);
+      const outside = document.createTextNode("host page paragraph");
+      document.body.appendChild(outside);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      // setBaseAndExtent lets the anchor be the LATER node, which is what a
+      // right-to-left drag produces; an anchor-only containment test passes one
+      // direction and fails the other.
+      if (reverse) {
+        sel?.setBaseAndExtent(outside, 4, inside, 2);
+      } else {
+        sel?.setBaseAndExtent(inside, 2, outside, 4);
+      }
+      typeOnDocument({ key: "x" });
+      expect(sentText()).toBe("");
+    }
+  });
+
+  it("leaves modified keys to the browser, so Ctrl+C still copies the selection", () => {
+    for (const init of [
+      { key: "c", ctrlKey: true },
+      { key: "c", metaKey: true },
+      { key: "ArrowLeft", altKey: true },
+      { key: "ArrowLeft", ctrlKey: true },
+      { key: "Backspace", altKey: true },
+    ]) {
+      sendBinary.mockClear();
+      document.body.replaceChildren();
+      armed();
+      typeOnDocument(init);
+      expect(sentText()).toBe("");
+      // The selection has to survive, or Ctrl+C would copy nothing.
+      expect(window.getSelection()?.isCollapsed).toBe(false);
+    }
+  });
+
+  it("recovers an AltGr character, which arrives with the AltGraph modifier", () => {
+    armed();
+    typeOnDocument({ key: "\u20AC", ctrlKey: true, altKey: true }, { altGraph: true });
+    expect(sentText()).toBe("\u20AC");
+  });
+
+  it("leaves Tab to the browser, so a keyboard user can move on", () => {
+    for (const init of [{ key: "Tab" }, { key: "Tab", shiftKey: true }]) {
+      sendBinary.mockClear();
+      document.body.replaceChildren();
+      armed();
+      typeOnDocument(init);
+      expect(sentText()).toBe("");
+    }
+  });
+
+  it("encodes the functional keys exactly as the focused path does", () => {
+    for (const [init, bytes] of [
+      [{ key: "Enter" }, "\r"],
+      [{ key: "Backspace" }, "\x7f"],
+      [{ key: "ArrowUp" }, "\x1b[A"],
+      [{ key: "Escape" }, "\x1b"],
+    ] as [KeyboardEventInit & { key: string }, string][]) {
+      sendBinary.mockClear();
+      document.body.replaceChildren();
+      armed();
+      typeOnDocument(init);
+      expect(sentText()).toBe(bytes);
+    }
+  });
+
+  it("leaves a dead key and an IME start to the platform", () => {
+    // A dead key has no bytes and no character, so it delivers nothing and must
+    // not touch the selection or the focus. The composed character arrives on the
+    // NEXT keydown, which this listener then recovers normally, so the accent
+    // survives rather than being traded for focus.
+    for (const key of ["Dead", "Process", "Unidentified"]) {
+      sendBinary.mockClear();
+      document.body.replaceChildren();
+      const root = armed();
+      const ev = typeOnDocument({ key });
+      expect(sentText()).toBe("");
+      expect(ev.defaultPrevented).toBe(false);
+      expect(document.activeElement).not.toBe(ta(root));
+      expect(window.getSelection()?.isCollapsed).toBe(false);
+    }
+  });
+
+  it("leaves the selection alone for a key that delivers nothing", () => {
+    // The blocker this pins: taking focus before deciding what the key does meant
+    // a bare Shift cleared the selection. Shift is how a user reaches Shift+click
+    // to extend a selection and Ctrl+Shift+C to copy one, so clearing on it broke
+    // the two gestures the selection exists for. Lock keys and media keys are the
+    // same shape: no bytes, no character, no business touching the selection.
+    for (const key of [
+      "Shift",
+      "Control",
+      "Alt",
+      "Meta",
+      "CapsLock",
+      "AltGraph",
+      "AudioVolumeUp",
+      "BrowserSearch",
+    ]) {
+      sendBinary.mockClear();
+      document.body.replaceChildren();
+      const root = armed();
+      typeOnDocument({ key });
+      expect(sentText()).toBe("");
+      expect(window.getSelection()?.isCollapsed).toBe(false);
+      expect(document.activeElement).not.toBe(ta(root));
+    }
+  });
+
+  it("survives the Shift-first chord order of Ctrl+Shift+C", () => {
+    // Pressing Shift before Ctrl is an ordinary way to form the chord, and each
+    // press is its own keydown. The two lead presses must leave the selection for
+    // the third to copy.
+    const seen: string[] = [];
+    const probe: TerminalFeature<void> = {
+      name: "copy-probe",
+      setup(ctx) {
+        ctx.registerKeydown((ev) => {
+          if (ev.code === "KeyC" && ev.ctrlKey && ev.shiftKey) {
+            seen.push(window.getSelection()?.toString() ?? "");
+            return true;
+          }
+          return false;
+        });
+        return { api: undefined, teardown: vi.fn() };
+      },
+    };
+    const root = rootIn();
+    createTerminal(root, { features: () => [probe] });
+    ta(root).blur();
+    selectInOutput(root);
+    typeOnDocument({ key: "Shift", shiftKey: true });
+    typeOnDocument({ key: "Control", ctrlKey: true, shiftKey: true });
+    typeOnDocument({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
+    expect(seen).toEqual(["line 1 "]);
+    expect(sentText()).toBe("");
+  });
+
+  it("leaves a key the host page already handled", () => {
+    // preventDefault is the platform's own way to say "handled", so an embedder
+    // with a document-level keymap needs no option to opt out of this listener.
+    armed();
+    const ev = new KeyboardEvent("keydown", { key: "j", bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "getModifierState", { value: () => false });
+    document.addEventListener("keydown", (e) => e.preventDefault(), { capture: true, once: true });
+    document.body.dispatchEvent(ev);
+    expect(sentText()).toBe("");
+    expect(window.getSelection()?.isCollapsed).toBe(false);
+  });
+
+  it("grants the AltGraph exception to a character, never to a mapped key", () => {
+    // AltGraph is not a reliable signal by itself: Firefox reports it for plain
+    // Option on macOS and for ordinary Ctrl+Alt on Windows. Admitting every
+    // AltGraph event would hand the terminal Option+ArrowLeft, which is back.
+    armed();
+    typeOnDocument({ key: "ArrowLeft", altKey: true }, { altGraph: true });
+    expect(sentText()).toBe("");
+    expect(window.getSelection()?.isCollapsed).toBe(false);
+  });
+
+  it("leaves the keystroke to the IME while a composition is running", () => {
+    const root = armed();
+    ta(root).dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    typeOnDocument({ key: "a" });
+    expect(sentText()).toBe("");
+    expect(window.getSelection()?.isCollapsed).toBe(false);
+  });
+
+  it("normalizes a typed NBSP to a space, as the focused path does", () => {
+    // One physical key must not produce two byte sequences depending on which
+    // listener caught it. AltGr+Space yields U+00A0 on some Linux keymaps.
+    armed();
+    typeOnDocument({ key: "\u00A0" });
+    expect(sentText()).toBe(" ");
+  });
+
+  it("sends nothing when the input cannot actually take focus", () => {
+    // Focus can fail to land: an inert subtree under an open modal dialog, or a
+    // released root. Bytes whose effect the user cannot see must not reach the
+    // shell, so the listener fails closed rather than sending blind.
+    const root = armed();
+    Object.defineProperty(ta(root), "focus", { value: () => undefined });
+    typeOnDocument({ key: "x" });
+    expect(sentText()).toBe("");
+  });
+
+  it("scrolls the viewport for Shift+PageUp and Shift+PageDown", () => {
+    // happy-dom reports no layout, so the scroll arms need geometry to move
+    // against; without it this test would pass against a helper that only called
+    // preventDefault.
+    const root = armed();
+    const term = root.querySelector(".term") as HTMLElement;
+    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
+    term.scrollTop = 1000;
+    typeOnDocument({ key: "PageUp", shiftKey: true });
+    expect(term.scrollTop).toBe(600);
+    expect(sentText()).toBe("");
+    selectInOutput(root);
+    ta(root).blur();
+    typeOnDocument({ key: "PageDown", shiftKey: true });
+    expect(term.scrollTop).toBe(1000);
+    expect(sentText()).toBe("");
+  });
+
+  it("lets the real clipboard feature copy the selection with focus on the body", () => {
+    // The design promised this integration, and the probe test above cannot stand
+    // in for it: the real handler keys on `ev.code`, not `ev.key`, and reads the
+    // ambient selection itself.
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const root = rootIn();
+    createTerminal(root, { features: () => [clipboard()] });
+    ta(root).blur();
+    selectInOutput(root);
+    typeOnDocument({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
+    expect(writeText).toHaveBeenCalledWith("line 1 ");
+    expect(sentText()).toBe("");
+    vi.unstubAllGlobals();
+  });
+
+  it("runs the feature keydown chain with the selection still intact", () => {
+    // This is what makes clipboard's Ctrl+Shift+C reachable after a mouse
+    // selection: the chain has to see the key BEFORE anything takes focus, or the
+    // selection it copies is already gone.
+    let sawSelection: string | null = null;
+    const probe: TerminalFeature<void> = {
+      name: "claims-keys",
+      setup(ctx) {
+        ctx.registerKeydown((ev) => {
+          if (ev.key === "C" && ev.ctrlKey && ev.shiftKey) {
+            sawSelection = window.getSelection()?.toString() ?? null;
+            return true;
+          }
+          return false;
+        });
+        // FeatureInstance requires teardown. registerKeydown returns an
+        // unsubscribe the kernel also drops wholesale on destroy, so this probe
+        // has nothing of its own to release.
+        return { api: undefined, teardown: vi.fn() };
+      },
+    };
+    const root = rootIn();
+    createTerminal(root, { features: () => [probe] });
+    ta(root).blur();
+    selectInOutput(root);
+    typeOnDocument({ key: "C", ctrlKey: true, shiftKey: true });
+    expect(sawSelection).toBe("line 1 ");
+    expect(sentText()).toBe("");
+    // A claimed key never focuses, so a second copy is still possible.
+    expect(window.getSelection()?.isCollapsed).toBe(false);
+  });
+
+  it("stops listening once the terminal is destroyed", () => {
+    // destroy() also removes the output DOM, which would invalidate the selection
+    // and make this pass for the wrong reason. So re-arm against the DETACHED
+    // output afterwards: `contains` still holds inside a detached tree, so the
+    // only thing left to stop the send is the aborted listener.
+    const root = rootIn();
+    const handle = createTerminal(root, { features: () => [] });
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    handle.destroy();
+    const text = document.createTextNode("detached output text");
+    output.appendChild(text);
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 8);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    expect(sel?.toString()).toBe("detached");
+    sendBinary.mockClear();
+    typeOnDocument({ key: "x" });
+    expect(sentText()).toBe("");
   });
 });
 
