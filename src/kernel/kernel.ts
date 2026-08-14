@@ -91,6 +91,34 @@ const CORE_TEMPLATE = `
   <div class="composition-view" aria-hidden="true"></div>
 </div>`;
 
+/**
+ * The single character this key types, or null when it types none. Used to tell
+ * a character the engine's encoder deferred to the `input` event apart from a
+ * key whose `key` is a NAME rather than text.
+ *
+ * `codePointAt` consumes a surrogate pair whole, so a key whose first scalar is
+ * the whole string is exactly one character; "Shift", "Dead", "F5" and "Process"
+ * are not. Code points rather than grapheme clusters on purpose: a character key
+ * carries one code point, and a segmenter would also accept a multi-scalar
+ * cluster. UI Events does allow a key "associated with multiple characters"
+ * (macros, some dead-key sequences); those return null here and are simply not
+ * recovered, which is a stated limitation rather than a claim about key names.
+ */
+function typedChar(ev: KeyboardEvent): string | null {
+  const first = ev.key.codePointAt(0);
+  return first !== undefined && String.fromCodePoint(first) === ev.key ? ev.key : null;
+}
+
+/**
+ * Normalizes text on its way to the PTY: iOS sends U+00A0 where a space was
+ * typed. Shared by every send path so one physical key cannot produce two byte
+ * sequences depending on which listener caught it (the `input` event on the
+ * focused textarea, or the document-level type-to-focus fallback).
+ */
+function normalizeTypedText(text: string): string {
+  return text.replace(/\u00A0/g, " ");
+}
+
 function pick(root: ParentNode, selector: string): HTMLElement {
   const el = root.querySelector<HTMLElement>(selector);
   if (!el) {
@@ -712,14 +740,14 @@ function buildTerminal(
           paste(ev.data);
         } else {
           // Normalize iOS's NBSP-for-space quirk, then send through the funnel.
-          sendText(ev.data.replace(/\u00A0/g, " "));
+          sendText(normalizeTypedText(ev.data));
         }
       } else {
         const v = input.value;
         if (v.length > INPUT_PLACEHOLDER.length && v.startsWith(INPUT_PLACEHOLDER)) {
-          sendText(v.slice(INPUT_PLACEHOLDER.length).replace(/\u00A0/g, " "));
+          sendText(normalizeTypedText(v.slice(INPUT_PLACEHOLDER.length)));
         } else if (v !== INPUT_PLACEHOLDER && v.length > 0) {
-          sendText(v.replace(/\u00A0/g, " "));
+          sendText(normalizeTypedText(v));
         }
       }
       resetToPlaceholder(input);
@@ -743,6 +771,42 @@ function buildTerminal(
     { signal },
   );
 
+  /**
+   * Applies the part of a `mapKeyboardEvent` result that BOTH keydown paths (the
+   * focused textarea below, and the document-level type-to-focus fallback in the
+   * focus-strategy section) handle identically. Returns false only for "ignore",
+   * the one arm the two callers resolve differently: the textarea lets its own
+   * `input` event deliver the character, while the fallback has no `input` event
+   * coming and must send the character itself.
+   *
+   * Switching over the whole `KeyboardResult` union in one place is what keeps
+   * the two paths from drifting — handling only "send" in the fallback silently
+   * dropped Shift+PageUp, which is exactly what a reader who just selected some
+   * scrollback presses next.
+   */
+  function applyMappedKey(ev: KeyboardEvent, result: keyboard.KeyboardResult): boolean {
+    switch (result.kind) {
+      case "send":
+        ev.preventDefault();
+        sendText(result.bytes);
+        return true;
+      case "scroll-up": {
+        ev.preventDefault();
+        const h = termWrap.clientHeight;
+        termWrap.scrollTop = Math.max(0, termWrap.scrollTop - h);
+        return true;
+      }
+      case "scroll-down": {
+        ev.preventDefault();
+        const h = termWrap.clientHeight;
+        termWrap.scrollTop = Math.min(termWrap.scrollHeight, termWrap.scrollTop + h);
+        return true;
+      }
+      case "ignore":
+        return false;
+    }
+  }
+
   input.addEventListener(
     "keydown",
     (ev: KeyboardEvent) => {
@@ -755,27 +819,10 @@ function buildTerminal(
           return;
         }
       }
-      const result = mapKeyboardEvent(ev, modes);
-      switch (result.kind) {
-        case "send":
-          ev.preventDefault();
-          sendText(result.bytes);
-          return;
-        case "scroll-up": {
-          ev.preventDefault();
-          const h = termWrap.clientHeight;
-          termWrap.scrollTop = Math.max(0, termWrap.scrollTop - h);
-          return;
-        }
-        case "scroll-down": {
-          ev.preventDefault();
-          const h = termWrap.clientHeight;
-          termWrap.scrollTop = Math.min(termWrap.scrollHeight, termWrap.scrollTop + h);
-          return;
-        }
-        case "ignore":
-          return;
-      }
+      // A false return ("ignore") needs nothing here: the `input` listener above
+      // delivers the character, which is also how IME and dead-key composition
+      // output reaches the terminal.
+      applyMappedKey(ev, mapKeyboardEvent(ev, modes));
     },
     { signal },
   );
@@ -931,6 +978,175 @@ function buildTerminal(
         return;
       }
       focusTerminal();
+    },
+    { signal },
+  );
+
+  // --- Type-to-focus: recovering a keystroke after a mouse selection ---
+  // A mouse gesture over `.term-output` leaves the browser no focusable target,
+  // so the key target becomes the document body (UI Events: "If no suitable
+  // element is in focus, the event target will be the HTML body element") and
+  // the hidden textarea stops receiving keys. The click handler above cannot fix
+  // that, because focusing the textarea COLLAPSES the selection the user just
+  // made, so it deliberately declines while one exists. Net effect without this
+  // listener: select a single cell with the mouse and typing silently does
+  // nothing, and the two shortcuts that ride the keydown chain go with it
+  // (clipboard's Ctrl+Shift+C, contextMenu's Escape).
+  //
+  // Native terminals have no such competition: a selection is app state and the
+  // keyboard belongs to the window, so VTE grabs widget focus on the very press
+  // that starts a selection. xterm.js sidesteps it by preventDefaulting mousedown
+  // and painting its own selection, which is not open to us — native touch
+  // selection is this UI's mobile selection UX (css/02-terminal.css). So the
+  // browser's model stands and typing takes the keyboard back instead, which is
+  // also what Windows Terminal does ("most key input clears the selection and
+  // passes the key event directly to the underlying shell").
+  const doc = root.ownerDocument;
+  function ownsSelection(): boolean {
+    // EVERY range, and both ends of each: a range dragged from the terminal out
+    // into the host page's own content never arms this in either drag direction,
+    // and neither does a Firefox Ctrl+drag multi-range selection with one range
+    // outside (the mousedown policy above deliberately preserves those, and
+    // removeAllRanges below would take the host's range with the terminal's).
+    // Range ends are in document order whichever way the user dragged, so
+    // direction costs nothing here. Selected TEXT rather than isCollapsed, so a
+    // bare caret does not arm, matching the click handler's own test. Scoped to
+    // `.term-output`, so a selection in the chrome does not arm. Known
+    // limitation: a terminal inside a host's shadow root never arms, because
+    // getSelection() does not reach into shadow trees.
+    const sel = doc.getSelection();
+    if (sel === null || sel.toString().length === 0) {
+      return false;
+    }
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const range = sel.getRangeAt(i);
+      if (!outputEl.contains(range.startContainer) || !outputEl.contains(range.endContainer)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  doc.addEventListener(
+    "keydown",
+    (ev: KeyboardEvent) => {
+      // Two groups, in this order. The ARMING gates immediately below decide
+      // whether this listener is responsible for the keystroke at all; the
+      // TERMINAL-KEY gates after the feature chain decide whether the terminal
+      // wants this particular key. Both are preconditions rather than a
+      // classification: nothing runs unless every gate passes, so no keystroke
+      // falls between them.
+      if (destroyed) {
+        // Reachable in one window only: cleanupRuntime() tears features down
+        // BEFORE it aborts the signal that removes this listener, so a feature
+        // teardown that synchronously dispatched a key would otherwise be served
+        // by a terminal that is already gone. (The textarea listener needs no
+        // such gate: it only fires while the textarea holds focus, and a teardown
+        // does not focus it.)
+        return;
+      }
+      // A host that already handled this key marked it, so leave it alone. This
+      // is the platform's own convention for composing keyboard handlers, and it
+      // is the reason this listener needs no opt-out option: an embedder with a
+      // document-level keymap cancels the events it owns.
+      if (ev.defaultPrevented) {
+        return;
+      }
+      // Nobody owns the keyboard. This one test replaces a blocklist of
+      // interactive tag names and is strictly more complete: focus inside an open
+      // shadow root reports the HOST, an open <dialog> reports the dialog (or its
+      // focused child), and a tabindex="0" ARIA widget reports itself. All
+      // non-body, so all bail. It also subsumes the double-send guard: a focused
+      // textarea is not the body, so a key the handler above already took can
+      // never reach here. Residual: HTML's focus fixup rule can park focus back
+      // on the body while a modal dialog is still open (its focused child was
+      // removed), which the focus-landed check below is what actually covers.
+      if (doc.activeElement !== null && doc.activeElement !== doc.body) {
+        return;
+      }
+      // Composition first, matching the textarea path, and on the composition
+      // module's clock rather than ev.isComposing: that clock stays true through
+      // the deferred compositionend read (the documented Chromium workaround).
+      if (composition.isComposing()) {
+        return;
+      }
+      if (!ownsSelection()) {
+        return;
+      }
+      // Features next, while the selection is STILL INTACT, and BEFORE the
+      // modifier gate below. Both orderings are load-bearing: clipboard's
+      // Ctrl+Shift+C is a MODIFIED key that reads the selection, so a modifier
+      // gate placed first would deny the chain the one shortcut this listener
+      // exists to restore (caught by its own test). A claimed key never focuses,
+      // so the selection survives it and a second copy is still possible.
+      for (const h of keydownHandlers) {
+        if (h(ev)) {
+          return;
+        }
+      }
+      // What this key DOES is decided before taking focus, because a keystroke
+      // that delivers nothing must leave the selection and the focus untouched.
+      // A bare modifier press is the case that proves it: Shift on its way to
+      // Shift+click, or to Ctrl+Shift+C, would otherwise clear the very selection
+      // the chord is about to act on.
+      //
+      // The character is computed ONLY for an "ignore" result, so the encoder
+      // always wins a key it maps. Under the kitty protocol a MODIFIED character
+      // key encodes to a CSI-u sequence rather than to its text, and the focused
+      // path sends that sequence; this path has to agree with it.
+      const result = mapKeyboardEvent(ev, modes);
+      const char = result.kind === "ignore" ? typedChar(ev) : null;
+      if (result.kind === "ignore" && char === null) {
+        // Nothing to deliver: a bare modifier or lock key, a dead key, an IME
+        // start, a multi-character or unknown key name.
+        return;
+      }
+      // Modified keys stay with the browser, with one exception: an AltGr
+      // CHARACTER, because on the layouts that need AltGr that is how the
+      // character is typed. The exception is deliberately limited to a character
+      // rather than granted to any AltGraph event, because AltGraph is not a
+      // reliable signal on its own: Firefox reports it for plain Option on macOS
+      // and for ordinary Ctrl+Alt on Windows, so admitting every AltGraph event
+      // would hand the terminal Option+ArrowLeft, which is browser back.
+      // (xterm.js carries the mirror-image heuristic, ctrl+alt meaning AltGr, and
+      // scopes it to Windows.)
+      //
+      // Nothing else modified is recovered, and the asymmetry decides that: not
+      // recovering Ctrl+ArrowLeft costs one keypress in a state that ends on the
+      // next character typed, while stealing Ctrl+C costs the user the selection
+      // they just made, and Alt+ArrowLeft is browser back.
+      const altGraphChar = char !== null && ev.getModifierState("AltGraph");
+      if ((ev.ctrlKey || ev.metaKey || ev.altKey) && !altGraphChar) {
+        return;
+      }
+      // Tab stays with the browser: this only ever runs on a body-focused page,
+      // where Tab is how a keyboard user moves on (web-terminal-kiro's
+      // focusable-inventory test pins that expectation).
+      if (ev.key === "Tab") {
+        return;
+      }
+      // Take the keyboard. Collapsing explicitly rather than leaning on focus()
+      // to do it keeps the behaviour identical wherever focus() would not.
+      doc.getSelection()?.removeAllRanges();
+      focusTerminal();
+      // Fail closed. Focus can fail to land (an inert subtree under an open modal
+      // dialog, a released root), and bytes whose effect the user cannot see do
+      // not belong in a shell.
+      if (doc.activeElement !== input) {
+        return;
+      }
+      if (char !== null) {
+        // The encoder defers a plain character to the `input` event, which the
+        // focused path delivers. No input event is coming for a key that targeted
+        // the body, so send it here. preventDefault makes that exactly once BY
+        // SPEC ("If this event is canceled, the associated event types MUST NOT be
+        // dispatched"), rather than by depending on whether an engine re-resolves
+        // an uncanceled keydown's insertion target after a listener moved focus
+        // mid-dispatch. Chromium does; no specification requires it.
+        ev.preventDefault();
+        sendText(normalizeTypedText(char));
+        return;
+      }
+      applyMappedKey(ev, result);
     },
     { signal },
   );
