@@ -20,6 +20,7 @@
     "./features/connection-banner": "./src/features/connection-banner.ts",
     "./features/mobile-toolbar": "./src/features/mobile-toolbar.ts",
     "./features/tabs": "./src/features/tabs/index.ts",
+    "./features/tabs/attention": "./src/features/tabs/attention.ts",
     "./features/activity-monitor": "./src/features/activity-monitor.ts",
     "./features/animations": "./src/features/animations.ts"
   },
