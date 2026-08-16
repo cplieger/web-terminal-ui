@@ -21,7 +21,8 @@ it mirrors. Change a theme token, re-run this.
 Usage:
     python3 scripts/gen-attention-icons.py --app web-terminal-kiro --static ../web-terminal-kiro/static
     python3 scripts/gen-attention-icons.py --app web-terminal-server --static ../web-terminal-server/static
-    python3 scripts/gen-attention-icons.py --app all --root ..        # both, sibling checkouts
+    python3 scripts/gen-attention-icons.py --app vibekit --static ../vibekit/static
+    python3 scripts/gen-attention-icons.py --app all --root ..        # every app, sibling checkouts
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from __future__ import annotations
 import argparse
 import math
 import pathlib
+import re
 import struct
 import sys
 import zlib
@@ -291,11 +293,36 @@ def paint_dot(width: int, height: int, rgba: bytearray, colour: tuple[int, int, 
     return out
 
 
+_VIEWBOX = re.compile(r'viewBox\s*=\s*"\s*([-\d.]+)\s+([-\d.]+)\s+([\d.]+)\s+([\d.]+)\s*"')
+
+
+def svg_scale(source: str) -> float:
+    """The factor mapping the 32-unit geometry above onto this SVG's own space.
+
+    The geometry constants are declared in a 32-unit viewBox because that is what
+    the two web-terminal icons use, and the PNG path already scales from it
+    (paint_dot: `width / 32.0`). An SVG base with a different viewBox needs the
+    same treatment or the dot lands mid-artwork at the wrong relative size —
+    silently, since an SVG has no pixel grid to disagree with. A missing or
+    non-square viewBox raises for the same reason paint_dot refuses a non-square
+    PNG: the dot's placement is only meaningful in a square frame.
+    """
+    match = _VIEWBOX.search(source)
+    if not match:
+        raise ValueError('source SVG has no viewBox, so the dot cannot be placed')
+    width, height = float(match.group(3)), float(match.group(4))
+    if width <= 0 or width != height:
+        raise ValueError(f'expected a square viewBox, got {width}x{height}')
+    return width / 32.0
+
+
 def svg_variant(source: str, hex_colour: str) -> str:
     """Insert the dot into the source SVG. Appended last so it paints on top."""
     if '</svg>' not in source:
         raise ValueError('source SVG has no closing tag')
-    circle = f'<circle cx="{DOT_CX:g}" cy="{DOT_CY:g}" r="{DOT_R:g}" fill="{hex_colour}"/>'
+    scale = svg_scale(source)
+    cx, cy, r = DOT_CX * scale, DOT_CY * scale, DOT_R * scale
+    circle = f'<circle cx="{cx:g}" cy="{cy:g}" r="{r:g}" fill="{hex_colour}"/>'
     head, _, tail = source.rpartition('</svg>')
     return head + circle + '</svg>' + tail
 
@@ -308,28 +335,56 @@ def svg_variant(source: str, hex_colour: str) -> str:
 # maps both onto it. `working` and `warning` are absent on purpose: they are
 # ongoing and informational, so they raise no cue at all (see model.ts CueStatus).
 
-APPS: dict[str, dict[str, str]] = {
+# The base icons a variant is generated from. Every `link[rel=icon]` in the two
+# web-terminal apps' index.html points at one of these three, and the swap
+# replaces like with like so no link's `type` attribute has to change. The PWA
+# icons (apple-touch-icon, icon-192x192, icon-512x512) are deliberately NOT here:
+# those come from the manifest and are cached by the OS at install time, so a swap
+# cannot reach them.
+BASES = ('favicon.svg', 'favicon-32x32.png', 'favicon-16x16.png')
+
+# `bases` is per app rather than global because it is derived from an app's OWN
+# markup: the set has to be exactly the files its `link[rel~="icon"]` elements
+# point at. A base an app does not ship is a hard error (see generate), which is
+# the guard that catches a renamed icon — so an app with one icon link declares
+# one base rather than being handed three and excused two.
+APPS: dict[str, dict[str, object]] = {
     # static-src/app.ts themes these two in oklch; --status-failed keeps the
     # library default from css/00-tokens.css.
     'web-terminal-kiro': {
-        'input': oklch_to_hex(0.78, 0.15, 95),
-        'done': oklch_to_hex(0.78, 0.15, 150),
-        'alert': '#dc2626',
+        'colours': {
+            'input': oklch_to_hex(0.78, 0.15, 95),
+            'done': oklch_to_hex(0.78, 0.15, 150),
+            'alert': '#dc2626',
+        },
+        'bases': BASES,
     },
     # No theme overrides: the library defaults from css/00-tokens.css.
     'web-terminal-server': {
-        'input': '#fb923c',
-        'done': '#22c55e',
-        'alert': '#dc2626',
+        'colours': {
+            'input': '#fb923c',
+            'done': '#22c55e',
+            'alert': '#dc2626',
+        },
+        'bases': BASES,
+    },
+    # vibekit has no --status-* family, so the colours come from the vocabulary
+    # its tab dots already use (static-src/css/01-tokens.css, the default theme's
+    # :root values): --c-yellow is the waiting/permission dot, so it is `input`;
+    # --c-green and --c-red carry done and alert. One icon serves both themes, so
+    # the light-theme overrides below the fold are deliberately not read.
+    #
+    # ONE base: static/index.html has a single `link[rel="icon"]`, the SVG. Its
+    # viewBox is 48, not 32 — svg_scale handles that.
+    'vibekit': {
+        'colours': {
+            'input': oklch_to_hex(0.919, 0.07, 86.5),
+            'done': oklch_to_hex(0.858, 0.109, 142.7),
+            'alert': oklch_to_hex(0.756, 0.13, 2.8),
+        },
+        'bases': ('favicon.svg',),
     },
 }
-
-# The base icons a variant is generated from. Every `link[rel=icon]` in both apps'
-# index.html points at one of these three, and the swap replaces like with like so
-# no link's `type` attribute has to change. The PWA icons (apple-touch-icon,
-# icon-192x192, icon-512x512) are deliberately NOT here: those come from the
-# manifest and are cached by the OS at install time, so a swap cannot reach them.
-BASES = ('favicon.svg', 'favicon-32x32.png', 'favicon-16x16.png')
 
 
 def variant_name(base: str, status: str) -> str:
@@ -341,9 +396,10 @@ def variant_name(base: str, status: str) -> str:
 
 
 def generate(app: str, static: pathlib.Path) -> int:
-    colours = APPS[app]
+    colours: dict[str, str] = APPS[app]['colours']  # type: ignore[assignment]
+    bases: tuple[str, ...] = APPS[app]['bases']  # type: ignore[assignment]
     written = 0
-    for base in BASES:
+    for base in bases:
         source = static / base
         if not source.exists():
             raise SystemExit(f'{app}: missing base icon {source}')
