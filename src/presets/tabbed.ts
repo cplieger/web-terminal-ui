@@ -35,7 +35,7 @@ export interface TabbedPresetOptions {
   /** Swap the page's icon links to a status variant while a background session
    *  wants the user. Off by default, and enabling it is a promise that the
    *  variant assets are served — see TabsOptions.attentionIcons for the naming
-   *  contract and scripts/gen-attention-icons.py, which writes them. */
+   *  contract and .kiro/scripts/gen-attention-icons.py, which writes them. */
   attentionIcons?: boolean;
 }
 

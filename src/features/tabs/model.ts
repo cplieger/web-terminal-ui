@@ -243,7 +243,7 @@ export function worseCue(a: CueStatus | "", b: CueStatus | ""): CueStatus | "" {
 
 /** The icon variant a cue paints, which is NOT one per status: `crashed` and
  *  `failed` both render --status-failed, so they share one asset. An app ships
- *  one icon per name returned here (see scripts/gen-attention-icons.py). */
+ *  one icon per name returned here (see .kiro/scripts/gen-attention-icons.py). */
 export function cueIconName(status: CueStatus): "input" | "done" | "alert" {
   if (status === "input" || status === "done") {
     return status;

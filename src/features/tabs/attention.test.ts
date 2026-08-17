@@ -222,7 +222,7 @@ describe("createAttention renders a state onto the sinks", () => {
 
 describe("iconVariantHref follows the asset generator's naming", () => {
   it("inserts the variant after the favicon token, keeping the extension", () => {
-    // These expectations are the file names scripts/gen-attention-icons.py
+    // These expectations are the file names .kiro/scripts/gen-attention-icons.py
     // actually writes. If either side changes, this is the test that fails.
     expect(iconVariantHref("/favicon.svg", "input")).toBe("/favicon-input.svg");
     expect(iconVariantHref("/favicon-32x32.png", "done")).toBe("/favicon-done-32x32.png");
