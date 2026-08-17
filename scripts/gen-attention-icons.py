@@ -16,7 +16,9 @@ icon pixel-for-pixel plus a dot.
 
 The dot colour is derived from the app's `--status-*` theme token, in the same
 colour space the CSS declares it in, so a variant cannot drift from the tab dot
-it mirrors. Change a theme token, re-run this.
+it mirrors. Its SILHOUETTE is derived the same way, from that state's own tab-dot
+shape, because a cue's icon has to be recognisable from memory and only one is
+ever showing. Change a theme token or a dot shape, re-run this.
 
 Usage:
     python3 scripts/gen-attention-icons.py --app web-terminal-kiro --static ../web-terminal-kiro/static
@@ -47,6 +49,26 @@ DOT_R = 5.5
 PAD = 3.0
 DOT_CX = 32.0 - PAD - DOT_R
 DOT_CY = PAD + DOT_R
+
+# The badge's SILHOUETTE, per cue. A cue's icon has to be recognisable from
+# memory rather than by comparison — only one is ever showing — so hue alone is
+# not enough, the same reason the tab dot itself carries a shape channel.
+#
+# Both members keep the SAME FOOTPRINT, 2 * DOT_R across, so every cue occupies
+# one slot on the artwork: the diamond's DIAGONAL is what matches the circle's
+# diameter, which is also how the tab dot sizes its own diamond (8px square in a
+# 9px slot, css/12-tabs.css). Corners are sharp here where the tab dot rounds
+# them by 1.5 of 8 units, because at a 16px rendering that radius is a third of a
+# pixel.
+#
+# There is deliberately no `ring` member. vibekit's `input` tab dot is a disc
+# inside a 2px ring at 30% alpha, and at 16px the whole badge is 5.5px across, so
+# a proportional ring is 0.85px at 30% over a saturated backdrop — invisible. A
+# ring drawn thick enough to see would no longer be the dot it claims to mirror,
+# so the halo is DROPPED rather than faked, and `input` keeps its ink and its
+# circular silhouette. Consequence, stated: on the icon `input` and `done`
+# separate by hue alone. The tab strip is where the ring lives.
+SHAPES = ("circle", "diamond")
 
 # Supersampling factor per axis for the dot's edge. 4x4 is indistinguishable from
 # exact coverage at these sizes and needs no analytic circle-pixel intersection.
@@ -253,11 +275,31 @@ def png_encode(width: int, height: int, rgba: bytes) -> bytes:
 # Compositing
 
 
-def paint_dot(width: int, height: int, rgba: bytearray, colour: tuple[int, int, int]) -> bytearray:
-    """Composite the status dot onto an 8-bit RGBA buffer, source-over.
+def inside(shape: str, dx: float, dy: float, r: float) -> bool:
+    """Is a point `dx`, `dy` from the badge centre inside the badge?
+
+    One predicate for both output paths, so a shape cannot mean one thing in an
+    SVG and another in a PNG. The diamond is the L1 ball, which is a square
+    rotated 45 degrees whose diagonal is 2r — the same footprint as the circle.
+    """
+    if shape == 'circle':
+        return dx * dx + dy * dy <= r * r
+    if shape == 'diamond':
+        return abs(dx) + abs(dy) <= r
+    raise ValueError(f'unknown badge shape {shape!r}')
+
+
+def paint_dot(
+    width: int,
+    height: int,
+    rgba: bytearray,
+    colour: tuple[int, int, int],
+    shape: str = 'circle',
+) -> bytearray:
+    """Composite the status badge onto an 8-bit RGBA buffer, source-over.
 
     Geometry scales from the 32-unit viewBox, so a 16px icon gets a
-    proportionally placed dot rather than a differently-designed one.
+    proportionally placed badge rather than a differently-designed one.
     """
     if width != height:
         raise ValueError(f'expected a square icon, got {width}x{height}')
@@ -265,7 +307,7 @@ def paint_dot(width: int, height: int, rgba: bytearray, colour: tuple[int, int, 
     cx, cy, r = DOT_CX * scale, DOT_CY * scale, DOT_R * scale
     sr, sg, sb = colour
     out = bytearray(rgba)
-    # Only the dot's bounding box can change.
+    # Only the badge's bounding box can change, and every shape shares it.
     x0, x1 = max(0, int(cx - r) - 1), min(width, int(cx + r) + 2)
     y0, y1 = max(0, int(cy - r) - 1), min(height, int(cy + r) + 2)
     for y in range(y0, y1):
@@ -275,7 +317,7 @@ def paint_dot(width: int, height: int, rgba: bytearray, colour: tuple[int, int, 
                 py = y + (sy + 0.5) / SS
                 for sx in range(SS):
                     px = x + (sx + 0.5) / SS
-                    if (px - cx) ** 2 + (py - cy) ** 2 <= r * r:
+                    if inside(shape, px - cx, py - cy, r):
                         hits += 1
             if not hits:
                 continue
@@ -316,15 +358,25 @@ def svg_scale(source: str) -> float:
     return width / 32.0
 
 
-def svg_variant(source: str, hex_colour: str) -> str:
-    """Insert the dot into the source SVG. Appended last so it paints on top."""
+def badge_element(cx: float, cy: float, r: float, hex_colour: str, shape: str) -> str:
+    """The badge as one SVG element, at the same geometry `inside` describes."""
+    if shape == 'circle':
+        return f'<circle cx="{cx:g}" cy="{cy:g}" r="{r:g}" fill="{hex_colour}"/>'
+    if shape == 'diamond':
+        points = ((cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy))
+        path = 'M' + 'L'.join(f'{x:g} {y:g}' for x, y in points) + 'Z'
+        return f'<path d="{path}" fill="{hex_colour}"/>'
+    raise ValueError(f'unknown badge shape {shape!r}')
+
+
+def svg_variant(source: str, hex_colour: str, shape: str = 'circle') -> str:
+    """Insert the badge into the source SVG. Appended last so it paints on top."""
     if '</svg>' not in source:
         raise ValueError('source SVG has no closing tag')
     scale = svg_scale(source)
     cx, cy, r = DOT_CX * scale, DOT_CY * scale, DOT_R * scale
-    circle = f'<circle cx="{cx:g}" cy="{cy:g}" r="{r:g}" fill="{hex_colour}"/>'
     head, _, tail = source.rpartition('</svg>')
-    return head + circle + '</svg>' + tail
+    return head + badge_element(cx, cy, r, hex_colour, shape) + '</svg>' + tail
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +400,10 @@ BASES = ('favicon.svg', 'favicon-32x32.png', 'favicon-16x16.png')
 # point at. A base an app does not ship is a hard error (see generate), which is
 # the guard that catches a renamed icon — so an app with one icon link declares
 # one base rather than being handed three and excused two.
+# `shapes` is optional and every cue it omits is a circle, which is what all
+# three shipped `--status-*` treatments are. It is validated against `colours` at
+# generate time, so a shape naming a cue the app has no colour for is an error
+# rather than a line that quietly does nothing.
 APPS: dict[str, dict[str, object]] = {
     # static-src/app.ts themes these two in oklch; --status-failed keeps the
     # library default from css/00-tokens.css.
@@ -370,18 +426,34 @@ APPS: dict[str, dict[str, object]] = {
     },
     # vibekit has no --status-* family, so the colours come from the vocabulary
     # its tab dots already use (static-src/css/01-tokens.css, the default theme's
-    # :root values): --c-yellow is the waiting/permission dot, so it is `input`;
-    # --c-green and --c-red carry done and alert. One icon serves both themes, so
-    # the light-theme overrides below the fold are deliberately not read.
+    # :root values): --c-orange is its `input` dot, --c-green its `done` and
+    # --c-red its `failed`, which is the state `alert` stands for.
+    #
+    # THE DARK VALUES, and one icon for both themes, by MEASUREMENT rather than by
+    # omission. The badge is composited onto static/favicon.svg, whose artwork is
+    # an opaque violet gradient (#A468FF -> #7E2FF0) and whose badge position sits
+    # at that gradient's exact midpoint, #914cf8. So the badge is never seen
+    # against an app surface, and the two themes are not two options: over that
+    # violet the dark pastels read 2.0-3.1:1 while the light deeps read 1.15-1.25:1,
+    # which is invisible. vibekit's `css-contrast.py dot` prints the table.
+    # A per-theme icon could not help anyway — the app's theme is a localStorage
+    # toggle, so it can disagree with the OS scheme an SVG favicon's own media
+    # query would see.
+    #
+    # `alert` is a DIAMOND because vibekit's `failed` tab dot is one: it and `done`
+    # were otherwise separable by hue alone, which is a WCAG 1.4.1 failure the tab
+    # vocabulary spends a shape to avoid, and the icon would have re-opened it for
+    # the one pair where confusing the two matters most.
     #
     # ONE base: static/index.html has a single `link[rel="icon"]`, the SVG. Its
     # viewBox is 48, not 32 — svg_scale handles that.
     'vibekit': {
         'colours': {
-            'input': oklch_to_hex(0.919, 0.07, 86.5),
+            'input': oklch_to_hex(0.81, 0.125, 55.9),
             'done': oklch_to_hex(0.858, 0.109, 142.7),
             'alert': oklch_to_hex(0.756, 0.13, 2.8),
         },
+        'shapes': {'alert': 'diamond'},
         'bases': ('favicon.svg',),
     },
 }
@@ -398,21 +470,33 @@ def variant_name(base: str, status: str) -> str:
 def generate(app: str, static: pathlib.Path) -> int:
     colours: dict[str, str] = APPS[app]['colours']  # type: ignore[assignment]
     bases: tuple[str, ...] = APPS[app]['bases']  # type: ignore[assignment]
+    shapes: dict[str, str] = APPS[app].get('shapes', {})  # type: ignore[assignment]
+    for status, shape in shapes.items():
+        if status not in colours:
+            raise SystemExit(f'{app}: shape for {status!r}, which has no colour')
+        if shape not in SHAPES:
+            raise SystemExit(f'{app}: {status!r} wants unknown shape {shape!r}')
     written = 0
     for base in bases:
         source = static / base
         if not source.exists():
             raise SystemExit(f'{app}: missing base icon {source}')
         for status, hex_colour in colours.items():
+            shape = shapes.get(status, 'circle')
             target = static / variant_name(base, status)
             if base.endswith('.svg'):
-                target.write_text(svg_variant(source.read_text(), hex_colour), encoding='utf-8')
+                target.write_text(
+                    svg_variant(source.read_text(), hex_colour, shape), encoding='utf-8'
+                )
             else:
                 width, height, rgba = png_decode(source.read_bytes())
-                painted = paint_dot(width, height, rgba, hex_to_rgb(hex_colour))
+                painted = paint_dot(width, height, rgba, hex_to_rgb(hex_colour), shape)
                 target.write_bytes(png_encode(width, height, bytes(painted)))
             written += 1
-            print(f'  {target.name:34s} {hex_colour}  {target.stat().st_size:>6d} B')
+            print(
+                f'  {target.name:34s} {hex_colour}  {shape:<8s}'
+                f'{target.stat().st_size:>6d} B'
+            )
     return written
 
 
