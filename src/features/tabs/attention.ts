@@ -137,7 +137,8 @@ export function createAttention(env: AttentionEnv): AttentionSurfaces {
 }
 
 /** iconVariantHref rewrites an icon URL to its variant, by the convention the
- *  asset generator writes (scripts/gen-attention-icons.py): the `favicon` token
+ *  asset generator writes (the fleet's .kiro/scripts/gen-attention-icons.py, which
+ *  serves every consuming app rather than living in this repo): the `favicon` token
  *  of the filename gains `-<variant>`, so `/favicon.svg` becomes
  *  `/favicon-input.svg` and `/favicon-32x32.png` becomes
  *  `/favicon-input-32x32.png`. The extension is preserved, so each link keeps

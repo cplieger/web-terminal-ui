@@ -146,7 +146,7 @@ export interface TabsOptions {
    *  be served alongside it with `-input`, `-done` and `-alert` inserted after
    *  that token (`/favicon.svg` needs `/favicon-input.svg`; `/favicon-32x32.png`
    *  needs `/favicon-input-32x32.png`). Generate them with
-   *  `scripts/gen-attention-icons.py`, which writes exactly those names, and
+   *  `.kiro/scripts/gen-attention-icons.py`, which writes exactly those names, and
    *  assert their presence in the APP's own tests — the library cannot check a
    *  file it does not ship, and a missing variant is a blank tab icon.
    *
