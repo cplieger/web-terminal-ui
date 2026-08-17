@@ -95,6 +95,6 @@
     "LICENSE",
     "README.md",
     "!src/**/*.test.ts",
-    "!src/**/fc-strict-setup.ts"
+    "!src/**/*-setup.ts"
   ]
 }

@@ -28,9 +28,11 @@ mkdir -p "$PKG/src"
 find "$PKG/src" -maxdepth 1 -name '*.ts' -delete
 # Ship only runtime source; tests/fuzz/setup pull in vitest/fast-check which
 # aren't installed in this package's node_modules and would break the typecheck.
+# The `*-setup.ts` suffix is the engine's convention for a vitest setup file, so
+# this glob covers any setup file it adds without needing this list updated.
 for f in "$ENGINE_DIR"/web/src/*.ts; do
   case "$f" in
-    *.test.ts | *fuzz* | *fc-strict-setup*) continue ;;
+    *.test.ts | *fuzz* | *-setup.ts) continue ;;
   esac
   cp "$f" "$PKG/src/"
 done
