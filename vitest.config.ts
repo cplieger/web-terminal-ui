@@ -31,13 +31,19 @@ export default defineConfig({
       concurrent: false,
       hooks: "stack",
     },
+    // Test-only setup files are named `*-setup.ts` and loaded here in order.
+    // That suffix is the convention every publish and analysis filter matches on
+    // (package.json `files`, jsr.json `publish.exclude`, stryker `mutate`, the
+    // coverage exclude below, scripts/verify.sh): they import vitest, which a
+    // consumer does not install, so shipping one breaks the consumer's build.
+    // Name any new setup file `*-setup.ts` and every filter covers it already.
     setupFiles: ["./src/fc-strict-setup.ts", "./src/dom-isolation-setup.ts"],
     printConsoleTrace: true,
     expandSnapshotDiff: true,
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
-      exclude: ["src/**/*.test.ts", "src/**/*.d.ts", "src/fc-strict-setup.ts"],
+      exclude: ["src/**/*.test.ts", "src/**/*.d.ts", "src/**/*-setup.ts"],
       reportOnFailure: true,
       reporter: ["text", "text-summary", "lcov"],
     },
