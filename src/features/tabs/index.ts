@@ -2561,6 +2561,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (activeId !== null) {
           return;
         }
+        // ...but only once the bootstrap has adopted its list. Before that the
+        // view is PARTIAL, and deterministically so: tabs subscribes to the status
+        // stream during setup, before resolveInitialSession issues its
+        // GET /api/sessions, so the SSE snapshot's one-event-per-session arrives
+        // first and this ran on a strip holding only whichever session the server
+        // sent first. Activating it both picked a tab on incomplete information and
+        // silently disabled the saved-tab restore: the bootstrap ladder's first act
+        // is to return early when activeId is already set, so localStorage was
+        // never read and every reload landed on the oldest tab. Boot activation
+        // belongs to that ladder alone, which is the only site with the whole list
+        // AND the saved id; this stays the runtime repair it was written to be.
+        if (!started) {
+          return;
+        }
         const first = tabList.find((t) => !isEndedStatus(statusOf(t))) ?? tabList[0];
         if (first) {
           switchTo(first.id);
@@ -4025,10 +4039,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         // From here on, tabs added at runtime (create / adopt) animate in.
         started = true;
-        // The SSE snapshot may have raced this bootstrap and already activated
-        // a tab (ensureActive during the await above). The switch is then
-        // already in flight — return null; the kernel sees connectionInitiated
-        // and leaves the loading overlay to the normal ready path.
+        // Something already activated a tab while the list was in flight. The
+        // chrome mounts synchronously, so a user can tap a chip (or a delivered
+        // notification can be clicked) before this resolves, and an explicit
+        // gesture outranks the saved id — return null and leave that switch alone;
+        // the kernel sees connectionInitiated and leaves the loading overlay to
+        // the normal ready path. ensureActive is deliberately NOT one of these
+        // callers during boot (see its `started` gate): when it was, the SSE
+        // snapshot won this race on every load and the ladder below never ran.
         if (activeId !== null) {
           return null;
         }

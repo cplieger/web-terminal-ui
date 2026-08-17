@@ -399,6 +399,65 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s2");
   });
 
+  it("restores the saved active tab when the status snapshot wins the boot race", async () => {
+    // The test above passes with no activityMonitor, so nothing races the
+    // bootstrap. The real app always has one, and it always wins: tabs subscribes
+    // during setup, before resolveInitialSession issues GET /api/sessions, so the
+    // SSE snapshot adopts every session first. ensureActive then fired on the
+    // FIRST of those events — a one-tab view — activated it, and the bootstrap
+    // ladder found activeId already set and returned before ever reading the saved
+    // id. Every reload landed on the oldest tab.
+    localStorage.setItem("wt-active-session", "s2");
+    const monitor = snapshotMonitor([
+      { id: "s1", status: "idle", title: "one", createdAt: "1" },
+      { id: "s2", status: "idle", title: "two", createdAt: "2" },
+    ]);
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [monitor, tabs({ activityMonitor: monitor })] });
+    await until(() => root.querySelectorAll(".wt-tab").length >= 2);
+    // Let the bootstrap's list round-trip settle, which is what chooses the tab.
+    await new Promise((r) => setTimeout(r, 0));
+
+    const tabEls = root.querySelectorAll(".wt-tab");
+    expect(tabEls[1]?.classList.contains("wt-tab-active")).toBe(true);
+    expect(tabEls[0]?.classList.contains("wt-tab-active")).toBe(false);
+    // Exactly one connect, to the saved session: activating s1 first and
+    // correcting to s2 would flash the wrong screen and burn a WS attach.
+    expect(setSession.mock.calls.map((c) => c[0])).toEqual(["s2"]);
+  });
+
+  it("activates a tab adopted after the bootstrap failed (server down at load, then back)", async () => {
+    // The bootstrap total-fails: the list rejects, and so does the create it falls
+    // back to, so it returns having activated nothing and leaves the retry chrome
+    // up. When the server comes back and the status stream adopts a session,
+    // ensureActive must activate it, or the tab renders inert (blank, never
+    // connecting) until the user taps it.
+    //
+    // This is the path ensureActive's `started` gate must NOT close, and the
+    // reason `started` is set on every exit from the bootstrap rather than only
+    // the successful one. Two rejections, so the shared fetch mock's base
+    // implementation is left intact for the rest of the suite.
+    fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
+    fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => fetchMock.mock.calls.length >= 2);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(root.querySelectorAll(".wt-tab").length).toBe(0);
+    expect(setSession).not.toHaveBeenCalled();
+
+    // The server is back, and the stream pushes a session that already exists.
+    monitor.emit({ id: "s9", status: "idle", title: "recovered", createdAt: "9" });
+    await until(() => root.querySelectorAll(".wt-tab.wt-tab-active").length === 1);
+    expect(root.querySelectorAll(".wt-tab.wt-tab-active").length).toBe(1);
+    expect(setSession).toHaveBeenCalledWith("s9");
+  });
+
   it("falls back to the oldest tab when the saved active id no longer exists", async () => {
     // The saved tab was closed before the reload; activate the oldest instead.
     localStorage.setItem("wt-active-session", "s-gone");
