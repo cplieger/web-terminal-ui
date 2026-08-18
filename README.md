@@ -174,6 +174,7 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
 | `persistScrollback` | _(off)_                      | Persist each session's scrollback across a page discard, through storage YOU supply. A page that is discarded and reloaded otherwise resumes holding nothing, so it asks the server for everything and refills its whole buffer over the wire — the normal case on iOS, where Safari evicts backgrounded tabs under memory pressure and returning to one re-runs the page. With a snapshot restored, the resume asks only for what was printed while the tab was gone. It helps the FRESH-LOAD case only: a warm reconnect and an in-page tab switch already replay nothing. Off by default because `localStorage` is a shared, origin-wide, quota-limited resource and this library is embedded in applications that keep their own state there — an application decides durability for its own users, a library does not decide it for an embedder. Applies to a single terminal and to every tab alike. See below.                                                                                                                                                                                                                                                                                                                                                                                                |
 | `loading`           | _(none)_                     | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `onFatalError`      | _(built-in recovery)_        | Called with a `TerminalStartupFailure` after a fatal startup failure, in either phase (`feature-setup` or `kernel-init`); behavior below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `onSessionEnded`    | _(none)_                     | Called when the active session's process has ended and nothing is retrying — the fact the banner renders as "Session ended". Wire it only if you can act on it: the recovery move is `handle.reattach()`, and whether that helps depends on what your endpoint does on the next connect (see "When a session ends"). Observation only; everything the kernel does about the end happens first and happens regardless, and a handler that throws is logged rather than allowed to take the banner down with it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `theme`             | _(none)_                     | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input`, `--status-warning`, `--status-failed`. The library ships neutral defaults. If you retheme the animated trio (`--status-working` / `--status-warning` / `--status-failed`), keep their LIGHTNESS spread: they differ only in hue, so equal-lightness replacements collapse into one another in greyscale and under deuteranopia.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 `createTerminal()` returns a handle: `focus()` re-focuses the terminal input
@@ -181,8 +182,9 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
 session through the kernel's sanitizing input funnel (the supported host path
 for a "type this command" affordance); `reset()` drops the local scrollback and
 screen without injecting keystrokes (send a redraw keystroke yourself if you
-want one, for example Ctrl+L); and `destroy()` tears every feature down and
-releases the kernel.
+want one, for example Ctrl+L); `reattach()` attaches again to whatever the server
+serves now, for a session that has ended (see "When a session ends"); and
+`destroy()` tears every feature down and releases the kernel.
 
 ### Persisting scrollback across a discard
 
@@ -386,6 +388,49 @@ anything by definition. Take its wording from `STARTUP_FAILURE_COPY` (exported a
 the package root and at `@cplieger/web-terminal-ui/startup-copy`, which imports
 nothing and touches no DOM so a build script can read it) and substitute the
 strings into your HTML at build time, rather than restating them by hand.
+
+### When a session ends
+
+A session whose process exits is over: the engine closes with its definitive
+process-exited code, the banner reads "Session ended", and no reconnect is
+attempted. That refusal is deliberate. On a server that hands each session its own
+endpoint, reconnecting could only collect the same close again, which is an
+endless "Reconnecting…" flap over a screen that will never change.
+
+Some hosts are the other shape. If your endpoint hands out a NEW session on the
+next connect — one shared PTY the server replaces once it is spent, an endpoint
+that spawns on attach — then the connection the engine declines to make is exactly
+what would produce a working terminal, and you are the only party who knows that.
+So the library gives you the fact and the move, and keeps the policy out of it:
+
+```ts
+const term = createTerminal("#terminal", {
+  features: presetTouch,
+  wsPath: "/api/shell/ws",
+  onSessionEnded: () => {
+    // Your endpoint's own restart call goes here if it needs one, then:
+    term.reattach();
+  },
+});
+```
+
+`reattach()` drops the local scrollback and screen, moves the connection state
+off `ended`, and reconnects. The order is the reason it belongs here: the local
+buffer holds the dead session's content and a line index the replacement has
+never reached, so a bare reconnect would resume against the wrong index space, and
+a bare reset would leave "Session ended" standing over a screen it just blanked.
+
+It reconnects and nothing more. It starts no process and calls no API of yours, so
+if your server needs to be told to make a new session, tell it first and reattach
+after. Do not call it on a live session: that is a needless full replay, and it
+drops history the server may have evicted since.
+
+**Bound your own retries.** A shell that dies as fast as it is spawned will end
+again the moment it is replaced, so a handler that reattaches unconditionally is a
+hot loop. Count consecutive ends, back off, and stop after a few — the banner is
+the honest outcome when a session cannot stay up. The library will not do this for
+you, because how many attempts is worth making, and whether any are, is a fact
+about your server rather than about this terminal.
 
 ## What ships
 
