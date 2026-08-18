@@ -690,15 +690,29 @@
    in css/31-switcher.css. On the narrow-coarse phone the strip is hidden and
    the mobile switcher's inset is applied through viewport.ts
    (--wt-reserve-bottom) instead. Two rules because the class half cannot mix
-   into a media condition; they set the same declaration. */
+   into a media condition; they set the same declaration.
+
+   The clearance is the strip's height PLUS --safe-bottom, because that is where
+   the strip is: .wt-tab-bar sits at `bottom: var(--safe-bottom)`, so the band it
+   occupies runs from --safe-bottom to --safe-bottom + --wt-tabbar-h. Clearing
+   the height alone left the surface reaching exactly env(safe-area-inset-bottom)
+   past the strip's top edge — 0 on a desktop, 20px in iPad Safari (viewport-fit
+   is cover, so the insets are live), where the terminal grew one extra row that
+   rendered behind the strip. --wt-tabbar-h is the bar's OWN height and must stay
+   that: the wide-touchscreen key grid (31-switcher.css) already adds the inset to
+   it itself, and folding the inset into the variable would double-count there.
+   The mobile switcher reaches the same total from the other direction, measuring
+   `innerHeight - rect.top` so the inset rides along inside --wt-reserve-bottom.
+   --kb-inset is deliberately absent: viewport.ts owns the keyboard case by
+   writing an inline bottom on the surface, which outranks this rule entirely. */
 @media (pointer: fine) {
   :where(.wt-root) .term.wt-with-tabbar {
-    bottom: var(--wt-tabbar-h, 44px);
+    bottom: calc(var(--wt-tabbar-h, 44px) + var(--safe-bottom, 0px));
   }
 }
 
 :where(.wt-root:not(.wt-narrow)) .term.wt-with-tabbar {
-  bottom: var(--wt-tabbar-h, 44px);
+  bottom: calc(var(--wt-tabbar-h, 44px) + var(--safe-bottom, 0px));
 }
 
 /* ===== Activity dots (activityMonitor via tabs) =====

@@ -25,6 +25,9 @@ const primitives = readFileSync(path.join(cssDir, "10-primitives.css"), "utf8");
 const scrollToBottomCss = readFileSync(path.join(cssDir, "21-scroll-to-bottom.css"), "utf8");
 const page = readFileSync(path.join(cssDir, "page.css"), "utf8");
 const animations = readFileSync(path.join(cssDir, "40-animations.css"), "utf8");
+// The one non-CSS source read here: the strip's height is measured in TS and
+// consumed in CSS, so the pairing spans the two.
+const tabsFeature = readFileSync(path.join(packageDir, "src/features/tabs/index.ts"), "utf8");
 
 describe("engine-toggled class contract", () => {
   it("styles DECSCNM reverse video (.term-reverse-video) as a default-pair swap", () => {
@@ -140,6 +143,72 @@ describe("press-class contract for the focus-holding buttons", () => {
     expect(
       new RegExp(`${escaped}\\.wt-pressed`).test(css),
       `${selector}.wt-pressed accompanies it`,
+    ).toBe(true);
+  });
+});
+
+// Same shape one axis over: a geometry pairing whose two halves live in
+// different rules, each self-consistent alone.
+//
+// The bottom-docked strip is anchored ABOVE the safe area
+// (.wt-tab-bar { bottom: var(--safe-bottom) }), so the band it occupies runs
+// from --safe-bottom to --safe-bottom + --wt-tabbar-h. A surface clearance
+// written as the strip height alone therefore reaches env(safe-area-inset-bottom)
+// past the strip's top edge. That is 0 on a desktop and 20px in iPad Safari, so
+// it reads as correct everywhere the CI and the sidecar can look: it shipped from
+// v4 (the release that put a wide touchscreen on the desktop strip instead of the
+// phone switcher) until it was measured on a real iPad, where the engine sized the
+// PTY two rows taller than the visible area and the shell's prompt rendered behind
+// the strip.
+//
+// The mobile switcher reaches the same total from the other direction, measuring
+// `innerHeight - rect.top` so the inset rides inside --wt-reserve-bottom, and the
+// wide-touchscreen key grid adds the inset to --wt-tabbar-h itself. So this asserts
+// the WHOLE set: whatever clears the strip accounts for where the strip actually is.
+describe("bottom-strip clearance contract (the safe-area pairing)", () => {
+  const barRule = /:where\(\.wt-root\)\s*\.wt-tab-bar\s*\{([\s\S]*?)\n\}/.exec(tabs);
+
+  it("anchors the strip above the safe area, which is the premise of the rest", () => {
+    expect(barRule, ":where(.wt-root) .wt-tab-bar rule exists in 30-tabs.css").not.toBeNull();
+    expect(
+      /bottom:\s*var\(--safe-bottom/.test(barRule![1]!),
+      "the bar is lifted by the inset",
+    ).toBe(true);
+  });
+
+  it.each([
+    [
+      "the fine-pointer rule",
+      /@media \(pointer: fine\) \{\n\s*:where\(\.wt-root\) \.term\.wt-with-tabbar \{([^}]*)\}/,
+    ],
+    [
+      "the non-narrow rule",
+      /:where\(\.wt-root:not\(\.wt-narrow\)\) \.term\.wt-with-tabbar \{([^}]*)\}/,
+    ],
+  ])("clears the strip's whole band in %s", (_name, pattern) => {
+    const rule = pattern.exec(tabs);
+    expect(rule, "the clearance rule exists").not.toBeNull();
+    const body = rule![1]!;
+    // Both terms, not just the height: the height alone is the defect this guards.
+    expect(/var\(--wt-tabbar-h/.test(body), "clears the strip's own height").toBe(true);
+    expect(/var\(--safe-bottom/.test(body), "AND the safe area it is lifted by").toBe(true);
+  });
+
+  it("keeps --wt-tabbar-h meaning the strip's own height, so no consumer double-counts", () => {
+    // The measurement the CSS above depends on: tabs publishes bar.offsetHeight,
+    // the element's own box. Folding the inset into the variable instead would
+    // double-count in the key grid, which adds --safe-bottom to it itself.
+    expect(
+      /--wt-tabbar-h[\s\S]{0,60}bar\.offsetHeight/.test(tabsFeature),
+      "the strip's height is published as the bar's own offsetHeight",
+    ).toBe(true);
+    const grid = /:where\(\.wt-root\) \.key-toolbar\.wt-toolbar-external \{([\s\S]*?)\n {2}\}/.exec(
+      switcher,
+    );
+    expect(grid, "the wide-touchscreen key-grid rule exists in 31-switcher.css").not.toBeNull();
+    expect(
+      /var\(--wt-tabbar-h[^;]*var\(--safe-bottom/.test(grid![1]!),
+      "the key grid adds the inset to it on its own",
     ).toBe(true);
   });
 });
