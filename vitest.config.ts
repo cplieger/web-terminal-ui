@@ -8,9 +8,27 @@ export default defineConfig({
   test: {
     environment: "node",
     pool: "threads",
-    isolate: false,
+
+    // Each test file gets its own module graph. isolate:false was faster but
+    // unsound here: kernel.test.ts and kernel-persist.test.ts each replace the
+    // WHOLE @cplieger/web-terminal-engine module with their own factory, and
+    // with a shared registry whichever file loads first wins for the rest of
+    // the worker. kernel.ts then called a function the other file's stub does
+    // not define. The symptom moves with the packing order, which is the tell:
+    // "render.dropBrowseCache is not a function" and
+    // "scroll.stickToBottom is not a function" from consecutive runs of the
+    // same commit. It only surfaces where workers are scarce enough to pack
+    // those two files together, so it was invisible locally (34 files, 650
+    // tests, all green) and failed on every 4-CPU CI run: 3 of 3 reproduced
+    // when pinned to 4 CPUs. vibekit's config carries the same note after the
+    // same bug. Measured cost here: 3.62s to 4.41s.
+    isolate: true,
+
     include: ["src/**/*.test.ts"],
-    exclude: ["node_modules/**"],
+    // .stryker-tmp holds Stryker's sandbox, a full copy of this directory. A
+    // run that dies before cleanTempDir leaves it behind, and without this the
+    // next plain `vitest --run` collects every test twice.
+    exclude: ["node_modules/**", "**/.stryker-tmp/**"],
     passWithNoTests: false,
     allowOnly: false,
     globals: false,
