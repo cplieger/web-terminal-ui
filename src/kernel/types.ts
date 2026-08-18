@@ -645,6 +645,22 @@ export interface CreateTerminalOptions {
    *  surface, so a reporting failure cannot leave the page blank. */
   // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- an observing handler returns nothing; only a literal `true` claims the recovery surface, so forcing `return undefined` on every observer is worse than the union
   onFatalError?: (failure: TerminalStartupFailure) => boolean | void;
+  /** Called when the active session's process has ended and nothing is retrying:
+   *  the engine's definitive process-exited close, the same fact the connection
+   *  banner renders as "Session ended".
+   *
+   *  Wired by a host that can do something about it, which means a host that
+   *  knows its endpoint yields a new session on the next connect (see
+   *  `TerminalHandle.reattach`). Everything the kernel does about the end — lower
+   *  the loading overlay, surface the state, discard an unconfirmed restore —
+   *  happens first and happens regardless, so a host that wires nothing loses
+   *  nothing, and a callback that throws cannot take the banner down with it (the
+   *  throw is logged and swallowed).
+   *
+   *  Observation only: the recovery POLICY stays with the host, deliberately.
+   *  Whether to reattach at all, how many times and how fast depends on what sits
+   *  behind the endpoint, which this library does not know. */
+  onSessionEnded?: () => void;
   /** Theme overrides: CSS custom properties set on the terminal root so a
    *  consumer recolors the UI (accent, tab hover/active, the activity-dot
    *  palette) without shipping CSS. Keys must be CSS custom-property names
@@ -679,6 +695,28 @@ export interface TerminalHandle {
    *  no keystroke — a host that wants a freshly drawn prompt sends one itself
    *  (e.g. Ctrl+L via send()). No-op after destroy(). */
   reset(): void;
+  /** Attach again to whatever the server serves now, discarding this terminal's
+   *  view of the session that is gone.
+   *
+   *  For the one state the kernel cannot leave on its own: `ended`. The engine
+   *  refuses to reconnect a definitively closed session, and it is right to on a
+   *  per-session server, where reconnecting could only collect the same close
+   *  again. A host whose endpoint hands out a NEW session on the next connect —
+   *  one shared PTY that the server replaces once it is spent — is the only party
+   *  that knows a reconnect is worth making, so it is the party that asks.
+   *
+   *  Three steps, in this order, and none of them is a host's to perform: drop
+   *  the local scrollback and screen (the old session's content, and a stale
+   *  absolute-index base whose `haveThrough` would otherwise claim lines the new
+   *  session has never reached), move the connection state off `ended` so the
+   *  banner stops contradicting a blank screen, then reconnect.
+   *
+   *  Reconnecting is ALL it does: it starts no process and asks the server for
+   *  nothing. Whatever makes a new session exist is the host's own call to its
+   *  own API, made before this one. Do not call it on a live session — that is a
+   *  needless full replay, and it drops history the server may have evicted since.
+   *  No-op after destroy(). */
+  reattach(): void;
   /** Tear down every feature in reverse order, dispose all subscriptions, and
    *  release the kernel's DOM and engine wiring. */
   destroy(): void;

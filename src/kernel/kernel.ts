@@ -689,7 +689,7 @@ function buildTerminal(
     },
     onProcessExit() {
       // The engine's definitive 4001 close: the session's process has exited
-      // and the engine will not reconnect it. Two jobs here. markReady()
+      // and the engine will not reconnect it. Three jobs here. markReady()
       // guarantees the page is usable even when the exit lands before any
       // screen frame (attaching to an already-dead session on a server that
       // races the replay) — without it the loading overlay would sit on top of
@@ -700,6 +700,18 @@ function buildTerminal(
       discardUnverifiedRestore({ session: connection.currentSessionId() });
       markReady();
       connState.ended();
+      // The host's turn, and LAST: everything above is unconditional, so a
+      // handler that throws cannot leave the page without its overlay lowered
+      // or its banner shown. The host is told because the kernel's own answer
+      // stops here — only the host knows whether its endpoint yields a new
+      // session on the next connect, which is what reattach() is for.
+      if (opts.onSessionEnded !== undefined) {
+        try {
+          opts.onSessionEnded();
+        } catch (err) {
+          console.error("web-terminal-ui: onSessionEnded handler failed", err);
+        }
+      }
     },
     onWireIncompatible() {
       // Compatibility refusal is terminal for this page instance. Lower the
@@ -1762,6 +1774,22 @@ function buildTerminal(
       }
       render.resetScrollback();
       render.resetScreen();
+    },
+    reattach() {
+      if (destroyed) {
+        return;
+      }
+      // The old session's content goes first: it belongs to a process that is
+      // gone, and holding it would also put a `haveThrough` on the resume that
+      // claims lines above anything the replacement has committed.
+      render.resetScrollback();
+      render.resetScreen();
+      // Off `ended`, or the banner would keep saying "Session ended" over a
+      // screen this call just blanked. `reconnecting` carries a grace delay, so a
+      // connect that lands promptly shows no banner at all and a slow one reads
+      // as what it is.
+      connState.reconnecting();
+      connection.reconnectNow();
     },
     destroy() {
       if (rootReleased) {

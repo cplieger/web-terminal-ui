@@ -18,6 +18,7 @@ const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.ini
 const connect = vi.fn();
 const setSession = vi.fn<(id: string) => void>();
 const disconnect = vi.fn();
+const reconnectNow = vi.fn();
 const resetScrollback = vi.fn();
 const resetScreen = vi.fn();
 const renderInit = vi.fn<(opts: Parameters<typeof Engine.render.init>[0]) => void>();
@@ -78,7 +79,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       connect,
       sendBinary,
       sendResize: vi.fn(),
-      reconnectNow: vi.fn(),
+      reconnectNow,
       disconnect,
       setSession,
       forgetSession: vi.fn(),
@@ -102,6 +103,7 @@ beforeEach(async () => {
   connect.mockClear();
   setSession.mockClear();
   disconnect.mockClear();
+  reconnectNow.mockClear();
   resetScrollback.mockClear();
   resetScreen.mockClear();
   renderInit.mockClear();
@@ -366,6 +368,123 @@ describe("process exit (the engine's definitive 4001 close)", () => {
 
     expect(loading.classList.contains("fade")).toBe(true);
     expect(seen).toContain("incompatible");
+  });
+
+  it("tells the host, after doing its own work, so a throwing handler costs nothing", async () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const seen: string[] = [];
+    const watcher: TerminalFeature = {
+      name: "throwing-host-watcher",
+      setup(ctx) {
+        ctx.on("connection:state", (s) => {
+          seen.push(s);
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    const onSessionEnded = vi.fn(() => {
+      throw new Error("host blew up");
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    createTerminal(root, { features: () => [watcher], loading, onSessionEnded });
+    await tick();
+
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    // The kernel must not rethrow into the engine's close handler either: the
+    // socket teardown is mid-flight and has nowhere to put an exception.
+    expect(() => {
+      cbs.onProcessExit?.();
+    }).not.toThrow();
+
+    expect(onSessionEnded).toHaveBeenCalledTimes(1);
+    // Both unconditional halves survived the throw.
+    expect(loading.classList.contains("fade")).toBe(true);
+    expect(seen).toContain("ended");
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("leaves the host uninformed about an ordinary close, which is not an end", async () => {
+    const onSessionEnded = vi.fn();
+    createTerminal(rootIn(), { features: () => [], onSessionEnded });
+    await tick();
+
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onClose();
+
+    expect(onSessionEnded).not.toHaveBeenCalled();
+  });
+});
+
+// The host's way out of `ended`, which is the one connection state the kernel
+// cannot leave on its own: the engine will not reconnect a definitively closed
+// session, and only the host knows whether its endpoint yields a new one on the
+// next connect.
+describe("reattach", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("drops the dead session's content, leaves the ended state, and reconnects", async () => {
+    const root = rootIn();
+    const seen: string[] = [];
+    const watcher: TerminalFeature = {
+      name: "reattach-state-watcher",
+      setup(ctx) {
+        ctx.on("connection:state", (s) => {
+          seen.push(s);
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    const term = createTerminal(root, { features: () => [watcher] });
+    await tick();
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onProcessExit?.(); // the definitive close; also marks the kernel loaded
+    resetScrollback.mockClear();
+    resetScreen.mockClear();
+    seen.length = 0;
+    vi.useFakeTimers();
+
+    term.reattach();
+
+    // The old PTY's screen goes before the connect, so the resume cannot claim
+    // lines above what the replacement has committed.
+    expect(resetScrollback).toHaveBeenCalledTimes(1);
+    expect(resetScreen).toHaveBeenCalledTimes(1);
+    expect(reconnectNow).toHaveBeenCalledTimes(1);
+    // And the banner stops saying "Session ended" over the blanked screen. The
+    // transition carries the machine's grace delay, so a connect that lands
+    // promptly shows nothing at all.
+    expect(seen).not.toContain("reconnecting");
+    vi.advanceTimersByTime(1000);
+    expect(seen).toContain("reconnecting");
+  });
+
+  it("injects no keystrokes, and starts nothing: reconnecting is all it does", async () => {
+    const term = createTerminal(rootIn(), { features: () => [] });
+    await tick();
+    sendBinary.mockClear();
+
+    term.reattach();
+
+    expect(sendBinary).not.toHaveBeenCalled();
+    expect(setSession).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op after destroy, like every other handle member", async () => {
+    const term = createTerminal(rootIn(), { features: () => [] });
+    await tick();
+    term.destroy();
+    reconnectNow.mockClear();
+    resetScrollback.mockClear();
+
+    term.reattach();
+
+    expect(reconnectNow).not.toHaveBeenCalled();
+    expect(resetScrollback).not.toHaveBeenCalled();
   });
 });
 
