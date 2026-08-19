@@ -73,10 +73,15 @@ body {
   --wt-loading-bg: #000;
   --wt-loading-bar-inline-size: min(220px, 62vw);
   --wt-loading-bar-block-size: 5px;
-  /* Symmetric ease-in-out-cubic, deliberately NOT one of the component easing
-     tokens: those are all asymmetric (they settle at one end), which reads as a
-     stutter on a looping indeterminate sweep. */
-  --wt-loading-sweep-easing: cubic-bezier(0.65, 0, 0.35, 1);
+  /* Symmetric, deliberately NOT one of the component easing tokens: those are all
+     asymmetric (they settle at one end), which reads as a stutter on a looping
+     indeterminate sweep. It is also deliberately NOT an ease-in-out-cubic
+     (`cubic-bezier(0.65, 0, 0.35, 1)`, what this was): a curve with zero velocity
+     at both ends spends its two slow phases exactly where the sweep is clipped
+     off-screen, which measured as 315 ms of blank track at each end of every
+     1.5 s lap. Non-zero end velocity keeps the symmetry and cuts that to 90 ms,
+     below the point where the loop reads as a stall. */
+  --wt-loading-sweep-easing: cubic-bezier(0.3, 0.25, 0.7, 0.75);
   --wt-loading-sweep-duration: 1.5s;
 
   position: fixed;
@@ -129,6 +134,15 @@ body {
   content: "";
   position: absolute;
   inset-block: 0;
+  /* Load-bearing, and the whole reason the sweep used to enter mid-track: with
+     both inline offsets `auto` an absolutely positioned box falls back to its
+     STATIC position, and .wt-loading sets `text-align: center`, which centres
+     that static position inside the 220px track. The keyframes below are written
+     against the track's left edge, so every offset was silently shifted right by
+     (220 - 92.4) / 2 = 64px: the sweep was already visible at t=0 near the left
+     of centre, and it left the track at ~73% of the cycle. Pinning the origin is
+     what makes translateX(-100%) mean "one full sweep-width off the left edge". */
+  inset-inline-start: 0;
   inline-size: 42%;
   border-radius: inherit;
   background: linear-gradient(
@@ -167,12 +181,17 @@ body {
   opacity: 0;
 }
 
+/* Offsets are percentages of the SWEEP (42% of the track), not of the track, so
+   -100% is exactly one sweep-width left of the origin (fully clipped, flush with
+   the left edge) and 100% / 0.42 = 238% puts its left edge flush with the right
+   edge. Flush at both ends rather than over-travelled: every pixel of travel
+   outside the track is dead time on a screen whose only job is to look alive. */
 @keyframes wt-loading-slide {
   0% {
-    transform: translateX(-110%);
+    transform: translateX(-100%);
   }
   100% {
-    transform: translateX(250%);
+    transform: translateX(238%);
   }
 }
 
