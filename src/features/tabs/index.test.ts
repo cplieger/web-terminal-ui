@@ -155,6 +155,10 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       updateReverseVideo: vi.fn(),
       resetScrollback: vi.fn(),
       resetScreen: vi.fn(),
+      // Only reached by the kernel's own `freeze` handler, which a tabs test
+      // dispatches when it checks that freezing a background tab does NOT clear
+      // the attention surfaces.
+      dropBrowseCache: vi.fn(),
       bind,
       captureViewMemory,
       boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
@@ -2341,6 +2345,55 @@ describe("tabs OSC 9 status chrome", () => {
     expect(document.title).toBe("(1) Host page");
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
+    expect(document.title).toBe("(1) Host page");
+    void root;
+  });
+
+  it("hands the page's own icon and title back when the page goes away", async () => {
+    // A browser remembers ONE icon per URL and renders it for the bookmark, the
+    // history row and the new-tab tile, so a tab closed on a lit cue would leave a
+    // status variant standing in for the app until the page is next loaded.
+    document.title = "Host page";
+    document.head.insertAdjacentHTML("beforeend", '<link rel="icon" href="/favicon.svg">');
+    const iconHref = (): string | null =>
+      document.querySelector('link[rel~="icon"]')?.getAttribute("href") ?? null;
+    try {
+      const { root, monitor } = await withMonitor({ attentionIcons: true });
+      monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+      expect(document.title).toBe("(1) Host page");
+      expect(iconHref()).toBe("/favicon-input.svg");
+
+      window.dispatchEvent(new Event("pagehide"));
+      expect(document.title).toBe("Host page");
+      expect(iconHref()).toBe("/favicon.svg");
+
+      // A bfcache entry fires the same event and that page comes BACK, so the
+      // fold has to re-run rather than be trusted: the sinks are change-gated on
+      // the last applied value, so nothing else would repaint the cue.
+      const restored = new Event("pageshow");
+      Object.defineProperty(restored, "persisted", { value: true });
+      window.dispatchEvent(restored);
+      expect(document.title).toBe("(1) Host page");
+      expect(iconHref()).toBe("/favicon-input.svg");
+      void root;
+    } finally {
+      document.querySelector('link[rel~="icon"]')?.remove();
+    }
+  });
+
+  it("KEEPS the cue when the browser merely freezes a background tab", async () => {
+    // The case the restore must not reach. A frozen tab is still in the strip
+    // rendering its icon and its title, so `freeze` is not a proxy for the page
+    // going away and restoring there would blank the cue in exactly the case the
+    // cue exists for. (The kernel listens to `freeze` for its own scrollback
+    // write; that is a different question with a different answer.)
+    document.title = "Host page";
+    const { root, monitor } = await withMonitor();
+    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    expect(document.title).toBe("(1) Host page");
+
+    document.dispatchEvent(new Event("freeze"));
+
     expect(document.title).toBe("(1) Host page");
     void root;
   });
