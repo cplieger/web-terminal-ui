@@ -56,8 +56,8 @@
    invisible. It is NOT free: every backdrop-filter surface holds an offscreen
    copy of what is behind it plus the blurred result, re-derived when that
    content changes — a standing compositor allocation on exactly the
-   memory-constrained devices this UI targets (see the iOS-memory section of
-   the steering doc). An EMBEDDED root (wt-container) keeps the frosting: the
+   memory-constrained devices this UI targets. An EMBEDDED root (wt-container)
+   keeps the frosting: the
    host's own page can sit behind the bar there, which is what the blur is
    for. */
 :where(.wt-root.wt-container) .wt-tab-bar {
