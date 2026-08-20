@@ -152,7 +152,13 @@ export interface TabsOptions {
    *
    *  Not every platform honours it: Safari caches the first icon it fetched and
    *  ignores later changes, and an installed app has no tab icon at all. The
-   *  title count is not gated on this, so those cases lose nothing. */
+   *  title count is not gated on this, so those cases lose nothing.
+   *
+   *  The links are restored on `pagehide` as well as on teardown, because a
+   *  browser remembers one icon per URL and renders it for the bookmark, the
+   *  history row and the new-tab tile. Best-effort there, since the write races
+   *  the unload. Deliberately not on `freeze`: a frozen background tab is still in
+   *  the strip rendering its icon, which is the case this exists for. */
   attentionIcons?: boolean;
 }
 
@@ -600,6 +606,39 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
       document.addEventListener("visibilitychange", onPageVisible);
+
+      // onPageGone hands the page's own icon back before the page GOES AWAY,
+      // which is a different question from the page being hidden and needs a
+      // different event. A browser remembers ONE icon per URL and renders it for
+      // the bookmark, the history row and the new-tab tile, so a tab closed while
+      // a cue was lit leaves a status variant standing in for the app until the
+      // page is next loaded.
+      //
+      // `pagehide`, and deliberately NOT `freeze`. freeze fires for a background
+      // tab the browser is conserving resources on (Android after five minutes in
+      // the background; desktop for a collapsed tab group and, since Chrome 133, a
+      // CPU-heavy tab under Energy Saver), and that tab is STILL in the strip
+      // rendering its icon — restoring there would blank the cue in exactly the
+      // case the cue exists for. pagehide fires on unload, tab close and bfcache
+      // entry, where no strip entry is left to render.
+      //
+      // Through apply() rather than the icon sink directly, because the sinks are
+      // change-gated on the last applied value: writing behind that memo would
+      // leave it believing the variant is still up, and a page restored from the
+      // bfcache would then never repaint it. Which is what onPageBack is for — a
+      // bfcache restore re-runs the fold, so the cue returns for a page that did
+      // not actually go away. Best-effort on a real unload, where the icon write
+      // races the teardown, and a no-op when nothing was lit.
+      function onPageGone(): void {
+        attention.apply(NO_ATTENTION);
+      }
+      function onPageBack(event: PageTransitionEvent): void {
+        if (event.persisted) {
+          paintAttention();
+        }
+      }
+      window.addEventListener("pagehide", onPageGone);
+      window.addEventListener("pageshow", onPageBack);
 
       // paintAttention re-derives the whole attention state from the tab list and
       // this viewer's acknowledgements, and hands it to the surfaces.
@@ -4115,6 +4154,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           offMenuKey();
           document.removeEventListener("click", onDocClickMenu);
           document.removeEventListener("visibilitychange", onPageVisible);
+          window.removeEventListener("pagehide", onPageGone);
+          window.removeEventListener("pageshow", onPageBack);
           document.removeEventListener("contextmenu", onDocContextMenu);
           document.removeEventListener("pointerup", onDocTapDismiss, true);
           document.removeEventListener("dragover", onDocTabDrop);
