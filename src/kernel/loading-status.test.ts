@@ -243,4 +243,117 @@ describe("loading overlay status text", () => {
     }).not.toThrow();
     expect(document.querySelector(".wt-loading-text")).toBeNull();
   });
+
+  it("keeps the announced line off-screen, so the wording is not on screen twice", () => {
+    // The visible line and the announced line carry the same sentence at the
+    // first threshold. The announced one is a live region's payload, not a
+    // second paragraph, so it is clipped by the same technique the kernel
+    // announcer uses; without that the overlay reads the message twice.
+    const o = overlayIn();
+    status = attachLoadingStatus(o);
+    vi.advanceTimersByTime(INITIAL_DELAY_MS);
+
+    const live = o.querySelector<HTMLElement>(".wt-loading-live");
+
+    expect(live?.style.clipPath).toBe("inset(50%)");
+    expect(live?.style.position).toBe("absolute");
+    expect(live?.style.blockSize).toBe("1px");
+  });
+
+  it("fades the old wording out before writing the new one", () => {
+    // A message that swaps instantly reads as a glitch, and the CSS transition
+    // it fades with is on .wt-loading-text-out (css/page.css). The FIRST write
+    // deliberately skips the fade: there is nothing to fade out and the line
+    // would arrive half-transparent.
+    const o = overlayIn();
+    status = attachLoadingStatus(o);
+
+    vi.advanceTimersByTime(INITIAL_DELAY_MS);
+    // The first write is immediate and fully opaque.
+    expect(visibleText(o)).toBe(DEFAULT_LOADING_MESSAGES.initial);
+    expect(o.querySelector(".wt-loading-text")?.className).toBe("wt-loading-text");
+
+    // The rotation's first message is a SWAP, so it fades first and the old
+    // wording is still the one on screen while it does.
+    vi.advanceTimersByTime(WAITING_AFTER_MS - INITIAL_DELAY_MS);
+    expect(visibleText(o)).toBe(DEFAULT_LOADING_MESSAGES.initial);
+    expect(o.querySelector(".wt-loading-text")?.classList.contains("wt-loading-text-out")).toBe(
+      true,
+    );
+
+    settleSwap();
+    expect(DEFAULT_LOADING_MESSAGES.waiting).toContain(visibleText(o));
+    // ...and the fade class comes back off, or the line stays transparent.
+    expect(o.querySelector(".wt-loading-text")?.classList.contains("wt-loading-text-out")).toBe(
+      false,
+    );
+  });
+
+  it("treats an empty reason as no reason at all", () => {
+    // A retry loop that has lost the server's wording must not blank the line it
+    // already put up: an empty string is the absence of a reason, not a new one.
+    const o = overlayIn();
+    status = attachLoadingStatus(o);
+    vi.advanceTimersByTime(INITIAL_DELAY_MS);
+    status.reason("tools installing");
+    settleSwap();
+
+    status.reason("");
+    settleSwap();
+
+    expect(visibleText(o)).toBe("tools installing");
+    expect(announcedText(o)).toBe("tools installing");
+  });
+
+  it("clears the thresholds it armed but never reached", () => {
+    // The common case: the overlay is lowered inside a second, so both scripted
+    // timers are still pending when stop() runs. Either one firing afterwards
+    // writes into a node that has already been removed.
+    const o = overlayIn();
+    status = attachLoadingStatus(o);
+    expect(vi.getTimerCount()).toBe(2);
+
+    status.stop();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels the rotation on stop, so nothing keeps ticking for twenty minutes", () => {
+    const o = overlayIn();
+    status = attachLoadingStatus(o);
+    vi.advanceTimersByTime(WAITING_AFTER_MS);
+    settleSwap();
+    expect(vi.getTimerCount()).toBe(1); // the rotation interval, and only it
+
+    status.stop();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("schedules nothing for a reason that arrives after stop()", () => {
+    // The kernel lowers the overlay and the session owner's retry loop may be one
+    // tick behind it. A reason that lands after stop() must not arm the fade
+    // timer, which is the one thing here that outlives its own call.
+    const o = overlayIn();
+    status = attachLoadingStatus(o);
+    vi.advanceTimersByTime(INITIAL_DELAY_MS);
+    status.stop();
+
+    status.reason("tools installing");
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("arms no rotation for a consumer that supplies no waiting messages", () => {
+    // A consumer may reword the initial line and decline the reassurance
+    // rotation entirely. An interval over an empty list would tick forever
+    // choosing between nothing.
+    const o = overlayIn();
+    status = attachLoadingStatus(o, { initial: "Waking the dev box…", waiting: [] });
+
+    vi.advanceTimersByTime(WAITING_AFTER_MS);
+
+    expect(visibleText(o)).toBe("Waking the dev box…");
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

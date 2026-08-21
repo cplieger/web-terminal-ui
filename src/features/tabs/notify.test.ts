@@ -166,6 +166,38 @@ describe("createNotifier delivery", () => {
     expect(posts).toHaveLength(3);
   });
 
+  it("delivers an event that carries no sequence number at all", () => {
+    // An older server, or a notification path that does not sequence: seq 0 is
+    // "unsequenced", not "sequence zero". Treating it as a number to compare
+    // against the cursor would swallow every notification such a server sends.
+    const { ctor, posts } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+
+    expect(n.deliver({ id: "s1", notification: "Done" }, view({ label: "a" }))).toBe(true);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("forgets the oldest cursors once too many sessions are tracked", () => {
+    // The bound exists because a hostile or buggy stream could otherwise grow the
+    // dedupe map without end. What it costs is real and worth stating: the oldest
+    // session's cursor is gone, so a replayed notification for THAT session can
+    // notify a second time — which is why the bound is far above any real page's
+    // session count rather than a tidy number.
+    const { ctor } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    const v = view({ label: "a" });
+    for (let i = 0; i <= 200; i++) {
+      n.deliver({ id: `s${String(i)}`, notification: "Done", notificationSeq: 1 }, v);
+    }
+
+    // The next-oldest is still tracked: the sweep stops at the bound rather than
+    // trimming past it. Checked first, because a suppressed delivery records
+    // nothing while an accepted one would evict in its turn.
+    expect(n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, v)).toBe(false);
+    // The oldest is out, so its cursor no longer suppresses anything.
+    expect(n.deliver({ id: "s0", notification: "Done", notificationSeq: 1 }, v)).toBe(true);
+  });
+
   it("forgets a closed session's sequence cursor", () => {
     const { ctor, posts } = fakeCtor();
     const n = createNotifier(env({ ctor }));

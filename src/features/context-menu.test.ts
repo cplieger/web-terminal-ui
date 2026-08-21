@@ -14,6 +14,10 @@ import type * as CtxMenuModule from "./context-menu.js";
 import type { TerminalFeature } from "../kernel/types.js";
 import type { ClipboardApi } from "./clipboard.js";
 
+// Hoisted so a test can read what reached the PTY: the Escape rule is "close the
+// menu WITHOUT also sending ESC", and the second half is only visible here.
+const sendBinary = vi.hoisted(() => vi.fn<(buf: Uint8Array) => boolean>(() => true));
+
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
   return {
@@ -46,7 +50,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
     connection: {
       init: vi.fn(),
       connect: vi.fn(),
-      sendBinary: vi.fn(() => true),
+      sendBinary,
       sendResize: vi.fn(),
       reconnectNow: vi.fn(),
       disconnect: vi.fn(),
@@ -125,6 +129,7 @@ beforeEach(async () => {
   vi.resetModules();
   pasteSpy.mockClear();
   copySpy.mockClear();
+  sendBinary.mockClear();
   document.body.replaceChildren();
   ({ createTerminal } = await import("../kernel/kernel.js"));
   ({ contextMenu } = await import("./context-menu.js"));
@@ -476,6 +481,351 @@ describe("contextMenu — dismissal", () => {
     );
     expect(isOpen(root)).toBe(true);
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(isOpen(root)).toBe(false);
+  });
+});
+
+describe("contextMenu — which devices may have their touch contextmenu cancelled", () => {
+  // isAppleTouchDevice decides exactly one thing, and both halves of its test
+  // matter: WebKit reads preventDefault on a touch contextmenu as "cancel every
+  // remaining default of this gesture", so cancelling there once left an iPad
+  // unable to select text at all. The MacIntel cases above cover iPadOS Safari's
+  // desktop mode; these cover the device the function is named for, and the
+  // desktop Mac it must not mistake for one.
+  const touchContextMenu = async (): Promise<MouseEvent> => {
+    const { surface } = await mount();
+    touchPointer(surface);
+    const cm = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    });
+    surface.dispatchEvent(cm);
+    return cm;
+  };
+
+  it("recognises an iPhone from its user agent alone", async () => {
+    // navigator.platform is deprecated and some browsers report nothing for it,
+    // so the user agent has to be sufficient on its own.
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) Version/26.0 Safari",
+      platform: "",
+      maxTouchPoints: 5,
+    });
+
+    expect((await touchContextMenu()).defaultPrevented).toBe(false);
+  });
+
+  it("does not mistake a trackpad Mac for a touch device", async () => {
+    // The same platform string iPadOS desktop mode reports, with the fact that
+    // separates them: a Mac has no touch screen.
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari",
+      platform: "MacIntel",
+      maxTouchPoints: 0,
+    });
+
+    expect((await touchContextMenu()).defaultPrevented).toBe(true);
+  });
+
+  it("takes more than one touch point to count as a touch Mac", async () => {
+    // A single point is what a stylus digitiser or a trackpad driver reports; an
+    // iPad reports five.
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari",
+      platform: "MacIntel",
+      maxTouchPoints: 1,
+    });
+
+    expect((await touchContextMenu()).defaultPrevented).toBe(true);
+  });
+});
+
+describe("contextMenu — where the keyboard goes when the menu closes", () => {
+  const input = (root: HTMLElement): HTMLTextAreaElement | null =>
+    root.querySelector<HTMLTextAreaElement>(".term-input");
+
+  const openAt = (surface: HTMLElement): void => {
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+  };
+
+  it("returns the keyboard to the terminal after an item the user had focused", async () => {
+    // The menu's buttons are real focusable controls, so activating one with the
+    // keyboard leaves focus inside a menu that is about to be emptied. Focus has
+    // to land back on the terminal's input or the next keystroke goes nowhere.
+    const { root, surface } = await mount();
+    openAt(surface);
+    const paste = itemNamed(root, "Paste");
+    paste?.focus();
+
+    paste?.click();
+
+    expect(document.activeElement).toBe(input(root));
+  });
+
+  it("returns the keyboard to the terminal when Escape closes a focused menu", async () => {
+    // Escape reaches the menu through the kernel's keydown intercept, which does
+    // not pass a refocus preference — so this is the DEFAULT that has to be
+    // "yes", the same as an item's.
+    const { root, surface } = await mount();
+    openAt(surface);
+    itemNamed(root, "Select All")?.focus();
+
+    input(root)?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    expect(document.activeElement).toBe(input(root));
+  });
+
+  it("leaves the keyboard alone after Select All, or Firefox collapses the new selection", async () => {
+    // The one item that must NOT hand focus back: Firefox drops a selection made
+    // in the output the moment focus leaves it, so refocusing the input here
+    // would undo the item's own work.
+    const { root, surface } = await mount();
+    openAt(surface);
+    const selectAll = itemNamed(root, "Select All");
+    selectAll?.focus();
+
+    selectAll?.click();
+
+    expect(document.activeElement).not.toBe(input(root));
+  });
+
+  it("does not take focus from elsewhere on the page when it closes", async () => {
+    // A menu dismissal is not a reason to move the keyboard: the refocus only
+    // exists to recover focus the MENU held, and a page with its own controls
+    // would otherwise lose the caret every time a menu closed.
+    const { root, surface } = await mount();
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    openAt(surface);
+    outside.focus();
+
+    outside.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(isOpen(root)).toBe(false);
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it("empties the menu when it closes, so nothing stale is left in the DOM", async () => {
+    const { root, surface } = await mount();
+    openAt(surface);
+    expect(itemLabels(root)).toEqual(["Select All", "Paste"]);
+
+    input(root)?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    expect(menuIn(root)?.childElementCount).toBe(0);
+  });
+
+  it("rebuilds its items on every open rather than appending to the last set", async () => {
+    // Opening twice without a dismissal in between is ordinary (right-click,
+    // then right-click somewhere else): the second menu must be a menu, not two.
+    const { root, surface } = await mount();
+
+    openAt(surface);
+    openAt(surface);
+
+    expect(itemLabels(root)).toEqual(["Select All", "Paste"]);
+  });
+});
+
+describe("contextMenu — Select All", () => {
+  it("selects the terminal output, which is the only thing worth selecting", async () => {
+    // The item exists because the platform's own menu is suppressed here; if it
+    // selected nothing, Copy would have nothing to copy the next time round.
+    const { root, surface } = await mount();
+    const output = root.querySelector<HTMLElement>(".term-output");
+    output?.append(document.createTextNode("line one\nline two"));
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+
+    itemNamed(root, "Select All")?.click();
+
+    const sel = window.getSelection();
+    expect(sel?.anchorNode).toBe(output);
+    expect(sel?.toString()).toBe("line one\nline two");
+  });
+});
+
+describe("contextMenu — Escape belongs to the menu only while it is open", () => {
+  const escapeOn = (root: HTMLElement): KeyboardEvent => {
+    const ev = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    root.querySelector<HTMLTextAreaElement>(".term-input")?.dispatchEvent(ev);
+    return ev;
+  };
+
+  it("keeps Escape out of the PTY while the menu is open", async () => {
+    // The intercept exists so one Escape does one thing. Sending it as well
+    // would also dismiss whatever the program has on screen.
+    const { root, surface } = await mount();
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+
+    const ev = escapeOn(root);
+
+    expect(ev.defaultPrevented).toBe(true);
+    expect(isOpen(root)).toBe(false);
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("lets Escape through to the PTY when no menu is open", async () => {
+    // The other half, and the one a `menu.classList` assertion cannot see: with
+    // nothing to close, Escape is the program's key and must arrive. (The
+    // kernel cancels the keystroke's default either way, so the event's own
+    // defaultPrevented says nothing about which of the two happened.)
+    const { root } = await mount();
+
+    escapeOn(root);
+
+    expect(sendBinary).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves every other key to the terminal", async () => {
+    const { root, surface } = await mount();
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+
+    root
+      .querySelector<HTMLTextAreaElement>(".term-input")
+      ?.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+
+    expect(isOpen(root)).toBe(true);
+  });
+});
+
+describe("contextMenu — dismissal by another menu", () => {
+  it("closes when a right-click lands outside the terminal", async () => {
+    // A right-click on a tab, on the page, or on the browser's own chrome is a
+    // request for a different menu; two open at once is the failure.
+    const { root, surface } = await mount();
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+    expect(isOpen(root)).toBe(true);
+
+    document.body.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 500, clientY: 500 }),
+    );
+
+    expect(isOpen(root)).toBe(false);
+  });
+});
+
+describe("contextMenu — what counts as a stationary press", () => {
+  it("survives a touchmove that did not move", async () => {
+    // Browsers emit touchmove for sub-pixel jitter while a finger rests, and iOS
+    // emits one for the same coordinates. Treating any move event as a drag would
+    // stand the menu down on most real long presses.
+    const { root, surface } = await mount();
+
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    surface.dispatchEvent(touch("touchmove", { x: 30, y: 40 }, 1200));
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 1700));
+
+    expect(isOpen(root)).toBe(true);
+  });
+
+  it("stands down for a HORIZONTAL drag as well as a vertical one", async () => {
+    // A sideways drag over terminal text is a selection-extend, which is the
+    // browser's gesture and not a request for this menu.
+    const { root, surface } = await mount();
+
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    surface.dispatchEvent(touch("touchmove", { x: 90, y: 40 }, 1200));
+    surface.dispatchEvent(touch("touchend", { x: 90, y: 40 }, 1700));
+
+    expect(isOpen(root)).toBe(false);
+  });
+
+  it("allows a wobble of exactly the shared tap allowance", async () => {
+    // TAP_MOVEMENT_PX is shared with the kernel's tap-to-focus so the two cannot
+    // both claim one press; a press at exactly the allowance is still a press on
+    // both sides of that split, and it is a finger on glass, so it happens.
+    const { root, surface } = await mount();
+
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    surface.dispatchEvent(touch("touchmove", { x: 40, y: 50 }, 1200));
+    surface.dispatchEvent(touch("touchend", { x: 40, y: 50 }, 1700));
+
+    expect(isOpen(root)).toBe(true);
+  });
+
+  it("stands down when a second finger joins mid-press", async () => {
+    // The existing case starts the pinch with a second touchstart; a pinch that
+    // begins as a drag reports its extra finger on touchmove instead.
+    const { root, surface } = await mount();
+
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    surface.dispatchEvent(
+      touch(
+        "touchmove",
+        [
+          { x: 30, y: 40 },
+          { x: 90, y: 40 },
+        ],
+        1200,
+      ),
+    );
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 1700));
+
+    expect(isOpen(root)).toBe(false);
+  });
+
+  it("treats a press held to exactly the tap ceiling as a tap", async () => {
+    // The ceiling is the boundary between the kernel's tap-to-focus and this
+    // menu. Both sides read it, so the press that lands ON it must belong to
+    // exactly one of them, and by this rule that is the tap.
+    const { root, surface } = await mount();
+
+    longPress(surface, { x: 30, y: 40 }, 500);
+
+    expect(isOpen(root)).toBe(false);
+  });
+
+  it("opens for a press that CLEARED a selection rather than making one", async () => {
+    // The rule is "this press produced a selection", not "a selection is
+    // involved": a press that dismissed an old selection produced nothing for the
+    // OS callout to own, so it is ours and Paste is the point of it.
+    const { root, surface } = await mount();
+    const before = stubSelection("an earlier selection");
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    before.mockRestore();
+    const after = stubSelection("");
+
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 1700));
+
+    expect(isOpen(root)).toBe(true);
+    after.mockRestore();
+  });
+
+  it("opens nothing for a touchend that no press preceded", async () => {
+    // Touch events arrive from the platform, not from this module: a stray
+    // release (a gesture that started on another element, a synthesised event)
+    // must not be classified as a long press that nothing measured.
+    const { root, surface } = await mount();
+
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 9000));
+
+    expect(isOpen(root)).toBe(false);
+  });
+
+  it("does not classify one press twice", async () => {
+    // iOS emits a second touchend for a gesture whose touches ended on different
+    // elements. The press is consumed by its first release, so the second has
+    // nothing of its own and its elapsed time is measured from a press that is
+    // already over — which is how a tap turns into a long press.
+    const { root, surface } = await mount();
+    surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 1200));
+    expect(isOpen(root)).toBe(false);
+
+    surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 3000));
+
     expect(isOpen(root)).toBe(false);
   });
 });
