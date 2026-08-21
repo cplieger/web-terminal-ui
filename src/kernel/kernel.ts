@@ -790,29 +790,29 @@ function buildTerminal(
   );
 
   /**
-   * Applies the part of a `mapKeyboardEvent` result that BOTH keydown paths (the
-   * focused textarea below, and the document-level type-to-focus fallback in the
-   * focus-strategy section) handle identically. Returns false only for "ignore",
-   * the one arm the two callers resolve differently: the textarea lets its own
-   * `input` event deliver the character, while the fallback has no `input` event
-   * coming and must send the character itself.
+   * Applies a `mapKeyboardEvent` result. BOTH keydown paths — the focused textarea
+   * below, and the document-level type-to-focus fallback in the focus-strategy
+   * section — handle every arm identically, including "ignore": the textarea lets
+   * its own `input` event deliver the character, and the fallback has already
+   * resolved that case before it gets here, computing the typed character itself
+   * because no `input` event is coming for a key that targeted the body.
    *
-   * Switching over the whole `KeyboardResult` union in one place is what keeps
-   * the two paths from drifting — handling only "send" in the fallback silently
-   * dropped Shift+PageUp, which is exactly what a reader who just selected some
-   * scrollback presses next.
+   * Switching over the whole `KeyboardResult` union in one place is what keeps the
+   * two paths from drifting — handling only "send" in the fallback silently dropped
+   * Shift+PageUp, which is exactly what a reader who just selected some scrollback
+   * presses next.
    */
-  function applyMappedKey(ev: KeyboardEvent, result: keyboard.KeyboardResult): boolean {
+  function applyMappedKey(ev: KeyboardEvent, result: keyboard.KeyboardResult): void {
     switch (result.kind) {
       case "send":
         ev.preventDefault();
         sendText(result.bytes);
-        return true;
+        return;
       case "scroll-up": {
         ev.preventDefault();
         const h = termWrap.clientHeight;
         termWrap.scrollTop = Math.max(0, termWrap.scrollTop - h);
-        return true;
+        return;
       }
       case "scroll-down": {
         ev.preventDefault();
@@ -823,10 +823,10 @@ function buildTerminal(
         // reasoning as the engine's bottom writes.
         const max = Math.max(0, termWrap.scrollHeight - h);
         termWrap.scrollTop = Math.min(max, termWrap.scrollTop + h);
-        return true;
+        return;
       }
       case "ignore":
-        return false;
+        return;
     }
   }
 
@@ -842,9 +842,9 @@ function buildTerminal(
           return;
         }
       }
-      // A false return ("ignore") needs nothing here: the `input` listener above
-      // delivers the character, which is also how IME and dead-key composition
-      // output reaches the terminal.
+      // Nothing more is needed for an "ignore": the `input` listener above delivers
+      // the character, which is also how IME and dead-key composition output
+      // reaches the terminal.
       applyMappedKey(ev, mapKeyboardEvent(ev, modes));
     },
     { signal },
