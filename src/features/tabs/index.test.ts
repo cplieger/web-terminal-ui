@@ -16,7 +16,7 @@ import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
-import { CUE_SEEN_KEY } from "./model.js";
+import { CUE_SEEN_KEY, SWIPE_HINT_KEY } from "./model.js";
 // The reorder preview's timings, imported rather than restated: the tests below pin the
 // SHAPE of the interaction (a sweep rearranges nothing, a stationary dragover opens the
 // slot, the no-events fallback clears the drag loop's cadence, a drop never waits), not
@@ -136,6 +136,12 @@ const bind = vi.fn();
 // bind for the incoming one — the round trip is the behavior, and a null-returning
 // double would let a broken round trip pass.
 const captureViewMemory = vi.fn(() => ({ abs: 7, screenTop: -3, following: false }));
+// The two render facts the catching-up cue is computed from. Hoisted out of the
+// factory below (like `bind` above) so a test can say "this tab has a warm store
+// and a queue this deep" and the cue's own arithmetic decides the rest; beforeEach
+// puts both back to the empty-store defaults every other test assumes.
+const pendingRowCount = vi.fn(() => 0);
+const getHighestIndex = vi.fn(() => -1);
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -147,8 +153,8 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       setPredictedCursor: vi.fn(),
       computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
       getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-      getHighestIndex: vi.fn(() => -1),
-      pendingRowCount: vi.fn(() => 0),
+      getHighestIndex,
+      pendingRowCount,
       noteResumeBounds: vi.fn(),
       handleScreen: vi.fn(),
       handleScroll: vi.fn(),
@@ -231,6 +237,8 @@ beforeEach(async () => {
   setSession.mockClear();
   forgetSession.mockClear();
   bind.mockClear();
+  pendingRowCount.mockReturnValue(0);
+  getHighestIndex.mockReturnValue(-1);
   fetchMock.mockClear();
   listBody = [
     { id: "s1", title: "one", createdAt: "1", status: "idle" },
@@ -3426,5 +3434,860 @@ describe("tabs reorder preview", () => {
       expect(chip.classList.contains("wt-tab-dragging")).toBe(false);
       expect(chip.classList.contains("wt-tab-slotted")).toBe(false);
     }
+  });
+});
+
+// A query-aware matchMedia. The feature asks three different questions of it
+// ("(any-pointer: fine)" for a physical keyboard, "(pointer: coarse)" for the
+// mobile switcher layout, "(prefers-reduced-motion: reduce)" for the animation
+// gate) and they mean opposite things, so a blanket true/false stub answers the
+// wrong one and the test proves something other than what it claims.
+function stubMedia(answers: Record<string, boolean>): void {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: answers[query] ?? false,
+      media: query,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    })),
+  );
+}
+
+describe("tabs: physical-keyboard detection", () => {
+  // Whether a tab switch focuses the terminal input is decided by whether a
+  // physical keyboard is likely. On a keyboard-less touchscreen it must not, or
+  // every switch pops the soft keyboard; with a keyboard attached it must, so the
+  // user can switch and type. A trackpad-less keyboard folio matches no pointer
+  // media query at all, so the only evidence available is a keydown that the iOS
+  // on-screen keyboard cannot produce — which is what looksLikeHardwareKey reads.
+  //
+  // These cases run with NO fine pointer, so the latch is the only thing that can
+  // turn focus-on-switch on, and the switch is driven by a bare click (no
+  // pointerdown) so the unrelated "put the keyboard back where the press took it
+  // from" rule cannot supply the focus instead.
+  interface KeyHarness {
+    input: HTMLElement;
+    chips: () => NodeListOf<HTMLElement>;
+    press: (init: KeyboardEventInit) => void;
+    switchAndReportFocus: (index: number) => boolean;
+  }
+
+  async function mountCoarse(): Promise<KeyHarness> {
+    stubMedia({}); // no fine pointer, no coarse pointer, no reduced motion
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    const input = root.querySelector<HTMLElement>(".term-input");
+    if (!input) {
+      throw new Error("no .term-input");
+    }
+    return {
+      input,
+      chips: () => root.querySelectorAll<HTMLElement>(".wt-tab"),
+      press: (init) => {
+        input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...init }));
+      },
+      switchAndReportFocus: (index) => {
+        document.body.focus();
+        root.querySelectorAll<HTMLElement>(".wt-tab")[index]?.click();
+        return document.activeElement === input;
+      },
+    };
+  }
+
+  it("leaves the keyboard alone on a switch until a hardware-only key is seen", async () => {
+    const h = await mountCoarse();
+    // Nothing observed yet: a switch must not summon the soft keyboard.
+    expect(h.switchAndReportFocus(1)).toBe(false);
+    // An arrow key cannot come from the iOS on-screen keyboard, so it is proof a
+    // real keyboard is attached.
+    h.press({ key: "ArrowUp" });
+    expect(h.switchAndReportFocus(0)).toBe(true);
+  });
+
+  it("does not read an ordinary character as evidence of a keyboard", async () => {
+    const h = await mountCoarse();
+    // A letter is exactly what the on-screen keyboard sends, so it proves nothing
+    // and focus-on-switch must stay off.
+    h.press({ key: "a" });
+    expect(h.switchAndReportFocus(1)).toBe(false);
+  });
+
+  it("reads a modified key as evidence, even one the key list does not name", async () => {
+    const h = await mountCoarse();
+    // Ctrl+C: the on-screen keyboard has no modifier keys at all, so the modifier
+    // alone settles it — "c" is not in the key list and never needs to be.
+    h.press({ key: "c", ctrlKey: true });
+    expect(h.switchAndReportFocus(1)).toBe(true);
+  });
+
+  it("reads a function key as evidence, up to two digits", async () => {
+    const h = await mountCoarse();
+    // F12, not F1: the range is F1–F12, and a single-digit pattern would miss the
+    // top of it.
+    h.press({ key: "F12" });
+    expect(h.switchAndReportFocus(1)).toBe(true);
+  });
+});
+
+describe("tabs: bulk close by direction", () => {
+  // The four bulk-close menu actions differ only in which slice of the strip they
+  // take. Getting a bound wrong here destroys sessions the user did not ask to
+  // close, so each direction is pinned against a strip long enough to tell an
+  // off-by-one and a missing slice apart.
+  async function mount4(): Promise<{
+    root: HTMLElement;
+    ids: () => string[];
+    menu: (index: number) => HTMLButtonElement[];
+  }> {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+      { id: "s4", title: "four", createdAt: "4", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 4);
+    return {
+      root,
+      ids: () => idsOf(root),
+      menu: (index) => {
+        const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[index];
+        chip?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+        return [...root.querySelectorAll<HTMLButtonElement>(".wt-tab-menu button")];
+      },
+    };
+  }
+
+  function click(items: HTMLButtonElement[], label: string): void {
+    items.find((b) => b.textContent === label)?.click();
+  }
+
+  function deletedIds(): string[] {
+    return fetchMock.mock.calls
+      .filter((c) => (c[1]?.method ?? "GET") === "DELETE")
+      .map((c) => String(c[0]).split("/").pop() ?? "");
+  }
+
+  it("closes every tab to the LEFT of the target and nothing else", async () => {
+    vi.stubGlobal("confirm", () => true);
+    const h = await mount4();
+    fetchMock.mockClear();
+
+    click(h.menu(2), "Close to the left");
+    await until(() => h.ids().length === 2 && deletedIds().length === 2, 60);
+
+    expect(h.ids()).toEqual(["three", "four"]);
+    expect(deletedIds().sort()).toEqual(["s1", "s2"]);
+  });
+
+  it("closes every tab to the RIGHT of the target and nothing else", async () => {
+    vi.stubGlobal("confirm", () => true);
+    const h = await mount4();
+    fetchMock.mockClear();
+
+    click(h.menu(1), "Close to the right");
+    await until(() => h.ids().length === 2 && deletedIds().length === 2, 60);
+
+    expect(h.ids()).toEqual(["one", "two"]);
+    expect(deletedIds().sort()).toEqual(["s3", "s4"]);
+  });
+
+  it("keeps the tab the bulk close was aimed at, however many neighbours go", async () => {
+    vi.stubGlobal("confirm", () => true);
+    const h = await mount4();
+    fetchMock.mockClear();
+
+    click(h.menu(2), "Close others");
+    await until(() => h.ids().length === 1 && deletedIds().length === 3, 60);
+
+    expect(h.ids()).toEqual(["three"]);
+    expect(deletedIds()).not.toContain("s3");
+  });
+
+  it("offers each direction only where it has somewhere to go", async () => {
+    const h = await mount4();
+    const disabled = (index: number, label: string): boolean | undefined =>
+      h.menu(index).find((b) => b.textContent === label)?.disabled;
+
+    // The leftmost tab has nothing to its left, and the rightmost nothing to its
+    // right: both the move and the bulk close in that direction stand down.
+    expect(disabled(0, "Move left")).toBe(true);
+    expect(disabled(0, "Close to the left")).toBe(true);
+    expect(disabled(0, "Move right")).toBe(false);
+    expect(disabled(0, "Close to the right")).toBe(false);
+    expect(disabled(3, "Move right")).toBe(true);
+    expect(disabled(3, "Close to the right")).toBe(true);
+    expect(disabled(3, "Move left")).toBe(false);
+    expect(disabled(3, "Close to the left")).toBe(false);
+    // A middle tab can go either way, and Close is never disabled.
+    expect(disabled(1, "Move left")).toBe(false);
+    expect(disabled(1, "Move right")).toBe(false);
+    expect(disabled(1, "Close")).toBe(false);
+    expect(disabled(1, "Close others")).toBe(false);
+  });
+
+  it("disables Close others on the only tab", async () => {
+    listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+
+    root
+      .querySelector<HTMLElement>(".wt-tab")
+      ?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    const items = [...root.querySelectorAll<HTMLButtonElement>(".wt-tab-menu button")];
+    expect(items.find((b) => b.textContent === "Close others")?.disabled).toBe(true);
+  });
+});
+
+describe("tabs: the mobile swipe", () => {
+  // A swipe of the switcher bar rotates the tab list, so the ends wrap: past the
+  // last tab lands on the first. Three tabs, because with two "one forward" and
+  // "one back" reach the same tab and no test could tell the directions apart.
+  async function mount3(): Promise<{
+    root: HTMLElement;
+    swipe: (from: number, to: number) => void;
+  }> {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+    const cur = root.querySelector<HTMLElement>(".wt-switcher-current");
+    return {
+      root,
+      swipe: (from, to) => {
+        cur?.dispatchEvent(
+          new MouseEvent("pointerdown", { clientX: from, clientY: 10, bubbles: true }),
+        );
+        cur?.dispatchEvent(
+          new MouseEvent("pointerup", { clientX: to, clientY: 12, bubbles: true }),
+        );
+      },
+    };
+  }
+
+  function label(root: HTMLElement): string {
+    return root.querySelector(".wt-switcher-label")?.textContent ?? "";
+  }
+
+  it("advances one tab per leftward swipe, and wraps past the last", async () => {
+    const h = await mount3();
+    expect(label(h.root)).toBe("one");
+
+    h.swipe(220, 90);
+    expect(label(h.root)).toBe("two");
+    h.swipe(220, 90);
+    expect(label(h.root)).toBe("three");
+    // Past the end: the list rotates rather than stopping.
+    h.swipe(220, 90);
+    expect(label(h.root)).toBe("one");
+  });
+
+  it("goes back one tab per rightward swipe, and wraps past the first", async () => {
+    const h = await mount3();
+    // From the first tab, backwards is the LAST one — the other end of the same
+    // rotation, and the case an unsigned index would get wrong.
+    h.swipe(90, 220);
+    expect(label(h.root)).toBe("three");
+    h.swipe(90, 220);
+    expect(label(h.root)).toBe("two");
+  });
+
+  it("does nothing on the only tab", async () => {
+    listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    setSession.mockClear();
+
+    const cur = root.querySelector<HTMLElement>(".wt-switcher-current");
+    cur?.dispatchEvent(new MouseEvent("pointerdown", { clientX: 220, clientY: 10, bubbles: true }));
+    cur?.dispatchEvent(new MouseEvent("pointerup", { clientX: 90, clientY: 12, bubbles: true }));
+
+    expect(setSession).not.toHaveBeenCalled();
+    expect(label(root)).toBe("one");
+  });
+
+  it("slides the incoming tab in from the side the swipe came from", async () => {
+    // The direction is not decoration: it is what makes the swipe feel like it
+    // moved the strip rather than replaced the screen, so forward and back must
+    // not play the same animation.
+    const h = await mount3();
+    // The class lands on the SURFACE (.term), which is what the CSS animates.
+    const surface = h.root.querySelector(".term");
+    if (!surface) {
+      throw new Error("no .term");
+    }
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => undefined);
+    const pump = (): void => {
+      const due = frames.splice(0, frames.length);
+      for (const cb of due) {
+        cb(0);
+      }
+    };
+
+    h.swipe(220, 90); // forward
+    pump();
+    expect(surface.classList.contains("wt-switching-next")).toBe(true);
+    expect(surface.classList.contains("wt-switching-prev")).toBe(false);
+
+    h.swipe(90, 220); // back
+    pump();
+    expect(surface.classList.contains("wt-switching-prev")).toBe(true);
+    expect(surface.classList.contains("wt-switching-next")).toBe(false);
+  });
+});
+
+describe("tabs: the swipe-to-switch hint", () => {
+  // A one-time coach mark, and the "one time" is the whole feature: it must not
+  // greet a returning user, and it has no business on a layout that has no swipe
+  // bar at all.
+  async function mountHinted(media: Record<string, boolean>): Promise<HTMLElement> {
+    stubMedia(media);
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    return root;
+  }
+
+  const HINT = "Swipe to switch terminals";
+
+  function toastText(root: HTMLElement): string {
+    return root.querySelector(".wt-toast")?.textContent ?? "";
+  }
+
+  it("greets a coarse-pointer user the first time a second tab exists", async () => {
+    const root = await mountHinted({ "(pointer: coarse)": true });
+    expect(toastText(root)).toBe(HINT);
+  });
+
+  it("stays quiet on a fine-pointer layout, which has no swipe bar", async () => {
+    // The desktop strip is what a fine pointer gets; telling that user to swipe
+    // names a gesture their UI does not have.
+    const root = await mountHinted({ "(any-pointer: fine)": true });
+    expect(toastText(root)).not.toBe(HINT);
+  });
+
+  it("does not greet a returning user", async () => {
+    localStorage.setItem(SWIPE_HINT_KEY, "1");
+    const root = await mountHinted({ "(pointer: coarse)": true });
+    expect(toastText(root)).not.toBe(HINT);
+  });
+
+  it("remembers that it has greeted, so the next page load does not", async () => {
+    const root = await mountHinted({ "(pointer: coarse)": true });
+    expect(toastText(root)).toBe(HINT);
+    // The record is what makes it once-ever rather than once-per-load.
+    expect(localStorage.getItem(SWIPE_HINT_KEY)).toBe("1");
+  });
+
+  it("greets once per page even when storage cannot be read at all", async () => {
+    // Safari private mode throws on both halves. The hint still shows, and still
+    // only once: the in-memory latch is the fallback for the record it could not
+    // write.
+    const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    const set = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    const root = await mountHinted({ "(pointer: coarse)": true });
+    expect(toastText(root)).toBe(HINT);
+
+    // A second tab arriving must not re-greet: the latch outlives the failed write.
+    const banner = root.querySelector(".wt-toast");
+    if (banner) {
+      banner.textContent = "";
+    }
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
+    await until(() => root.querySelectorAll(".wt-tab").length === 3, 60);
+    expect(toastText(root)).not.toBe(HINT);
+
+    get.mockRestore();
+    set.mockRestore();
+  });
+
+  it("says nothing while there is only one tab to switch between", async () => {
+    listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    stubMedia({ "(pointer: coarse)": true });
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    expect(toastText(root)).not.toBe(HINT);
+  });
+});
+
+describe("tabs: the catching-up cue", () => {
+  // The cue tells the user the surface still owes them content. Two earlier
+  // conditions were tried and are recorded in the source as wrong, so what is
+  // pinned here is the third: it arms on a backlog deep enough to need several
+  // frames, it needs a stretch of QUIET before it believes the restore finished
+  // (the render queue empties between the server's replay chunks, so a bare
+  // "queue is empty" test declares victory several times per restore), and it
+  // retires itself on a deadline so a backlog that never drains cannot leave the
+  // badge on screen forever.
+  const MIN_BACKLOG = 400; // the queued-row depth that arms it
+  const SETTLE_MS = 250; // how long the queue must stay empty to count as done
+  const MAX_MS = 30000; // the ceiling on the whole cue
+  const ARM_DELAY_MS = 150; // the anti-flicker delay before it appears
+
+  interface CueHarness {
+    visible: () => boolean;
+    switchTab: () => void;
+    pumpFrame: () => void;
+    tick: (ms: number) => void;
+  }
+
+  /** Two tabs, a manual rAF pump and a frozen clock. A pump rather than a
+   *  synchronous rAF stub because the cue's completion poll re-arms itself, so an
+   *  inline stub recurses until the stack blows. Date is faked alongside the
+   *  timers: the settle window and the deadline are both measured with Date.now,
+   *  so a test that advanced only the timers would move half the clock. */
+  async function mountCue(): Promise<CueHarness> {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    let nextHandle = 1;
+    const frames = new Map<number, FrameRequestCallback>();
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback): number => {
+      const h = nextHandle++;
+      frames.set(h, cb);
+      return h;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (h: number): void => {
+      frames.delete(h);
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    return {
+      visible: () => root.querySelector(".wt-catchup")?.classList.contains("visible") === true,
+      switchTab: () => {
+        root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
+      },
+      pumpFrame: () => {
+        const due = [...frames.entries()];
+        frames.clear();
+        for (const [, cb] of due) {
+          cb(0);
+        }
+      },
+      tick: (ms) => {
+        vi.advanceTimersByTime(ms);
+      },
+    };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("arms on a backlog deep enough to need more than one frame", async () => {
+    // A warm store (highest index >= 0) so the "nothing cached at all" half of
+    // the condition cannot supply the arm, and a queue one row past the
+    // threshold: this is the shallowest backlog worth telling the user about.
+    getHighestIndex.mockReturnValue(120);
+    pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
+    const h = await mountCue();
+
+    h.switchTab();
+    expect(h.visible()).toBe(false); // the delay is anti-flicker, so not yet
+    h.tick(ARM_DELAY_MS);
+    expect(h.visible()).toBe(true);
+  });
+
+  it("stays out of the way of ordinary streaming at the threshold itself", async () => {
+    // Exactly at the threshold is NOT past it. The renderer builds up to 300 rows
+    // per frame, so a queue this size costs the user nothing to wait for, and a
+    // cue here would flash on every busy tab switch.
+    getHighestIndex.mockReturnValue(120);
+    pendingRowCount.mockReturnValue(MIN_BACKLOG);
+    const h = await mountCue();
+
+    h.switchTab();
+    h.tick(ARM_DELAY_MS);
+    expect(h.visible()).toBe(false);
+  });
+
+  it("arms on a tab that has never been viewed, whatever its queue says", async () => {
+    // Nothing cached at all means the whole screen is still on the network, which
+    // is the case the cue is most needed for and the one an empty queue hides.
+    getHighestIndex.mockReturnValue(-1);
+    pendingRowCount.mockReturnValue(0);
+    const h = await mountCue();
+
+    h.switchTab();
+    h.tick(ARM_DELAY_MS);
+    expect(h.visible()).toBe(true);
+  });
+
+  it("says nothing when the backlog drained inside the anti-flicker delay", async () => {
+    // Armed by a deep queue that then emptied before the cue was ever shown: it
+    // re-asks at the end of the delay rather than showing what it no longer means.
+    getHighestIndex.mockReturnValue(120);
+    pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
+    const h = await mountCue();
+
+    h.switchTab();
+    pendingRowCount.mockReturnValue(0);
+    h.tick(ARM_DELAY_MS);
+    expect(h.visible()).toBe(false);
+  });
+
+  it("does not believe one empty frame, only a settled stretch of them", async () => {
+    // The queue empties BETWEEN the server's replay chunks, so a single empty
+    // frame is not the end of the restore. This is the hysteresis: it takes a
+    // continuous quiet window to retire the cue.
+    getHighestIndex.mockReturnValue(120);
+    pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
+    const h = await mountCue();
+    h.switchTab();
+    h.tick(ARM_DELAY_MS);
+    expect(h.visible()).toBe(true);
+
+    // The queue drains. The first empty frame only starts the clock.
+    pendingRowCount.mockReturnValue(0);
+    h.pumpFrame();
+    expect(h.visible()).toBe(true);
+    // Still inside the window: a second empty frame changes nothing.
+    h.tick(SETTLE_MS - 1);
+    h.pumpFrame();
+    expect(h.visible()).toBe(true);
+    // The window closes.
+    h.tick(1);
+    h.pumpFrame();
+    expect(h.visible()).toBe(false);
+  });
+
+  it("restarts the settle window when the next replay chunk arrives", async () => {
+    // A chunk landing mid-window means the restore was not finished after all, so
+    // the quiet has to be served again from the start rather than resumed.
+    getHighestIndex.mockReturnValue(120);
+    pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
+    const h = await mountCue();
+    h.switchTab();
+    h.tick(ARM_DELAY_MS);
+
+    pendingRowCount.mockReturnValue(0);
+    h.pumpFrame(); // quiet starts
+    h.tick(SETTLE_MS - 1);
+    pendingRowCount.mockReturnValue(50); // the next chunk
+    h.pumpFrame();
+    pendingRowCount.mockReturnValue(0);
+    h.pumpFrame(); // quiet starts over here
+
+    h.tick(SETTLE_MS - 1);
+    h.pumpFrame();
+    expect(h.visible()).toBe(true);
+    h.tick(1);
+    h.pumpFrame();
+    expect(h.visible()).toBe(false);
+  });
+
+  it("retires itself when a backlog never drains at all", async () => {
+    // The server stops mid-replay or the socket drops: the queue stays deep
+    // forever. The badge must not outlive its own ceiling.
+    getHighestIndex.mockReturnValue(120);
+    pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
+    const h = await mountCue();
+    h.switchTab();
+    h.tick(ARM_DELAY_MS);
+    expect(h.visible()).toBe(true);
+
+    // Right up to the ceiling it is still the truth: rows are still owed.
+    h.tick(MAX_MS - ARM_DELAY_MS);
+    h.pumpFrame();
+    expect(h.visible()).toBe(true);
+    // Past it, the cue gives up rather than lying indefinitely.
+    h.tick(1);
+    h.pumpFrame();
+    expect(h.visible()).toBe(false);
+  });
+});
+
+describe("tabs: the switcher's gesture recogniser", () => {
+  // One thin bar carries two gestures at right angles: sideways switches tabs,
+  // upward opens the overview list. Which one a drag becomes is decided twice —
+  // once mid-drag, when a pointermove first travels far enough to lock an axis,
+  // and once on release, for a flick that delivered no intermediate move at all.
+  // Both decisions compare the two deltas against each other, so a drag that is
+  // ambiguous must resolve to neither.
+  async function mountBar(): Promise<{
+    root: HTMLElement;
+    expanded: () => boolean;
+    active: () => string;
+    down: (x: number, y: number) => void;
+    move: (x: number, y: number) => void;
+    up: (x: number, y: number) => void;
+  }> {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+    const cur = root.querySelector<HTMLElement>(".wt-switcher-current");
+    const at = (type: string, x: number, y: number, target: EventTarget | null): void => {
+      target?.dispatchEvent(new MouseEvent(type, { clientX: x, clientY: y, bubbles: true }));
+    };
+    return {
+      root,
+      expanded: () =>
+        root.querySelector(".wt-switcher")?.classList.contains("wt-switcher-expanded") === true,
+      active: () => root.querySelector(".wt-switcher-label")?.textContent ?? "",
+      down: (x, y) => {
+        at("pointerdown", x, y, cur);
+      },
+      // The move handler lives on WINDOW for the gesture's life, so the finger is
+      // tracked wherever it goes — off the thin bar included.
+      move: (x, y) => {
+        at("pointermove", x, y, window);
+      },
+      up: (x, y) => {
+        at("pointerup", x, y, cur);
+      },
+    };
+  }
+
+  it("opens the overview on an upward drag", async () => {
+    const h = await mountBar();
+    expect(h.expanded()).toBe(false);
+
+    h.down(100, 300);
+    h.up(104, 180); // mostly up, barely sideways
+    expect(h.expanded()).toBe(true);
+    expect(h.active()).toBe("one"); // an upward drag is not a switch
+  });
+
+  it("closes the overview on a downward drag", async () => {
+    const h = await mountBar();
+    h.down(100, 300);
+    h.up(104, 180);
+    expect(h.expanded()).toBe(true);
+
+    h.down(100, 180);
+    h.up(104, 300);
+    expect(h.expanded()).toBe(false);
+  });
+
+  it("refuses a diagonal drag that commits to neither axis", async () => {
+    const h = await mountBar();
+    setSession.mockClear();
+
+    // Equal travel on both axes: neither gesture is what the user meant, so the
+    // bar does nothing rather than guessing.
+    h.down(200, 300);
+    h.up(100, 200);
+    expect(h.expanded()).toBe(false);
+    expect(h.active()).toBe("one");
+    expect(setSession).not.toHaveBeenCalled();
+  });
+
+  it("locks the axis mid-drag and holds it to the release", async () => {
+    const h = await mountBar();
+
+    // The first move that travels far enough locks HORIZONTAL. Later travel
+    // upward must not re-decide: a gesture that changed its mind halfway would
+    // open the list under the user's sideways swipe.
+    h.down(200, 300);
+    h.move(120, 300);
+    h.move(110, 180);
+    h.up(110, 180);
+    expect(h.expanded()).toBe(false);
+    expect(h.active()).toBe("two");
+  });
+
+  it("locks the vertical axis mid-drag the same way", async () => {
+    const h = await mountBar();
+
+    h.down(200, 300);
+    h.move(200, 200);
+    h.move(120, 190);
+    h.up(120, 190);
+    expect(h.expanded()).toBe(true);
+    expect(h.active()).toBe("one");
+  });
+
+  it("locks nothing while the travel is still within the slop", async () => {
+    const h = await mountBar();
+    setSession.mockClear();
+
+    // A few pixels is a tap with a shaky finger, not a drag: no axis locks, and
+    // the release is too small to resolve either gesture on its own.
+    h.down(200, 300);
+    h.move(203, 301);
+    h.move(204, 302);
+    h.up(204, 302);
+    expect(h.expanded()).toBe(false);
+    expect(setSession).not.toHaveBeenCalled();
+  });
+
+  it("abandons the gesture rather than switching when the program owns drags", async () => {
+    // A mouse-mode application (vim, a TUI with drag support) is entitled to the
+    // drag; the bar's swipe stands down instead of stealing it.
+    const engine = await import("@cplieger/web-terminal-engine");
+    const mouseMode = vi.spyOn(engine.modes, "getMouseMode").mockReturnValue(1000);
+    const h = await mountBar();
+    setSession.mockClear();
+
+    h.down(200, 300);
+    h.move(100, 302);
+    h.up(100, 302);
+    expect(h.active()).toBe("one");
+    expect(setSession).not.toHaveBeenCalled();
+    mouseMode.mockRestore();
+  });
+});
+
+describe("tabs: wheel translation across delta modes", () => {
+  // A wheel tick arrives in one of three units depending on the browser, and the
+  // strip converts all three to pixels of horizontal scroll. index.test.ts covers
+  // pixels and lines; pages is the mode a converted unit is easiest to get wrong
+  // in, because it is the only one whose scale depends on the element.
+  async function mountBar(): Promise<{ bar: HTMLElement; scroller: HTMLElement }> {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
+    const scroller = root.querySelector<HTMLElement>(".wt-tab-scroll");
+    if (!bar || !scroller) {
+      throw new Error("missing tab bar chrome");
+    }
+    // An overflowing strip, which is the only state the wheel acts on.
+    Object.defineProperty(scroller, "scrollWidth", { value: 600, configurable: true });
+    Object.defineProperty(scroller, "clientWidth", { value: 200, configurable: true });
+    return { bar, scroller };
+  }
+
+  it("scrolls a page per tick in page mode, scaled by the visible width", async () => {
+    const { bar, scroller } = await mountBar();
+
+    bar.dispatchEvent(
+      new WheelEvent("wheel", {
+        deltaY: 2,
+        deltaMode: 2, // DOM_DELTA_PAGE
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    // Two pages of the 200px viewport, not two pixels and not two-hundredths.
+    expect(scroller.scrollLeft).toBe(400);
+  });
+
+  it("leaves an evenly diagonal wheel to the browser", async () => {
+    const { bar, scroller } = await mountBar();
+
+    // Equal deltas are not vertical-dominant, so the strip does not claim them:
+    // the boundary belongs to native handling.
+    const even = new WheelEvent("wheel", {
+      deltaX: 40,
+      deltaY: 40,
+      bubbles: true,
+      cancelable: true,
+    });
+    bar.dispatchEvent(even);
+    expect(even.defaultPrevented).toBe(false);
+    expect(scroller.scrollLeft).toBe(0);
+  });
+});
+
+describe("tabs: duplicate-label numbering", () => {
+  it("keeps the suffix with its session when two sessions claim the same instant", async () => {
+    // The "(k)" suffix belongs to the SESSION, not to the slot it sits in: it used
+    // to be assigned by walking the strip, so two identically named tabs read
+    // "shell" then "shell (2)" whichever way round they sat and the numbers swapped
+    // under a reorder. Age decides it — and when two sessions report the SAME
+    // createdAt, the id decides, because something stable has to or the pair would
+    // renumber itself on every repaint.
+    listBody = [
+      { id: "s1", title: "shell", createdAt: "1", status: "idle" },
+      { id: "s2", title: "shell", createdAt: "1", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    expect(idsOf(root)).toEqual(["shell", "shell (2)"]);
+
+    // Drag s2 in front of s1. The labels travel with their sessions, so the strip
+    // now reads the suffix FIRST — the numbering did not follow the slots.
+    const second = root.querySelectorAll<HTMLElement>(".wt-tab")[1];
+    second?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    const items = [...root.querySelectorAll<HTMLButtonElement>(".wt-tab-menu button")];
+    items.find((b) => b.textContent === "Move left")?.click();
+    await until(() => idsOf(root)[0] === "shell (2)", 60);
+    expect(idsOf(root)).toEqual(["shell (2)", "shell"]);
+  });
+});
+
+describe("tabs: teardown leaves the page as it found it", () => {
+  it("removes every surface it added and stops polling", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    // A short poll so a surviving interval is caught within the test's window.
+    term = createTerminal(root, { features: () => [tabs({ pollMs: 10 })] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    // Everything the feature built is on the page first, so the assertions below
+    // are about removal rather than about markup that was never there.
+    expect(root.querySelector(".wt-tab-bar")).toBeTruthy();
+    expect(root.querySelector(".wt-switcher")).toBeTruthy();
+    expect(root.querySelector(".wt-tab-menu")).toBeTruthy();
+    expect(root.querySelector(".wt-catchup")).toBeTruthy();
+    expect(root.querySelector(".wt-tab-new")).toBeTruthy();
+    const surface = root.querySelector(".term");
+    expect(surface?.classList.contains("wt-with-tabbar")).toBe(true);
+    expect(root.classList.contains("wt-tabbed")).toBe(true);
+
+    term.destroy();
+    term = undefined;
+
+    // A feature is removable, so a destroyed one may not leave chrome behind: in
+    // an embedded panel the host keeps the element and would be left with a strip
+    // wired to nothing.
+    expect(root.querySelector(".wt-tab-bar")).toBeNull();
+    expect(root.querySelector(".wt-switcher")).toBeNull();
+    expect(root.querySelector(".wt-tab-menu")).toBeNull();
+    expect(root.querySelector(".wt-catchup")).toBeNull();
+    expect(root.querySelector(".wt-tab-new")).toBeNull();
+    expect(root.querySelector(".wt-tab")).toBeNull();
+    // ...nor the layout it reserved for itself, which would hold the surface off
+    // an edge that no longer has a bar on it.
+    expect(root.classList.contains("wt-tabbed")).toBe(false);
+    expect(root.style.getPropertyValue("--wt-tabbar-h")).toBe("");
+    expect(root.style.getPropertyValue("--wt-reserve-bottom")).toBe("");
+
+    // And the session poll is over: a timer outliving the feature would keep
+    // re-listing sessions for a terminal that no longer exists.
+    const before = fetchMock.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(fetchMock.mock.calls.length).toBe(before);
   });
 });
