@@ -1,7 +1,8 @@
 {
   "testRunner": "vitest",
   "vitest": {
-    "configFile": "vitest.config.ts"
+    "configFile": "vitest.config.ts",
+    "related": false
   },
   "checkers": ["typescript"],
   "tsconfigFile": "tsconfig.json",
