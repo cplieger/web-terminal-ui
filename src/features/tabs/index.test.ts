@@ -435,6 +435,46 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s2");
   });
 
+  // The two cases below are the WRITE half of the restore above, and until they
+  // existed nothing in the repo had one: the record is written from two places
+  // (the bootstrap ladder and every switch), both inside a try/catch, and both
+  // writes could be deleted outright with the whole suite still green. A refused
+  // write is pinned further down ("still switches tabs when the active-tab record
+  // cannot be written"), but surviving an exception says nothing about a
+  // successful write ever happening. happy-dom's localStorage is real, and the
+  // beforeEach clears it, so what these read back can only have come from the
+  // feature under test in this test.
+
+  it("records the tab the bootstrap activated, so a first reload has an id to restore", async () => {
+    // Storage starts empty here: no saved id, so the ladder falls to the oldest
+    // live tab and s1 under the key is the boot path's own write.
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    expect(root.querySelectorAll(".wt-tab")[0]?.classList.contains("wt-tab-active")).toBe(true);
+    expect(localStorage.getItem("wt-active-session")).toBe("s1");
+  });
+
+  it("records the tab a switch moved to, not the one the page opened on", async () => {
+    // Seeded with s1 — the id the ladder lands on anyway — so this case pins the
+    // SWITCH's write and nothing else: drop it and storage still says s1 while s2
+    // is the tab on screen. Every other witness of a switch (the renderer bind,
+    // the WS reconnect, the active class) is unchanged by a missing write, which
+    // is how four mutants lived here.
+    localStorage.setItem("wt-active-session", "s1");
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+
+    root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
+
+    expect(root.querySelectorAll(".wt-tab")[1]?.classList.contains("wt-tab-active")).toBe(true);
+    expect(localStorage.getItem("wt-active-session")).toBe("s2");
+  });
+
   it("restores the saved active tab when the status snapshot wins the boot race", async () => {
     // The test above passes with no activityMonitor, so nothing races the
     // bootstrap. The real app always has one, and it always wins: tabs subscribes
