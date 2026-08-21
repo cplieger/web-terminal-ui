@@ -15,6 +15,20 @@ describe("a11y: announcer", () => {
     expect(root.children.length).toBe(2);
   });
 
+  it("hides both live regions visually, inline, without any stylesheet", () => {
+    const root = document.createElement("div");
+    createAnnouncer(root);
+    const polite = root.querySelector<HTMLElement>('[aria-live="polite"]');
+    const assertive = root.querySelector<HTMLElement>('[aria-live="assertive"]');
+    expect(polite?.style.position).toBe("absolute");
+    expect(polite?.style.width).toBe("1px");
+    expect(polite?.style.height).toBe("1px");
+    expect(polite?.style.clipPath).toBe("inset(50%)");
+    expect(assertive?.style.position).toBe("absolute");
+    expect(assertive?.style.clipPath).toBe("inset(50%)");
+    expect(assertive?.style.overflow).toBe("hidden");
+  });
+
   it("clears the region then sets the message after the ~100ms delay (repeat re-announces)", () => {
     vi.useFakeTimers();
     try {
@@ -77,6 +91,23 @@ describe("a11y: announcer", () => {
       ann.destroy();
       vi.advanceTimersByTime(200); // must not throw or write to removed nodes
       expect(root.children.length).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the cancelled announcement never reaches the detached region", () => {
+    vi.useFakeTimers();
+    try {
+      const root = document.createElement("div");
+      const ann = createAnnouncer(root);
+      const polite = root.querySelector<HTMLElement>('[aria-live="polite"]');
+      ann.announce("late");
+      ann.destroy();
+      vi.advanceTimersByTime(200);
+      // The timer is cleared, not merely orphaned: a fired one would still hold
+      // the region in its closure and write the message into the detached node.
+      expect(polite?.textContent).toBe("");
     } finally {
       vi.useRealTimers();
     }
@@ -149,6 +180,49 @@ describe("a11y: tablist", () => {
     const handle = ctl.registerTab(tab);
     handle.setLabel("Session 1");
     expect(tab.getAttribute("aria-label")).toBe("Session 1");
+  });
+
+  it("setEditing(true) takes the chip out of the roving sequence, so Tab reaches the field", () => {
+    const panel = document.createElement("div");
+    panel.id = "p";
+    const ctl = createTablist(panel);
+    const tab = document.createElement("div");
+    tab.id = "t";
+    const handle = ctl.registerTab(tab);
+    handle.setSelected(true);
+    expect(tab.tabIndex).toBe(0);
+    handle.setEditing(true, true);
+    // -1, not a positive index: a positive tabindex would put the role-less
+    // container ahead of the textbox inside it in the document's Tab order.
+    expect(tab.tabIndex).toBe(-1);
+    expect(tab.hasAttribute("role")).toBe(false);
+  });
+
+  it("leaving edit mode restores an unselected chip to programmatic focus only", () => {
+    const panel = document.createElement("div");
+    panel.id = "p";
+    const ctl = createTablist(panel);
+    const tab = document.createElement("div");
+    tab.id = "t";
+    const handle = ctl.registerTab(tab);
+    handle.setEditing(true, false);
+    handle.setEditing(false, false);
+    expect(tab.getAttribute("role")).toBe("tab");
+    expect(tab.getAttribute("aria-selected")).toBe("false");
+    expect(tab.tabIndex).toBe(-1);
+  });
+
+  it("leaving edit mode puts the selected chip back in the Tab sequence", () => {
+    const panel = document.createElement("div");
+    panel.id = "p";
+    const ctl = createTablist(panel);
+    const tab = document.createElement("div");
+    tab.id = "t";
+    const handle = ctl.registerTab(tab);
+    handle.setEditing(true, true);
+    handle.setEditing(false, true);
+    expect(tab.getAttribute("aria-selected")).toBe("true");
+    expect(tab.tabIndex).toBe(0);
   });
 
   it("setSelected(true) labels the panel by the tab; deselecting a tab never relabels it", () => {

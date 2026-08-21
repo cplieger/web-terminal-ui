@@ -21,6 +21,16 @@ describe("numeric option validation", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("accepts 1, the smallest value the policy calls valid", () => {
+    // The boundary matters in both directions: 1 is a legal scrollback line
+    // count and a legal interval, and rejecting it would silently substitute a
+    // default several orders of magnitude larger.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(positiveIntOption(1, 7, "a.b")).toBe(1);
+    expect(optionalPositiveIntOption(1, "c")).toBe(1);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("treats an omitted value as no opinion, silently", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     expect(positiveIntOption(undefined, 7, "a.b")).toBe(7);

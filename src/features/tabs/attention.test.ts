@@ -268,6 +268,21 @@ describe("browserAttentionEnv binds the sinks to the real browser", () => {
     }
   });
 
+  it("clears through setAppBadge(0) on a platform with no clearAppBadge", () => {
+    // Chrome shipped setAppBadge before clearAppBadge; zero has to clear there
+    // too, so the fallback arm is the only thing standing between that platform
+    // and a badge that never goes away.
+    const setAppBadge = vi.fn(() => Promise.resolve());
+    Object.assign(navigator, { setAppBadge });
+    try {
+      const env = browserAttentionEnv(vi.fn(), false);
+      env.setBadge?.(0);
+      expect(setAppBadge).toHaveBeenCalledExactlyOnceWith(0);
+    } finally {
+      delete (navigator as { setAppBadge?: unknown }).setAppBadge;
+    }
+  });
+
   it("swallows a rejected badge, because an OS that will not paint one is normal", async () => {
     // The Badging API is present but non-functional on some desktops, where the
     // promise rejects. An unhandled rejection inside a status sweep would surface

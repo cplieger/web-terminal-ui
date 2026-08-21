@@ -12,10 +12,14 @@ const setCtrlArmed = vi.fn((v: boolean) => {
 });
 const dispose = vi.fn();
 let onCtrlChange: ((a: boolean) => void) | undefined;
-const bindMobileToolbar = vi.fn((o: { onCtrlChange: (a: boolean) => void }) => {
-  onCtrlChange = o.onCtrlChange;
-  return { isCtrlArmed, applyStickyCtrl, setCtrlArmed, dispose };
-});
+let sendFromToolbar: ((text: string) => void) | undefined;
+const bindMobileToolbar = vi.fn(
+  (o: { onCtrlChange: (a: boolean) => void; send: (text: string) => void }) => {
+    onCtrlChange = o.onCtrlChange;
+    sendFromToolbar = o.send;
+    return { isCtrlArmed, applyStickyCtrl, setCtrlArmed, dispose };
+  },
+);
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -27,19 +31,21 @@ function fakeCtx(): {
   slot: HTMLElement;
   transform: (b: Uint8Array) => Uint8Array;
   offTransform: ReturnType<typeof vi.fn>;
+  send: ReturnType<typeof vi.fn>;
 } {
   const slot = document.createElement("div");
   let transformFn: ((b: Uint8Array) => Uint8Array) | undefined;
   const offTransform = vi.fn();
+  const send = vi.fn();
   const ctx = {
     region: () => slot,
-    send: vi.fn(),
+    send,
     registerInputTransform: (fn: (b: Uint8Array) => Uint8Array) => {
       transformFn = fn;
       return offTransform;
     },
   } as unknown as TerminalContext;
-  return { ctx, slot, transform: (b) => transformFn?.(b) ?? b, offTransform };
+  return { ctx, slot, transform: (b) => transformFn?.(b) ?? b, offTransform, send };
 }
 
 let mobileToolbar: typeof MobileToolbarFn;
@@ -53,6 +59,7 @@ beforeEach(async () => {
   dispose.mockClear();
   bindMobileToolbar.mockClear();
   onCtrlChange = undefined;
+  sendFromToolbar = undefined;
   vi.resetModules();
   ({ mobileToolbar } = await import("./mobile-toolbar.js"));
 });
@@ -131,6 +138,39 @@ describe("mobileToolbar: API + lifecycle", () => {
     const f = fakeCtx();
     await mobileToolbar({ externalToggle: true }).setup(f.ctx);
     expect(f.slot.querySelector(".wt-toolbar-external")).not.toBeNull();
+  });
+
+  it("keeps its own toggle when no peer drives it (presetTouch)", async () => {
+    const f = fakeCtx();
+    await mobileToolbar().setup(f.ctx);
+    // Without the class the CSS keeps the top-right kb-toggle visible and the
+    // grid anchored to the viewport rather than above a tab bar.
+    expect(f.slot.querySelector(".wt-toolbar-external")).toBeNull();
+    expect(f.slot.querySelector(".key-toolbar")).not.toBeNull();
+  });
+
+  it("routes the toolbar's key output through the kernel funnel, encoded", async () => {
+    const f = fakeCtx();
+    await mobileToolbar().setup(f.ctx);
+    sendFromToolbar?.("\x1b[A");
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(new TextDecoder().decode(f.send.mock.calls[0]?.[0] as Uint8Array)).toBe("\x1b[A");
+  });
+
+  it("enables the slide transition only after two frames, so the first paint does not flash", async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    const f = fakeCtx();
+    await mobileToolbar().setup(f.ctx);
+    const bar = f.slot.querySelector(".key-toolbar");
+    expect(bar?.classList.contains("no-transition")).toBe(true);
+    frames.shift()?.(0);
+    expect(bar?.classList.contains("no-transition")).toBe(true);
+    frames.shift()?.(0);
+    expect(bar?.classList.contains("no-transition")).toBe(false);
   });
 
   it("teardown disposes the engine binding, drops the transform, and removes the toolbar", async () => {
