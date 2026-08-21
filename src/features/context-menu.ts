@@ -188,9 +188,6 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
             clipboard.paste();
           });
         }
-        if (menu.childElementCount === 0) {
-          return; // nothing to offer
-        }
         // Make visible (so it has measurable size), then place it within the
         // visible viewport via the shared point-anchored positioner (clamp to the
         // visual viewport; flip above the finger near the bottom edge).
