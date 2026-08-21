@@ -273,6 +273,30 @@ async function until(pred: () => boolean, tries = 20): Promise<void> {
   }
 }
 
+// A localStorage that refuses every operation, which is what Safari private mode,
+// a disabled third-party context and an embedder's iframe all look like from here.
+//
+// The whole global is REPLACED rather than `Storage.prototype` spied on. A prototype
+// spy installed inside a test does NOT reach `localStorage` once other tests in this
+// file have run: measured with a probe in the test body, the read went through
+// untouched (`getItem is mock? false`, and reading did not throw) while the same case
+// run alone with `-t` did throw. A case built on the spy therefore never exercises the
+// guard it is named for — it passes because storage stayed friendly. The stubbed global
+// holds whatever ran before it and is reversed by the afterEach `unstubAllGlobals`.
+function stubHostileStorage(): void {
+  const boom = (): never => {
+    throw new Error("storage disabled");
+  };
+  vi.stubGlobal("localStorage", {
+    getItem: boom,
+    setItem: boom,
+    removeItem: boom,
+    clear: boom,
+    key: boom,
+    length: 0,
+  });
+}
+
 // A minimal DataTransfer stand-in recording what the strip's drag handlers put
 // on it, plus a synthetic DragEvent (happy-dom has no drag event constructors).
 interface FakeDataTransfer {
@@ -1875,11 +1899,7 @@ describe("tabs feature", () => {
   // writes still touch.
 
   it("survives storage that throws (Safari private mode) without losing the reorder", async () => {
-    const boom = (): never => {
-      throw new Error("storage disabled");
-    };
-    vi.spyOn(Storage.prototype, "getItem").mockImplementation(boom);
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(boom);
+    stubHostileStorage();
     listBody = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
       { id: "s2", title: "two", createdAt: "2", status: "idle" },
@@ -1889,9 +1909,31 @@ describe("tabs feature", () => {
     term = createTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
+    // The bootstrap survived it: an unreadable saved id falls back to the oldest
+    // live tab rather than throwing out of the session resolve, which is what
+    // "survives" means here — an exception there leaves the page with no active
+    // terminal at all.
+    expect(setSession).toHaveBeenCalledWith("s1");
     menuItem(openTabMenu(root, 1), "Move left")?.click();
     // The reorder still applies: it is published to the server, not stored here.
     expect(idsOf(root)).toEqual(["two", "one"]);
+  });
+
+  it("still switches tabs when the active-tab record cannot be written", async () => {
+    // The bootstrap's read and write are not the only storage the strip touches:
+    // every switch records the new active id. Unguarded, a refused write there
+    // throws out of the switch and leaves the renderer bound to the old tab.
+    stubHostileStorage();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    setSession.mockClear();
+
+    root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
+
+    expect(setSession).toHaveBeenCalledWith("s2");
+    expect(root.querySelectorAll(".wt-tab")[1]?.classList.contains("wt-tab-active")).toBe(true);
   });
 });
 
@@ -3802,31 +3844,9 @@ describe("tabs: the swipe-to-switch hint", () => {
   it("greets once per page even when storage cannot be read at all", async () => {
     // Safari private mode throws on both halves. The hint still shows, and still
     // only once: the in-memory latch is the fallback for the record it could not
-    // write.
-    //
-    // The whole global is replaced rather than Storage.prototype spied on. A
-    // prototype spy installed here does NOT reach `localStorage` once other tests
-    // in this file have run — measured: the read went through untouched and this
-    // case passed for the wrong reason — while a stubbed global is reversed by the
-    // afterEach unstub and holds whatever ran before it.
-    vi.stubGlobal("localStorage", {
-      getItem: (): never => {
-        throw new Error("storage disabled");
-      },
-      setItem: (): never => {
-        throw new Error("storage disabled");
-      },
-      removeItem: (): never => {
-        throw new Error("storage disabled");
-      },
-      clear: (): never => {
-        throw new Error("storage disabled");
-      },
-      key: (): never => {
-        throw new Error("storage disabled");
-      },
-      length: 0,
-    });
+    // write. stubHostileStorage (not a Storage.prototype spy) is what makes the
+    // read actually throw here — see its comment.
+    stubHostileStorage();
     const root = await mountHinted({ "(pointer: coarse)": true });
     expect(toastText(root)).toBe(HINT);
 
