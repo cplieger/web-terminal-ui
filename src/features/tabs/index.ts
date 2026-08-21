@@ -244,7 +244,12 @@ async function createSessionHonouringRetry(
   isTornDown: () => boolean,
 ): Promise<SessionInfo> {
   const startedAt = Date.now();
-  let lastAnnouncedAt = 0;
+  // The elapsed reading of the last announcement, or null when nothing has been
+  // announced yet. NOT a 0 sentinel: elapsed is legitimately 0 when the server
+  // refuses inside the first millisecond (a host on the same machine), and a 0
+  // sentinel read that as "never spoken" and re-announced on the next refusal —
+  // the one thing the throttle below exists to prevent.
+  let lastAnnouncedAt: number | null = null;
   for (;;) {
     try {
       return await api.create();
@@ -266,7 +271,7 @@ async function createSessionHonouringRetry(
       // only said "not yet" -- and the first announcement fires before any retry
       // has happened at all, so a user two seconds into a boot was told
       // "retrying" about a request that had been made exactly once.
-      if (lastAnnouncedAt === 0 || elapsed - lastAnnouncedAt >= CREATE_RETRY_REANNOUNCE_MS) {
+      if (lastAnnouncedAt === null || elapsed - lastAnnouncedAt >= CREATE_RETRY_REANNOUNCE_MS) {
         lastAnnouncedAt = elapsed;
         const reason = err.serverMessage ?? "Server is not ready yet";
         ctx.toast(`${reason}; waiting…`, 8000);
