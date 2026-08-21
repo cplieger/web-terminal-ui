@@ -235,3 +235,169 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
     expect(tw.style.bottom).toBe("300px");
   });
 });
+
+// A visualViewport stand-in whose listeners actually fire. Every other suite
+// here stubs addEventListener with a vi.fn, so the geometry is only ever
+// computed by the one direct onChange() call init makes — nothing proved the
+// listener WIRING reacts to a keyboard opening after init, or that teardown
+// releases it.
+function liveVisualViewport(
+  height: number,
+  offsetTop: number,
+): {
+  height: number;
+  offsetTop: number;
+  addEventListener: (type: string, fn: () => void) => void;
+  removeEventListener: (type: string, fn: () => void) => void;
+  fire: (type: string) => void;
+} {
+  const listeners = new Map<string, Set<() => void>>();
+  return {
+    height,
+    offsetTop,
+    addEventListener(type, fn) {
+      const set = listeners.get(type) ?? new Set<() => void>();
+      set.add(fn);
+      listeners.set(type, set);
+    },
+    removeEventListener(type, fn) {
+      listeners.get(type)?.delete(fn);
+    },
+    fire(type) {
+      for (const fn of [...(listeners.get(type) ?? [])]) {
+        fn();
+      }
+    },
+  };
+}
+
+describe("viewport: the visual-viewport wiring reacts after init", () => {
+  let vv: ReturnType<typeof liveVisualViewport>;
+  let root: HTMLElement;
+
+  beforeEach(() => {
+    viewport.teardown(); // drop the beforeEach init's window listeners first
+    vv = liveVisualViewport(window.innerHeight, 0);
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    root = document.createElement("div");
+    const tw = document.createElement("div");
+    root.appendChild(tw);
+    document.body.replaceChildren(root);
+    viewport.init({ termWrap: tw, root, onSettled });
+  });
+
+  afterEach(() => {
+    viewport.teardown();
+    Reflect.deleteProperty(window, "visualViewport");
+  });
+
+  it("republishes the keyboard inset when the keyboard opens after init", () => {
+    vv.height = window.innerHeight - 300;
+    vv.fire("resize");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("300px");
+  });
+
+  it("republishes the offset when the visual viewport scrolls", () => {
+    vv.offsetTop = 40;
+    vv.fire("scroll");
+    expect(root.style.getPropertyValue("--vv-top")).toBe("40px");
+  });
+
+  it("treats a visual-viewport change as a transition in flight", () => {
+    vv.height = window.innerHeight - 100;
+    vv.fire("resize");
+    expect(viewport.isInTransition()).toBe(true);
+  });
+
+  it("self-heals a stuck inset when the window regains focus", () => {
+    vv.height = window.innerHeight - 120;
+    window.dispatchEvent(new Event("focus"));
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("120px");
+  });
+
+  it("self-heals a stuck inset when the page is restored from the bfcache", () => {
+    vv.height = window.innerHeight - 140;
+    window.dispatchEvent(new Event("pageshow"));
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("140px");
+  });
+});
+
+describe("viewport: teardown releases every listener it attached", () => {
+  let vv: ReturnType<typeof liveVisualViewport>;
+  let root: HTMLElement;
+
+  beforeEach(() => {
+    viewport.teardown();
+    vv = liveVisualViewport(window.innerHeight - 200, 0);
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    root = document.createElement("div");
+    const tw = document.createElement("div");
+    root.appendChild(tw);
+    document.body.replaceChildren(root);
+    viewport.init({ termWrap: tw, root, onSettled });
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("200px");
+    viewport.teardown();
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, "visualViewport");
+  });
+
+  it("clears the geometry vars it published, so a destroy without a remount leaves no inset", () => {
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("");
+    expect(root.style.getPropertyValue("--vv-top")).toBe("");
+  });
+
+  it("stops answering visual-viewport resizes", () => {
+    vv.height = window.innerHeight - 500;
+    vv.fire("resize");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("");
+  });
+
+  it("stops answering visual-viewport scrolls", () => {
+    vv.offsetTop = 90;
+    vv.fire("scroll");
+    expect(root.style.getPropertyValue("--vv-top")).toBe("");
+  });
+
+  it("stops answering window focus", () => {
+    window.dispatchEvent(new Event("focus"));
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("");
+  });
+
+  it("stops answering a bfcache restore", () => {
+    window.dispatchEvent(new Event("pageshow"));
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("");
+  });
+
+  it("stops answering window resize, so no transition starts after destroy", () => {
+    window.dispatchEvent(new Event("resize"));
+    expect(viewport.isInTransition()).toBe(false);
+  });
+});
+
+describe("viewport: rotation is a re-measure signal on both Safari generations", () => {
+  afterEach(() => {
+    viewport.teardown();
+    Reflect.deleteProperty(screen, "orientation");
+  });
+
+  it("re-measures on screen.orientation change where the modern API exists", () => {
+    viewport.teardown();
+    const orientation = liveVisualViewport(0, 0); // reused as a bare event target
+    Object.defineProperty(screen, "orientation", { configurable: true, value: orientation });
+    viewport.init({ termWrap, onSettled });
+    expect(viewport.isInTransition()).toBe(false);
+    orientation.fire("change");
+    expect(viewport.isInTransition()).toBe(true);
+  });
+
+  it("does not listen for the deprecated window event on a browser that lacks it", () => {
+    // happy-dom exposes neither screen.orientation nor onorientationchange, which
+    // is the older-Safari-absent case: nothing must be bound to the window event.
+    viewport.teardown();
+    viewport.init({ termWrap, onSettled });
+    window.dispatchEvent(new Event("orientationchange"));
+    expect(viewport.isInTransition()).toBe(false);
+  });
+});

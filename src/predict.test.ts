@@ -139,6 +139,77 @@ describe("predict: setDimensions clamps position", () => {
     predict.setDimensions(80, 10); // clamp to 9
     expect(predict.get().row).toBe(9);
   });
+
+  it("a resize that changes nothing leaves the cursor where it was", () => {
+    predict.setDimensions(80, 24);
+    predict.onScreenFrame(3, 40);
+    predict.setDimensions(80, 24);
+    expect(predict.get()).toEqual({ row: 3, col: 40, active: true });
+  });
+
+  it("clamps a server column that is exactly the width, which is one past the last cell", () => {
+    // onScreenFrame takes the server's cursor unclamped, so predCol can arrive
+    // AT cols; the last addressable cell is cols-1.
+    predict.setDimensions(80, 24);
+    predict.onScreenFrame(0, 80);
+    predict.setDimensions(80, 24);
+    expect(predict.get().col).toBe(79);
+  });
+
+  it("clamps a server row that is exactly the height", () => {
+    predict.setDimensions(80, 24);
+    predict.onScreenFrame(24, 0);
+    predict.setDimensions(80, 24);
+    expect(predict.get().row).toBe(23);
+  });
+});
+
+describe("predict: a resize notifies only when it moved the cursor", () => {
+  function counter(): () => number {
+    let calls = 0;
+    predict.subscribe(() => {
+      calls++;
+    });
+    return () => calls;
+  }
+
+  // Module state is shared and subscribe has no unsubscribe, so every case here
+  // drops its counter before returning (see the subscribe suite above).
+  function release(): void {
+    predict.subscribe(() => {
+      // no-op
+    });
+  }
+
+  it("stays quiet when the new size clamps nothing", () => {
+    predict.setDimensions(80, 24);
+    predict.onScreenFrame(3, 40);
+    const calls = counter();
+    predict.setDimensions(80, 24);
+    const after = calls();
+    release();
+    expect(after).toBe(0);
+  });
+
+  it("notifies when the width clamped the column", () => {
+    predict.setDimensions(80, 24);
+    predict.onScreenFrame(3, 40);
+    const calls = counter();
+    predict.setDimensions(20, 24);
+    const after = calls();
+    release();
+    expect(after).toBe(1);
+  });
+
+  it("notifies when the height clamped the row", () => {
+    predict.setDimensions(80, 24);
+    predict.onScreenFrame(20, 3);
+    const calls = counter();
+    predict.setDimensions(80, 10);
+    const after = calls();
+    release();
+    expect(after).toBe(1);
+  });
 });
 
 describe("predict: reset()", () => {
@@ -223,5 +294,37 @@ describe("predict: 3-byte UTF-8 codepoint advances one cell", () => {
   it("CJK ideograph counts as a single cell", () => {
     predict.applyInput(enc("中x")); // the CJK char is 3 UTF-8 bytes
     expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
+  });
+});
+
+describe("predict: the UTF-8 lead-byte boundaries decide the codepoint length", () => {
+  it("0xC0 is a 2-byte lead, not a standalone byte", () => {
+    // The lowest 2-byte lead there is. Prediction models the byte STREAM, and a
+    // lead byte counted as one cell would advance the cursor once per
+    // continuation byte — the visible symptom being a ghost cursor running ahead
+    // of the text on any non-ASCII input.
+    predict.applyInput(new Uint8Array([0xc0, 0x80, 0x78]));
+    expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
+  });
+
+  it("0xE0 is a 3-byte lead, not a 2-byte one", () => {
+    predict.applyInput(new Uint8Array([0xe0, 0xa4, 0xb9, 0x78]));
+    expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
+  });
+
+  it("0xF0 is a 4-byte lead", () => {
+    predict.applyInput(new Uint8Array([0xf0, 0x9f, 0x99, 0x82, 0x78]));
+    expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
+  });
+});
+
+describe("predict: a consumed wrap does not wrap the next character too", () => {
+  it("the character after a wrap advances normally", () => {
+    predict.setDimensions(5, 10);
+    predict.onScreenFrame(0, 4);
+    predict.applyInput(enc("x")); // at the last column: pendingWrap
+    predict.applyInput(enc("y")); // consumes the wrap: (1,0) then advance
+    predict.applyInput(enc("z")); // must NOT wrap again
+    expect(predict.get()).toEqual({ row: 1, col: 2, active: true });
   });
 });
