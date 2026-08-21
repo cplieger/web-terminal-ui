@@ -11,7 +11,12 @@ import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as KernelModule from "./kernel.js";
 import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
 import { clipboard } from "../features/clipboard.js";
-import type { TerminalContext, TerminalFeature, TerminalStartupFailure } from "./types.js";
+import type {
+  TerminalContext,
+  TerminalFeature,
+  TerminalHandle,
+  TerminalStartupFailure,
+} from "./types.js";
 
 const sendBinary = vi.fn<(buf: Uint8Array) => boolean>(() => true);
 const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
@@ -31,6 +36,11 @@ const dropBrowseCache = vi.fn<(pageVisible: boolean) => void>();
 // Hoisted so the scroll seam test can assert the callback the kernel builds
 // actually REACHES the renderer, not merely that it is a function.
 const handleScrollPosition = vi.fn();
+// Hoisted so a test can say "this store is the visible tab's": the sweep splits
+// the bound store (conditional drop, through the renderer) from every background
+// one (unconditional, direct), and without a bound store to name, the split is
+// invisible.
+const boundStore = vi.fn<() => Engine.LineStore | undefined>(() => undefined);
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -64,7 +74,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       noteSolicited: vi.fn(),
       clearSolicited: vi.fn(),
       bind: vi.fn(),
-      boundStore: vi.fn(),
+      boundStore,
     },
     scroll: {
       init: scrollInit,
@@ -113,6 +123,8 @@ beforeEach(async () => {
   lastBrowseActivityMs.mockClear();
   lastBrowseActivityMs.mockReturnValue(0);
   dropBrowseCache.mockClear();
+  boundStore.mockClear();
+  boundStore.mockReturnValue(undefined);
   document.body.replaceChildren();
   ({ createTerminal } = await import("./kernel.js"));
 });
@@ -1922,5 +1934,1784 @@ describe("the document title is composed from a base and a feature prefix", () =
 
     t.destroy();
     expect(document.title).toBe("Served page");
+  });
+});
+
+// --- Helpers for the suites below -------------------------------------------
+
+/** Give a root real geometry. happy-dom reports 0 for every layout box, and 0 is
+ *  inside BOTH narrow breakpoints, so an un-sized root is unconditionally narrow
+ *  and the two halves of the test are indistinguishable. */
+function sizeRoot(root: HTMLElement, width: number, height: number): void {
+  Object.defineProperty(root, "clientWidth", { value: width, configurable: true });
+  Object.defineProperty(root, "clientHeight", { value: height, configurable: true });
+}
+
+/** A QUERY-AWARE matchMedia. The kernel asks two different questions that mean
+ *  opposite things — `(any-pointer: fine)` (a hardware pointer exists, so focus
+ *  eagerly) and `(pointer: coarse)` (the primary pointer is a finger, which
+ *  ctx.layout() reports) — so a blanket `matches: false` stub answers the wrong
+ *  one and a blanket `true` answers both wrongly at once. */
+function stubMedia(answers: Record<string, boolean>): void {
+  vi.stubGlobal(
+    "matchMedia",
+    (query: string) =>
+      ({
+        matches: answers[query] ?? false,
+        media: query,
+        onchange: null,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        dispatchEvent: () => false,
+      }) as unknown as MediaQueryList,
+  );
+}
+
+describe("narrow layout: compact in EITHER dimension", () => {
+  // The .wt-narrow class and ctx.layout().narrow are the same fact, published
+  // once. Both breakpoints are load-bearing and they are NOT interchangeable: a
+  // landscape phone (932x430) is far wider than the width breakpoint and still
+  // wants the thumb-reach switcher, which is exactly the case a width-only test
+  // cannot see.
+
+  it("is not narrow on a desktop root", () => {
+    const root = rootIn();
+    sizeRoot(root, 1280, 800);
+    createTerminal(root, { features: () => [] });
+    expect(root.classList.contains("wt-narrow")).toBe(false);
+  });
+
+  it("is narrow on a portrait phone (skinny)", () => {
+    const root = rootIn();
+    sizeRoot(root, 390, 844);
+    createTerminal(root, { features: () => [] });
+    expect(root.classList.contains("wt-narrow")).toBe(true);
+  });
+
+  it("is narrow on a LANDSCAPE phone, which is wide but short", () => {
+    // 932x430: an iPhone 14 Pro Max rotated. Wider than the width breakpoint by
+    // 330px, so only the height half can catch it.
+    const root = rootIn();
+    sizeRoot(root, 932, 430);
+    createTerminal(root, { features: () => [] });
+    expect(root.classList.contains("wt-narrow")).toBe(true);
+  });
+
+  it("is not narrow on a landscape tablet, which is the case the height bound separates", () => {
+    // The smallest iPad is 744 CSS px tall in landscape, so the 500px bound clears
+    // it with margin — a tablet gets the desktop strip.
+    const root = rootIn();
+    sizeRoot(root, 1024, 744);
+    createTerminal(root, { features: () => [] });
+    expect(root.classList.contains("wt-narrow")).toBe(false);
+  });
+
+  it("counts the width breakpoint itself as narrow, and one pixel past it as not", () => {
+    const atBound = rootIn();
+    sizeRoot(atBound, 600, 800);
+    createTerminal(atBound, { features: () => [] });
+    expect(atBound.classList.contains("wt-narrow")).toBe(true);
+
+    const pastBound = rootIn();
+    sizeRoot(pastBound, 601, 800);
+    createTerminal(pastBound, { features: () => [] });
+    expect(pastBound.classList.contains("wt-narrow")).toBe(false);
+  });
+
+  it("counts the height breakpoint itself as narrow, and one pixel past it as not", () => {
+    const atBound = rootIn();
+    sizeRoot(atBound, 1280, 500);
+    createTerminal(atBound, { features: () => [] });
+    expect(atBound.classList.contains("wt-narrow")).toBe(true);
+
+    const pastBound = rootIn();
+    sizeRoot(pastBound, 1280, 501);
+    createTerminal(pastBound, { features: () => [] });
+    expect(pastBound.classList.contains("wt-narrow")).toBe(false);
+  });
+
+  it("reports the same fact through ctx.layout(), alongside pointer coarseness", async () => {
+    // Two independent questions, deliberately: a narrow embedded panel on a
+    // desktop is narrow with a fine pointer, and a landscape tablet is wide with
+    // a coarse one. A feature that conflated them would get the mobile treatment
+    // on a desktop panel.
+    stubMedia({ "(pointer: coarse)": true });
+    const root = rootIn();
+    sizeRoot(root, 390, 844);
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "layout-probe",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(root, { features: () => [probe] });
+    await tick();
+
+    expect(captured?.layout()).toEqual({ narrow: true, coarse: true });
+  });
+
+  it("reports coarse: false when the primary pointer is not a finger", async () => {
+    stubMedia({ "(any-pointer: fine)": true });
+    const root = rootIn();
+    sizeRoot(root, 1280, 800);
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "layout-probe-fine",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(root, { features: () => [probe] });
+    await tick();
+
+    expect(captured?.layout()).toEqual({ narrow: false, coarse: false });
+  });
+
+  it("drops the narrow class on destroy, so a re-mount starts clean", () => {
+    const root = rootIn();
+    sizeRoot(root, 390, 844);
+    const term = createTerminal(root, { features: () => [] });
+    expect(root.classList.contains("wt-narrow")).toBe(true);
+    term.destroy();
+    expect(root.classList.contains("wt-narrow")).toBe(false);
+  });
+});
+
+describe("consumer theme overrides", () => {
+  // The theme is a consumer-supplied record that lands on the root as CSS custom
+  // properties, and the `--` filter is what keeps it to custom properties: the
+  // whole point is to override the shipped tokens for THIS instance, not to hand
+  // a consumer arbitrary inline style on the terminal root.
+
+  it("sets each custom property on the root", () => {
+    const root = rootIn();
+    createTerminal(root, {
+      features: () => [],
+      theme: { "--wt-bg": "#101014", "--wt-fg": "#e6e6e6" },
+    });
+    expect(root.style.getPropertyValue("--wt-bg")).toBe("#101014");
+    expect(root.style.getPropertyValue("--wt-fg")).toBe("#e6e6e6");
+  });
+
+  it("ignores a key that is not a custom property", () => {
+    const root = rootIn();
+    createTerminal(root, {
+      features: () => [],
+      // A consumer reaching for `position` is reaching past the token contract:
+      // the layout-mode class owns how the root claims space.
+      theme: { position: "static", "--wt-bg": "#101014" } as Record<string, string>,
+    });
+    expect(root.style.getPropertyValue("position")).toBe("");
+    expect(root.style.getPropertyValue("--wt-bg")).toBe("#101014");
+  });
+
+  it("ignores a key that merely CONTAINS the custom-property prefix", () => {
+    const root = rootIn();
+    createTerminal(root, {
+      features: () => [],
+      theme: { "font-family--": "serif" } as Record<string, string>,
+    });
+    expect(root.style.getPropertyValue("font-family--")).toBe("");
+  });
+
+  it("leaves the root's inline style untouched with no theme", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    expect(root.getAttribute("style")).toBeNull();
+  });
+});
+
+describe("toast (the kernel-owned shared primitive)", () => {
+  const toastEl = (root: HTMLElement): HTMLElement | null =>
+    root.querySelector<HTMLElement>(".wt-toast");
+
+  async function withToast(): Promise<{ root: HTMLElement; ctx: TerminalContext }> {
+    const root = rootIn();
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "toast-probe",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(root, { features: () => [probe] });
+    await tick();
+    if (captured === undefined) {
+      throw new Error("the probe feature never ran");
+    }
+    return { root, ctx: captured };
+  }
+
+  it("announces itself to assistive tech as a status, not an alert", async () => {
+    // role="status" is polite: a toast is confirmation of something the user just
+    // did, so it must not interrupt what a screen reader is currently saying.
+    const { root } = await withToast();
+    expect(toastEl(root)?.getAttribute("role")).toBe("status");
+  });
+
+  it("shows the message, then hides and clears it when the window expires", async () => {
+    const { root, ctx } = await withToast();
+    vi.useFakeTimers();
+    try {
+      ctx.toast("Copied");
+      expect(toastEl(root)?.textContent).toBe("Copied");
+      expect(toastEl(root)?.classList.contains("visible")).toBe(true);
+
+      vi.advanceTimersByTime(3000);
+
+      expect(toastEl(root)?.classList.contains("visible")).toBe(false);
+      // Cleared as well as hidden: the element stays in the DOM under role=status,
+      // and leftover text is announced again by some screen readers on the next
+      // mutation.
+      expect(toastEl(root)?.textContent).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("restarts the window on a second toast instead of letting the first one hide it", async () => {
+    // Without the clearTimeout the FIRST toast's timer still fires on its original
+    // schedule and blanks the second message early — the more toasts, the shorter
+    // each one lasts.
+    const { root, ctx } = await withToast();
+    vi.useFakeTimers();
+    try {
+      ctx.toast("First");
+      vi.advanceTimersByTime(2500);
+      ctx.toast("Second");
+
+      vi.advanceTimersByTime(2500); // 5000ms since the first, 2500 since the second
+      expect(toastEl(root)?.textContent).toBe("Second");
+      expect(toastEl(root)?.classList.contains("visible")).toBe(true);
+
+      vi.advanceTimersByTime(500);
+      expect(toastEl(root)?.classList.contains("visible")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("honours a caller's own duration", async () => {
+    const { root, ctx } = await withToast();
+    vi.useFakeTimers();
+    try {
+      ctx.toast("Brief", 500);
+      vi.advanceTimersByTime(499);
+      expect(toastEl(root)?.classList.contains("visible")).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(toastEl(root)?.classList.contains("visible")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("feature error routing", () => {
+  // A feature that throws must be attributed and contained. With no host handler
+  // the kernel logs; with one, the host decides — and a host handler that itself
+  // throws must not turn a feature bug into an unhandled rejection.
+
+  it("logs a feature error, with the feature named, when no host handler is registered", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "noisy",
+      setup(ctx) {
+        captured = ctx;
+        ctx.on("connection:state", () => {
+          throw new Error("handler blew up");
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+    if (captured === undefined) {
+      throw new Error("the probe feature never ran");
+    }
+    logged.mockClear();
+
+    // The definitive 4001 close, because it publishes its state immediately: an
+    // ordinary close is suppressed until the first frame has landed (the loading
+    // overlay owns the screen), so it would deliver no event to throw from.
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onProcessExit?.();
+
+    expect(logged).toHaveBeenCalled();
+    expect(String(logged.mock.calls[0]?.[0])).toContain("noisy");
+    logged.mockRestore();
+  });
+
+  it("routes to a registered host handler instead of the console", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const onError = vi.fn();
+    const probe: TerminalFeature<void> = {
+      name: "noisy",
+      setup(ctx) {
+        ctx.onError(onError);
+        ctx.on("connection:state", () => {
+          throw new Error("handler blew up");
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+    logged.mockClear();
+
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onProcessExit?.();
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]).toBe("noisy");
+    expect(logged).not.toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("survives a host error handler that throws, and still reaches the next one", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const second = vi.fn();
+    const probe: TerminalFeature<void> = {
+      name: "noisy",
+      setup(ctx) {
+        ctx.onError(() => {
+          throw new Error("reporter blew up");
+        });
+        ctx.onError(second);
+        ctx.on("connection:state", () => {
+          throw new Error("handler blew up");
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+    const cbs = connectionInit.mock.calls[0]![0]!;
+
+    expect(() => {
+      cbs.onProcessExit?.();
+    }).not.toThrow();
+
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("stops routing to a handler that unregistered itself", async () => {
+    const onError = vi.fn();
+    const probe: TerminalFeature<void> = {
+      name: "noisy",
+      setup(ctx) {
+        const off = ctx.onError(onError);
+        off();
+        ctx.on("connection:state", () => {
+          throw new Error("handler blew up");
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onProcessExit?.();
+
+    expect(onError).not.toHaveBeenCalled();
+    logged.mockRestore();
+  });
+});
+
+describe("the input funnel's transform and observer chains", () => {
+  // A transform can rewrite or drop bytes; an observer only watches. The split is
+  // what lets predictive echo paint a character without being able to corrupt what
+  // the server receives — and observers see ACCEPTED input only, so a phantom is
+  // never painted for bytes the socket refused.
+
+  it("tells every observer what was accepted", async () => {
+    const seen: string[] = [];
+    const dec2 = new TextDecoder();
+    const probe: TerminalFeature<void> = {
+      name: "observer",
+      setup(ctx) {
+        ctx.registerInputObserver((b) => {
+          seen.push(dec2.decode(b));
+        });
+        ctx.registerInputObserver((b) => {
+          seen.push(`second:${dec2.decode(b)}`);
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+
+    expect(seen).toEqual(["q", "second:q"]);
+  });
+
+  it("tells observers the TRANSFORMED bytes, not the raw ones", async () => {
+    const seen: string[] = [];
+    const dec2 = new TextDecoder();
+    const probe: TerminalFeature<void> = {
+      name: "rewriter",
+      setup(ctx) {
+        ctx.registerInputTransform(() => new TextEncoder().encode("Z"));
+        ctx.registerInputObserver((b) => {
+          seen.push(dec2.decode(b));
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+
+    expect(seen).toEqual(["Z"]);
+  });
+
+  it("tells observers nothing when the socket refused the bytes", async () => {
+    const observed = vi.fn();
+    const probe: TerminalFeature<void> = {
+      name: "observer",
+      setup(ctx) {
+        ctx.registerInputObserver(observed);
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+    sendBinary.mockReturnValue(false); // the outbox is full
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+
+    expect(observed).not.toHaveBeenCalled();
+    sendBinary.mockReturnValue(true);
+  });
+
+  it("stops calling an unregistered transform, leaving the earlier one in place", async () => {
+    // The unsubscribe has to remove the RIGHT entry: a splice at a stale index
+    // silently drops somebody else's transform, which is the failure mode an
+    // index-guard mutation produces and a single-transform test cannot see.
+    const probe: TerminalFeature<void> = {
+      name: "two-transforms",
+      setup(ctx) {
+        ctx.registerInputTransform((b) => new TextEncoder().encode(`<${dec.decode(b)}`));
+        const off = ctx.registerInputTransform((b) =>
+          new TextEncoder().encode(`${dec.decode(b)}>`),
+        );
+        off();
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+
+    expect(sentText()).toBe("<q");
+  });
+
+  it("stops calling an unregistered observer, leaving the earlier one in place", async () => {
+    const seen: string[] = [];
+    const dec2 = new TextDecoder();
+    const probe: TerminalFeature<void> = {
+      name: "two-observers",
+      setup(ctx) {
+        ctx.registerInputObserver((b) => {
+          seen.push(`first:${dec2.decode(b)}`);
+        });
+        const off = ctx.registerInputObserver((b) => {
+          seen.push(`second:${dec2.decode(b)}`);
+        });
+        off();
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+
+    expect(seen).toEqual(["first:q"]);
+  });
+
+  it("stops calling an unregistered keydown interceptor, leaving the earlier one in place", async () => {
+    const seen: string[] = [];
+    const probe: TerminalFeature<void> = {
+      name: "two-keydowns",
+      setup(ctx) {
+        ctx.registerKeydown(() => {
+          seen.push("first");
+          return false;
+        });
+        const off = ctx.registerKeydown(() => {
+          seen.push("second");
+          return false;
+        });
+        off();
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+
+    expect(seen).toEqual(["first"]);
+  });
+
+  it("unregistering the FIRST of two leaves the second working", async () => {
+    // The index-zero case. A guard that admits only positive indices leaves entry
+    // 0 in the list forever, so the removed transform keeps running.
+    const probe: TerminalFeature<void> = {
+      name: "drop-the-first",
+      setup(ctx) {
+        const off = ctx.registerInputTransform((b) =>
+          new TextEncoder().encode(`<${dec.decode(b)}`),
+        );
+        ctx.registerInputTransform((b) => new TextEncoder().encode(`${dec.decode(b)}>`));
+        off();
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+
+    expect(sentText()).toBe("q>");
+  });
+
+  it("unregistering the FIRST observer leaves the second hearing input", async () => {
+    const seen: string[] = [];
+    const dec2 = new TextDecoder();
+    const probe: TerminalFeature<void> = {
+      name: "drop-the-first-observer",
+      setup(ctx) {
+        const off = ctx.registerInputObserver((b) => {
+          seen.push(`first:${dec2.decode(b)}`);
+        });
+        ctx.registerInputObserver((b) => {
+          seen.push(`second:${dec2.decode(b)}`);
+        });
+        off();
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+
+    expect(seen).toEqual(["second:q"]);
+  });
+
+  it("unregistering the FIRST keydown interceptor leaves the second in the chain", async () => {
+    const seen: string[] = [];
+    const probe: TerminalFeature<void> = {
+      name: "drop-the-first-keydown",
+      setup(ctx) {
+        const off = ctx.registerKeydown(() => {
+          seen.push("first");
+          return false;
+        });
+        ctx.registerKeydown(() => {
+          seen.push("second");
+          return false;
+        });
+        off();
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+
+    expect(seen).toEqual(["second"]);
+  });
+
+  it("tolerates a double unregister of an observer without silencing the survivor", async () => {
+    const seen: string[] = [];
+    const dec2 = new TextDecoder();
+    const probe: TerminalFeature<void> = {
+      name: "double-off-observer",
+      setup(ctx) {
+        ctx.registerInputObserver((b) => {
+          seen.push(`first:${dec2.decode(b)}`);
+        });
+        const off = ctx.registerInputObserver((b) => {
+          seen.push(`second:${dec2.decode(b)}`);
+        });
+        off();
+        off();
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+
+    expect(seen).toEqual(["first:q"]);
+  });
+
+  it("tolerates a double unregister of a keydown interceptor without dropping the survivor", async () => {
+    const seen: string[] = [];
+    const probe: TerminalFeature<void> = {
+      name: "double-off-keydown",
+      setup(ctx) {
+        ctx.registerKeydown(() => {
+          seen.push("first");
+          return false;
+        });
+        const off = ctx.registerKeydown(() => {
+          seen.push("second");
+          return false;
+        });
+        off();
+        off();
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+
+    expect(seen).toEqual(["first"]);
+  });
+
+  it("tolerates a double unregister without disturbing the survivors", async () => {
+    // The second call finds nothing, and `indexOf` reports -1 — which a splice
+    // would read as "the last entry", removing an innocent transform.
+    const probe: TerminalFeature<void> = {
+      name: "double-off",
+      setup(ctx) {
+        const off = ctx.registerInputTransform((b) =>
+          new TextEncoder().encode(`<${dec.decode(b)}`),
+        );
+        ctx.registerInputTransform((b) => new TextEncoder().encode(`${dec.decode(b)}>`));
+        off();
+        off();
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+
+    expect(sentText()).toBe("q>");
+  });
+});
+
+describe("the input event's value-recovery path (Android/IME, where ev.data is null)", () => {
+  // The `input` event does not always carry what was typed: on Android's Gboard
+  // and several IMEs `data` is null and the typed text is only visible as the
+  // textarea's VALUE. The textarea is seeded with a placeholder so a backspace at
+  // column 0 has something to delete, so recovery means telling "placeholder plus
+  // new text" apart from "the field was replaced outright" — and sending the
+  // placeholder to the pty would type garbage into the user's shell.
+  const ta = (): HTMLTextAreaElement =>
+    document.querySelector(".term-input") as HTMLTextAreaElement;
+  const fireValueInput = (value: string): void => {
+    const el = ta();
+    el.value = value;
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertText" }));
+  };
+
+  it("sends only the text appended after the placeholder", () => {
+    createTerminal(rootIn(), { features: () => [] });
+    const placeholder = ta().value;
+    expect(placeholder.length).toBeGreaterThan(0);
+
+    fireValueInput(`${placeholder}hi`);
+
+    expect(sentText()).toBe("hi");
+  });
+
+  it("sends nothing when the value is the untouched placeholder", () => {
+    createTerminal(rootIn(), { features: () => [] });
+    fireValueInput(ta().value);
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when the field was emptied", () => {
+    // A cleared field is a delete, not a keystroke: the placeholder is restored
+    // and nothing goes on the wire.
+    createTerminal(rootIn(), { features: () => [] });
+    fireValueInput("");
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("sends the whole value when it does not start with the placeholder", () => {
+    // An IME that REPLACES the field rather than appending to it. The value is
+    // entirely the user's text, so all of it goes.
+    createTerminal(rootIn(), { features: () => [] });
+    fireValueInput("replaced");
+    expect(sentText()).toBe("replaced");
+  });
+
+  it("sends the whole value when the placeholder is a SUFFIX rather than a prefix", () => {
+    // Position matters: text before the placeholder is the user's, and treating it
+    // as a placeholder-prefixed value would slice the user's own characters off.
+    createTerminal(rootIn(), { features: () => [] });
+    const placeholder = ta().value;
+
+    fireValueInput(`ab${placeholder}`);
+
+    // The placeholder is an NBSP and every send path normalizes NBSP to a space
+    // (the iOS quirk), so the recovered text arrives as "ab ".
+    expect(sentText()).toBe("ab ");
+  });
+
+  it("normalizes an iOS NBSP recovered from the value", () => {
+    createTerminal(rootIn(), { features: () => [] });
+    const placeholder = ta().value;
+    fireValueInput(`${placeholder}a\u00A0b`);
+    expect(sentText()).toBe("a b");
+  });
+
+  it("restores the placeholder afterwards, so the next backspace still has a target", () => {
+    createTerminal(rootIn(), { features: () => [] });
+    const placeholder = ta().value;
+    fireValueInput(`${placeholder}hi`);
+    expect(ta().value).toBe(placeholder);
+  });
+
+  it("sends nothing for a deletion, whatever is left in the field", () => {
+    // Backspace and its three siblings are the reason the placeholder exists: the
+    // engine's key encoder already sent the control byte on keydown, so the
+    // resulting `input` event must send nothing at all. The residual value is what
+    // makes this observable — an EMPTY field takes the same path either way, so a
+    // test that clears the field proves nothing about the guard. A field still
+    // holding text is the case where dropping the guard sends it a second time.
+    for (const inputType of [
+      "deleteContentBackward",
+      "deleteContentForward",
+      "deleteWordBackward",
+      "deleteWordForward",
+    ]) {
+      sendBinary.mockClear();
+      document.body.replaceChildren();
+      createTerminal(rootIn(), { features: () => [] });
+      const el = ta();
+      const placeholder = el.value;
+      el.value = `${placeholder}ab`;
+
+      el.dispatchEvent(new InputEvent("input", { inputType }));
+
+      expect(sendBinary, `${inputType} must send nothing`).not.toHaveBeenCalled();
+      expect(el.value, `${inputType} must restore the placeholder`).toBe(placeholder);
+    }
+  });
+
+  it("prefers ev.data over the value when both are present", () => {
+    // The value still holds the placeholder at this point; taking the data path is
+    // what keeps the placeholder out of the wire on the common browsers.
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    el.value = `${el.value}ignored`;
+
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "d" }));
+
+    expect(sentText()).toBe("d");
+  });
+
+  it("falls back to the value when ev.data is an empty string", () => {
+    // An empty `data` is not "nothing typed": Gboard reports it while putting the
+    // text in the value, so an empty-string check that admitted it would send
+    // nothing at all.
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    const placeholder = el.value;
+    el.value = `${placeholder}gb`;
+
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "" }));
+
+    expect(sentText()).toBe("gb");
+  });
+});
+
+describe("the keydown chain on the focused textarea", () => {
+  const ta = (): HTMLTextAreaElement =>
+    document.querySelector(".term-input") as HTMLTextAreaElement;
+  const key = (init: KeyboardEventInit & { key: string }): KeyboardEvent => {
+    const ev = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    ta().dispatchEvent(ev);
+    return ev;
+  };
+
+  it("stops at the first feature that claims the key", async () => {
+    // Ordering is the contract: clipboard's Ctrl+Shift+C must beat the encoder,
+    // which would otherwise send an interrupt.
+    const seen: string[] = [];
+    const probe: TerminalFeature<void> = {
+      name: "claimer",
+      setup(ctx) {
+        ctx.registerKeydown((ev) => {
+          seen.push(`first:${ev.key}`);
+          return true;
+        });
+        ctx.registerKeydown((ev) => {
+          seen.push(`second:${ev.key}`);
+          return false;
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    key({ key: "c", ctrlKey: true, shiftKey: true });
+
+    expect(seen).toEqual(["first:c"]);
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("falls through to the encoder when no feature claims the key", async () => {
+    const probe: TerminalFeature<void> = {
+      name: "declines",
+      setup(ctx) {
+        ctx.registerKeydown(() => false);
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+
+    key({ key: "c", ctrlKey: true });
+
+    // Ctrl+C is SIGINT: the encoder maps it, so the chain must reach it.
+    expect(sentText()).toBe("\x03");
+  });
+
+  it("scrolls a page up on Shift+PageUp instead of sending it to the pty", () => {
+    // Scrollback paging is a CLIENT gesture: the pty has no scrollback to page,
+    // so the bytes must not go on the wire and the browser's own PageUp must not
+    // also fire.
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const term = root.querySelector<HTMLElement>(".term");
+    if (!term) {
+      throw new Error("no .term");
+    }
+    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
+    term.scrollTop = 1000;
+
+    const ev = key({ key: "PageUp", shiftKey: true });
+
+    expect(term.scrollTop).toBe(600);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("clamps a page up at the top rather than scrolling past it", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const term = root.querySelector<HTMLElement>(".term");
+    if (!term) {
+      throw new Error("no .term");
+    }
+    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
+    term.scrollTop = 120;
+
+    key({ key: "PageUp", shiftKey: true });
+
+    expect(term.scrollTop).toBe(0);
+  });
+
+  it("scrolls a page down on Shift+PageDown", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const term = root.querySelector<HTMLElement>(".term");
+    if (!term) {
+      throw new Error("no .term");
+    }
+    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
+    term.scrollTop = 1000;
+
+    const ev = key({ key: "PageDown", shiftKey: true });
+
+    expect(term.scrollTop).toBe(1400);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("cancels a key it sends, so the browser cannot also act on it", () => {
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const ev = key({ key: "c", ctrlKey: true });
+    expect(ev.defaultPrevented).toBe(true);
+  });
+
+  it("leaves a printable key to the input event, uncancelled", () => {
+    // The encoder defers a plain character on purpose: cancelling here would kill
+    // IME and dead-key composition, which only produce text through `input`.
+    createTerminal(rootIn(), { features: () => [] });
+    const ev = key({ key: "a" });
+    expect(ev.defaultPrevented).toBe(false);
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+});
+
+describe("tap-to-focus on touch (the gesture boundary with native selection)", () => {
+  // A touch that opens the soft keyboard has to be a genuine tap. Everything else
+  // belongs to the platform: a drag is a scroll or a selection-extend, a hold is a
+  // long-press that native text selection and the context menu split between them.
+  // The thresholds live in gesture.ts because the contextMenu feature classifies
+  // the other side of the same boundary from them.
+  function tapSequence(
+    root: HTMLElement,
+    opts: {
+      from?: [number, number];
+      to?: [number, number];
+      heldMs?: number;
+      pointerType?: string;
+      target?: Element;
+    } = {},
+  ): void {
+    const term = root.querySelector<HTMLElement>(".term");
+    if (!term) {
+      throw new Error("no .term");
+    }
+    const [x0, y0] = opts.from ?? [100, 100];
+    const [x1, y1] = opts.to ?? [x0, y0];
+    const pointerType = opts.pointerType ?? "touch";
+    const down = new PointerEvent("pointerdown", {
+      bubbles: true,
+      pointerType,
+      clientX: x0,
+      clientY: y0,
+    });
+    Object.defineProperty(down, "timeStamp", { value: 1000, configurable: true });
+    term.dispatchEvent(down);
+    const up = new PointerEvent("pointerup", {
+      bubbles: true,
+      pointerType,
+      clientX: x1,
+      clientY: y1,
+    });
+    Object.defineProperty(up, "timeStamp", {
+      value: 1000 + (opts.heldMs ?? 40),
+      configurable: true,
+    });
+    Object.defineProperty(up, "target", { value: opts.target ?? term, configurable: true });
+    (opts.target ?? term).dispatchEvent(up);
+  }
+  const focused = (root: HTMLElement): boolean =>
+    document.activeElement === root.querySelector(".term-input");
+  const blurTerminal = (root: HTMLElement): void => {
+    (root.querySelector(".term-input") as HTMLTextAreaElement).blur();
+  };
+
+  it("focuses the input on a clean tap, which is what opens the soft keyboard", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root);
+
+    expect(focused(root)).toBe(true);
+  });
+
+  it("bows out of a drag, which is a scroll or a selection-extend", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root, { from: [100, 100], to: [140, 100] });
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("bows out of vertical movement too, not just horizontal", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root, { from: [100, 100], to: [100, 60] });
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("counts the movement ceiling itself as still a tap", () => {
+    // At the threshold, not past it: the contextMenu feature classifies the other
+    // side of this same boundary, so an off-by-one here opens a gap or an overlap.
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root, { from: [100, 100], to: [110, 110] });
+
+    expect(focused(root)).toBe(true);
+  });
+
+  it("bows out one pixel past the movement ceiling", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root, { from: [100, 100], to: [111, 100] });
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("measures movement as a distance, so a leftward drag counts too", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root, { from: [100, 100], to: [40, 100] });
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("bows out of a long-press, which belongs to native word-select", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root, { heldMs: 900 });
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("counts the duration ceiling itself as still a tap", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root, { heldMs: 500 });
+
+    expect(focused(root)).toBe(true);
+  });
+
+  it("bows out one millisecond past the duration ceiling", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root, { heldMs: 501 });
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("leaves a tap on a link to the platform", () => {
+    // Neither this handler nor the context menu claims a link press: the OS's own
+    // affordances (preview on hold, activate on tap) win.
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const output = root.querySelector(".term-output");
+    const link = document.createElement("a");
+    link.className = "term-link";
+    link.href = "https://example.com/";
+    output?.appendChild(link);
+    blurTerminal(root);
+
+    tapSequence(root, { target: link });
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("ignores a mouse pointerup entirely: this handler is touch-only", () => {
+    // The click handler owns the mouse, and it applies the selection policy that
+    // this one must not.
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    tapSequence(root, { pointerType: "mouse" });
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("clears a selection on a clean tap WITHOUT popping the keyboard", () => {
+    // The deselect tap. iOS otherwise leaves the selection stuck, because the
+    // synthetic mousedown the kernel cancels to preserve the keyboard also
+    // suppresses the platform's own tap-to-deselect. Focusing here as well would
+    // pop the keyboard right after a copy.
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const output = root.querySelector(".term-output");
+    const text = document.createTextNode("selected output");
+    output?.appendChild(text);
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 8);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    blurTerminal(root);
+
+    tapSequence(root);
+
+    expect(window.getSelection()?.isCollapsed).toBe(true);
+    expect(focused(root)).toBe(false);
+  });
+
+  it("clears the selection AND focuses in one tap when a hardware keyboard is present", () => {
+    // An iPad with a Magic Keyboard has no soft keyboard to protect, so the extra
+    // tap the bare-touch rule costs is pure friction — a large part of the
+    // reported "2-3 taps to focus".
+    stubMedia({ "(any-pointer: fine)": true });
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const output = root.querySelector(".term-output");
+    const text = document.createTextNode("selected output");
+    output?.appendChild(text);
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 8);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    blurTerminal(root);
+
+    tapSequence(root);
+
+    expect(window.getSelection()?.isCollapsed).toBe(true);
+    expect(focused(root)).toBe(true);
+  });
+  it("cancels the synthetic mousedown after a bare-touch tap, which is what keeps the keyboard up", () => {
+    // iOS synthesises a mousedown after a touch tap, and letting it through blurs
+    // and refocuses the textarea — which closes and reopens the soft keyboard. The
+    // xterm.js focus-preservation pattern, scoped to touch.
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const term = root.querySelector(".term");
+    term?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+
+    const ev = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 });
+    term?.dispatchEvent(ev);
+
+    expect(ev.defaultPrevented).toBe(true);
+  });
+
+  it("lets that mousedown through when a hardware keyboard is present", () => {
+    // There is no soft keyboard to protect on an iPad with a trackpad, and
+    // suppressing the mousedown there was DEFEATING the native focus — which is why
+    // the terminal needed several taps to focus.
+    stubMedia({ "(any-pointer: fine)": true });
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const term = root.querySelector(".term");
+    term?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+
+    const ev = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 });
+    term?.dispatchEvent(ev);
+
+    expect(ev.defaultPrevented).toBe(false);
+  });
+});
+
+describe("clicking the terminal", () => {
+  const clickOn = (el: Element): MouseEvent => {
+    const ev = new MouseEvent("click", { bubbles: true, cancelable: true });
+    el.dispatchEvent(ev);
+    return ev;
+  };
+  const focused = (root: HTMLElement): boolean =>
+    document.activeElement === root.querySelector(".term-input");
+  const blurTerminal = (root: HTMLElement): void => {
+    (root.querySelector(".term-input") as HTMLTextAreaElement).blur();
+  };
+
+  it("opens a linkified URL in a new tab, severed from this page", () => {
+    // noopener is the security property: without it the opened page gets a live
+    // `window.opener` handle to the terminal, and the terminal is a shell.
+    stubMedia({});
+    const opened = vi.spyOn(window, "open").mockReturnValue(null);
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const link = document.createElement("a");
+    link.className = "term-link";
+    link.href = "https://example.com/path";
+    root.querySelector(".term-output")?.appendChild(link);
+
+    const ev = clickOn(link);
+
+    expect(opened).toHaveBeenCalledWith(
+      "https://example.com/path",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    // Cancelled, so the browser does not ALSO navigate this page to the href.
+    expect(ev.defaultPrevented).toBe(true);
+    opened.mockRestore();
+  });
+
+  it("focuses the terminal on an ordinary click", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    blurTerminal(root);
+
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    clickOn(output);
+
+    expect(focused(root)).toBe(true);
+  });
+
+  it("declines while text is selected, so a click does not destroy the selection", () => {
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    const text = document.createTextNode("selected output");
+    output.appendChild(text);
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 8);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    blurTerminal(root);
+
+    clickOn(output);
+
+    expect(focused(root)).toBe(false);
+    expect(window.getSelection()?.isCollapsed).toBe(false);
+  });
+
+  it("declines the synthetic click after a bare-touch tap, which pointerup already handled", () => {
+    // On bare touch the pointerup handler owns the gesture; letting the synthetic
+    // click focus as well would pop the keyboard on a deselect tap.
+    stubMedia({});
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    root
+      .querySelector(".term")
+      ?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+    blurTerminal(root);
+
+    clickOn(output);
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("still focuses after a touch tap when a hardware keyboard is present", () => {
+    stubMedia({ "(any-pointer: fine)": true });
+    const root = rootIn();
+    createTerminal(root, { features: () => [] });
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    root
+      .querySelector(".term")
+      ?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+    blurTerminal(root);
+
+    clickOn(output);
+
+    expect(focused(root)).toBe(true);
+  });
+});
+
+describe("browse-cache TTL boundaries and the visible/hidden asymmetry", () => {
+  const TTL_MS = 5 * 60_000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A terminal with one background store, under FAKE timers.
+   *
+   *  The timers have to be installed before createTerminal, because the sweep is a
+   *  window.setInterval registered during the build: install them afterwards and
+   *  advanceTimersByTime never fires it, so every "does not drop" assertion in this
+   *  suite would pass without the sweep running at all. */
+  async function withBackgroundStore(): Promise<Engine.LineStore> {
+    vi.useFakeTimers();
+    let captured: TerminalContext | undefined;
+    const grabber: TerminalFeature<void> = {
+      name: "store-grabber",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [grabber] });
+    await vi.advanceTimersByTimeAsync(0);
+    const store = captured?.newLineStore("session-bg");
+    if (store === undefined) {
+      throw new Error("the feature never ran");
+    }
+    return store;
+  }
+
+  it("leaves an EMPTY bound cache alone, however long ago it was read", () => {
+    // Nothing to evict. Calling into the store anyway is not free — the drop
+    // schedules a reconcile — and it would run on every sweep for the life of the
+    // page on a terminal that never paged any history in.
+    vi.useFakeTimers();
+    createTerminal(rootIn(), { features: () => [] });
+    browseCacheSize.mockReturnValue(0);
+    lastBrowseActivityMs.mockReturnValue(Date.now() - 60 * 60_000);
+
+    vi.advanceTimersByTime(61_000);
+
+    expect(dropBrowseCache).not.toHaveBeenCalled();
+  });
+
+  it("drops at exactly the TTL, not one tick later", () => {
+    vi.useFakeTimers();
+    createTerminal(rootIn(), { features: () => [] });
+    browseCacheSize.mockReturnValue(1200);
+    lastBrowseActivityMs.mockReturnValue(Date.now() + 60_000 - TTL_MS);
+
+    // The sweep runs 60s from now, at which point the cache has been idle for
+    // exactly TTL_MS.
+    vi.advanceTimersByTime(60_000);
+
+    expect(dropBrowseCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds one millisecond short of the TTL", () => {
+    vi.useFakeTimers();
+    createTerminal(rootIn(), { features: () => [] });
+    browseCacheSize.mockReturnValue(1200);
+    lastBrowseActivityMs.mockReturnValue(Date.now() + 60_000 - TTL_MS + 1);
+
+    vi.advanceTimersByTime(60_000);
+
+    expect(dropBrowseCache).not.toHaveBeenCalled();
+  });
+
+  it("drops UNCONDITIONALLY on a hidden page, where there is no reader to protect", () => {
+    // The visible-page drop is conditional inside the store, because a reader
+    // parked on cached rows is idle while looking straight at them. A hidden page
+    // has no reader, so the same call must not exempt anything.
+    vi.useFakeTimers();
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("hidden" as Document["visibilityState"]);
+    createTerminal(rootIn(), { features: () => [] });
+    browseCacheSize.mockReturnValue(1200);
+    lastBrowseActivityMs.mockReturnValue(Date.now() - TTL_MS - 1);
+
+    vi.advanceTimersByTime(61_000);
+
+    expect(dropBrowseCache).toHaveBeenCalledWith(false);
+    visibility.mockRestore();
+  });
+
+  it("leaves an empty BACKGROUND cache alone", async () => {
+    const background = await withBackgroundStore();
+    const bgDrop = vi.spyOn(background, "dropBrowseCache");
+    vi.spyOn(background, "browseCacheSize").mockReturnValue(0);
+    vi.spyOn(background, "lastBrowseActivityMs").mockReturnValue(Date.now() - 60 * 60_000);
+    browseCacheSize.mockReturnValue(0);
+
+    vi.advanceTimersByTime(61_000);
+
+    expect(bgDrop).not.toHaveBeenCalled();
+  });
+
+  it("leaves a recently-read BACKGROUND cache alone", async () => {
+    // A background tab still has a reader who may come back to exactly these rows,
+    // so inactivity is the test there too — not merely "is not the bound store".
+    const background = await withBackgroundStore();
+    const bgDrop = vi.spyOn(background, "dropBrowseCache");
+    vi.spyOn(background, "browseCacheSize").mockReturnValue(900);
+    vi.spyOn(background, "lastBrowseActivityMs").mockReturnValue(Date.now());
+    browseCacheSize.mockReturnValue(0);
+
+    vi.advanceTimersByTime(61_000);
+
+    expect(bgDrop).not.toHaveBeenCalled();
+  });
+
+  it("drops a background cache at exactly the TTL", async () => {
+    const background = await withBackgroundStore();
+    const bgDrop = vi.spyOn(background, "dropBrowseCache");
+    vi.spyOn(background, "browseCacheSize").mockReturnValue(900);
+    vi.spyOn(background, "lastBrowseActivityMs").mockReturnValue(Date.now() + 60_000 - TTL_MS);
+    browseCacheSize.mockReturnValue(0);
+
+    vi.advanceTimersByTime(60_000);
+
+    expect(bgDrop).toHaveBeenCalledWith(-1, false);
+  });
+
+  it("holds a background cache one millisecond short of the TTL", async () => {
+    const background = await withBackgroundStore();
+    const bgDrop = vi.spyOn(background, "dropBrowseCache");
+    vi.spyOn(background, "browseCacheSize").mockReturnValue(900);
+    vi.spyOn(background, "lastBrowseActivityMs").mockReturnValue(Date.now() + 60_000 - TTL_MS + 1);
+    browseCacheSize.mockReturnValue(0);
+
+    vi.advanceTimersByTime(60_000);
+
+    expect(bgDrop).not.toHaveBeenCalled();
+  });
+
+  it("sweeps the BOUND store through the renderer, never directly", async () => {
+    // The bound store is the one with a reader, so its drop is conditional and has
+    // to go through the layer that knows where that reader is. Reaching it directly
+    // from the store list would apply the no-reader rule to the visible tab and
+    // delete the rows somebody is looking at.
+    const background = await withBackgroundStore();
+    const bgDrop = vi.spyOn(background, "dropBrowseCache");
+    vi.spyOn(background, "browseCacheSize").mockReturnValue(900);
+    vi.spyOn(background, "lastBrowseActivityMs").mockReturnValue(Date.now() - TTL_MS - 1);
+    boundStore.mockReturnValue(background); // this store IS the visible tab's
+    browseCacheSize.mockReturnValue(1200);
+    lastBrowseActivityMs.mockReturnValue(Date.now() - TTL_MS - 1);
+
+    vi.advanceTimersByTime(61_000);
+
+    expect(dropBrowseCache).toHaveBeenCalledWith(true);
+    expect(bgDrop).not.toHaveBeenCalled();
+  });
+});
+
+describe("the loading overlay cannot be resurrected once it is down", () => {
+  it("ignores a second dismissal, so no late failure re-fades a lowered overlay", async () => {
+    // Two independent paths lower the overlay and they can both run: a session owner
+    // that resolves nothing lowers it so its retry chrome is visible, and any later
+    // close lowers it again on its way through markReady. Without the one-shot the
+    // second one re-arms the fade and the removal timer on an element the consumer
+    // may have taken back, which is a spinner reappearing over a working page.
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const owner: TerminalFeature = {
+      name: "session-owner",
+      sessionOwner: { resolveInitialSession: () => Promise.resolve(null) },
+      setup() {
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [owner], loading });
+    await tick();
+    await tick();
+    expect(loading.classList.contains("fade")).toBe(true);
+    loading.dispatchEvent(new Event("transitionend"));
+    expect(loading.isConnected).toBe(false);
+    document.body.appendChild(loading); // the consumer re-attached its own element
+
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onProcessExit?.(); // a second path that would lower the overlay
+    loading.dispatchEvent(new Event("transitionend"));
+
+    expect(loading.isConnected).toBe(true);
+  });
+});
+
+describe("the recovery surface's accessibility wiring", () => {
+  // The one implementation of "Terminal failed to start", shared by the
+  // synchronous and asynchronous startup phases. It is a dialog, so it has to name
+  // and describe itself, and focus has to land on the only action available.
+
+  function fatalRoot(): HTMLElement {
+    const root = rootIn();
+    const thrower: TerminalFeature = {
+      name: "thrower",
+      setup() {
+        throw new Error("setup blew up");
+      },
+    };
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    createTerminal(root, { features: () => [thrower] });
+    logged.mockRestore();
+    return root;
+  }
+
+  it("labels and describes the dialog from its own title and message", async () => {
+    const root = fatalRoot();
+    await tick();
+    const surface = root.querySelector<HTMLElement>(".wt-fatal");
+    if (!surface) {
+      throw new Error("no recovery surface");
+    }
+    const labelId = surface.getAttribute("aria-labelledby");
+    const describedId = surface.getAttribute("aria-describedby");
+
+    // Not merely present: the ids have to RESOLVE, or a screen reader announces an
+    // unnamed dialog.
+    expect(labelId).not.toBeNull();
+    expect(describedId).not.toBeNull();
+    expect(surface.querySelector(`#${String(labelId)}`)?.textContent).toBe(
+      STARTUP_FAILURE_COPY.title,
+    );
+    expect(surface.querySelector(`#${String(describedId)}`)?.textContent).toBe(
+      STARTUP_FAILURE_COPY.message,
+    );
+  });
+
+  it("moves focus to the reload button, because the terminal input it left is gone", async () => {
+    const root = fatalRoot();
+    await tick();
+    const button = root.querySelector<HTMLButtonElement>(".wt-fatal-reload");
+    expect(button).not.toBeNull();
+    expect(document.activeElement).toBe(button);
+  });
+});
+
+describe("the consumer's loading overlay is always removed, not merely faded", () => {
+  // The fade is a transition, and `transitionend` is not guaranteed to fire — a
+  // display:none ancestor, a reduced-motion setting, or a browser that drops the
+  // event leaves the overlay sitting on top of a working terminal forever. The
+  // timeout is the guarantee, and it is the one that actually runs under a test.
+
+  it("removes the overlay from the document after the fade window", async () => {
+    vi.useFakeTimers();
+    try {
+      const loading = document.createElement("div");
+      document.body.appendChild(loading);
+      createTerminal(rootIn(), { features: () => [], loading });
+      await vi.advanceTimersByTimeAsync(0);
+      const cbs = connectionInit.mock.calls[0]![0]!;
+      cbs.onProcessExit?.(); // any path that lowers the overlay
+      expect(loading.classList.contains("fade")).toBe(true);
+      expect(loading.isConnected).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1500);
+
+      expect(loading.isConnected).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("removes it on transitionend without waiting for the timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const loading = document.createElement("div");
+      document.body.appendChild(loading);
+      createTerminal(rootIn(), { features: () => [], loading });
+      await vi.advanceTimersByTimeAsync(0);
+      const cbs = connectionInit.mock.calls[0]![0]!;
+      cbs.onProcessExit?.();
+
+      loading.dispatchEvent(new Event("transitionend"));
+
+      expect(loading.isConnected).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lowers the overlay only once, so a second close cannot restart the fade", async () => {
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    createTerminal(rootIn(), { features: () => [], loading });
+    await tick();
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onProcessExit?.();
+    loading.dispatchEvent(new Event("transitionend"));
+    expect(loading.isConnected).toBe(false);
+    document.body.appendChild(loading); // a consumer re-attached it
+
+    cbs.onWireIncompatible?.({
+      source: "server-close",
+      clientVersion: 4,
+      minimumServerVersion: 3,
+      reason: "upgrade required",
+    });
+    loading.dispatchEvent(new Event("transitionend"));
+
+    // Still attached: the second dismissal was a no-op, so no listener and no
+    // timer were armed to remove it again.
+    expect(loading.isConnected).toBe(true);
+  });
+});
+
+describe("ctx.loadingReason (progressive status on the consumer's overlay)", () => {
+  it("writes the reason into the overlay's status element", async () => {
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "status-probe",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe], loading });
+    await tick();
+
+    captured?.loadingReason("Waiting for the session list");
+
+    // The status lines are built by the kernel's own overlay attachment, so a
+    // consumer supplies a bare overlay element and gets both the visible and the
+    // announced line.
+    expect(loading.querySelector(".wt-loading-text")?.textContent).toBe(
+      "Waiting for the session list",
+    );
+    expect(loading.querySelector(".wt-loading-live")?.textContent).toBe(
+      "Waiting for the session list",
+    );
+  });
+
+  it("is inert once the overlay has been lowered, so a late retry cannot resurrect it", async () => {
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "status-probe",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    createTerminal(rootIn(), { features: () => [probe], loading });
+    await tick();
+    captured?.loadingReason("Waiting for the session list");
+    const cbs = connectionInit.mock.calls[0]![0]!;
+    cbs.onProcessExit?.(); // lowers the overlay, which stops the status
+
+    captured?.loadingReason("too late");
+
+    // stop() detaches both lines, so a late reason has nowhere to land and cannot
+    // put text back over a terminal that is already usable.
+    expect(loading.querySelector(".wt-loading-text")).toBeNull();
+    expect(loading.querySelector(".wt-loading-live")).toBeNull();
+  });
+});
+
+describe("the switch path (ctx.notifySwitch and the kernel's owned first connect)", () => {
+  function withSwitchProbe(): {
+    term: TerminalHandle;
+    ctx: () => TerminalContext;
+    detached: () => number;
+    switched: () => { id: string }[];
+    busSwitches: () => { id: string }[];
+  } {
+    let captured: TerminalContext | undefined;
+    let detaches = 0;
+    const switches: { id: string }[] = [];
+    const busSwitches: { id: string }[] = [];
+    const probe: TerminalFeature<void> = {
+      name: "switch-probe",
+      setup(ctx) {
+        captured = ctx;
+        ctx.on("session:switch", (s) => {
+          busSwitches.push(s);
+        });
+        return {
+          teardown: () => undefined,
+          onDetach: () => {
+            detaches += 1;
+          },
+          onSwitch: (s) => {
+            switches.push(s);
+          },
+        };
+      },
+    };
+    const term = createTerminal(rootIn(), { features: () => [probe] });
+    return {
+      term,
+      ctx: () => {
+        if (captured === undefined) {
+          throw new Error("the probe feature never ran");
+        }
+        return captured;
+      },
+      detached: () => detaches,
+      switched: () => switches,
+      busSwitches: () => busSwitches,
+    };
+  }
+
+  it("detaches, re-points the socket, attaches, and announces — in that order", async () => {
+    const probe = withSwitchProbe();
+    await tick();
+
+    probe.ctx().notifySwitch({ id: "s2" });
+
+    expect(probe.detached()).toBe(1);
+    expect(setSession).toHaveBeenCalledWith("s2");
+    expect(probe.switched()).toEqual([{ id: "s2" }]);
+    // The bus event is for pure observers, on top of the instance callback.
+    expect(probe.busSwitches()).toEqual([{ id: "s2" }]);
+  });
+
+  it("clears the textarea across a switch, so half-typed text reaches neither session", async () => {
+    const probe = withSwitchProbe();
+    await tick();
+    const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
+    const placeholder = ta.value;
+    ta.value = `${placeholder}half-typed`;
+
+    probe.ctx().notifySwitch({ id: "s2" });
+
+    expect(ta.value).toBe(placeholder);
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("reports the new session as the active one", async () => {
+    const probe = withSwitchProbe();
+    await tick();
+    expect(probe.ctx().session.id).toBeNull();
+
+    probe.ctx().notifySwitch({ id: "s2" });
+
+    expect(probe.ctx().session.id).toBe("s2");
+  });
+
+  it("ignores a switch requested after destroy, so a late async cannot reopen the socket", async () => {
+    // A feature's un-cancelled create() or poll can resolve after destroy(); without
+    // this guard it re-points a torn-down terminal's connection at a session.
+    const probe = withSwitchProbe();
+    await tick();
+    const ctx = probe.ctx();
+    probe.term.destroy();
+    setSession.mockClear();
+
+    ctx.notifySwitch({ id: "s3" });
+
+    expect(setSession).not.toHaveBeenCalled();
   });
 });
