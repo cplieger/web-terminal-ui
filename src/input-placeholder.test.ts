@@ -25,6 +25,23 @@ describe("input-placeholder: resetToPlaceholder", () => {
     expect(ta.selectionEnd).toBe(INPUT_PLACEHOLDER.length);
   });
 
+  it("moves the caret back to the end when re-padding a textarea that already holds it", () => {
+    // This is the production path, and the one the explicit range exists for:
+    // the kernel re-pads after every send, so the value being assigned is the
+    // one already there. A DOM moves the caret to the end only when the value
+    // CHANGES, so on a re-pad the caret stays wherever the last input left it —
+    // and a caret before the placeholder means the next typed character lands in
+    // front of it, which is what stops iOS repeating deleteContentBackward.
+    const ta = document.createElement("textarea");
+    resetToPlaceholder(ta);
+    ta.setSelectionRange(0, 0);
+
+    resetToPlaceholder(ta);
+
+    expect(ta.selectionStart).toBe(INPUT_PLACEHOLDER.length);
+    expect(ta.selectionEnd).toBe(INPUT_PLACEHOLDER.length);
+  });
+
   it("re-seeds an already-empty textarea (idempotent priming)", () => {
     const ta = document.createElement("textarea");
     ta.value = "";

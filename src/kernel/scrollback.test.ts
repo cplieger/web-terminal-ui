@@ -686,3 +686,176 @@ describe("scrollback persistence: the keeper composed with the real store", () =
     keeper.stop();
   });
 });
+
+describe("scrollback persistence: the boundaries and the tracking contract", () => {
+  it("keeps an entry for a week by default", () => {
+    // The library's own durability promise, and the number a storage
+    // implementation sweeps its orphans by (scrollback-storage.ts imports this
+    // constant so the two cannot drift). A consumer that names no bound gets
+    // "back to it on Monday", which is only true at this magnitude.
+    vi.useFakeTimers();
+    const sixDays = 6 * 24 * 60 * 60 * 1000;
+    const eightDays = 8 * 24 * 60 * 60 * 1000;
+    const recent = createScrollbackKeeper(
+      fakeStorage({ "sess-1": entryFor(seeded(5, 200), 777, Date.now() - sixDays) }),
+      undefined,
+    );
+    expect(recent.storeFor("sess-1").highestIndex()).toBe(204);
+    recent.stop();
+
+    const stale = createScrollbackKeeper(
+      fakeStorage({ "sess-1": entryFor(seeded(5, 200), 777, Date.now() - eightDays) }),
+      undefined,
+    );
+    expect(stale.storeFor("sess-1").highestIndex()).toBe(-1);
+    stale.stop();
+  });
+
+  it("uses an entry whose age is exactly the bound", () => {
+    // A week is the documented promise ("back to it on Monday"), so the entry
+    // that is exactly a week old is the one the promise is about. Rejecting at
+    // the bound shortens every consumer's stated window by one tick.
+    vi.useFakeTimers();
+    const entry = entryFor(seeded(5, 200), 777, Date.now() - 1000);
+    const keeper = createScrollbackKeeper(
+      { ...fakeStorage({ "sess-1": entry }), maxAgeMs: 1000 },
+      undefined,
+    );
+
+    expect(keeper.storeFor("sess-1").highestIndex()).toBe(204);
+    keeper.stop();
+  });
+
+  it("says once, not per session, that entries had no server epoch", () => {
+    // A tabbed page hydrates one store per tab, so a server that reports no epoch
+    // at all produces this for every one of them. A console line per tab is how a
+    // real explanation turns into noise nobody reads.
+    const storage = fakeStorage({
+      "sess-1": entryFor(seeded(5, 200), 0),
+      "sess-2": entryFor(seeded(5, 300), 0),
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const keeper = createScrollbackKeeper(storage, undefined);
+    try {
+      keeper.storeFor("sess-1");
+      keeper.storeFor("sess-2");
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(storage.dropped).toEqual(["sess-1", "sess-2"]);
+    } finally {
+      warn.mockRestore();
+      keeper.stop();
+    }
+  });
+
+  it("says once, not per attempt, that it could not persist", () => {
+    // Storage that is full stays full, and the keeper deliberately keeps retrying
+    // on every background pass. One line per retry for the rest of the page's
+    // life would bury the one that matters.
+    serverEpochOf.mockReturnValue(999);
+    const storage = fakeStorage();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const keeper = createScrollbackKeeper(
+      {
+        ...storage,
+        save: () => {
+          throw new Error("quota exceeded");
+        },
+      },
+      undefined,
+    );
+    try {
+      keeper.track("sess-a", seeded(3, 10));
+      keeper.flush();
+      keeper.flush();
+      keeper.flush();
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(storage.entries.size).toBe(0);
+    } finally {
+      warn.mockRestore();
+      keeper.stop();
+    }
+  });
+
+  it("saves a store it created for a session that had nothing stored", () => {
+    // storeFor tracks either way: a session whose first run produced no entry is
+    // exactly the session whose FIRST snapshot matters most, and a store the
+    // keeper handed out but forgot to track would never be written at all.
+    serverEpochOf.mockReturnValue(999);
+    const storage = fakeStorage();
+    const keeper = createScrollbackKeeper(storage, undefined);
+    const store = keeper.storeFor("sess-new");
+    store.applyScroll({
+      type: "scroll",
+      firstIndex: 0,
+      lines: [[{ t: "first output", f: -1, b: -1, a: 0, uc: -1 }]],
+    });
+
+    keeper.flush();
+
+    expect(storage.entries.get("sess-new")?.snapshot.highest).toBe(0);
+    keeper.stop();
+  });
+
+  it("treats a store handed to track() as unsaved, even at the watermark it just restored", () => {
+    // The kernel calls track() for the store it built itself, which can be a
+    // different object holding the same content as the entry storeFor read. The
+    // watermark means "this exact store is on disk", so adopting a new store has
+    // to clear it or the first background pass skips a session whose store the
+    // keeper has never actually written.
+    vi.useFakeTimers();
+    serverEpochOf.mockReturnValue(777);
+    let writes = 0;
+    const storage = fakeStorage({ "sess-1": entryFor(seeded(5, 200), 777) });
+    const keeper = createScrollbackKeeper(
+      {
+        ...storage,
+        save: (id, entry) => {
+          writes++;
+          storage.entries.set(id, entry);
+        },
+      },
+      undefined,
+    );
+    keeper.storeFor("sess-1"); // seeds the watermark at 204
+    keeper.track("sess-1", seeded(5, 200)); // same content, a store never written
+
+    keeper.flush();
+
+    expect(writes).toBe(1);
+    keeper.stop();
+  });
+
+  it("writes nothing for a session tracked after stop()", () => {
+    // Every method is documented as safe after stop(), and the kernel's teardown
+    // order is not guaranteed against a feature that is still creating stores. A
+    // write here would land after the terminal it belongs to stopped existing.
+    serverEpochOf.mockReturnValue(999);
+    const storage = fakeStorage();
+    const keeper = createScrollbackKeeper(storage, undefined);
+
+    keeper.stop();
+    const store = keeper.storeFor("sess-late");
+    store.applyScroll({
+      type: "scroll",
+      firstIndex: 0,
+      lines: [[{ t: "too late", f: -1, b: -1, a: 0, uc: -1 }]],
+    });
+    keeper.flush();
+
+    expect(storage.entries.size).toBe(0);
+  });
+
+  it("releases the background timer on stop", () => {
+    // stop()'s documented job. A live interval holds its closure — and through it
+    // every tracked store — for the rest of the page's life.
+    vi.useFakeTimers();
+    const keeper = createScrollbackKeeper({ ...fakeStorage(), saveIntervalMs: 1000 }, undefined);
+    expect(vi.getTimerCount()).toBe(1);
+
+    keeper.stop();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
