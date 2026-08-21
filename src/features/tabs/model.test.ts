@@ -53,56 +53,48 @@ afterEach(() => {
 });
 
 describe("SessionAPIError carries what the server said", () => {
+  // Every case below asserts through `await expect(p).rejects`, never `.catch(cb)`.
+  // A callback says NOTHING when the promise RESOLVES: with the `!r.ok` guard gone
+  // the call succeeds, the callback never runs, and the `it` passes having asserted
+  // nothing — or on a sibling verb's assertions, when one `it` covered two verbs.
+  // That is why four mutants on those guards survived a file holding eight failure
+  // tests. `.rejects` fails on a resolve, which is the whole point.
   it("exposes the status so a caller can tell 503 from 500", async () => {
     stubFetch(response(503));
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toBeInstanceOf(
-      SessionAPIError,
-    );
-    stubFetch(response(503));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).status).toBe(503);
-      });
+    const refused = createSessionAPI("/api/sessions").create();
+    await expect(refused).rejects.toBeInstanceOf(SessionAPIError);
+    await expect(refused).rejects.toMatchObject({ status: 503 });
   });
 
   it("parses Retry-After delta-seconds into milliseconds", async () => {
     stubFetch(response(503, {}, { "Retry-After": "5" }));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).retryAfterMs).toBe(5000);
-      });
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      retryAfterMs: 5000,
+    });
   });
 
   it("parses an HTTP-date Retry-After and never returns a negative delay", async () => {
     const past = new Date(Date.now() - 60000).toUTCString();
     stubFetch(response(503, {}, { "Retry-After": past }));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        // A date already in the past means "retry now", not "never".
-        expect((err as SessionAPIError).retryAfterMs).toBe(0);
-      });
+    // A date already in the past means "retry now", not "never".
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      retryAfterMs: 0,
+    });
   });
 
   it("clamps an absurd Retry-After so a bad header cannot park the UI", async () => {
     stubFetch(response(503, {}, { "Retry-After": "99999" }));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).retryAfterMs).toBe(60000);
-      });
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      retryAfterMs: 60000,
+    });
   });
 
   it("ignores a missing or unparseable Retry-After", async () => {
     for (const headers of [{}, { "Retry-After": "soon" }, { "Retry-After": "  " }]) {
       stubFetch(response(503, {}, headers));
-      await createSessionAPI("/api/sessions")
-        .create()
-        .catch((err: unknown) => {
-          expect((err as SessionAPIError).retryAfterMs).toBeUndefined();
-        });
+      await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+        retryAfterMs: undefined,
+      });
     }
   });
 
@@ -111,49 +103,44 @@ describe("SessionAPIError carries what the server said", () => {
     // the field every server in this family actually returns, and the shape
     // web-terminal-kiro's tools-installing 503 uses.
     stubFetch(response(503, { error: "tools installing", code: "", request_id: "abc" }));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).serverMessage).toBe("tools installing");
-      });
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      serverMessage: "tools installing",
+    });
   });
 
-  it("also accepts a `message` field, and prefers `error` when both are present", async () => {
+  it("also accepts a `message` field", async () => {
     stubFetch(response(503, { message: "installing" }));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).serverMessage).toBe("installing");
-      });
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      serverMessage: "installing",
+    });
+  });
+
+  it("prefers `error` over `message` when both are present", async () => {
     stubFetch(response(503, { error: "from error", message: "from message" }));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).serverMessage).toBe("from error");
-      });
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      serverMessage: "from error",
+    });
   });
 
   it("caps a server message destined for UI chrome", async () => {
     stubFetch(response(503, { message: "x".repeat(400) }));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).serverMessage).toHaveLength(120);
-      });
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      serverMessage: "x".repeat(120),
+    });
   });
 
   it("tolerates a non-JSON, empty, or hostile body without losing the status", async () => {
     const bodies: unknown[] = [null, "a string", { error: 42 }, { error: "   " }, []];
     for (const body of bodies) {
       stubFetch(response(503, body));
-      await createSessionAPI("/api/sessions")
-        .create()
-        .catch((err: unknown) => {
-          expect((err as SessionAPIError).status).toBe(503);
-          expect((err as SessionAPIError).serverMessage).toBeUndefined();
-        });
+      await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+        status: 503,
+        serverMessage: undefined,
+      });
     }
-    // A body that rejects on read (not JSON at all) must not mask the status.
+  });
+
+  it("keeps the status when the body rejects on read (not JSON at all)", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
@@ -165,12 +152,10 @@ describe("SessionAPIError carries what the server said", () => {
         } as unknown as Response),
       ),
     );
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).status).toBe(503);
-        expect((err as SessionAPIError).serverMessage).toBeUndefined();
-      });
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      status: 503,
+      serverMessage: undefined,
+    });
   });
 
   it("treats a Retry-After that is not purely digits as a date, not a count", async () => {
@@ -178,11 +163,9 @@ describe("SessionAPIError carries what the server said", () => {
     // be read as five seconds by a regex anchored on only one end.
     for (const value of ["5x", "x5"]) {
       stubFetch(response(503, {}, { "Retry-After": value }));
-      await createSessionAPI("/api/sessions")
-        .create()
-        .catch((err: unknown) => {
-          expect((err as SessionAPIError).retryAfterMs).toBeUndefined();
-        });
+      await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+        retryAfterMs: undefined,
+      });
     }
   });
 
@@ -191,28 +174,19 @@ describe("SessionAPIError carries what the server said", () => {
     // can send it. Untrimmed, this falls through to the date branch and the retry
     // hint is lost.
     stubFetch(response(503, {}, { "Retry-After": " 30 " }));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).retryAfterMs).toBe(30_000);
-      });
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      retryAfterMs: 30_000,
+    });
   });
 
-  it("applies to list and close as well, not only create", async () => {
+  it("applies to list as well, not only create", async () => {
+    // close() carries the same contract and is pinned in both directions by
+    // "rejects a refused close, and resolves a successful one" below; keeping it
+    // here too would mean one `it` failing for either of two verbs.
     stubFetch(response(500));
-    await createSessionAPI("/api/sessions")
-      .list()
-      .catch((err: unknown) => {
-        expect(err).toBeInstanceOf(SessionAPIError);
-        expect((err as SessionAPIError).status).toBe(500);
-      });
-    stubFetch(response(404));
-    await createSessionAPI("/api/sessions")
-      .close("s1")
-      .catch((err: unknown) => {
-        expect(err).toBeInstanceOf(SessionAPIError);
-        expect((err as SessionAPIError).status).toBe(404);
-      });
+    const refused = createSessionAPI("/api/sessions").list();
+    await expect(refused).rejects.toBeInstanceOf(SessionAPIError);
+    await expect(refused).rejects.toMatchObject({ status: 500 });
   });
 });
 
@@ -554,14 +528,14 @@ describe("the session API's requests", () => {
     });
   });
   it("rejects a refused close, and resolves a successful one", async () => {
-    // The pre-existing failure case for close() shares its `it` with list(), and
+    // The pre-existing failure case for close() shared its `it` with list(), and
     // `.catch(cb)` says nothing when the promise RESOLVES — so the list half
     // supplied the assertions while close()'s own guard went unpinned in both
     // directions. A close that silently "succeeds" leaves the tab on the strip.
     stubFetch(response(404));
-    await expect(createSessionAPI("/api/sessions").close("s1")).rejects.toBeInstanceOf(
-      SessionAPIError,
-    );
+    const refused = createSessionAPI("/api/sessions").close("s1");
+    await expect(refused).rejects.toBeInstanceOf(SessionAPIError);
+    await expect(refused).rejects.toMatchObject({ status: 404 });
 
     vi.stubGlobal("fetch", () => Promise.resolve(new Response(null, { status: 204 })));
     await expect(createSessionAPI("/api/sessions").close("s1")).resolves.toBeUndefined();
@@ -577,11 +551,9 @@ describe("the session API's requests", () => {
     // The string goes straight into chrome, and a host that pads its JSON field
     // would otherwise push the visible text off its own baseline.
     stubFetch(response(503, { error: "  tools installing\n" }));
-    await createSessionAPI("/api/sessions")
-      .create()
-      .catch((err: unknown) => {
-        expect((err as SessionAPIError).serverMessage).toBe("tools installing");
-      });
+    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      serverMessage: "tools installing",
+    });
   });
 });
 
