@@ -101,9 +101,43 @@ describe("predictiveEcho: col-0 backspace brake (input transform)", () => {
     const out = f.transform(new Uint8Array([0x08]));
     expect(Array.from(out)).toEqual([0x08]);
   });
+  it("passes a DEL through at column 0 of any row but the first", () => {
+    // The brake is for the TRUE origin only: at col 0 further down the screen a
+    // backspace is a line join the shell has to see, not a keypress against an
+    // empty first line.
+    const f = fakeCtx();
+    predictiveEcho().setup(f.ctx);
+    arm(f, 2, 0);
+    const out = f.transform(new Uint8Array([DEL]));
+    expect(Array.from(out)).toEqual([DEL]);
+  });
 });
 
 describe("predictiveEcho: prediction wiring", () => {
+  it("re-pushes the predicted cursor after a render flush", () => {
+    // The renderer rebuilds its overlay on every flush, so the prediction has to
+    // be re-asserted or the ghost cursor disappears until the next keypress.
+    const f = fakeCtx();
+    predictiveEcho().setup(f.ctx);
+    arm(f, 0, 3);
+    f.setPredictedCursor.mockClear();
+
+    f.emit("render:cursor", undefined);
+
+    expect(f.setPredictedCursor).toHaveBeenCalledWith(0, 3, true);
+  });
+
+  it("gives the predictor the session's own width, so a prediction wraps where the screen does", () => {
+    // Predicting against a default 80 columns on a 4-column screen puts the ghost
+    // cursor off the end of the row instead of at the start of the next one.
+    const f = fakeCtx({ cols: 4, rows: 2 });
+    predictiveEcho().setup(f.ctx);
+    arm(f, 0, 3); // the last column: the next character wraps
+    f.observe(new Uint8Array([0x41]));
+    f.observe(new Uint8Array([0x42]));
+    expect(predict.get()).toEqual({ row: 1, col: 1, active: true });
+  });
+
   it("advances the predicted cursor for observed printable input", () => {
     const f = fakeCtx();
     predictiveEcho().setup(f.ctx);

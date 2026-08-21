@@ -9,7 +9,7 @@
 // accumulate until the origin quota fills, at which point the symptom is "saving
 // silently stopped working" in an app that never touched this code.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { LineStore } from "@cplieger/web-terminal-engine";
 import { localScrollbackStorage } from "./scrollback-storage.js";
 import type { PersistedScrollback } from "./types.js";
@@ -48,6 +48,11 @@ const ownKeys = (): string[] =>
 
 beforeEach(() => {
   localStorage.clear();
+});
+
+afterEach(() => {
+  // Only the age-boundary case fakes the clock; a no-op for every other case.
+  vi.useRealTimers();
 });
 
 describe("localScrollbackStorage: round trip", () => {
@@ -154,6 +159,53 @@ describe("localScrollbackStorage: round trip", () => {
     // Absent rather than undefined, so the kernel's own defaults apply.
     expect(Object.keys(localScrollbackStorage()).includes("lines")).toBe(false);
   });
+
+  it("omits the save interval entirely when the caller set none", () => {
+    // Present-but-undefined is not the same thing: the kernel reads its own
+    // default from the ABSENCE of the field, so spreading it unconditionally
+    // would hand it an undefined interval to schedule against.
+    expect(Object.keys(localScrollbackStorage()).includes("saveIntervalMs")).toBe(false);
+  });
+
+  it("rejects a stored value whose timestamp line is empty, and removes it", () => {
+    // A truncated write can leave a readable snapshot behind an unreadable head.
+    // Number("") is 0, so a head-check that only rejects a MISSING newline hands
+    // the kernel an entry dated at the epoch instead of refusing it. Seeded after
+    // construction so the load path is what answers, not the constructor's sweep.
+    const store = localScrollbackStorage();
+    localStorage.setItem(
+      "wt.scrollback.sess-1",
+      `\n${JSON.stringify(entryFor(777, Date.now()).snapshot)}`,
+    );
+
+    expect(store.load("sess-1")).toBeNull();
+    expect(ownKeys()).toEqual([]);
+  });
+
+  it("stores an entry whose size lands exactly on the budget", () => {
+    // The refusal is for an entry that cannot fit at all; one that fits to the
+    // byte must be stored, or a store tuned to its own entry size saves nothing.
+    const entry = entryFor(777, 1_700_000_000_000);
+    const key = "wt.scrollback.sess-1";
+    const exact = `${String(entry.savedAt)}\n${JSON.stringify(entry.snapshot)}`.length + key.length;
+    vi.setSystemTime(entry.savedAt);
+    const store = localScrollbackStorage({ maxBytes: exact });
+
+    store.save("sess-1", entry);
+
+    expect(store.load("sess-1")).toEqual(entry);
+  });
+
+  it("refuses an entry that fits only if its key costs nothing", () => {
+    const entry = entryFor(777, 1_700_000_000_000);
+    const valueOnly = `${String(entry.savedAt)}\n${JSON.stringify(entry.snapshot)}`.length;
+    vi.setSystemTime(entry.savedAt);
+    const store = localScrollbackStorage({ maxBytes: valueOnly });
+
+    expect(() => {
+      store.save("sess-1", entry);
+    }).toThrow();
+  });
 });
 
 describe("localScrollbackStorage: orphan collection", () => {
@@ -239,6 +291,53 @@ describe("localScrollbackStorage: orphan collection", () => {
     expect(store.load("sess-1")?.snapshot.lines.length).toBe(3);
   });
 
+  it("keeps an entry sitting exactly on the age bound and drops the one just past it", () => {
+    // The store hands maxAgeMs to the kernel so both ends apply ONE bound; which
+    // side of it the edge falls on therefore has to be decided here, or the sweep
+    // deletes entries the kernel would still have restored.
+    vi.setSystemTime(new Date("2026-08-21T12:00:00Z"));
+    const now = Date.now();
+    seed("edge", entryFor(777, now - 7 * DAY));
+    seed("past", entryFor(777, now - 7 * DAY - 1));
+
+    localScrollbackStorage();
+
+    expect(ownKeys()).toEqual(["wt.scrollback.edge"]);
+  });
+
+  it("keeps an entry that exactly fills the remaining budget", () => {
+    // The eviction walks newest-first and keeps what fits. An entry that fits to
+    // the byte is one the budget has room for, so dropping it would evict history
+    // the quota never asked for.
+    vi.setSystemTime(new Date("2026-08-21T12:00:00Z"));
+    const now = Date.now();
+    seed("s0", entryFor(777, now));
+    seed("s1", entryFor(777, now - 1000));
+    seed("s2", entryFor(777, now - 2000));
+    const each =
+      (localStorage.getItem("wt.scrollback.s0") ?? "").length + "wt.scrollback.s0".length;
+
+    localScrollbackStorage({ maxBytes: each * 2 });
+
+    expect(ownKeys()).toEqual(["wt.scrollback.s0", "wt.scrollback.s1"]);
+  });
+
+  it("counts each entry's key toward the budget, not only its value", () => {
+    // localStorage is accounted key AND value, so a budget that prices only the
+    // value is optimistic by every key it stores — the quota refusal this sweep
+    // exists to prevent then arrives while the store believes it is inside budget.
+    vi.setSystemTime(new Date("2026-08-21T12:00:00Z"));
+    const now = Date.now();
+    seed("s0", entryFor(777, now));
+    seed("s1", entryFor(777, now - 1000));
+    const valueOnly = (localStorage.getItem("wt.scrollback.s0") ?? "").length;
+
+    // Room for both values to the byte, and for neither of the two keys.
+    localScrollbackStorage({ maxBytes: valueOnly * 2 });
+
+    expect(ownKeys()).toEqual(["wt.scrollback.s0"]);
+  });
+
   it("leaves other applications' keys alone", () => {
     localStorage.setItem("vibekit.ui-state", "{}");
     localStorage.setItem("unrelated", "x");
@@ -307,6 +406,45 @@ describe("localScrollbackStorage: when storage is unavailable", () => {
     }
     // The previous entry is intact and still loadable.
     expect(store.load("sess-1")?.snapshot.lines.length).toBe(5);
+  });
+
+  it("sweeps an expired neighbour and retries once when a write is refused", () => {
+    // A quota refusal is often transient, and what is in the way can be an entry
+    // this store itself abandoned weeks ago. Sweeping and retrying once is the
+    // difference between "saving silently stopped working" and a save that lands.
+    const store = localScrollbackStorage();
+    // Seeded after construction, so the constructor's sweep has not collected it.
+    seed("stale", entryFor(777, Date.now() - 9 * DAY));
+    const real = window.localStorage;
+    const fullUntilSwept = {
+      get length(): number {
+        return real.length;
+      },
+      key: (i: number): string | null => real.key(i),
+      getItem: (k: string): string | null => real.getItem(k),
+      removeItem: (k: string): void => {
+        real.removeItem(k);
+      },
+      clear: (): void => {
+        real.clear();
+      },
+      setItem: (k: string, v: string): void => {
+        // Out of room for exactly as long as the abandoned entry holds the space.
+        if (real.getItem("wt.scrollback.stale") !== null) {
+          throw new Error("QuotaExceededError");
+        }
+        real.setItem(k, v);
+      },
+    } as unknown as Storage;
+
+    withLocalStorage(
+      () => fullUntilSwept,
+      () => {
+        store.save("sess-1", entryFor(777, Date.now()));
+      },
+    );
+
+    expect(ownKeys()).toEqual(["wt.scrollback.sess-1"]);
   });
 
   it("throws rather than pretending to save when storage is unavailable", () => {

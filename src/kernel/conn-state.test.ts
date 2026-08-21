@@ -203,3 +203,53 @@ describe("conn-state: incompatible wire revision", () => {
     expect(states()).toEqual(["incompatible", "open"]);
   });
 });
+
+describe("conn-state: the loading gate holds transient states back", () => {
+  it("keeps a server restart behind the loading overlay until the first frame", () => {
+    // The overlay owns the screen until a frame lands, so a transient state is
+    // reported as "open" (which the banner renders as hidden) rather than
+    // painting a message over "Loading...".
+    m.restarted();
+    expect(states()).toEqual(["open"]);
+  });
+
+  it("still holds it back once the initial-connect failures have surfaced Offline", () => {
+    // Offline passes the gate on its own account (the failure limit), which must
+    // not open the gate for whatever state comes next.
+    m.closed();
+    m.closed();
+    m.closed();
+    m.closed();
+    vi.advanceTimersByTime(600);
+    onState.mockClear();
+
+    m.restarted();
+
+    expect(states()).toEqual(["open"]);
+  });
+});
+
+describe("conn-state: giving up is only for a page that never connected", () => {
+  it("does not give up on a close once the first frame has rendered", () => {
+    // give-up exists to take down a silent "Loading..." overlay. Past that
+    // point the terminal is on screen and a close is an ordinary retry.
+    m.setLoaded();
+    m.closed();
+    m.closed();
+    m.closed();
+    m.closed();
+    vi.advanceTimersByTime(600);
+    expect(onGiveUp).not.toHaveBeenCalled();
+  });
+});
+
+describe("conn-state: the escalation boundary is MORE than three failures", () => {
+  it("stays on 'reconnecting' for the third consecutive close", () => {
+    m.setLoaded();
+    m.closed();
+    m.closed();
+    m.closed();
+    vi.advanceTimersByTime(600);
+    expect(m.current()).toBe("reconnecting");
+  });
+});
