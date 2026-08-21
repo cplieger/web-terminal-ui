@@ -193,16 +193,38 @@ describe("session-create retry: what the user is told", () => {
     // The refusals carry DIFFERENT explanations, so the toast reveals which
     // attempt last spoke. Inside one re-announce window only the first may:
     // a page that retries for twenty minutes must be neither silent nor a storm.
+    //
+    // The two instants are deep into the wait and 10s apart, so what separates
+    // them is the GAP and not their size: a rule that added the two readings
+    // instead of subtracting them would clear the window here and speak twice.
     script = [
-      { status: 503, message: "first reason", retryAfter: "0", at: 10 },
-      { status: 503, message: "second reason", retryAfter: "0", at: 20 },
-      { status: 201, at: 30 },
+      { status: 503, message: "first reason", retryAfter: "0", at: 30000 },
+      { status: 503, message: "second reason", retryAfter: "0", at: 40000 },
+      { status: 201, at: 40010 },
     ];
     const root = mount();
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(posts).toBe(3);
     expect(toastText(root)).toBe("first reason; waiting…");
+  });
+
+  it("announces the wait to a screen reader as well as to the toast layer", async () => {
+    // The toast is decoration to a screen-reader user; the live region is the
+    // channel that reaches them, and it carries the same sentence.
+    script = [
+      { status: 503, message: "installing tools", retryAfter: "0", at: 10 },
+      { status: 201, at: 20 },
+    ];
+    const root = mount();
+
+    await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
+    // The announcer clears the region and re-sets it on a short timer, so the
+    // sentence lands a beat after the call.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(root.querySelector("[aria-live=polite]")?.textContent).toContain(
+      "installing tools; waiting…",
+    );
   });
 
   it("speaks again once the re-announce window has passed", async () => {

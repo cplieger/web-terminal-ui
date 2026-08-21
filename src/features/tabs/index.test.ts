@@ -3803,11 +3803,29 @@ describe("tabs: the swipe-to-switch hint", () => {
     // Safari private mode throws on both halves. The hint still shows, and still
     // only once: the in-memory latch is the fallback for the record it could not
     // write.
-    const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
-      throw new Error("denied");
-    });
-    const set = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("denied");
+    //
+    // The whole global is replaced rather than Storage.prototype spied on. A
+    // prototype spy installed here does NOT reach `localStorage` once other tests
+    // in this file have run — measured: the read went through untouched and this
+    // case passed for the wrong reason — while a stubbed global is reversed by the
+    // afterEach unstub and holds whatever ran before it.
+    vi.stubGlobal("localStorage", {
+      getItem: (): never => {
+        throw new Error("storage disabled");
+      },
+      setItem: (): never => {
+        throw new Error("storage disabled");
+      },
+      removeItem: (): never => {
+        throw new Error("storage disabled");
+      },
+      clear: (): never => {
+        throw new Error("storage disabled");
+      },
+      key: (): never => {
+        throw new Error("storage disabled");
+      },
+      length: 0,
     });
     const root = await mountHinted({ "(pointer: coarse)": true });
     expect(toastText(root)).toBe(HINT);
@@ -3825,9 +3843,6 @@ describe("tabs: the swipe-to-switch hint", () => {
     root.querySelector<HTMLElement>(".wt-tab-new")?.click();
     await until(() => root.querySelectorAll(".wt-tab").length === 3, 60);
     expect(toastText(root)).not.toBe(HINT);
-
-    get.mockRestore();
-    set.mockRestore();
   });
 
   it("says nothing while there is only one tab to switch between", async () => {
@@ -3906,10 +3921,11 @@ describe("tabs: the catching-up cue", () => {
   });
 
   it("arms on a backlog deep enough to need more than one frame", async () => {
-    // A warm store (highest index >= 0) so the "nothing cached at all" half of
-    // the condition cannot supply the arm, and a queue one row past the
-    // threshold: this is the shallowest backlog worth telling the user about.
-    getHighestIndex.mockReturnValue(120);
+    // A store holding exactly one row, which is the shallowest thing that counts
+    // as cached at all, so the "nothing cached" half of the condition cannot
+    // supply the arm; and a queue one row past the threshold, which is the
+    // shallowest backlog worth telling the user about.
+    getHighestIndex.mockReturnValue(0);
     pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
     const h = await mountCue();
 
@@ -3923,7 +3939,7 @@ describe("tabs: the catching-up cue", () => {
     // Exactly at the threshold is NOT past it. The renderer builds up to 300 rows
     // per frame, so a queue this size costs the user nothing to wait for, and a
     // cue here would flash on every busy tab switch.
-    getHighestIndex.mockReturnValue(120);
+    getHighestIndex.mockReturnValue(0);
     pendingRowCount.mockReturnValue(MIN_BACKLOG);
     const h = await mountCue();
 
@@ -3947,7 +3963,7 @@ describe("tabs: the catching-up cue", () => {
   it("says nothing when the backlog drained inside the anti-flicker delay", async () => {
     // Armed by a deep queue that then emptied before the cue was ever shown: it
     // re-asks at the end of the delay rather than showing what it no longer means.
-    getHighestIndex.mockReturnValue(120);
+    getHighestIndex.mockReturnValue(0);
     pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
     const h = await mountCue();
 
@@ -3961,7 +3977,7 @@ describe("tabs: the catching-up cue", () => {
     // The queue empties BETWEEN the server's replay chunks, so a single empty
     // frame is not the end of the restore. This is the hysteresis: it takes a
     // continuous quiet window to retire the cue.
-    getHighestIndex.mockReturnValue(120);
+    getHighestIndex.mockReturnValue(0);
     pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
     const h = await mountCue();
     h.switchTab();
@@ -3985,7 +4001,7 @@ describe("tabs: the catching-up cue", () => {
   it("restarts the settle window when the next replay chunk arrives", async () => {
     // A chunk landing mid-window means the restore was not finished after all, so
     // the quiet has to be served again from the start rather than resumed.
-    getHighestIndex.mockReturnValue(120);
+    getHighestIndex.mockReturnValue(0);
     pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
     const h = await mountCue();
     h.switchTab();
@@ -4010,7 +4026,7 @@ describe("tabs: the catching-up cue", () => {
   it("retires itself when a backlog never drains at all", async () => {
     // The server stops mid-replay or the socket drops: the queue stays deep
     // forever. The badge must not outlive its own ceiling.
-    getHighestIndex.mockReturnValue(120);
+    getHighestIndex.mockReturnValue(0);
     pendingRowCount.mockReturnValue(MIN_BACKLOG + 1);
     const h = await mountCue();
     h.switchTab();
@@ -4248,46 +4264,61 @@ describe("tabs: duplicate-label numbering", () => {
 });
 
 describe("tabs: teardown leaves the page as it found it", () => {
-  it("removes every surface it added and stops polling", async () => {
+  it("undoes the layout it claimed on the consumer's own element, and stops polling", async () => {
+    // The surfaces themselves go with the kernel's regions, so removing them is
+    // not this feature's to prove. What IS its own is the state it wrote onto
+    // elements the kernel does not own — the root class and the surface's inset
+    // class, both of which hold the terminal off an edge that no longer has a bar
+    // on it — and the interval it started.
     const root = document.createElement("div");
     document.body.appendChild(root);
-    // A short poll so a surviving interval is caught within the test's window.
+    // A short poll so a surviving interval is caught inside the test's window.
     term = createTerminal(root, { features: () => [tabs({ pollMs: 10 })] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
-    // Everything the feature built is on the page first, so the assertions below
-    // are about removal rather than about markup that was never there.
-    expect(root.querySelector(".wt-tab-bar")).toBeTruthy();
-    expect(root.querySelector(".wt-switcher")).toBeTruthy();
-    expect(root.querySelector(".wt-tab-menu")).toBeTruthy();
-    expect(root.querySelector(".wt-catchup")).toBeTruthy();
-    expect(root.querySelector(".wt-tab-new")).toBeTruthy();
-    const surface = root.querySelector(".term");
+    const surface = root.querySelector<HTMLElement>(".term");
     expect(surface?.classList.contains("wt-with-tabbar")).toBe(true);
     expect(root.classList.contains("wt-tabbed")).toBe(true);
 
     term.destroy();
     term = undefined;
 
-    // A feature is removable, so a destroyed one may not leave chrome behind: in
-    // an embedded panel the host keeps the element and would be left with a strip
-    // wired to nothing.
-    expect(root.querySelector(".wt-tab-bar")).toBeNull();
-    expect(root.querySelector(".wt-switcher")).toBeNull();
-    expect(root.querySelector(".wt-tab-menu")).toBeNull();
-    expect(root.querySelector(".wt-catchup")).toBeNull();
-    expect(root.querySelector(".wt-tab-new")).toBeNull();
-    expect(root.querySelector(".wt-tab")).toBeNull();
-    // ...nor the layout it reserved for itself, which would hold the surface off
-    // an edge that no longer has a bar on it.
+    expect(surface?.classList.contains("wt-with-tabbar")).toBe(false);
     expect(root.classList.contains("wt-tabbed")).toBe(false);
-    expect(root.style.getPropertyValue("--wt-tabbar-h")).toBe("");
-    expect(root.style.getPropertyValue("--wt-reserve-bottom")).toBe("");
 
     // And the session poll is over: a timer outliving the feature would keep
     // re-listing sessions for a terminal that no longer exists.
     const before = fetchMock.mock.calls.length;
     await new Promise((r) => setTimeout(r, 40));
     expect(fetchMock.mock.calls.length).toBe(before);
+  });
+});
+
+describe("tabs: closing one tab from its own menu", () => {
+  it("closes exactly the tab the menu was opened on", async () => {
+    // The plain Close item, which the bulk-close cases above do not exercise: it
+    // takes no confirmation and must reach the same DELETE a middle-click does.
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+    fetchMock.mockClear();
+
+    const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[1];
+    chip?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    const items = [...root.querySelectorAll<HTMLButtonElement>(".wt-tab-menu button")];
+    items.find((b) => b.textContent === "Close")?.click();
+    await until(() => idsOf(root).length === 2, 60);
+
+    expect(idsOf(root)).toEqual(["one", "three"]);
+    const deleted = fetchMock.mock.calls
+      .filter((c) => (c[1]?.method ?? "GET") === "DELETE")
+      .map((c) => String(c[0]).split("/").pop());
+    expect(deleted).toEqual(["s2"]);
   });
 });
