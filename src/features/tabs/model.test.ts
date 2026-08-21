@@ -5,7 +5,7 @@
  *  temporarily and say so (web-terminal-kiro answers 503 + Retry-After while its
  *  tool engine installs on first boot). Flattening that into a message string
  *  made it indistinguishable from a 500 and threw away the retry hint. */
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import fc from "fast-check";
 import type { CueStatus, TabOrderKey } from "./model.js";
 import {
@@ -14,6 +14,7 @@ import {
   SessionAPIError,
   compareTabOrder,
   createSessionAPI,
+  createTombstones,
   isCueStatus,
   isEndedStatus,
   normalizeProgress,
@@ -169,6 +170,31 @@ describe("SessionAPIError carries what the server said", () => {
       .catch((err: unknown) => {
         expect((err as SessionAPIError).status).toBe(503);
         expect((err as SessionAPIError).serverMessage).toBeUndefined();
+      });
+  });
+
+  it("treats a Retry-After that is not purely digits as a date, not a count", async () => {
+    // The header arrives from a host this code does not control, so "5x" must not
+    // be read as five seconds by a regex anchored on only one end.
+    for (const value of ["5x", "x5"]) {
+      stubFetch(response(503, {}, { "Retry-After": value }));
+      await createSessionAPI("/api/sessions")
+        .create()
+        .catch((err: unknown) => {
+          expect((err as SessionAPIError).retryAfterMs).toBeUndefined();
+        });
+    }
+  });
+
+  it("reads a padded delta-seconds header as a count", async () => {
+    // RFC 9110 permits whitespace around a field value, and a hand-rolled server
+    // can send it. Untrimmed, this falls through to the date branch and the retry
+    // hint is lost.
+    stubFetch(response(503, {}, { "Retry-After": " 30 " }));
+    await createSessionAPI("/api/sessions")
+      .create()
+      .catch((err: unknown) => {
+        expect((err as SessionAPIError).retryAfterMs).toBe(30_000);
       });
   });
 
@@ -458,6 +484,8 @@ describe("setOrder sends the arrangement to the server", () => {
     expect(calls[0]?.url).toBe("/api/sessions/order");
     expect(calls[0]?.init?.method).toBe("PUT");
     expect(calls[0]?.init?.body).toBe(JSON.stringify({ order: ["s2", "s1"] }));
+    // A JSON body without the content type is a 415 from a strict host.
+    expect(calls[0]?.init?.headers).toEqual({ "Content-Type": "application/json" });
   });
 
   it("throws with the status, so a caller can tell 409 from a real failure", async () => {
@@ -473,6 +501,87 @@ describe("setOrder sends the arrangement to the server", () => {
         status,
       });
     }
+  });
+});
+
+describe("the session API's requests", () => {
+  it("asks for JSON and carries an abort timeout, so a wedged host cannot hang the strip", async () => {
+    // The timeout is the only thing bounding a request to a host that accepted the
+    // connection and then went quiet; without it the strip waits forever.
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve(new Response("[]", { status: 200 }));
+    });
+
+    await createSessionAPI("/api/sessions").list();
+
+    expect(calls[0]?.init?.headers).toEqual({ Accept: "application/json" });
+    expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("sends a pinned name as a JSON PUT under the session's escaped path", async () => {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+
+    await createSessionAPI("/api/sessions").setPinnedTitle("a/b c", "release notes");
+
+    expect(calls[0]?.url).toBe("/api/sessions/a%2Fb%20c/pinned-title");
+    expect(calls[0]?.init?.method).toBe("PUT");
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ title: "release notes" }));
+    expect(calls[0]?.init?.headers).toEqual({ "Content-Type": "application/json" });
+  });
+
+  it("rejects a 200 whose body is not an array", async () => {
+    // A Go server marshals a nil session slice as JSON `null`, and a proxy can
+    // answer 200 with an error object. Either one reaching the bootstrap's
+    // `sessions.length` or the poll's `list.map` is an uncaught TypeError; as a
+    // rejection, both callers' existing catch paths recover.
+    stubFetch(response(200, null));
+    await expect(createSessionAPI("/api/sessions").list()).rejects.toThrow();
+  });
+
+  it("propagates a failed pinned-name clear, so the caller can roll the label back", async () => {
+    // Not best-effort, unlike the status writes: the user renamed something and is
+    // owed the truth about whether it stuck.
+    stubFetch(response(500));
+    await expect(createSessionAPI("/api/sessions").clearPinnedTitle("s1")).rejects.toMatchObject({
+      name: "SessionAPIError",
+      status: 500,
+    });
+  });
+  it("rejects a refused close, and resolves a successful one", async () => {
+    // The pre-existing failure case for close() shares its `it` with list(), and
+    // `.catch(cb)` says nothing when the promise RESOLVES — so the list half
+    // supplied the assertions while close()'s own guard went unpinned in both
+    // directions. A close that silently "succeeds" leaves the tab on the strip.
+    stubFetch(response(404));
+    await expect(createSessionAPI("/api/sessions").close("s1")).rejects.toBeInstanceOf(
+      SessionAPIError,
+    );
+
+    vi.stubGlobal("fetch", () => Promise.resolve(new Response(null, { status: 204 })));
+    await expect(createSessionAPI("/api/sessions").close("s1")).resolves.toBeUndefined();
+  });
+
+  it("resolves a successful pinned-name clear", async () => {
+    vi.stubGlobal("fetch", () => Promise.resolve(new Response(null, { status: 204 })));
+
+    await expect(createSessionAPI("/api/sessions").clearPinnedTitle("s1")).resolves.toBeUndefined();
+  });
+
+  it("trims the server's own padding out of the message it hands to the UI", async () => {
+    // The string goes straight into chrome, and a host that pads its JSON field
+    // would otherwise push the visible text off its own baseline.
+    stubFetch(response(503, { error: "  tools installing\n" }));
+    await createSessionAPI("/api/sessions")
+      .create()
+      .catch((err: unknown) => {
+        expect((err as SessionAPIError).serverMessage).toBe("tools installing");
+      });
   });
 });
 
@@ -595,5 +704,56 @@ describe("parseCueSeen accepts the cue statuses and nothing else", () => {
       ["s1", "crashed"],
       ["s2", "done"],
     ]);
+  });
+});
+
+/** Close tombstones. The failure they exist to prevent is a tab the user just
+ *  closed flashing back into the strip, because a listing that predates the
+ *  server reaping the session (the SSE re-open snapshot, or the poll) still
+ *  carries it. Nothing exercised this before, so every rule below — the window,
+ *  its far edge, and the sweep's blast radius — was load-bearing and unpinned. */
+describe("close tombstones keep a closed tab from flashing back", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reports a session the user just closed as tombstoned", () => {
+    const tombs = createTombstones(15_000);
+    tombs.add("sess-1");
+    expect(tombs.active("sess-1")).toBe(true);
+  });
+
+  it("reports a session it never saw as free to adopt", () => {
+    // A false positive here is worse than a flash-back: it would swallow a tab
+    // the server legitimately lists and the user never closed.
+    const tombs = createTombstones(15_000);
+    tombs.add("sess-1");
+    expect(tombs.active("sess-2")).toBe(false);
+  });
+
+  it("stops tombstoning at exactly the end of the window, not after it", () => {
+    // The far edge is the whole contract: past it the server has had its chance
+    // to reap, so a listing that still carries the id is authoritative and the
+    // adopt must proceed.
+    const tombs = createTombstones(15_000);
+    tombs.add("sess-1");
+    vi.advanceTimersByTime(14_999);
+    expect(tombs.active("sess-1")).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(tombs.active("sess-1")).toBe(false);
+  });
+
+  it("does not let a second close sweep away the first tab's live tombstone", () => {
+    // add() sweeps elapsed entries so the map cannot grow over a long session of
+    // opens and closes. A sweep that took live entries with it would re-adopt the
+    // tab closed a moment ago, which is the bug the tombstones exist to stop.
+    const tombs = createTombstones(15_000);
+    tombs.add("sess-1");
+    vi.advanceTimersByTime(1000);
+    tombs.add("sess-2");
+    expect(tombs.active("sess-1")).toBe(true);
   });
 });

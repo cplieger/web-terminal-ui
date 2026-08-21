@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, afterEach, vi } from "vitest";
 
-import { placeMenuAt } from "./menu-position.js";
+import { createClickSwallow, placeMenuAt } from "./menu-position.js";
 
 // happy-dom does no layout: stub the menu's measured size and the viewport.
 
@@ -73,5 +73,79 @@ describe("placeMenuAt", () => {
     // The flip target (195 - 190 - 16 = -11) is off-screen; the top clamp
     // wins so the menu pins to the 8px margin.
     expect(menu.style.top).toBe("8px");
+  });
+});
+
+describe("placeMenuAt: the flip boundary", () => {
+  it("keeps the menu below the point when its bottom lands exactly on the margin", () => {
+    vi.stubGlobal("innerWidth", 800);
+    vi.stubGlobal("innerHeight", 600);
+    const menu = makeMenu(100, 150);
+    placeMenuAt(menu, 200, 442); // 442 + 150 + 8 === 600, the margin itself
+    expect(menu.style.top).toBe("442px");
+  });
+
+  it("flips as soon as the menu would cross the bottom margin", () => {
+    vi.stubGlobal("innerWidth", 800);
+    vi.stubGlobal("innerHeight", 600);
+    const menu = makeMenu(100, 150);
+    placeMenuAt(menu, 200, 445); // 445 + 150 + 8 = 603, three past the margin
+    expect(menu.style.top).toBe("279px"); // 445 - 150 - 16
+  });
+
+  it("clamps a point below the visible viewport back inside it", () => {
+    // The keyboard is up: the layout viewport still extends past the visual one,
+    // so a point can sit below the visible bottom and the flip target with it.
+    fakeVisualViewport({ offsetLeft: 0, offsetTop: 50, width: 400, height: 300 });
+    const menu = makeMenu(100, 150);
+    placeMenuAt(menu, 200, 400);
+    // Flip target 400 - 150 - 16 = 234 is past the bottom clamp 50 + 300 - 150 - 8.
+    expect(menu.style.top).toBe("192px");
+  });
+
+  it("rebases the viewport-space result onto the offsetParent's box", () => {
+    // The menu is absolute-positioned against .wt-root, which need not sit at the
+    // viewport origin when the terminal is embedded in a panel.
+    vi.stubGlobal("innerWidth", 800);
+    vi.stubGlobal("innerHeight", 600);
+    const menu = makeMenu(100, 150);
+    const hostRect = {
+      x: 40,
+      y: 60,
+      left: 40,
+      top: 60,
+      right: 740,
+      bottom: 560,
+      width: 700,
+      height: 500,
+      toJSON: () => ({}),
+    } satisfies DOMRect;
+    const host = document.createElement("div");
+    host.getBoundingClientRect = (): DOMRect => hostRect;
+    Object.defineProperty(menu, "offsetParent", { value: host, configurable: true });
+
+    placeMenuAt(menu, 200, 100);
+
+    expect(menu.style.left).toBe("160px"); // 200 - 40
+    expect(menu.style.top).toBe("40px"); // 100 - 60
+  });
+});
+
+describe("createClickSwallow", () => {
+  it("swallows the trailing click for the window after arm()", () => {
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000);
+    const swallow = createClickSwallow();
+    swallow.arm();
+    now.mockReturnValue(1349);
+    expect(swallow.swallowing()).toBe(true);
+  });
+
+  it("stops swallowing at exactly the end of the window", () => {
+    // A deliberate follow-up tap 350ms after the release must dismiss the menu.
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000);
+    const swallow = createClickSwallow();
+    swallow.arm();
+    now.mockReturnValue(1350);
+    expect(swallow.swallowing()).toBe(false);
   });
 });
