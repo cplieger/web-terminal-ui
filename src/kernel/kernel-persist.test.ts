@@ -11,10 +11,12 @@
 // the page-lifecycle callbacks a discard actually runs are the ones that write.
 //
 // The render mock implements the real RenderHandle contract for
-// bind/boundStore/getHighestIndex rather than returning constants, because
-// getHighestIndex is what the engine sends as `haveThrough`: it is how a restore
-// reaches the wire, so a mock that ignored the bound store would make the
-// central assertion of this file meaningless.
+// bind/boundStore/getHighestIndex rather than returning constants, because the
+// bound store is what a restore reaches the wire through: the kernel no longer
+// supplies `getHaveThrough` (the engine defaults it to its own renderer), so a
+// mock that ignored the bound store would make the central assertion of this
+// file meaningless. What goes on the wire from that store is pinned in the
+// engine's own connection suite.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -183,8 +185,7 @@ function storage(seed: Record<string, PersistedScrollback> = {}): ScrollbackPers
   };
 }
 
-/** The callbacks the kernel handed the engine's connection layer.
- *  `getHaveThrough` is the one that matters: it is what the resume announces. */
+/** The callbacks the kernel handed the engine's connection layer. */
 function engineCallbacks(): Parameters<typeof Engine.connection.init>[0] {
   const first = connectionInit.mock.calls[0]?.[0] as
     Parameters<typeof Engine.connection.init>[0] | undefined;
@@ -194,7 +195,14 @@ function engineCallbacks(): Parameters<typeof Engine.connection.init>[0] {
   return first;
 }
 
-const haveThrough = (): number => engineCallbacks().getHaveThrough?.() ?? -99;
+/** The claim this client will put on the wire, read where it is now decided: the
+ *  BOUND store's replay boundary. The kernel supplies no `getHaveThrough`, so the
+ *  engine answers from the renderer — which means "did the restore land, and land
+ *  before connect()" is a question about the store the renderer is pointing at. */
+const haveThrough = (): number => {
+  const store = engineState.bound as LineStore | null;
+  return store === null ? -1 : store.replayBoundary();
+};
 
 beforeEach(async () => {
   vi.resetModules();
@@ -215,6 +223,20 @@ function rootIn(): HTMLElement {
 }
 
 describe("persistScrollback: the single unmanaged terminal", () => {
+  it("supplies no getHaveThrough, so the engine's own answer is what goes out", () => {
+    // The premise every haveThrough() assertion in this file rests on, and the
+    // regression worth a test of its own: an explicit member WINS over the
+    // engine's default (connection.init spreads the consumer last), so re-adding
+    // one here silently restores the claim that parked a frozen copy of the
+    // composer in scrollback on every reattach. Absence IS the fix.
+    const term = createTerminal(rootIn(), {});
+    try {
+      expect(engineCallbacks().getHaveThrough).toBeUndefined();
+    } finally {
+      term.destroy();
+    }
+  });
+
   it("announces the restored content as haveThrough, so the resume is a delta", () => {
     // The reason the feature exists, asserted at the only place it is observable:
     // what this client tells the server it already holds. Without a restore this

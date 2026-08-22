@@ -601,7 +601,13 @@ function buildTerminal(
 
   connection.init({
     computeSize: render.computeSize,
-    getHaveThrough: render.getHighestIndex,
+    // getHaveThrough is deliberately NOT supplied. The engine defaults it to its
+    // own renderer (engine >= 5.0.3), which is the only party that knows which
+    // store is currently bound and which of its rows the server has confirmed.
+    // Supplying it from here is what claimed rows the application had merely
+    // DRAWN — `render.getHighestIndex` is the window's bottom row — and left a
+    // frozen copy of the composer parked in scrollback on almost every reattach.
+    // An explicit member wins over the default, so re-adding one reopens that.
     // --- Demand-paged scrollback (engine docs/paged-scrollback.md §4-5) ---
     // The transport is store-blind and viewport-blind by design, so every one of
     // these forwards a decision only the renderer can make. Without them the
