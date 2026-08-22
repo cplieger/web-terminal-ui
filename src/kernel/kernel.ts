@@ -811,7 +811,12 @@ function buildTerminal(
       case "scroll-down": {
         ev.preventDefault();
         const h = termWrap.clientHeight;
-        termWrap.scrollTop = Math.min(termWrap.scrollHeight, termWrap.scrollTop + h);
+        // The ceiling is the maximum offset, not scrollHeight: the latter is one
+        // clientHeight past the end, so a page-down near the bottom handed the
+        // container an out-of-range offset and relied on it to clamp. Same
+        // reasoning as the engine's bottom writes.
+        const max = Math.max(0, termWrap.scrollHeight - h);
+        termWrap.scrollTop = Math.min(max, termWrap.scrollTop + h);
         return true;
       }
       case "ignore":
