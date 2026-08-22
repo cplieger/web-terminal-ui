@@ -77,7 +77,11 @@ describe("scrollToBottom feature", () => {
     const { ctx, slot, surface, scrollToBottomSpy } = fakeCtx();
     scrollToBottom().setup(ctx);
     button(slot)?.click();
-    expect(surface.scrollTo).toHaveBeenCalledWith(expect.objectContaining({ behavior: "smooth" }));
+    // The target is the MAXIMUM offset (1000 - 300), not scrollHeight. An
+    // over-scroll target is one clientHeight past the end and needs the container
+    // to clamp it, which is the assumption the engine's bottom writes dropped:
+    // WebKit does not keep an offset inside the range for free.
+    expect(surface.scrollTo).toHaveBeenCalledWith({ top: 700, behavior: "smooth" });
     expect(scrollToBottomSpy).not.toHaveBeenCalled();
   });
 

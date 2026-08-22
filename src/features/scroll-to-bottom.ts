@@ -47,7 +47,16 @@ export function scrollToBottom(): TerminalFeature {
           ctx.scroll.scrollToBottom();
           return;
         }
-        surface.scrollTo({ top: surface.scrollHeight, behavior: "smooth" });
+        // Target the MAXIMUM offset, not scrollHeight. An over-scroll target is
+        // one clientHeight past the end and needs the container to clamp it,
+        // which is the assumption the engine's own bottom writes stopped making:
+        // clamping an offset the content shrank out from under is an
+        // implementation behaviour and WebKit does not do it. The line above
+        // already computes the maximum, so this is the same arithmetic said once.
+        surface.scrollTo({
+          top: surface.scrollHeight - surface.clientHeight,
+          behavior: "smooth",
+        });
       };
 
       // pointerdown (like the toolbar keys) so touch devices get the jump on the

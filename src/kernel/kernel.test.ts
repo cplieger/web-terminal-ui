@@ -1544,6 +1544,24 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(sentText()).toBe("");
   });
 
+  it("stops a page down at the maximum offset, not one screen past it", () => {
+    // The ceiling used to be scrollHeight, which is one clientHeight past the end
+    // of the content, so a page down from near the bottom handed the container an
+    // offset it cannot legally hold and relied on it to clamp. WebKit does not
+    // reliably do that, and an out-of-range offset is what leaves the viewport
+    // over empty space.
+    const root = armed();
+    const term = root.querySelector(".term") as HTMLElement;
+    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
+    term.scrollTop = 3500;
+    selectInOutput(root);
+    ta(root).blur();
+    typeOnDocument({ key: "PageDown", shiftKey: true });
+    expect(term.scrollTop).toBe(3600); // 4000 - 400, the bottom
+    expect(sentText()).toBe("");
+  });
+
   it("lets the real clipboard feature copy the selection with focus on the body", () => {
     // The design promised this integration, and the probe test above cannot stand
     // in for it: the real handler keys on `ev.code`, not `ev.key`, and reads the
