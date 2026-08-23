@@ -135,10 +135,10 @@ export function attachLoadingStatus(
   // Swap the visible text through a fade so a change reads as deliberate rather
   // than as a glitch. The first write skips the fade (there is nothing to fade
   // out) so the line does not arrive half-transparent.
+  //
+  // No `stopped` check, here or in the deferred half below, and that is
+  // deliberate rather than an omission: see stop(), which owns the invariant.
   const show = (text: string): void => {
-    if (stopped) {
-      return;
-    }
     // First write has nothing to fade out, so it must not arrive half-transparent.
     if (visible.textContent === "") {
       visible.textContent = text;
@@ -146,18 +146,13 @@ export function attachLoadingStatus(
     }
     visible.classList.add("wt-loading-text-out");
     later(() => {
-      if (stopped) {
-        return;
-      }
       visible.textContent = text;
       visible.classList.remove("wt-loading-text-out");
     }, SWAP_FADE_MS);
   };
 
   const announce = (text: string): void => {
-    if (!stopped) {
-      live.textContent = text;
-    }
+    live.textContent = text;
   };
 
   later(() => {
@@ -170,7 +165,13 @@ export function attachLoadingStatus(
 
   later(() => {
     const waiting = messages.waiting;
-    if (pinned || stopped || waiting.length === 0) {
+    // `pinned` only. Not `stopped`: this callback is held by `timers`, so stop()
+    // has cancelled it before it could read the flag. That disjunct was here and
+    // was as dead as the ones deleted above — and invisible to the mutation
+    // report, because a mutator works on binary-expression nodes and never
+    // isolates a bare identifier operand, so `pinned || stopped` is mutated as a
+    // pair and the pair is killable through `pinned`.
+    if (pinned || waiting.length === 0) {
       return;
     }
     // showAt reads through an undefined check rather than an index assertion:
@@ -219,6 +220,23 @@ export function attachLoadingStatus(
       announce(text);
     },
     stop(): void {
+      // THE OWNER of "nothing further happens", and the only one.
+      //
+      // It discharges that by cancelling every callback this controller armed:
+      // `later()` is the sole way to schedule here, everything it schedules is in
+      // `timers`, and the rotation interval is the one handle held separately.
+      // So the only call that can arrive after this line is one from OUTSIDE a
+      // cancellable callback — which is `reason()`, and `reason()` is where
+      // `stopped` is read.
+      //
+      // `show()` and `announce()` used to re-test it as well, and the mutation
+      // pass measured what that was worth: five permanently unkillable mutants,
+      // because no input could reach either function with `stopped` true. They
+      // were not even protecting anything if they had — the two nodes are
+      // detached three lines below, so a late write goes nowhere. The invariant
+      // is pinned by a test instead ("stop() leaves no timer armed"), which,
+      // unlike a guard, fails for the change that would actually break it: a
+      // future timer armed outside `later()`.
       if (stopped) {
         return;
       }

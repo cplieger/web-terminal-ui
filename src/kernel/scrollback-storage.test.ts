@@ -32,6 +32,18 @@ function entryFor(epoch: number, savedAt: number, lines = 3): PersistedScrollbac
   return { savedAt, snapshot };
 }
 
+/** `load` answers `unknown` by contract: a storage implementation cannot prove
+ *  what came back out of storage. A test asserting on the stored shape therefore
+ *  narrows it, once, the way the kernel's own boundary does — and throws rather
+ *  than returning undefined, so "nothing loaded" fails by name instead of as a
+ *  mismatched value. */
+function loaded(value: unknown): PersistedScrollback {
+  if (typeof value !== "object" || value === null) {
+    throw new Error(`expected a stored entry, got ${String(value)}`);
+  }
+  return value as PersistedScrollback;
+}
+
 /** Write an entry the way the store itself does — timestamp line, then snapshot
  *  JSON — so the sweep's bounded head read runs against real stored bytes. */
 function seed(sessionId: string, entry: PersistedScrollback): void {
@@ -83,7 +95,7 @@ describe("localScrollbackStorage: round trip", () => {
     const snapshot = line.snapshot(777);
     store.save("sess-1", { savedAt: Date.now(), snapshot: snapshot! });
 
-    expect(store.load("sess-1")?.snapshot.lines).toEqual(snapshot!.lines);
+    expect(loaded(store.load("sess-1")).snapshot.lines).toEqual(snapshot!.lines);
   });
 
   it("honors a custom prefix", () => {
@@ -125,7 +137,7 @@ describe("localScrollbackStorage: round trip", () => {
     const raw = localStorage.getItem("wt.scrollback.sess-1") ?? "";
     expect(raw.startsWith(`${String(at)}\n`)).toBe(true);
     expect(raw.slice(raw.indexOf("\n") + 1)).not.toContain("savedAt");
-    expect(store.load("sess-1")?.savedAt).toBe(at);
+    expect(loaded(store.load("sess-1")).savedAt).toBe(at);
   });
 
   it("hands the age bound to the kernel, so the sweep and the load agree", () => {
@@ -288,7 +300,7 @@ describe("localScrollbackStorage: orphan collection", () => {
     expect(() => {
       store.save("sess-1", entryFor(777, Date.now(), 400));
     }).toThrow();
-    expect(store.load("sess-1")?.snapshot.lines.length).toBe(3);
+    expect(loaded(store.load("sess-1")).snapshot.lines.length).toBe(3);
   });
 
   it("keeps an entry sitting exactly on the age bound and drops the one just past it", () => {
@@ -405,7 +417,7 @@ describe("localScrollbackStorage: when storage is unavailable", () => {
       setItem.mockRestore();
     }
     // The previous entry is intact and still loadable.
-    expect(store.load("sess-1")?.snapshot.lines.length).toBe(5);
+    expect(loaded(store.load("sess-1")).snapshot.lines.length).toBe(5);
   });
 
   it("sweeps an expired neighbour and retries once when a write is refused", () => {

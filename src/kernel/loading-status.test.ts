@@ -345,6 +345,71 @@ describe("loading overlay status text", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("leaves nothing armed from ANY state, including mid-fade", () => {
+    // The general form of the three cases above, and the reason show() and
+    // announce() need no `stopped` test of their own: stop() is the single owner
+    // of "nothing further happens", and it discharges that by cancelling
+    // everything `later()` armed. A guard inside show() could only re-assert
+    // this, which is why no input could ever make one fire — 5 permanently
+    // unkillable mutants, measured 2026-08-23.
+    //
+    // Written as a sweep rather than one more case because the guards were three
+    // and the reachable states are five: the two MID-FADE states are the ones the
+    // per-case tests above miss, and the deleted guard inside the fade callback
+    // is precisely the one that claimed to defend them.
+    const reach: { name: string; go: (s: LoadingStatus) => void }[] = [
+      { name: "fresh, both thresholds pending", go: () => undefined },
+      {
+        name: "initial line shown",
+        go: () => {
+          vi.advanceTimersByTime(INITIAL_DELAY_MS);
+        },
+      },
+      {
+        name: "mid-fade, swapping to a reason",
+        go: (s) => {
+          vi.advanceTimersByTime(INITIAL_DELAY_MS);
+          s.reason("tools installing");
+        },
+      },
+      {
+        name: "rotation running",
+        go: () => {
+          vi.advanceTimersByTime(WAITING_AFTER_MS);
+          settleSwap();
+        },
+      },
+      {
+        name: "mid-fade, rotation advancing",
+        go: () => {
+          vi.advanceTimersByTime(WAITING_AFTER_MS);
+          settleSwap();
+          vi.advanceTimersByTime(ROTATE_EVERY_MS);
+        },
+      },
+    ];
+
+    for (const state of reach) {
+      document.body.replaceChildren();
+      const o = overlayIn();
+      const s = attachLoadingStatus(o);
+      state.go(s);
+
+      const before = visibleText(o);
+      s.stop();
+
+      // Nothing is armed...
+      expect(vi.getTimerCount(), state.name).toBe(0);
+      // ...so running the clock out past every delay in the module writes
+      // nothing, which is what the deleted guards were reaching for. The nodes
+      // are detached too, so even a write would go nowhere.
+      vi.advanceTimersByTime(WAITING_AFTER_MS + ROTATE_EVERY_MS + SWAP_FADE_MS);
+      expect(visibleText(o), state.name).toBeNull();
+      expect(announcedText(o), state.name).toBeNull();
+      expect(before === null || typeof before === "string").toBe(true);
+    }
+  });
+
   it("arms no rotation for a consumer that supplies no waiting messages", () => {
     // A consumer may reword the initial line and decline the reassurance
     // rotation entirely. An interval over an empty list would tick forever

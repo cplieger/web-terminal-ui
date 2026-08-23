@@ -28,7 +28,6 @@
 // caps rather than only writing.
 
 import type { ScrollbackPersistence } from "./types.js";
-import type { StoreSnapshot } from "@cplieger/web-terminal-engine";
 import { DEFAULT_MAX_AGE_MS } from "./scrollback.js";
 import { positiveIntOption } from "./options.js";
 
@@ -259,11 +258,16 @@ export function localScrollbackStorage(
         return null;
       }
       try {
-        // The snapshot is returned unvalidated on purpose: the kernel validates
-        // every field against the engine's snapshot contract, and duplicating that
-        // here would give two places to disagree about what a usable entry is. A
-        // parse failure is the one thing this layer must handle, since it throws.
-        return { savedAt, snapshot: JSON.parse(raw.slice(raw.indexOf("\n") + 1)) as StoreSnapshot };
+        // The snapshot is returned unparsed on purpose: the kernel parses every
+        // field against the engine's snapshot contract, and duplicating that here
+        // would give two places to disagree about what a usable entry is. Typed
+        // `unknown` rather than asserted `as StoreSnapshot`, which is what this
+        // line used to do — and that cast was laundering `JSON.parse`'s `any` past
+        // no-unsafe-assignment while telling the compiler the value was verified,
+        // leaving the keeper to verify it anyway. That is how the keeper's
+        // boundary came to check the same thing twice.
+        const snapshot: unknown = JSON.parse(raw.slice(raw.indexOf("\n") + 1));
+        return { savedAt, snapshot };
       } catch {
         remove(keyFor(sessionId));
         return null;
