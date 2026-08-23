@@ -11,7 +11,7 @@
 // page-visibility half of the rule is dropped.
 
 import { describe, it, expect, vi } from "vitest";
-import { createNotifier, shouldNotify } from "./notify.js";
+import { browserNotifierEnv, createNotifier, shouldNotify } from "./notify.js";
 import type { NotificationCtorLike, NotifierEnv } from "./notify.js";
 
 /** A recording Notification stand-in: captures what the notifier constructed and
@@ -362,5 +362,122 @@ describe("createNotifier permission request", () => {
     expect(() => {
       n.gesture();
     }).not.toThrow();
+  });
+});
+
+// browserNotifierEnv is the only place in the feature that touches globals, and
+// its whole job is to answer safely about a `Notification` that may be absent —
+// or present and not callable, which is what an embedding page that defines its
+// own `Notification` symbol looks like. Every reading goes through a
+// `typeof value === "function"` test for that reason: a non-callable global must
+// read exactly like an absent one, because the alternative is `new
+// Notification(...)` on an object, i.e. a TypeError on the notification path.
+describe("browserNotifierEnv (the real-globals adapter)", () => {
+  it("reports no constructor and a denied permission where Notification is absent", () => {
+    vi.stubGlobal("Notification", undefined);
+    const env = browserNotifierEnv();
+    expect(env.ctor).toBeUndefined();
+    // "denied" rather than "default": nothing may be posted, and nothing may be
+    // requested either, since there is no API to request from.
+    expect(env.permission()).toBe("denied");
+    expect(() => {
+      env.request();
+    }).not.toThrow();
+  });
+
+  it("reads the permission and the constructor off a callable Notification", () => {
+    const ctor = function Fake(): void {
+      /* a browser's Notification is a constructor */
+    };
+    vi.stubGlobal("Notification", Object.assign(ctor, { permission: "granted" }));
+    const env = browserNotifierEnv();
+    expect(env.ctor).toBe(ctor);
+    expect(env.permission()).toBe("granted");
+  });
+
+  it("treats a NON-CALLABLE Notification global as absent, not as an API", () => {
+    // A host page with its own `window.Notification` object (a shim, a polyfill
+    // stub, an analytics namespace). Reading its `permission` would let the
+    // notifier believe it may post, and handing it back as `ctor` would make the
+    // post itself throw.
+    const request = vi.fn();
+    vi.stubGlobal("Notification", { permission: "granted", requestPermission: request });
+    const env = browserNotifierEnv();
+    expect(env.ctor).toBeUndefined();
+    expect(env.permission()).toBe("denied");
+    env.request();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("requests permission through either supported requestPermission shape", () => {
+    // Modern browsers return a promise, older Safari takes a callback and returns
+    // undefined. Neither result is awaited — the answer is read from permission()
+    // at the next notification — so both shapes are simply called.
+    const promiseShape = vi.fn(() => Promise.resolve("granted"));
+    const ctorA = Object.assign(
+      function FakeA(): void {
+        /* constructor */
+      },
+      { permission: "default", requestPermission: promiseShape },
+    );
+    vi.stubGlobal("Notification", ctorA);
+    browserNotifierEnv().request();
+    expect(promiseShape).toHaveBeenCalledTimes(1);
+    // Called as a method of Notification, the way both shapes expect.
+    expect(promiseShape.mock.instances[0]).toBe(ctorA);
+
+    const callbackShape = vi.fn((): undefined => undefined);
+    vi.stubGlobal(
+      "Notification",
+      Object.assign(
+        function FakeB(): void {
+          /* constructor */
+        },
+        { permission: "default", requestPermission: callbackShape },
+      ),
+    );
+    browserNotifierEnv().request();
+    expect(callbackShape).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not attempt a request on a Notification that has no requestPermission", () => {
+    // iOS Safari's history: the constructor has existed there without the
+    // permission API. Calling a non-function would throw on the gesture path,
+    // which runs inside a click handler.
+    vi.stubGlobal(
+      "Notification",
+      Object.assign(
+        function Fake(): void {
+          /* constructor */
+        },
+        { permission: "default" },
+      ),
+    );
+    const env = browserNotifierEnv();
+    expect(() => {
+      env.request();
+    }).not.toThrow();
+    expect(env.permission()).toBe("default");
+  });
+
+  it("reports a non-string permission as denied", () => {
+    vi.stubGlobal(
+      "Notification",
+      Object.assign(
+        function Fake(): void {
+          /* constructor */
+        },
+        { permission: 1 },
+      ),
+    );
+    expect(browserNotifierEnv().permission()).toBe("denied");
+  });
+
+  it("reads page visibility from document.visibilityState", () => {
+    const env = browserNotifierEnv();
+    expect(env.pageVisible()).toBe(true);
+    const hidden = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    expect(env.pageVisible()).toBe(false);
+    hidden.mockRestore();
   });
 });

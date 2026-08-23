@@ -461,3 +461,61 @@ describe("localScrollbackStorage: when storage is unavailable", () => {
     );
   });
 });
+
+describe("localScrollbackStorage: storage revoked part-way through the sweep", () => {
+  it("sweeps the entries it did manage to enumerate rather than abandoning the pass", () => {
+    // Storage can be revoked mid-session, and the sweep reads N keys and N values
+    // one at a time — so "it threw" is a state that can arrive after some of the
+    // list is already in hand. An origin whose permission is withdrawn between two
+    // getItem calls is the shape; a browser that starts refusing under memory
+    // pressure is another. The partial list is still worth acting on: the expired
+    // entries in it are dead weight whatever the rest of the store holds, and
+    // giving up would leave them to fill the quota.
+    const expiredAt = Date.now() - 9 * DAY;
+    localStorage.setItem("wt.scrollback.expired", `${String(expiredAt)}\n{"broken":true}`);
+    localStorage.setItem("wt.scrollback.later", `${String(Date.now())}\n{"fine":true}`);
+
+    const real = window.localStorage;
+    // Answers for the first own key, then refuses. The sweep should still have
+    // collected (and therefore still collect) the expired one.
+    let reads = 0;
+    const revoked = {
+      get length(): number {
+        return real.length;
+      },
+      key: (i: number) => real.key(i),
+      getItem: (k: string) => {
+        reads += 1;
+        if (reads > 1) {
+          throw new Error("SecurityError: the origin's storage was revoked");
+        }
+        return real.getItem(k);
+      },
+      setItem: (k: string, v: string) => {
+        real.setItem(k, v);
+      },
+      removeItem: (k: string) => {
+        real.removeItem(k);
+      },
+      clear: () => {
+        real.clear();
+      },
+    } as unknown as Storage;
+
+    const descriptor = Object.getOwnPropertyDescriptor(window, "localStorage");
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get: () => revoked,
+    });
+    try {
+      expect(() => localScrollbackStorage()).not.toThrow();
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(window, "localStorage", descriptor);
+      }
+    }
+
+    expect(reads).toBeGreaterThan(1);
+    expect(ownKeys()).toEqual(["wt.scrollback.later"]);
+  });
+});
