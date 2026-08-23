@@ -2873,13 +2873,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // still be), to the terminal otherwise. Recorded at entry because the exit
       // paths cannot tell them apart.
       let editFrom: "keyboard" | "pointer" = "pointer";
-      // Tab ids with a pinned-name request in flight. While an id is here, a status
-      // record carrying a DIFFERENT value is applied for display but does not
-      // supersede the request: SSE delivery order and REST mutation order are not
-      // one total order, so a record sampled BEFORE our PUT can arrive after it,
-      // and treating it as newer authority would suppress the request's own
-      // rollback and its failure toast.
-      const namesInFlight = new Set<string>();
+      // Tab ids with pinned-name requests in flight, COUNTED per id. While a count
+      // is held, a status record carrying a DIFFERENT value is applied for display
+      // but does not supersede the request: SSE delivery order and REST mutation
+      // order are not one total order, so a record sampled BEFORE our PUT can
+      // arrive after it, and treating it as newer authority would suppress the
+      // request's own rollback and its failure toast.
+      // Counted rather than a Set of ids, because two renames of one tab can be out
+      // at once and the invariant is "no request of OURS is in flight", not "no id
+      // is marked": a bare Set let the first request's completion clear the marker
+      // while the second's PUT was still open, and the second rename then failed
+      // silently. A per-request token would carry more information, but the only
+      // reader asks whether ANY request is out for this id, and the failure handler
+      // already distinguishes its own supersession by (born, nameSeq).
+      const namesInFlight = new Map<string, number>();
 
       /** restoreFocusAfterEdit sends focus where the entry path implies. The
        *  terminal branch is gated exactly like switchTo's focus-on-switch: on a
@@ -2949,8 +2956,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           const { text, fallback } = baseLabel(t);
           ctx.announce(fallback ? "Custom name removed" : `Using automatic name: ${text}`);
         }
-        namesInFlight.add(id);
         const request = name === "" ? api.clearPinnedTitle(id) : api.setPinnedTitle(id, name);
+        // Counted only once the request exists: an api implementation that throws
+        // instead of rejecting would otherwise leave a count behind that no
+        // .finally ever releases, and the id would read as in flight forever.
+        namesInFlight.set(id, (namesInFlight.get(id) ?? 0) + 1);
         void request
           .catch(() => {
             const cur = tabList.find((x) => x.id === id);
@@ -2962,7 +2972,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             ctx.toast("Couldn't save the terminal name");
           })
           .finally(() => {
-            namesInFlight.delete(id);
+            const left = (namesInFlight.get(id) ?? 0) - 1;
+            if (left > 0) {
+              namesInFlight.set(id, left);
+            } else {
+              namesInFlight.delete(id);
+            }
           });
         return true;
       }
