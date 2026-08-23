@@ -1,10 +1,9 @@
-// @vitest-environment happy-dom
-//
 // The switcher's row enter/leave animations. index.test.ts drives the switcher
 // chrome as a whole but never these two, because they only run when a row has a
-// measured height and happy-dom reports zero for every layout box — so the
-// height is supplied here as what it is, an engine reading, and the assertions
-// are on the inline styles the functions actually write.
+// measured height — and the test document loads no stylesheet, so an empty row
+// measures zero however real the layout engine is. The height is therefore
+// supplied here as what it is, an engine reading, and the assertions are on the
+// inline styles the functions actually write.
 //
 // Both are inline-driven and self-clearing (the caller gates motion), so the
 // behaviour under test is a TIMELINE: what the row looks like on the frame it is
@@ -19,9 +18,10 @@ import { animateRowIn, animateRowOut } from "./switcher.js";
 const ROW_ANIM_MS = 220;
 const CLEANUP_AFTER_MS = ROW_ANIM_MS + 60;
 
-/** A listed row of `heightPx`, attached, with the layout an engine would report
- *  for it. happy-dom has no layout engine, so the row's own height is the one
- *  input these functions read from outside. */
+/** A listed row of `heightPx`, attached, with the layout the package stylesheet
+ *  would give it. That stylesheet is not loaded here, so the row's own height is
+ *  supplied rather than measured: it is the one input these functions read from
+ *  outside. */
 function rowOf(heightPx: number): HTMLElement {
   const list = document.createElement("ul");
   list.className = "wt-switcher-list";
@@ -65,7 +65,10 @@ describe("animateRowIn", () => {
 
     // The first frame is the "from" state, written with transitions off so it
     // takes effect immediately rather than animating from the row's full height.
-    expect(row.style.maxHeight).toBe("0");
+    // A real CSSOM normalizes a LENGTH on read-back: production writes `0` and
+    // `element.style` reports `0px`. Same value, the platform's spelling. A bare
+    // number (opacity) is not a length and stays `0`.
+    expect(row.style.maxHeight).toBe("0px");
     expect(row.style.opacity).toBe("0");
     expect(row.style.transition).toBe("none");
     expect(row.style.overflow).toBe("hidden");
@@ -166,7 +169,7 @@ describe("animateRowOut", () => {
     animateRowOut(row);
     nextFrame();
 
-    expect(row.style.maxHeight).toBe("0");
+    expect(row.style.maxHeight).toBe("0px");
     expect(row.style.opacity).toBe("0");
     expect(row.style.transition).toContain("max-height 220ms");
   });
@@ -203,7 +206,7 @@ describe("animateRowOut", () => {
 
     animateRowOut(row);
     nextFrame();
-    expect(row.style.maxHeight).toBe("0");
+    expect(row.style.maxHeight).toBe("0px");
 
     vi.advanceTimersByTime(CLEANUP_AFTER_MS - 16);
     expect(row.isConnected).toBe(false);

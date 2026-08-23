@@ -1007,8 +1007,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // sync, so a user browsing a scrolled strip is never yanked back by an
       // unrelated repaint), the newly active chip is brought into view in the
       // overflowed scroller; inline: "nearest" is a no-op when it is already
-      // visible. The typeof guard covers happy-dom, which lacks
-      // scrollIntoView.
+      // visible. The typeof guard covers an environment without scrollIntoView.
       let lastRevealedActive = "";
       function paintActive(): void {
         for (const t of tabList) {
@@ -2247,7 +2246,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
         }
         if (invert.size === 0) {
-          return; // nothing moved on screen (a zero-rect DOM: happy-dom)
+          return; // nothing moved on screen (every box measured zero)
         }
         applyShift(invert, "none");
         // The read forces the reflow that COMMITS the from-state. Without it the
@@ -2537,8 +2536,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Reordering re-appends every chip, and reparenting the focused field blurs
         // it — so an open edit would be committed as a side effect of moving some
         // OTHER tab, via a blur the user never performed. Resolve it here instead,
-        // so the outcome is chosen and testable rather than emergent (happy-dom
-        // does not reproduce the reparent-blur, so no test could catch it).
+        // so the outcome is chosen rather than emergent: a blur that arrives as a
+        // side effect of reparenting is not a decision anyone made.
         resolveEdit("blur", false);
         const from = tabList.findIndex((t) => t.id === id);
         const to = from + delta;

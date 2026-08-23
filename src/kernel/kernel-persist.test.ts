@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Scrollback persistence wired through the real kernel: the parts that are about
 // PLACEMENT rather than policy (scrollback.test.ts owns the policy).
 //
@@ -93,6 +91,12 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       boundStore,
     },
     scroll: {
+      // Reached through viewport.ts's settle handler, which a real browser fires on
+      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
+      // real one delivers its first observation asynchronously, so every mount opens a
+      // transition that settles ~350ms later and pins to the bottom. Absent from the
+      // double, that settle throws out of a timer as an unhandled error.
+      stickToBottom: vi.fn(),
       init: vi.fn(),
       scrollToBottom: vi.fn(),
       isUserScrolledUp: vi.fn(() => false),

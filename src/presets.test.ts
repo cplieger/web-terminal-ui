@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Composition tests (design section 22.10): the presetTouch bundle assembles and
 // mounts, each feature contributes its chrome into the right region, the
 // clipboard shortcut routes through the sanitizing funnel, and destroy tears the
@@ -36,6 +34,12 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       boundStore: vi.fn(),
     },
     scroll: {
+      // Reached through viewport.ts's settle handler, which a real browser fires on
+      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
+      // real one delivers its first observation asynchronously, so every mount opens a
+      // transition that settles ~350ms later and pins to the bottom. Absent from the
+      // double, that settle throws out of a timer as an unhandled error.
+      stickToBottom: vi.fn(),
       init: vi.fn(),
       scrollToBottom: vi.fn(),
       isUserScrolledUp: vi.fn(() => false),
@@ -97,6 +101,11 @@ describe("presetTouch composition", () => {
   });
 
   it("routes Ctrl+Shift+V clipboard paste through the bracketed funnel", async () => {
+    // navigator.clipboard is an accessor on Navigator.prototype, so the cleanup
+    // has to restore the descriptor that was there rather than delete the shadow:
+    // a delete re-exposes the platform's real clipboard, which is a different
+    // premise for whatever test runs next.
+    const saved = Object.getOwnPropertyDescriptor(navigator, "clipboard");
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { readText: () => Promise.resolve("echo hi\nrm x") },
@@ -115,7 +124,11 @@ describe("presetTouch composition", () => {
       expect(sent).toContain("echo hi\rrm x");
       expect(sent.endsWith("\x1b[201~")).toBe(true);
     } finally {
-      Reflect.deleteProperty(navigator, "clipboard");
+      if (saved) {
+        Object.defineProperty(navigator, "clipboard", saved);
+      } else {
+        Reflect.deleteProperty(navigator, "clipboard");
+      }
     }
   });
 

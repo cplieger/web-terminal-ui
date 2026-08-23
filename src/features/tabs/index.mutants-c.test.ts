@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // tabs feature, chrome-sync half: the surfaces syncChrome refreshes and the
 // per-chip wiring that feeds them — paintActive's "reveal the newly active chip"
 // rule, the dedicated switch button's ≥2-tabs gate, the expanded switcher list
@@ -116,6 +114,12 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
     },
     scroll: {
+      // Reached through viewport.ts's settle handler, which a real browser fires on
+      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
+      // real one delivers its first observation asynchronously, so every mount opens a
+      // transition that settles ~350ms later and pins to the bottom. Absent from the
+      // double, that settle throws out of a timer as an unhandled error.
+      stickToBottom: vi.fn(),
       init: vi.fn(),
       scrollToBottom: vi.fn(),
       isUserScrolledUp: vi.fn(() => false),
@@ -218,9 +222,8 @@ async function until(pred: () => boolean, tries = 30): Promise<void> {
 
 // A query-aware matchMedia, same reasoning as index.test.ts's: the feature asks
 // three different questions of it and a blanket answer answers the wrong one.
-// happy-dom's own matchMedia reports false for everything, so this only has to be
-// installed by a case that wants a `true` — but installing it explicitly is what
-// makes the case say which question it is answering.
+// Installing it explicitly is what makes a case say which question it is
+// answering, rather than inheriting whatever the host browser reports.
 function stubMedia(answers: Record<string, boolean>): void {
   vi.stubGlobal(
     "matchMedia",
@@ -783,13 +786,13 @@ describe("tabs: the expanded/collapsed resting state", () => {
   });
 });
 
-// The expanded list's motion is measured in pixels, and happy-dom reports every
-// layout box as zero — which is not a neutral default here: animateRowIn bails on
-// a zero-height row and the reel's pitch collapses to 0, so a case built on the
-// bare environment proves nothing about either. This gives the ROWS and their LIST
-// (only) a real box: 40px rows stacked in DOM order inside a list whose own box
-// starts at `listTop`. Everything else keeps the environment's own answer, so the
-// strip's own scroll maths is untouched.
+// The expanded list's motion is measured in pixels, and an unstyled row has no
+// height to move by — which is not a neutral default here: animateRowIn bails on a
+// zero-height row and the reel's pitch collapses to 0, so a case built on whatever
+// the bare markup laid out as proves nothing about either. This gives the ROWS and
+// their LIST (only) a chosen box: 40px rows stacked in DOM order inside a list
+// whose own box starts at `listTop`. Everything else keeps the environment's own
+// answer, so the strip's own scroll maths is untouched.
 //
 // Rows lifted OUT of the flow (the reel's absolute ghost) occupy no slot, which is
 // what a browser does and what the reel depends on: the survivors close up over
@@ -902,8 +905,13 @@ describe("tabs: the expanded list's row reconcile", () => {
 
     m.current.click();
 
-    // 768px viewport, so the content (1000px) is capped to half of it.
-    expect(m.switcher.style.getPropertyValue("--wt-list-h")).toBe("384px");
+    // Half of the REAL viewport, read here rather than written as a constant: the
+    // number is a property of the environment (the browser project pins 1280x720,
+    // so 360px), and the claim under test is the cap RULE, not the height of any
+    // one browser window. The content is 1000px, so the cap demonstrably applied.
+    const half = window.innerHeight / 2;
+    expect(half).toBeLessThan(1000);
+    expect(m.switcher.style.getPropertyValue("--wt-list-h")).toBe(`${String(half)}px`);
   });
 
   it("publishes the content height itself when the content is shorter than the cap", async () => {
@@ -949,7 +957,10 @@ describe("tabs: the expanded list's row reconcile", () => {
       throw new Error("no new row");
     }
     // Starts collapsed and transparent...
-    expect(arriving.style.maxHeight).toBe("0");
+    // A real CSSOM normalizes a LENGTH on read-back: production writes `0` and
+    // `element.style` reports `0px`. Same value, the platform's spelling. A bare
+    // number (opacity) is not a length and stays `0`.
+    expect(arriving.style.maxHeight).toBe("0px");
     expect(arriving.style.opacity).toBe("0");
     expect(arriving.style.overflow).toBe("hidden");
     // ...then transitions to its measured height on the next frame.
@@ -981,7 +992,7 @@ describe("tabs: the expanded list's row reconcile", () => {
     expect(leaving.style.maxHeight).toBe(`${String(ROW_H)}px`);
     expect(leaving.style.pointerEvents).toBe("none");
     pump();
-    expect(leaving.style.maxHeight).toBe("0");
+    expect(leaving.style.maxHeight).toBe("0px");
     // And gone once the collapse has run.
     vi.advanceTimersByTime(400);
     expect(leaving.isConnected).toBe(false);
@@ -1081,7 +1092,7 @@ describe("tabs: the reel (a swipe rotates the open list)", () => {
     // what makes the change read as a rotation instead of a reload.
     const after = rowByLabel(m, "three");
     expect(after).toBe(survivor);
-    expect(after?.style.transform).toBe("translateY(0)");
+    expect(after?.style.transform).toBe("translateY(0px)");
     expect(after?.style.opacity).toBe("1");
     expect(after?.style.transition).toContain("transform");
   });
@@ -1473,7 +1484,11 @@ describe("tabs: the reel's from-state", () => {
     // stylesheet gives it; and a scrolled list is where an anchor computed in the
     // wrong space shows up.
     m.list.style.rowGap = `${String(GAP)}px`;
-    m.list.scrollTop = SCROLLED;
+    // A plain `m.list.scrollTop = SCROLLED` is clamped to 0 by a real browser: the
+    // list has no overflowing content in a bare test document, so there is nothing
+    // to scroll. The scroll offset is an INPUT to the anchor arithmetic under test,
+    // so it is declared as an own property the same way the row layout above is.
+    Object.defineProperty(m.list, "scrollTop", { value: SCROLLED, configurable: true });
 
     if (dir === "next") {
       flickNext(m.current);
@@ -1530,7 +1545,7 @@ describe("tabs: the reel's from-state", () => {
     // ghost a listful away from the row it replaces.
     expect(ghost?.top).toBe(`${String(SCROLLED)}px`);
     // Fully opaque and unmoved, so its fade and its exit both animate from here.
-    expect(ghost?.transform).toBe("translateY(0)");
+    expect(ghost?.transform).toBe("translateY(0px)");
     expect(ghost?.opacity).toBe("1");
   });
 });
@@ -1602,8 +1617,9 @@ describe("tabs: more guards on the chip's own handlers", () => {
   });
 });
 
-// A minimal DataTransfer stand-in: happy-dom has no drag-event constructors, and
-// the drag preview reads setDragImage off this.
+// A minimal DataTransfer stand-in: a constructed DragEvent carries a real, EMPTY
+// DataTransfer that a test cannot write to, and the drag preview reads
+// setDragImage off this.
 interface FakeDataTransfer {
   effectAllowed: string;
   dropEffect: string;

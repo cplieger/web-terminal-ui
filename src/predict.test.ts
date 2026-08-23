@@ -338,10 +338,19 @@ describe("predict: prediction is off until the first server frame", () => {
   // been painted yet, over a session whose cursor is wherever the shell left it.
   //
   // The module keeps this state in module-scope variables, so the boot state only
-  // exists at load: the module is imported inside the test for that reason.
+  // exists at load: the module is re-imported inside the test for that reason, and
+  // the query has to be BUSTED to get a second evaluation. `vi.resetModules()` on
+  // its own cannot do it in a browser — the module map is URL-keyed, so the
+  // re-import hands back the instance the file's beforeEach already armed with
+  // onScreenFrame, and every assertion below reads an armed module. The `.ts`
+  // extension is load-bearing: written `.js` the suite still passes while v8
+  // attributes every evaluation to a file that does not exist and coverage for
+  // predict.ts collapses to nothing.
+  let bootCount = 0;
   async function freshPredict(): Promise<typeof predict> {
-    vi.resetModules();
-    return import("./predict.js");
+    return (await import(
+      /* @vite-ignore */ `./predict.ts?boot=${String(++bootCount)}`
+    )) as typeof predict;
   }
 
   it("reports an inactive cursor at the origin before any frame arrives", async () => {

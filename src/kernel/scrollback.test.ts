@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Scrollback persistence (CreateTerminalOptions.persistScrollback): the rules
 // this module owns, which are all rules about TRUST and TIMING. The engine owns
 // the data shape; the consumer owns the bytes. What is tested here is that a

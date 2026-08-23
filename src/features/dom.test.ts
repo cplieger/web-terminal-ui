@@ -1,10 +1,9 @@
-// @vitest-environment happy-dom
 import { describe, it, expect, vi } from "vitest";
 import { fromHTML, holdFocusOnPress, PRESSED_CLASS } from "./dom.js";
 
-// happy-dom ships no PointerEvent, so the pointer events are spelled as
-// MouseEvent (the pattern the other feature tests use). Only `button` and
-// cancellability matter to the handler.
+// The pointer events are spelled as MouseEvent (the pattern the other feature
+// tests use). Only `button` and cancellability matter to the handler, and both
+// interfaces carry them.
 const pointer = (type: string, init: MouseEventInit = {}): MouseEvent =>
   new MouseEvent(type, { bubbles: true, cancelable: true, ...init });
 

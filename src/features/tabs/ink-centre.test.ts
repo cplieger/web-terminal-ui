@@ -1,7 +1,41 @@
-// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fc from "fast-check";
 import { centreChipLabels, inkShiftPx, type InkMetrics } from "./ink-centre.js";
+
+/** Shadows `document.fonts` with `value` and returns the restore.
+ *
+ *  `fonts` is an accessor on Document.prototype, so `delete document.fonts`
+ *  cannot produce ABSENCE — it removes an own shadow and re-exposes the real
+ *  FontFaceSet. Absence has to be installed as an own `undefined`, and the
+ *  restore has to put back whatever descriptor was actually there. */
+function shadowFonts(value: unknown): () => void {
+  const saved = Object.getOwnPropertyDescriptor(document, "fonts");
+  Object.defineProperty(document, "fonts", { value, configurable: true });
+  return () => {
+    if (saved) {
+      Object.defineProperty(document, "fonts", saved);
+    } else {
+      Reflect.deleteProperty(document, "fonts");
+    }
+  };
+}
+
+/** A fresh evaluation of the module under test.
+ *
+ *  Needed because ink-centre caches the first non-null 2d context it gets in a
+ *  module-level variable, and a real browser hands it a real context the moment
+ *  any earlier test measures for real — after which a `getContext` spy is dead.
+ *  `vi.resetModules()` cannot help: the browser's module map is URL-keyed, so a
+ *  plain re-import returns the cached instance. Busting the query mints a new
+ *  one. The `.ts` extension is load-bearing: written `.js` the suite still
+ *  passes while v8 attributes every evaluation to a file that does not exist. */
+let bootCount = 0;
+async function freshInkCentre(): Promise<typeof centreChipLabels> {
+  const mod = (await import(/* @vite-ignore */ `./ink-centre.ts?boot=${++bootCount}`)) as {
+    centreChipLabels: typeof centreChipLabels;
+  };
+  return mod.centreChipLabels;
+}
 
 // The numbers below are not invented: each row's fontBox, baseline and capInk are
 // what the named engine actually reported for the bundled Monaspace Neon NF
@@ -147,14 +181,42 @@ describe("centreChipLabels", () => {
     return { root, strip, switcher };
   };
 
-  it("leaves the CSS default in place when the environment reports no layout", () => {
-    // happy-dom has no layout engine, so every rect is zero — the same shape as a
-    // display: none probe or a canvas-less environment. Writing a number derived
-    // from zeros would be worse than the em default the stylesheet already has.
+  it("leaves the CSS default in place where the site cannot be measured", () => {
+    // A display: none host, or a canvas-less environment: every rect is zero, so
+    // the line box has no height and the pipeline bails at that guard. Writing a
+    // number derived from zeros would be worse than the em default the
+    // stylesheet already has.
     const { root, strip, switcher } = mount();
+    root.style.display = "none";
     const stop = centreChipLabels(root, { strip, switcher });
     expect(strip.style.getPropertyValue("--label-ink-shift")).toBe("");
     expect(switcher.style.getPropertyValue("--label-ink-shift")).toBe("");
+    stop();
+  });
+
+  it("writes a measured shift to both hosts where the site does lay out", () => {
+    // The other side of the guard above, and the first time the module's whole
+    // reason for existing is exercised end to end: a real engine lays the probe
+    // out, canvas reports the font's ink, and production derives a pixel value.
+    //
+    // The exact number is deliberately NOT pinned. It is a property of the
+    // engine's default font at the resolved size, and per-engine variance in
+    // exactly that number is what the module exists to absorb — pinning it here
+    // would assert the browser, not the module. What IS pinned: a value is
+    // written, to BOTH hosts, in the `toFixed(3)` px form the stylesheet's
+    // calc() consumes, and it is finite. The cross-engine numbers live in
+    // scripts/verify-chip-geometry.mjs and in the OBSERVED table above.
+    const { root, strip, switcher } = mount();
+    const stop = centreChipLabels(root, { strip, switcher });
+    const onStrip = strip.style.getPropertyValue("--label-ink-shift");
+    const onSwitcher = switcher.style.getPropertyValue("--label-ink-shift");
+    expect(onStrip).toMatch(/^-?\d+\.\d{3}px$/);
+    expect(onSwitcher).toMatch(/^-?\d+\.\d{3}px$/);
+    expect(Number.isFinite(Number.parseFloat(onStrip))).toBe(true);
+    // No stylesheet is loaded here, so both probes resolve the same font at the
+    // same size; the two sites therefore agree. They diverge in the product
+    // because the CSS gives the switcher a different label size.
+    expect(onSwitcher).toBe(onStrip);
     stop();
   });
 
@@ -183,11 +245,18 @@ describe("centreChipLabels", () => {
   });
 
   it("does not throw where document.fonts is absent", () => {
-    // happy-dom ships no FontFaceSet, which is also the shape of any environment
-    // without the CSS Font Loading API — the module must degrade to the
-    // measurement it can already make rather than fail to mount the chrome.
-    const { root, strip, switcher } = mount();
-    expect(() => centreChipLabels(root, { strip, switcher })()).not.toThrow();
+    // Any environment without the CSS Font Loading API — the module must degrade
+    // to the measurement it can already make rather than fail to mount the
+    // chrome. Chromium ships document.fonts, so the absence is installed here
+    // rather than inherited from the environment: left ambient, this test would
+    // drive the PRESENT arm, which is the one arm it exists to avoid.
+    const restore = shadowFonts(undefined);
+    try {
+      const { root, strip, switcher } = mount();
+      expect(() => centreChipLabels(root, { strip, switcher })()).not.toThrow();
+    } finally {
+      restore();
+    }
   });
 
   it("stops re-measuring on a late font load after teardown", () => {
@@ -195,7 +264,7 @@ describe("centreChipLabels", () => {
     // invisible to the signature cache), so a leaked listener here would probe
     // and write against a torn-down chrome rather than no-op.
     const fonts = Object.assign(new EventTarget(), { ready: Promise.resolve() });
-    Object.defineProperty(document, "fonts", { value: fonts, configurable: true });
+    const restore = shadowFonts(fonts);
     try {
       const { root, strip, switcher } = mount();
       const stop = centreChipLabels(root, { strip, switcher });
@@ -209,7 +278,7 @@ describe("centreChipLabels", () => {
       watch.disconnect();
       expect(sawProbe).toBe(false);
     } finally {
-      Reflect.deleteProperty(document, "fonts");
+      restore();
     }
   });
 
@@ -225,13 +294,13 @@ describe("centreChipLabels", () => {
   });
 });
 
-// Everything above runs in the environment as it is: happy-dom has no canvas 2d
-// context and reports a zero rect for every element, so the measurement pipeline
-// bails at its first guard and the module's whole reason for existing goes
-// untested. The block below supplies the two readings the module takes FROM the
-// engine — the font's ink extents (canvas TextMetrics) and the line box plus
-// baseline (two rects) — and then asserts on what the module DERIVES from them:
-// the pixel value written to --label-ink-shift, and when it is re-derived.
+// Everything above runs in the environment as it is: a real engine lays the
+// probe out and canvas reports real ink, so the pipeline runs end to end and the
+// numbers belong to whatever font the browser defaulted to. The block below
+// supplies the two readings the module takes FROM the engine — the font's ink
+// extents (canvas TextMetrics) and the line box plus baseline (two rects) — so
+// the DERIVED value is pinned exactly: the pixel written to --label-ink-shift,
+// and when it is re-derived.
 //
 // Both stubs are inputs, not subjects. The rect stub answers zero for a detached
 // element, which is what a real engine reports, so the probe's own DOM wiring
@@ -239,8 +308,13 @@ describe("centreChipLabels", () => {
 describe("centreChipLabels — a site the engine can measure", () => {
   // ink-centre caches the first non-null getContext() result in a module-level
   // variable, so this object outlives any one test's spy and the per-test knob
-  // has to be the ASCENT it reports rather than the context itself.
+  // has to be the ASCENT it reports rather than the context itself. In a real
+  // browser that cache is also why each test needs a FRESH evaluation of the
+  // module: an earlier test measuring for real would have cached the platform's
+  // own 2d context, and the spy below would then never be consulted.
   let capInkAscentPx = 300; // 0.750em at the module's 400px reference size
+  let centreChipLabels: Awaited<ReturnType<typeof freshInkCentre>>;
+  let restoreFonts: () => void = () => undefined;
   const fakeCtx2d = {
     font: "",
     measureText: () => ({ actualBoundingBoxAscent: capInkAscentPx }),
@@ -280,7 +354,7 @@ describe("centreChipLabels — a site the engine can measure", () => {
       ...over,
     }) as DOMRect;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     capInkAscentPx = 300;
     computed = {
       fontStyle: "normal",
@@ -312,9 +386,16 @@ describe("centreChipLabels — a site the engine can measure", () => {
       }
       return rect({ top: boxTop, bottom: boxTop + boxHeight, height: boxHeight });
     });
+    // The stubs have to be in place before the module evaluates, because the
+    // first canvas2d() call is what fills its cache.
+    centreChipLabels = await freshInkCentre();
   });
   afterEach(() => {
-    Reflect.deleteProperty(document, "fonts");
+    // Restores whatever document.fonts descriptor was there before the test
+    // installed one. `delete` would restore the platform's real FontFaceSet
+    // instead, which is not what any test in this block asked for.
+    restoreFonts();
+    restoreFonts = () => undefined;
   });
 
   const mount = (): { root: HTMLElement; strip: HTMLElement; switcher: HTMLElement } => {
@@ -329,8 +410,9 @@ describe("centreChipLabels — a site the engine can measure", () => {
     return { root, strip, switcher };
   };
 
-  /** A FontFaceSet stand-in: happy-dom ships none, so the module's font-load
-   *  path is unreachable without one. `settle` resolves `ready`. */
+  /** A FontFaceSet stand-in: the module's font-load path needs one whose `ready`
+   *  the test controls, which the platform's own FontFaceSet does not offer.
+   *  `settle` resolves `ready`. Restored by the block's afterEach. */
   const stubFonts = (): { fonts: EventTarget; settle: () => void } => {
     let settle = (): void => undefined;
     const ready = new Promise<void>((r) => {
@@ -339,7 +421,7 @@ describe("centreChipLabels — a site the engine can measure", () => {
       };
     });
     const fonts = Object.assign(new EventTarget(), { ready });
-    Object.defineProperty(document, "fonts", { value: fonts, configurable: true });
+    restoreFonts = shadowFonts(fonts);
     return { fonts, settle };
   };
 
@@ -531,10 +613,11 @@ describe("centreChipLabels — a measurement that does not resolve to a number",
     //
     // Loaded fresh because the module caches the first non-null 2d context it
     // gets in a module-level variable, so the block above's context (and its own
-    // ink knob) would answer this block's measurements.
-    vi.resetModules();
+    // ink knob) would answer this block's measurements. `vi.resetModules()`
+    // cannot do it here: the browser's module map is URL-keyed, so a plain
+    // re-import returns the cached instance. Busting the query mints a new one.
     stubReadings(Number.POSITIVE_INFINITY);
-    const { centreChipLabels: fresh } = await import("./ink-centre.js");
+    const fresh = await freshInkCentre();
     const { root, strip, switcher } = mount();
 
     const stop = fresh(root, { strip, switcher });
@@ -548,9 +631,8 @@ describe("centreChipLabels — a measurement that does not resolve to a number",
     // The control for the case above: the pipeline is otherwise identical, so a
     // guard that rejected everything would pass the previous test for the wrong
     // reason.
-    vi.resetModules();
     stubReadings(300);
-    const { centreChipLabels: fresh } = await import("./ink-centre.js");
+    const fresh = await freshInkCentre();
     const { root, strip, switcher } = mount();
 
     const stop = fresh(root, { strip, switcher });

@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Composition contract for presetSingle: the context menu is handed the SAME
 // clipboard feature value the array includes, not a second one and not none.
 // The menu reads it through ctx.use, which resolves by feature identity, so a

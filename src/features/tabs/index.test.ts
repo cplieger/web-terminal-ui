@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // tabs feature tests (design sections 5, 6, 22.10): the session list builds a
 // tab per session with the first active, a switch re-points the renderer at the
 // next tab's cached store and reconnects the WS to it, and creating a tab spawns
@@ -143,10 +141,19 @@ const captureViewMemory = vi.fn(() => ({ abs: 7, screenTop: -3, following: false
 const pendingRowCount = vi.fn(() => 0);
 const getHighestIndex = vi.fn(() => -1);
 
+// getMouseMode has to come through the mock factory rather than a vi.spyOn on the
+// real namespace: an ESM module namespace object is not configurable, so
+// `vi.spyOn(engine.modes, "getMouseMode")` throws "Module namespace is not
+// configurable in ESM" in a real browser (the node transform used to rewrite it
+// into something patchable). The default answers 0 — no mouse-mode application —
+// which is what `...actual` used to give.
+const getMouseMode = vi.fn<() => number>(() => 0);
+
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
   return {
     ...actual,
+    modes: { ...actual.modes, getMouseMode },
     render: {
       init: vi.fn(),
       updateFontMetrics: vi.fn(),
@@ -170,6 +177,12 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
     },
     scroll: {
+      // Reached through viewport.ts's settle handler, which a real browser fires on
+      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
+      // real one delivers its first observation asynchronously, so every mount opens a
+      // transition that settles ~350ms later and pins to the bottom. Absent from the
+      // double, that settle throws out of a timer as an unhandled error.
+      stickToBottom: vi.fn(),
       init: vi.fn(),
       scrollToBottom: vi.fn(),
       isUserScrolledUp: vi.fn(() => false),
@@ -236,6 +249,8 @@ beforeEach(async () => {
   vi.resetModules();
   setSession.mockClear();
   forgetSession.mockClear();
+  // mockReset strips the factory default; restore "no mouse-mode application".
+  getMouseMode.mockReturnValue(0);
   bind.mockClear();
   pendingRowCount.mockReturnValue(0);
   getHighestIndex.mockReturnValue(-1);
@@ -297,8 +312,9 @@ function stubHostileStorage(): void {
   });
 }
 
-// A minimal DataTransfer stand-in recording what the strip's drag handlers put
-// on it, plus a synthetic DragEvent (happy-dom has no drag event constructors).
+// A minimal DataTransfer stand-in recording what the strip's drag handlers put on
+// it, plus a synthetic DragEvent: a constructed DragEvent carries a real, EMPTY
+// DataTransfer a test cannot write to or read back.
 interface FakeDataTransfer {
   effectAllowed: string;
   dropEffect: string;
@@ -342,6 +358,30 @@ function idsOf(root: HTMLElement): string[] {
   return [
     ...(root.querySelector(".wt-tab-scroll")?.querySelectorAll<HTMLElement>(".wt-tab-label") ?? []),
   ].map((e) => e.textContent ?? "");
+}
+
+/** Declare a scroller's overflow geometry, INCLUDING a writable scrollLeft.
+ *
+ *  All three are INPUTS to the wheel translation, and the translation is the
+ *  subject: production reads scrollWidth/clientWidth and WRITES scrollLeft. In a
+ *  real browser scrollLeft is clamped by actual overflow, so the write to a strip
+ *  with nothing overflowing it silently stays 0 and the converted pixel value is
+ *  unobservable — which would let a handler that only called preventDefault pass.
+ *  The accessor records what production wrote. */
+function declareOverflow(
+  el: HTMLElement,
+  geom: { scrollWidth: number; clientWidth: number },
+): void {
+  Object.defineProperty(el, "scrollWidth", { value: geom.scrollWidth, configurable: true });
+  Object.defineProperty(el, "clientWidth", { value: geom.clientWidth, configurable: true });
+  let left = 0;
+  Object.defineProperty(el, "scrollLeft", {
+    configurable: true,
+    get: () => left,
+    set: (next: number) => {
+      left = next;
+    },
+  });
 }
 
 describe("tabs feature", () => {
@@ -441,7 +481,7 @@ describe("tabs feature", () => {
   // writes could be deleted outright with the whole suite still green. A refused
   // write is pinned further down ("still switches tabs when the active-tab record
   // cannot be written"), but surviving an exception says nothing about a
-  // successful write ever happening. happy-dom's localStorage is real, and the
+  // successful write ever happening. localStorage is the browser's own, and the
   // beforeEach clears it, so what these read back can only have come from the
   // feature under test in this test.
 
@@ -724,8 +764,9 @@ describe("tabs feature", () => {
     expect(input).toBeTruthy();
     expect(active).toBeTruthy();
     input?.focus();
-    // happy-dom runs no browser default actions, so play the one that matters:
-    // a pointer press focuses the chip it lands on, blurring the terminal input.
+    // A dispatched pointerdown runs no default action (it is untrusted), so play
+    // the one that matters here: a real press focuses the chip it lands on,
+    // blurring the terminal input.
     active?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     active?.focus();
     expect(document.activeElement).toBe(active);
@@ -765,7 +806,10 @@ describe("tabs feature", () => {
 
     // Press with the terminal NOT focused (nothing to restore): the switch
     // leaves the keyboard alone rather than opening the soft keyboard.
-    document.body.focus();
+    // `document.body.focus()` cannot park focus off the textarea in a real
+    // browser (the body has no tabindex, so focus() on it is ignored); blurring
+    // the input is what does it.
+    input?.blur();
     first?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     first?.focus();
     first?.click();
@@ -1842,8 +1886,8 @@ describe("tabs feature", () => {
       throw new Error("missing tab bar chrome");
     }
 
-    // Not overflowing (happy-dom reports scrollWidth = clientWidth = 0): the
-    // wheel falls through untouched so the page keeps it.
+    // Not overflowing: an unstyled strip has scrollWidth === clientWidth, so the
+    // wheel falls through untouched and the page keeps it.
     const inert = new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true });
     bar.dispatchEvent(inert);
     expect(inert.defaultPrevented).toBe(false);
@@ -1851,8 +1895,7 @@ describe("tabs feature", () => {
 
     // Overflowing: a vertical wheel translates to scrollLeft and claims the
     // event; a horizontal-dominant delta (trackpad pan) keeps native handling.
-    Object.defineProperty(scroller, "scrollWidth", { value: 600, configurable: true });
-    Object.defineProperty(scroller, "clientWidth", { value: 200, configurable: true });
+    declareOverflow(scroller, { scrollWidth: 600, clientWidth: 200 });
     const vertical = new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true });
     bar.dispatchEvent(vertical);
     expect(vertical.defaultPrevented).toBe(true);
@@ -2152,8 +2195,8 @@ describe("tabs feature: boot race (stream-open reconcile vs bootstrap create)", 
 
 // OSC 9 chrome: the progress states, the percentage's two display modes, the
 // notification, the aggregate cue's allowed set, and the accessible name.
-// Driven through the real feature over happy-dom, so what is asserted is the DOM
-// a browser would paint.
+// Driven through the real feature in a real browser, so what is asserted is the
+// DOM a browser does paint.
 describe("tabs OSC 9 status chrome", () => {
   /** Build a terminal with a fake status monitor and wait for both tabs. */
   async function withMonitor(
@@ -2444,9 +2487,16 @@ describe("tabs OSC 9 status chrome", () => {
     // history row and the new-tab tile, so a tab closed on a lit cue would leave a
     // status variant standing in for the app until the page is next loaded.
     document.title = "Host page";
-    document.head.insertAdjacentHTML("beforeend", '<link rel="icon" href="/favicon.svg">');
-    const iconHref = (): string | null =>
-      document.querySelector('link[rel~="icon"]')?.getAttribute("href") ?? null;
+    // Read back through the link this test inserted, not through the first
+    // `link[rel~="icon"]` in the document: the tester page ships an icon link of
+    // its own (`/__vitest__/favicon.svg`), so a document-wide query returns that
+    // one and the assertion measures the harness. Production rewrites EVERY icon
+    // link by design, so it rewrites both; this is the one under test.
+    const ownIcon = document.createElement("link");
+    ownIcon.rel = "icon";
+    ownIcon.setAttribute("href", "/favicon.svg");
+    document.head.appendChild(ownIcon);
+    const iconHref = (): string | null => ownIcon.getAttribute("href");
     try {
       const { root, monitor } = await withMonitor({ attentionIcons: true });
       monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
@@ -2467,7 +2517,7 @@ describe("tabs OSC 9 status chrome", () => {
       expect(iconHref()).toBe("/favicon-input.svg");
       void root;
     } finally {
-      document.querySelector('link[rel~="icon"]')?.remove();
+      ownIcon.remove();
     }
   });
 
@@ -2752,9 +2802,10 @@ describe("tabs switch-animation lifecycle", () => {
     return SWITCH_CLASSES.find((c) => surface.classList.contains(c));
   }
 
-  // happy-dom has no AnimationEvent constructor, so carry animationName on a
-  // plain bubbling Event. Dispatched from the element the CSS animates, so
-  // `target` is set by dispatch rather than asserted into place.
+  // animationName carried on a plain bubbling Event: no CSS animation is loaded
+  // here, so the engine has none to name and the END is what the handler is about.
+  // Dispatched from the element the CSS animates, so `target` is set by dispatch
+  // rather than asserted into place.
   function fireAnimEnd(output: Element, name: string): void {
     const e = new Event("animationend", { bubbles: true });
     Object.defineProperty(e, "animationName", { value: name });
@@ -3004,15 +3055,17 @@ describe("tabs switch-animation lifecycle", () => {
 // pointer comes to REST. Rest is detected by re-arming a window on movement, so it is
 // not a hold — stopping commits, and a drop never waits for it at all.
 //
-// What these CANNOT prove: happy-dom applies no stylesheet and reports every rect as
-// zero, so the slide only runs where a test stubs geometry, and the dashed slot's
-// appearance is unverifiable here. Every stage's inline-style bookkeeping IS checkable.
-// How the motion FEELS is on the manual checklist.
+// What these CANNOT prove: no stylesheet is loaded, so the dashed slot's appearance
+// is unverifiable here and the slide only runs where a test declares the visual
+// rects. Every stage's inline-style bookkeeping IS checkable. How the motion FEELS
+// is on the manual checklist.
 //
-// Zero layout offsets also mean dropTargetBefore never finds a midpoint past clientX,
-// so every candidate below is "past the last chip" — enough to exercise the machinery,
-// and the reason the expected orders all rotate the dragged tab to the end. Movement is
-// expressed by passing a different clientX, which is what `dragAt` is for.
+// The chips' LAYOUT offsets are declared at mount (mountDragLaidOut), because the
+// hit test reads them and a real engine answers with whatever the default font laid
+// out. Every case that expects a commit aims at `h.pastEnd` — an x past the last
+// midpoint — which is why the expected orders rotate the dragged tab to the end.
+// Movement is expressed by passing a different clientX, which is what `dragAt` is
+// for.
 describe("tabs reorder preview", () => {
   async function mountDrag(
     count: number,
@@ -3028,6 +3081,8 @@ describe("tabs reorder preview", () => {
     sweepTo: (x: number) => void;
     stubLayout: () => void;
     stubRects: () => void;
+    /** An x past every chip's midpoint, i.e. the slot after the last tab. */
+    pastEnd: number;
   }> {
     if (opts.reducedMotion === true) {
       // prefersReduce() is read live on every use, so one stub covers the whole drag.
@@ -3080,21 +3135,21 @@ describe("tabs reorder preview", () => {
       sweepTo: (x: number) => {
         bar.dispatchEvent(dragAt("dragover", dt, x));
       },
-      // Give the chips real horizontal geometry, derived from their LIVE DOM index so a
-      // reorder changes what they report. Without this the FLIP finds every delta zero
-      // and returns before writing a style, which silently makes any assertion about
-      // the slide vacuous. Deliberately does not stub offsetLeft/offsetWidth: the hit
-      // test reads those, and leaving them at zero keeps every candidate "past the last
-      // chip", which is the one target this environment can express.
-      // Give the chips real LAYOUT geometry (what dropTargetBefore reads), so a test can
-      // aim at a specific slot. Without it every offset is zero and the only expressible
-      // candidate is "past the last chip".
+      // The chips' LAYOUT geometry (offsetLeft/offsetWidth), which is what the hit
+      // test reads. Declared rather than measured because it is an INPUT: a chip
+      // is 100px wide at 0/100/200/..., so a midpoint is 50 + 100n and a test can
+      // aim at a named slot. Called once at mount below, and again by hand after a
+      // reorder, because these own properties are pinned per ELEMENT while the
+      // meaning of "index i" moves with the DOM.
       stubLayout: () => {
         chips().forEach((chip, i) => {
           Object.defineProperty(chip, "offsetLeft", { value: i * 100, configurable: true });
           Object.defineProperty(chip, "offsetWidth", { value: 100, configurable: true });
         });
       },
+      // The chips' VISUAL geometry, for the FLIP. Without it every delta is zero and
+      // the slide returns before writing a style, which makes any assertion about
+      // the slide vacuous.
       stubRects: () => {
         for (const chip of chips()) {
           chip.getBoundingClientRect = (): DOMRect => {
@@ -3114,17 +3169,35 @@ describe("tabs reorder preview", () => {
           };
         }
       },
+      pastEnd: count * 100 + 10,
     };
   }
+
+  /** mountDrag with the layout already declared.
+   *
+   *  Every test below that expects a COMMIT has to aim at a slot, and a real
+   *  browser answers offsetLeft/offsetWidth for real: unstubbed, three chips of
+   *  text width put the midpoints wherever the default font landed them. The
+   *  emulator this replaced reported zero for all of them, which is why these
+   *  tests used to reach "after the last chip" by sweeping to x=10 — the one
+   *  target a zero-offset strip could express. */
+  async function mountDragLaidOut(
+    count: number,
+    opts: { reducedMotion?: boolean } = {},
+  ): Promise<Awaited<ReturnType<typeof mountDrag>>> {
+    const h = await mountDrag(count, opts);
+    h.stubLayout();
+    return h;
+  }
+
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  // happy-dom returns undefined for a `translate` that was never set and "" for one
-  // that was cleared, and it does not implement the property through getPropertyValue
-  // at all; a real browser returns "" in both cases. Normalise, so "no displacement"
-  // reads the same either way. The cast is the honest way to say the DOM emulator can
-  // hand back undefined where lib.dom promises a string.
+  // A real browser returns "" for a `translate` that was never set and for one that
+  // was cleared, so "no displacement" is one value. The `?? ""` and the cast are
+  // kept because lib.dom types this as a plain string while the property is newer
+  // than some engines the library supports.
   function translateOf(el: HTMLElement): string {
     return (el.style.translate as string | undefined) ?? "";
   }
@@ -3171,15 +3244,15 @@ describe("tabs reorder preview", () => {
     // The signal that normally decides. A dragover at an unchanged position is positive
     // evidence the pointer stopped, so the slot opens after a short confirmation rather
     // than after the no-events fallback runs down.
-    const h = await mountDrag(3);
+    const h = await mountDragLaidOut(3);
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
-    h.sweepTo(40); // still moving
+    h.sweepTo(200);
+    h.sweepTo(h.pastEnd); // still moving
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
 
     // The pointer stops. The drag loop keeps delivering events at the same position.
     vi.advanceTimersByTime(REORDER_STILL_MS);
-    h.sweepTo(40);
+    h.sweepTo(h.pastEnd);
 
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
     // ...and it did NOT need the fallback, which is the whole point of the split.
@@ -3234,9 +3307,9 @@ describe("tabs reorder preview", () => {
   it("commits from the fallback when dragover stops arriving at all", async () => {
     // No stationary event ever comes, so the only remaining signal is the absence of
     // events. Slow on purpose: it has to out-wait the drag loop's cadence.
-    const h = await mountDrag(3);
+    const h = await mountDragLaidOut(3);
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
 
     vi.advanceTimersByTime(REORDER_REST_MS - 1);
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
@@ -3248,25 +3321,28 @@ describe("tabs reorder preview", () => {
     // A hand resting on a mouse is never perfectly still. Re-arming on a 1px tremor
     // would push the commit out for as long as someone held the tab, which is the bug a
     // naive movement check ships with.
-    const h = await mountDrag(3);
+    const h = await mountDragLaidOut(3);
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(50);
+    h.sweepTo(h.pastEnd);
 
     vi.advanceTimersByTime(REORDER_STILL_MS);
-    h.sweepTo(51); // 1px of jitter, under REORDER_MOVE_EPS_PX: still a stop
+    h.sweepTo(h.pastEnd + 1); // 1px of jitter, under REORDER_MOVE_EPS_PX: still a stop
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
   });
 
   it("commits on release without waiting for the rest window at all", async () => {
     // A release is a decision, so dropping mid-sweep lands the tab where the lean said
     // it would rather than discarding the gesture.
-    const h = await mountDrag(2);
+    const h = await mountDragLaidOut(2);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
     expect(idsOf(h.root)).toEqual(["one", "two"]);
 
-    dragged?.dispatchEvent(dragEvent("drop", h.dt));
+    // Released at the position the sweep last reported, which is what the lean was
+    // showing: dragEvent releases at clientX 0 and the drop commits the slot under
+    // the POINTER, so the coordinate has to come with it.
+    dragged?.dispatchEvent(dragAt("drop", h.dt, h.pastEnd));
 
     expect(idsOf(h.root)).toEqual(["two", "one"]);
     // ...and the model follows the DOM, which is what the drop commits.
@@ -3274,10 +3350,10 @@ describe("tabs reorder preview", () => {
   });
 
   it("fades the slot in at the position the rest opened", async () => {
-    const h = await mountDrag(3);
+    const h = await mountDragLaidOut(3);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
     vi.advanceTimersByTime(REORDER_REST_MS);
 
     expect(dragged?.classList.contains("wt-tab-slotted")).toBe(true);
@@ -3324,9 +3400,9 @@ describe("tabs reorder preview", () => {
   it("keeps a pending slot when dragleave is only a move between the bar's own children", async () => {
     // The reason dragleave cannot be used bare: crossing from a chip to its label fires
     // one, and treating that as an exit would make the strip unreorderable.
-    const h = await mountDrag(3);
+    const h = await mountDragLaidOut(3);
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
 
     const inner = dragEvent("dragleave", h.dt);
     Object.defineProperty(inner, "relatedTarget", {
@@ -3344,10 +3420,10 @@ describe("tabs reorder preview", () => {
     // depend on whether the browser chose to emit `drop` at all: an accepted document
     // drop would commit while a refused release fell through to dragend and reverted.
     // That distinction is invisible to the person dragging, so both cancel.
-    const h = await mountDrag(3);
+    const h = await mountDragLaidOut(3);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
     vi.advanceTimersByTime(REORDER_REST_MS);
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
 
@@ -3370,10 +3446,10 @@ describe("tabs reorder preview", () => {
     // committed whatever the strip happened to be showing, so an abandoned drag left the
     // tabs rearranged. Nothing is snapshotted to make this work — tabList is untouched
     // for the whole gesture, so the original order is simply re-projected.
-    const h = await mountDrag(3);
+    const h = await mountDragLaidOut(3);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
     vi.advanceTimersByTime(REORDER_REST_MS);
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
 
@@ -3392,30 +3468,31 @@ describe("tabs reorder preview", () => {
     // Escape can still undo. Announcing it as "Moved one to position 2" told a
     // screen-reader user a reversible state was a finished action, sometimes followed by
     // "Move cancelled" contradicting it.
-    const h = await mountDrag(2);
+    const h = await mountDragLaidOut(2);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
     vi.advanceTimersByTime(REORDER_REST_MS);
 
     vi.advanceTimersByTime(150);
     expect(h.live()).toBe("Drop position 2");
 
-    // The completed move is announced once, by the release.
-    dragged?.dispatchEvent(dragEvent("drop", h.dt));
+    // The completed move is announced once, by the release — at the pointer, which
+    // is the slot the lean is showing.
+    dragged?.dispatchEvent(dragAt("drop", h.dt, h.pastEnd));
     vi.advanceTimersByTime(150);
     expect(h.live()).toBe("Moved one to position 2");
   });
 
   it("previews nothing when the candidate is the slot the tab already holds", async () => {
-    // Dragging the LAST tab past the end of the strip: with zero layout offsets the
-    // candidate is "after everything", which is where it already is. No lean, no rest, no
-    // announcement — the cheap idempotent path every dragover takes when the pointer has
-    // not actually chosen anything new.
-    const h = await mountDrag(3);
+    // Dragging the LAST tab past the end of the strip: the candidate is "after
+    // everything", which is where it already is. No lean, no rest, no announcement —
+    // the cheap idempotent path every dragover takes when the pointer has not
+    // actually chosen anything new.
+    const h = await mountDragLaidOut(3);
     const chips = h.chips();
     chips[2]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
 
     expect(chips.map(translateOf)).toEqual(["", "", ""]);
     vi.advanceTimersByTime(REORDER_REST_MS * 4);
@@ -3473,9 +3550,9 @@ describe("tabs reorder preview", () => {
     // them: .wt-animate and the scoped prefers-reduced-motion reset in 01-scope.css both
     // govern CSS only. The reorder has to check the preference itself, and it has to
     // still REORDER — motion is what the user opted out of, not the feature.
-    const h = await mountDrag(3, { reducedMotion: true });
+    const h = await mountDragLaidOut(3, { reducedMotion: true });
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
 
     for (const chip of h.chips()) {
       expect(translateOf(chip)).toBe("");
@@ -3489,16 +3566,16 @@ describe("tabs reorder preview", () => {
   });
 
   it("leaves no inline style on any chip once a real slide has run", async () => {
-    // happy-dom reports every rect as zero, so an unstubbed FLIP finds nothing to invert
-    // and returns before writing a single style — which made an earlier version of this
-    // test vacuous for the half it names. Stubbing rects from live DOM index makes the
-    // slide branch actually execute, so this can prove the settle timer hands every chip
-    // back.
-    const h = await mountDrag(3);
+    // The FLIP inverts the chips' VISUAL geometry, and stubbing rects from the live
+    // DOM index is what makes that branch execute against known numbers rather than
+    // whatever an unstyled strip measured — an earlier version of this test was
+    // vacuous for the half it names. So this can prove the settle timer hands every
+    // chip back.
+    const h = await mountDragLaidOut(3);
     h.stubRects();
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
     vi.advanceTimersByTime(REORDER_REST_MS);
 
     // The slide is really running: the displaced chips are mid-transition.
@@ -3506,7 +3583,7 @@ describe("tabs reorder preview", () => {
     expect(sliding.length).toBeGreaterThan(0);
     expect(sliding[0]?.style.transition).toContain("translate");
 
-    dragged?.dispatchEvent(dragEvent("drop", h.dt));
+    dragged?.dispatchEvent(dragAt("drop", h.dt, h.pastEnd));
     dragged?.dispatchEvent(dragEvent("dragend", h.dt));
     vi.advanceTimersByTime(REORDER_SETTLE_MS + REORDER_SLOT_FADE_MS);
 
@@ -3572,7 +3649,11 @@ describe("tabs: physical-keyboard detection", () => {
         input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...init }));
       },
       switchAndReportFocus: (index) => {
-        document.body.focus();
+        // `document.body.focus()` does not move focus in a real browser: the body
+        // has no tabindex, so focus() on it is ignored and the textarea keeps it.
+        // Blurring the input is what actually parks focus off it (Chromium then
+        // reports document.activeElement as <body>, never null).
+        input.blur();
         root.querySelectorAll<HTMLElement>(".wt-tab")[index]?.click();
         return document.activeElement === input;
       },
@@ -4227,8 +4308,7 @@ describe("tabs: the switcher's gesture recogniser", () => {
   it("abandons the gesture rather than switching when the program owns drags", async () => {
     // A mouse-mode application (vim, a TUI with drag support) is entitled to the
     // drag; the bar's swipe stands down instead of stealing it.
-    const engine = await import("@cplieger/web-terminal-engine");
-    const mouseMode = vi.spyOn(engine.modes, "getMouseMode").mockReturnValue(1000);
+    getMouseMode.mockReturnValue(1000);
     const h = await mountBar();
     setSession.mockClear();
 
@@ -4237,7 +4317,6 @@ describe("tabs: the switcher's gesture recogniser", () => {
     h.up(100, 302);
     expect(h.active()).toBe("one");
     expect(setSession).not.toHaveBeenCalled();
-    mouseMode.mockRestore();
   });
 });
 
@@ -4257,8 +4336,7 @@ describe("tabs: wheel translation across delta modes", () => {
       throw new Error("missing tab bar chrome");
     }
     // An overflowing strip, which is the only state the wheel acts on.
-    Object.defineProperty(scroller, "scrollWidth", { value: 600, configurable: true });
-    Object.defineProperty(scroller, "clientWidth", { value: 200, configurable: true });
+    declareOverflow(scroller, { scrollWidth: 600, clientWidth: 200 });
     return { bar, scroller };
   }
 

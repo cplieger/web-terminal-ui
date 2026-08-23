@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { predictiveEcho } from "./predictive-echo.js";
 import * as predict from "../predict.js";

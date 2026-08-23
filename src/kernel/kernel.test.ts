@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Kernel contract tests (design section 22.10): a bare kernel yields a working
 // terminal (output + hidden textarea, input-model contract, the sanitizing
 // funnel) with no chrome, and the feature lifecycle (setup builds region chrome,
@@ -83,6 +81,13 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       currentScrollTop: vi.fn(() => 0),
       restoreScrollTop: vi.fn(),
       restoreView: vi.fn(),
+      // Reached through viewport.ts's settle handler, which a real browser fires
+      // on its own: viewport.init() observes the term wrap with a ResizeObserver,
+      // and a real one delivers its first observation asynchronously, so every
+      // mount opens a transition that settles ~350ms later and pins to the bottom.
+      // Absent from this double the settle threw "stickToBottom is not a
+      // function" out of a timer, 16 times over.
+      stickToBottom: vi.fn(),
     },
     connection: {
       init: connectionInit,
@@ -133,6 +138,33 @@ function rootIn(): HTMLElement {
   const root = document.createElement("div");
   document.body.appendChild(root);
   return root;
+}
+
+/** Declare a scroll container's geometry, INCLUDING a writable scrollTop.
+ *
+ *  All three readings are INPUTS to the paging arithmetic, and the arithmetic is
+ *  the subject: production reads clientHeight/scrollHeight and writes the offset
+ *  it computed. In a real browser `scrollTop` is clamped by actual overflow, so an
+ *  assignment to a container with nothing to scroll silently stays 0 and the
+ *  offset production wrote is unobservable — which would let a helper that only
+ *  called preventDefault pass every assertion below. The own accessor records what
+ *  production wrote and deliberately does NOT clamp, because production clamping
+ *  for itself is exactly what is under test (see the ceiling note: WebKit does not
+ *  reliably clamp an out-of-range offset). */
+function declareScrollGeometry(
+  el: HTMLElement,
+  geom: { clientHeight: number; scrollHeight: number; scrollTop: number },
+): void {
+  Object.defineProperty(el, "clientHeight", { value: geom.clientHeight, configurable: true });
+  Object.defineProperty(el, "scrollHeight", { value: geom.scrollHeight, configurable: true });
+  let top = geom.scrollTop;
+  Object.defineProperty(el, "scrollTop", {
+    configurable: true,
+    get: () => top,
+    set: (next: number) => {
+      top = next;
+    },
+  });
 }
 
 describe("bare kernel builds a working terminal with no chrome", () => {
@@ -1179,14 +1211,12 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
   // while one exists), so a document-level listener takes the keyboard back on the
   // first typed character, sending that character itself.
   //
-  // happy-dom caveat, load-bearing for these tests: its KeyboardEvent aliases
-  // getModifierState("AltGraph") to `altKey` ("case 'alt': case 'altgraph': return
-  // this.altKey"), collapsing two modifier states a browser reports separately.
-  // Every event below therefore pins getModifierState explicitly, so a test
-  // asserts the kernel's rule rather than the harness's approximation. Real
-  // engines differ from each other here too, which is why the kernel grants the
-  // AltGraph exception only to a printable character: Firefox reports AltGraph
-  // for plain Option on macOS and for ordinary Ctrl+Alt on Windows.
+  // Load-bearing for these tests: every event below pins getModifierState
+  // explicitly rather than leaving it derived from the modifier flags, so a test
+  // asserts the kernel's rule and not one engine's derivation of the modifier
+  // state. Real engines differ from each other here, which is why the kernel
+  // grants the AltGraph exception only to a printable character: Firefox reports
+  // AltGraph for plain Option on macOS and for ordinary Ctrl+Alt on Windows.
   const ta = (root: HTMLElement): HTMLTextAreaElement =>
     root.querySelector(".term-input") as HTMLTextAreaElement;
 
@@ -1515,11 +1545,24 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
   });
 
   it("leaves the keystroke to the IME while a composition is running", () => {
-    const root = armed();
+    const root = rootIn();
+    const handle = createTerminal(root, { features: () => [] });
+    ta(root).blur();
+    selectInOutput(root);
     ta(root).dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
     typeOnDocument({ key: "a" });
     expect(sentText()).toBe("");
     expect(window.getSelection()?.isCollapsed).toBe(false);
+    // The composition has to be closed before this test ends. composition.ts holds
+    // `composing` in a module-level singleton, and in a real browser the module is
+    // evaluated ONCE for the whole file: the browser's module map is URL-keyed, so
+    // the beforeEach's `vi.resetModules()` + re-import hands back the SAME
+    // instance rather than a fresh graph. A composition left open here therefore
+    // stays open for every later test in this file, each of which then bails at
+    // the kernel's isComposing() gate and passes for the wrong reason (measured:
+    // six of them). destroy() resets the singleton — the contract
+    // kernel.mutants.test.ts pins directly.
+    handle.destroy();
   });
 
   it("normalizes a typed NBSP to a space, as the focused path does", () => {
@@ -1541,14 +1584,13 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
   });
 
   it("scrolls the viewport for Shift+PageUp and Shift+PageDown", () => {
-    // happy-dom reports no layout, so the scroll arms need geometry to move
-    // against; without it this test would pass against a helper that only called
+    // The test document loads no stylesheet, so the terminal pane has nothing to
+    // overflow and the scroll arms need declared geometry to move against;
+    // without it this test would pass against a helper that only called
     // preventDefault.
     const root = armed();
     const term = root.querySelector(".term") as HTMLElement;
-    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
-    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
-    term.scrollTop = 1000;
+    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 1000 });
     typeOnDocument({ key: "PageUp", shiftKey: true });
     expect(term.scrollTop).toBe(600);
     expect(sentText()).toBe("");
@@ -1567,9 +1609,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     // over empty space.
     const root = armed();
     const term = root.querySelector(".term") as HTMLElement;
-    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
-    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
-    term.scrollTop = 3500;
+    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 3500 });
     selectInOutput(root);
     ta(root).blur();
     typeOnDocument({ key: "PageDown", shiftKey: true });
@@ -1627,9 +1667,12 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
 
   it("stops listening once the terminal is destroyed", () => {
     // destroy() also removes the output DOM, which would invalidate the selection
-    // and make this pass for the wrong reason. So re-arm against the DETACHED
-    // output afterwards: `contains` still holds inside a detached tree, so the
-    // only thing left to stop the send is the aborted listener.
+    // and make this pass for the wrong reason. A real browser will not select
+    // detached nodes at all (addRange is ignored, and the selection reads back
+    // empty), so the output is re-ATTACHED and armed against afterwards: it is
+    // still the element the listener's `ownsSelection` closure captured, the
+    // selection is genuine, and the only thing left to stop the send is the
+    // aborted listener.
     const root = rootIn();
     const handle = createTerminal(root, { features: () => [] });
     const output = root.querySelector(".term-output");
@@ -1637,6 +1680,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
       throw new Error("no .term-output");
     }
     handle.destroy();
+    document.body.appendChild(output);
     const text = document.createTextNode("detached output text");
     output.appendChild(text);
     const range = document.createRange();
@@ -1942,9 +1986,9 @@ describe("the document title is composed from a base and a feature prefix", () =
 
 // --- Helpers for the suites below -------------------------------------------
 
-/** Give a root real geometry. happy-dom reports 0 for every layout box, and 0 is
- *  inside BOTH narrow breakpoints, so an un-sized root is unconditionally narrow
- *  and the two halves of the test are indistinguishable. */
+/** Give a root real geometry. An unstyled root measures 0, and 0 is inside BOTH
+ *  narrow breakpoints, so an un-sized root is unconditionally narrow and the two
+ *  halves of the test are indistinguishable. */
 function sizeRoot(root: HTMLElement, width: number, height: number): void {
   Object.defineProperty(root, "clientWidth", { value: width, configurable: true });
   Object.defineProperty(root, "clientHeight", { value: height, configurable: true });
@@ -2122,10 +2166,18 @@ describe("consumer theme overrides", () => {
     expect(root.style.getPropertyValue("font-family--")).toBe("");
   });
 
-  it("leaves the root's inline style untouched with no theme", () => {
+  it("writes no custom property of its own to the root with no theme", () => {
     const root = rootIn();
     createTerminal(root, { features: () => [] });
-    expect(root.getAttribute("style")).toBeNull();
+    // Not "the style attribute is absent": viewport.init() publishes the visual
+    // viewport's geometry on the root as --kb-inset/--vv-top, which it is supposed
+    // to do and which a real browser (a real window.visualViewport) makes happen
+    // on every mount. Those two have a different owner and their own tests. What
+    // the theme seam owes with no theme given is that it contributes nothing, so
+    // that is what is asserted: every inline property present belongs to the
+    // viewport, and no --wt-* token was invented.
+    const written = [...root.style].sort();
+    expect(written).toEqual(["--kb-inset", "--vv-top"]);
   });
 });
 
@@ -2821,9 +2873,7 @@ describe("the keydown chain on the focused textarea", () => {
     if (!term) {
       throw new Error("no .term");
     }
-    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
-    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
-    term.scrollTop = 1000;
+    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 1000 });
 
     const ev = key({ key: "PageUp", shiftKey: true });
 
@@ -2839,9 +2889,7 @@ describe("the keydown chain on the focused textarea", () => {
     if (!term) {
       throw new Error("no .term");
     }
-    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
-    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
-    term.scrollTop = 120;
+    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 120 });
 
     key({ key: "PageUp", shiftKey: true });
 
@@ -2855,9 +2903,7 @@ describe("the keydown chain on the focused textarea", () => {
     if (!term) {
       throw new Error("no .term");
     }
-    Object.defineProperty(term, "clientHeight", { value: 400, configurable: true });
-    Object.defineProperty(term, "scrollHeight", { value: 4000, configurable: true });
-    term.scrollTop = 1000;
+    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 1000 });
 
     const ev = key({ key: "PageDown", shiftKey: true });
 

@@ -1,15 +1,14 @@
-// @vitest-environment happy-dom
 // Tests for the tab-title model changes and the inline rename editor: the
 // eligibility filter, the first-message latch, baseLabel's pinned rung, the
 // client-side name sanitizer, and the editor's own state machine (entry paths,
 // commit/cancel, the empty asymmetry, the nameSeq guard, the edit-mode
 // stand-downs, and teardown mid-edit).
 //
-// What these CANNOT prove: happy-dom is a DOM emulator, so caret placement and
-// selection inside the field (the WebKit user-select hazard), double-tap entering
-// edit rather than zooming, long-press still starting a reorder drag, soft-keyboard
-// dismissal, and how the entry-only 300px expansion feels in a crowded strip are
-// all on the manual Safari/iPad checklist in the spec instead.
+// What these CANNOT prove: headless Chromium on a desktop is not an iPad, so the
+// WebKit user-select hazard around caret placement and selection inside the field,
+// double-tap entering edit rather than zooming, long-press still starting a reorder
+// drag, soft-keyboard dismissal, and how the entry-only 300px expansion feels in a
+// crowded strip are all on the manual Safari/iPad checklist in the spec instead.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_PINNED_NAME, baseLabel, hasPinnedName, sanitizePinnedName } from "./model.js";
@@ -454,9 +453,9 @@ describe("inline rename", () => {
       throw new Error("no rename field");
     }
     input.value = "moved while editing";
-    // Reordering re-appends every chip, which in a real browser blurs the focused
-    // field. The feature resolves the edit itself so the outcome is chosen rather
-    // than emergent (happy-dom does not reproduce the reparent-blur).
+    // Reordering re-appends every chip, which blurs the focused field. The
+    // feature resolves the edit itself so the outcome is chosen rather than left
+    // to whichever blur the reparent happens to raise.
     item(openMenu(root, 1), "Move left")?.click();
     expect(field(root)).toBeNull();
     await until(() => labels(root).includes("moved while editing"));
@@ -501,7 +500,13 @@ describe("inline rename", () => {
     }
     // Without these, iPadOS capitalises the first letter of every tab name and can
     // autocorrect it on commit — on the device this affordance was designed for.
-    expect(input.autocapitalize).toBe("off");
+    //
+    // The attribute, not the IDL property, for autocapitalize: `off` and `none` are
+    // synonyms in the spec and a browser canonicalises the IDL getter to `none`, so
+    // reading the property back asserts the platform's spelling rather than what
+    // production wrote.
+    expect(input.getAttribute("autocapitalize")).toBe("off");
+    expect(input.autocapitalize).toBe("none"); // the same thing, canonicalised
     expect(input.spellcheck).toBe(false);
     expect(input.getAttribute("autocorrect")).toBe("off");
     expect(input.enterKeyHint).toBe("done");

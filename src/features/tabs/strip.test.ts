@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // The strip's markup factories. index.test.ts drives the built chrome; these pin
 // the two things a caller of chipContent can only get from the string itself,
 // because the desktop chip is assembled at module scope and never re-rendered.

@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // tabs feature — the switcher's INTERACTIVE drag and the document-level
 // dismissals (index.ts, the last section of the file). index.test.ts drives the
 // recogniser's decisions (which axis a drag locks, whether a release resolves at
@@ -16,16 +14,16 @@
 //     opening the keyboard, a right-click that closes the tab menu, Escape's
 //     claim on that menu, and the active row's own close button.
 //
-// Two things make that reachable here where the sibling file leaves it dark.
-// happy-dom reports zero for every layout box, so the list's scrollHeight is
-// supplied as what it is — an engine reading — and the vertical drag's whole
-// arithmetic (which is bounded by it) comes alive. And matchMedia answers `true`
-// for EVERY query in happy-dom, so prefers-reduced-motion reads as "on" and the
-// preview paths are all gated off; a query-aware stub is what turns them on.
+// Two things make that reachable here where the sibling file leaves it dark. The
+// list's scrollHeight is supplied as what it is — an engine reading — so the
+// vertical drag's whole arithmetic (which is bounded by it) comes alive against a
+// number the test chose rather than whatever an unstyled list happened to measure.
+// And matchMedia is stubbed per query, so a case says which of the three questions
+// the feature asks it is answering.
 //
 // Pointer events carry an explicit timeStamp. The recogniser's flick test is
 // three comparisons against the clock (duration, sample velocity, staleness), so
-// a test that let the emulator pick the timestamps would be asserting whatever
+// a test that let the environment pick the timestamps would be asserting whatever
 // the box happened to be doing.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -57,10 +55,19 @@ const sendBinary = vi.fn<(bytes: Uint8Array) => boolean>(() => true);
 // renderer and reconnects the socket, and neither belongs in a DOM-only test.
 // `modes` comes through from the real module so getMouseMode() answers 0 (no
 // mouse-mode application) unless a test says otherwise.
+// getMouseMode has to come through the mock factory rather than a vi.spyOn on the
+// real namespace: an ESM module namespace object is not configurable, so
+// `vi.spyOn(engine.modes, "getMouseMode")` throws "Module namespace is not
+// configurable in ESM" in a real browser (the node transform used to rewrite it
+// into something patchable). The default answers 0 — no mouse-mode application —
+// which is what `...actual` used to give.
+const getMouseMode = vi.fn<() => number>(() => 0);
+
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
   return {
     ...actual,
+    modes: { ...actual.modes, getMouseMode },
     render: {
       init: vi.fn(),
       updateFontMetrics: vi.fn(),
@@ -81,6 +88,12 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
     },
     scroll: {
+      // Reached through viewport.ts's settle handler, which a real browser fires on
+      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
+      // real one delivers its first observation asynchronously, so every mount opens a
+      // transition that settles ~350ms later and pins to the bottom. Absent from the
+      // double, that settle throws out of a timer as an unhandled error.
+      stickToBottom: vi.fn(),
       init: vi.fn(),
       scrollToBottom: vi.fn(),
       isUserScrolledUp: vi.fn(() => false),
@@ -145,6 +158,8 @@ beforeEach(async () => {
   vi.resetModules();
   setSession.mockClear();
   bind.mockClear();
+  // mockReset strips the factory default; restore "no mouse-mode application".
+  getMouseMode.mockReturnValue(0);
   sendBinary.mockClear();
   fetchMock.mockClear();
   createStatus = 201;
@@ -174,10 +189,10 @@ async function until(pred: () => boolean, tries = 30): Promise<void> {
   }
 }
 
-// A query-aware matchMedia. happy-dom's answers `true` to everything, which
-// makes prefers-reduced-motion read as "the user opted out of motion" and gates
-// off every preview path under test. `motion: false` is the ordinary case (an
-// animating browser); `motion: true` is the opt-out, asserted on its own.
+// A query-aware matchMedia. `motion: false` is the ordinary case (an animating
+// browser); `motion: true` is the opt-out, asserted on its own. Stubbed rather
+// than left to the environment because a headless browser's own answer to
+// prefers-reduced-motion is not the test's to choose.
 function stubMatchMedia(reduced: boolean): void {
   vi.stubGlobal(
     "matchMedia",
@@ -192,9 +207,10 @@ function stubMatchMedia(reduced: boolean): void {
   );
 }
 
-// A pointer event with a chosen clock reading and pointer id. happy-dom has no
-// PointerEvent constructor, so MouseEvent stands in (as in index.test.ts) with
-// the two pointer fields the recogniser reads defined onto it.
+// A pointer event with a chosen clock reading and pointer id. MouseEvent stands
+// in (as in index.test.ts) because `timeStamp` is read-only on a constructed
+// event, and the recogniser compares it three ways; the two pointer fields it
+// reads are defined onto it.
 function pointerEvent(type: string, x: number, y: number, t: number, id = 1): MouseEvent {
   const e = new MouseEvent(type, { clientX: x, clientY: y, bubbles: true, cancelable: true });
   Object.defineProperty(e, "timeStamp", { value: t });
@@ -259,8 +275,9 @@ interface Bar {
  *  parts plus a gesture driver.
  *
  *  `listHeight` is the list's scrollHeight, which is the ONLY input bounding the
- *  vertical drag; happy-dom reports 0 for it, and a zero bound makes the whole
- *  drag inert (its two guards return early), so it is supplied here.
+ *  vertical drag; an unstyled list has nothing overflowing it, and a zero bound
+ *  makes the whole drag inert (its two guards return early), so it is supplied
+ *  here.
  *  `surfaceWidth` is the terminal's own width, which sets the horizontal
  *  commit distance (a quarter of it) — deliberately different from the window's
  *  width, so a test can tell which one the rule reads. */
@@ -347,8 +364,8 @@ async function mountBar(
         toFake: ["setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame"],
       });
     },
-    // happy-dom drives requestAnimationFrame off a timer, so a frame is one
-    // tick of the fake clock.
+    // requestAnimationFrame is faked with the timers above, so a frame is one tick
+    // of the fake clock rather than a real paint.
     frame: () => {
       vi.advanceTimersByTime(20);
     },
@@ -377,6 +394,9 @@ describe("tabs: the switcher's vertical drag", () => {
     expect(h.list.style.maxHeight).toBe(`${String(LIST_H)}px`);
     // And a drag back below the start clamps at nothing, not at a negative height.
     h.move(100, 420, 1040);
+    // A real CSSOM normalizes a LENGTH on read-back: production writes `0` and
+    // `element.style` reports `0px`. Same value, the platform's spelling. A bare
+    // number (opacity) is not a length and stays `0`.
     expect(h.list.style.maxHeight).toBe("0px");
   });
 
@@ -758,7 +778,7 @@ describe("tabs: the switcher's horizontal drag", () => {
 
     h.frame();
     for (const row of h.rows()) {
-      expect(row.style.transform).toBe("translateY(0)");
+      expect(row.style.transform).toBe("translateY(0px)");
       expect(row.style.transition).toBe("transform 0.2s ease-out");
     }
   });
@@ -936,7 +956,7 @@ describe("tabs: the switcher's horizontal drag", () => {
     expect(h.inner.style.transition).toBe("none");
     // ...then animated home on the next frame...
     h.frame();
-    expect(h.inner.style.transform).toBe("translateX(0)");
+    expect(h.inner.style.transform).toBe("translateX(0px)");
     expect(h.inner.style.transition).toContain("cubic-bezier");
     // ...and left with no inline style of ours once it has arrived.
     vi.advanceTimersByTime(340);
@@ -1173,23 +1193,20 @@ describe("tabs: the switcher's gesture bookkeeping", () => {
   });
 
   it("leaves a moveless swipe alone while a program owns drags", async () => {
-    const engine = await import("@cplieger/web-terminal-engine");
-    const mouseMode = vi.spyOn(engine.modes, "getMouseMode").mockReturnValue(1000);
+    getMouseMode.mockReturnValue(1000);
     const h = await mountBar(3, { surfaceWidth: 400 });
 
     h.down(300, 300, 1000);
     h.up(200, 300, 1010);
 
     expect(h.active()).toBe("one");
-    mouseMode.mockRestore();
   });
 
   it("swallows the trailing click of a drag it abandoned to a program", async () => {
     // The bar stands down mid-drag when a mouse-mode application is capturing
     // drags — and having stood down, it must not let the release's click toggle
     // the list either: the gesture went to the program, not to the chrome.
-    const engine = await import("@cplieger/web-terminal-engine");
-    const mouseMode = vi.spyOn(engine.modes, "getMouseMode").mockReturnValue(1000);
+    getMouseMode.mockReturnValue(1000);
     stubMatchMedia(false);
     const h = await mountBar(3, { listHeight: 200, surfaceWidth: 400 });
 
@@ -1200,15 +1217,13 @@ describe("tabs: the switcher's gesture bookkeeping", () => {
 
     expect(h.expanded()).toBe(false);
     expect(h.inner.style.transform).toBe(""); // nothing was previewed either
-    mouseMode.mockRestore();
   });
 
   it("leaves the drag state clear after abandoning to a program", async () => {
     // Standing down has to end the gesture, not merely stop steering it: a drag
     // left marked active strands every later tap that checks for one — the tap
     // that dismisses an open overlay reads exactly that flag.
-    const engine = await import("@cplieger/web-terminal-engine");
-    const mouseMode = vi.spyOn(engine.modes, "getMouseMode").mockReturnValue(1000);
+    getMouseMode.mockReturnValue(1000);
     const h = await mountBar(3, { listHeight: 200, surfaceWidth: 400 });
     h.openList();
     expect(h.expanded()).toBe(true);
@@ -1219,7 +1234,6 @@ describe("tabs: the switcher's gesture bookkeeping", () => {
     h.surface.dispatchEvent(pointerEvent("pointerup", 10, 10, 2000));
 
     expect(h.expanded()).toBe(false);
-    mouseMode.mockRestore();
   });
 });
 
@@ -1450,9 +1464,16 @@ describe("tabs: teardown hands the out-of-page surfaces back", () => {
   }
 
   it("puts the page's own icon back when the terminal is destroyed", async () => {
-    document.head.insertAdjacentHTML("beforeend", '<link rel="icon" href="/favicon.svg">');
-    const iconHref = (): string | null =>
-      document.querySelector('link[rel~="icon"]')?.getAttribute("href") ?? null;
+    // Read back through the link this test inserted, not through the first
+    // `link[rel~="icon"]` in the document: the tester page ships an icon link of
+    // its own (`/__vitest__/favicon.svg`), so a document-wide query returns that
+    // one and the assertion measures the harness. Production rewrites EVERY icon
+    // link by design, so it rewrites both; this is the one under test.
+    const ownIcon = document.createElement("link");
+    ownIcon.rel = "icon";
+    ownIcon.setAttribute("href", "/favicon.svg");
+    document.head.appendChild(ownIcon);
+    const iconHref = (): string | null => ownIcon.getAttribute("href");
     try {
       const monitor = statusMonitor();
       const root = document.createElement("div");
@@ -1473,7 +1494,7 @@ describe("tabs: teardown hands the out-of-page surfaces back", () => {
 
       expect(iconHref()).toBe("/favicon.svg");
     } finally {
-      document.querySelector('link[rel~="icon"]')?.remove();
+      ownIcon.remove();
     }
   });
 });

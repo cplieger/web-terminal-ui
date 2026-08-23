@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // presetAgentTabbed's whole body is the argument it passes to buildTabbed, so
 // that argument is what has to be pinned. presets.test.ts compares FEATURE NAMES
 // between the two tabbed presets and they are identical by design, which is

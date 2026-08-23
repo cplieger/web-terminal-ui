@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Kernel lifecycle rules that the contract suites next door state in passing but
 // never pin: what a released runtime must STOP doing, what a teardown owes the
 // primitives it built, and which startup steps are ordered against destroy().
@@ -14,6 +12,14 @@ import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as KernelModule from "./kernel.js";
 import { INPUT_PLACEHOLDER } from "../input-placeholder.js";
 import type { SessionRef, TerminalContext, TerminalFeature, TerminalHandle } from "./types.js";
+
+// The library's single navigation call lives in its own module so a test can
+// replace the import; navigation.ts records why the platform property cannot be
+// stubbed. This REPLACES the implementation rather than spying through to it
+// (`{ spy: true }` would call the real reload, which navigates the runner's own
+// iframe and fails the whole file with "the iframe was reloaded during a test").
+const reloadSpy = vi.hoisted(() => vi.fn());
+vi.mock("./navigation.js", () => ({ reloadPage: reloadSpy }));
 
 const hoisted = vi.hoisted(() => ({
   sendBinary: vi.fn<(buf: Uint8Array) => boolean>(() => true),
@@ -129,6 +135,23 @@ function rootIn(): HTMLElement {
   return root;
 }
 
+/** Shadows `document.fonts` with `value` and returns the restore.
+ *
+ *  `fonts` is an accessor on Document.prototype, so `delete document.fonts`
+ *  cannot produce ABSENCE — it drops an own shadow and re-exposes the real
+ *  FontFaceSet. The restore puts back whatever descriptor was there. */
+function shadowFonts(value: unknown): () => void {
+  const saved = Object.getOwnPropertyDescriptor(document, "fonts");
+  Object.defineProperty(document, "fonts", { value, configurable: true, writable: true });
+  return () => {
+    if (saved) {
+      Object.defineProperty(document, "fonts", saved);
+    } else {
+      Reflect.deleteProperty(document, "fonts");
+    }
+  };
+}
+
 const ta = (root: HTMLElement): HTMLTextAreaElement =>
   root.querySelector(".term-input") as HTMLTextAreaElement;
 const term = (root: HTMLElement): HTMLElement => root.querySelector(".term") as HTMLElement;
@@ -157,6 +180,35 @@ function selectInOutput(root: HTMLElement): Selection {
   const range = document.createRange();
   range.setStart(text, 0);
   range.setEnd(text, 7);
+  const sel = window.getSelection();
+  if (!sel) {
+    throw new Error("no selection");
+  }
+  sel.removeAllRanges();
+  sel.addRange(range);
+  expect(sel.isCollapsed).toBe(false);
+  return sel;
+}
+
+/** The same live selection, but anchored OUTSIDE the terminal root and taken
+ *  AFTER destroy, for the released-runtime cases.
+ *
+ *  Two measured facts force both halves. A real browser applies the selection
+ *  fixup, so removing the selected nodes collapses the selection — and destroy()
+ *  empties the root. And destroy() collapses the document selection outright
+ *  (measured: not collapsed before, collapsed after, with the range anchored in a
+ *  sibling of the root), so no selection taken BEFORE destroy survives it either
+ *  way. Taking it after leaves a leaked listener as the only thing that could
+ *  clear it, which is the claim; production clears the document selection wherever
+ *  it lives (`window.getSelection()`, kernel.ts pointerup/mousedown), so this is
+ *  the same probe and it can now actually fail. */
+function selectOutsideTerminal(): Selection {
+  const host = document.createElement("p");
+  host.textContent = "selected outside the terminal";
+  document.body.appendChild(host);
+  const range = document.createRange();
+  range.setStart(host.firstChild as Text, 0);
+  range.setEnd(host.firstChild as Text, 8);
   const sel = window.getSelection();
   if (!sel) {
     throw new Error("no selection");
@@ -224,8 +276,8 @@ describe("a released runtime answers no event it registered for", () => {
     const root = rootIn();
     const handle = createTerminal(root, { features: () => [] });
     const wrap = term(root);
-    const sel = selectInOutput(root);
     handle.destroy();
+    const sel = selectOutsideTerminal();
 
     wrap.dispatchEvent(
       new PointerEvent("pointerdown", { pointerType: "touch", clientX: 5, clientY: 5 }),
@@ -241,8 +293,8 @@ describe("a released runtime answers no event it registered for", () => {
     const root = rootIn();
     const handle = createTerminal(root, { features: () => [] });
     const wrap = term(root);
-    const sel = selectInOutput(root);
     handle.destroy();
+    const sel = selectOutsideTerminal();
 
     wrap.dispatchEvent(new MouseEvent("mousedown", { button: 0, cancelable: true }));
 
@@ -262,6 +314,15 @@ describe("a released runtime answers no event it registered for", () => {
       wrap.appendChild(link);
       handle.destroy();
 
+      // The anchor's own default action has to be suppressed, or a real browser
+      // NAVIGATES on this dispatch and takes the whole test page with it (the
+      // live handler preventDefaults for exactly that reason; the released one is
+      // not there to do it, which is the point of the test). preventDefault does
+      // not stop propagation, so a leaked kernel listener would still see the
+      // click and still call open().
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+      });
       link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
 
       expect(open).not.toHaveBeenCalled();
@@ -827,25 +888,22 @@ describe("the fatal-startup rollback", () => {
   it("offers a reload button that actually reloads the page", async () => {
     // The only action on the surface. Nothing else in the library can recover a
     // failed startup, so a button that does nothing is the whole surface failing.
-    const reload = vi.fn();
+    //
+    // Asserted through the navigation module rather than the platform. In a real
+    // browser `window.location.reload` cannot be substituted at all, and letting
+    // the real one run navigates the test runner's own frame; navigation.ts
+    // records why the seam is a separate module.
+    reloadSpy.mockClear();
     const root = rootIn();
     createTerminal(root, { features: () => [boom] });
     await tick();
+
     const button = root.querySelector<HTMLButtonElement>(".wt-fatal-reload");
     if (!button) {
       throw new Error("no reload button");
     }
-    const original = window.location.reload;
-    Object.defineProperty(window.location, "reload", { configurable: true, value: reload });
-    try {
-      button.click();
-      expect(reload).toHaveBeenCalledTimes(1);
-    } finally {
-      Object.defineProperty(window.location, "reload", {
-        configurable: true,
-        value: original,
-      });
-    }
+    button.click();
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1243,12 +1301,19 @@ describe("a browser with no matchMedia at all", () => {
 });
 
 describe("a fontReady the document cannot resolve", () => {
-  it("is reported by name and does not wedge startup", () => {
-    // The font gate is one of the two things the loading overlay waits for, so a
-    // fontReady this document cannot answer for — a browser with no Font Loading
-    // API, or a descriptor it refuses — must fall through to the settled path with
-    // a named warning rather than stalling the page silently. (The test DOM has no
-    // `document.fonts` at all, which is the first of those two cases.)
+  // The font gate is one of the two things the loading overlay waits for, so a
+  // fontReady this document cannot answer for must fall through to the settled
+  // path with a named warning rather than stalling the page silently. The header
+  // named two such cases and the emulator collapsed them into one: with no
+  // `document.fonts` at all, EVERY fontReady took the synchronous catch. A real
+  // browser separates them, and they warn differently, so they are two tests.
+  //
+  // Measured on Chromium: FontFaceSet.load never throws synchronously. An
+  // unparseable descriptor comes back as a REJECTED promise ("Could not resolve
+  // '...' as a font"), and a well-formed descriptor naming a missing family
+  // RESOLVES with zero faces, which is not an error at all.
+  it("reports a document with no Font Loading API by name, and does not wedge startup", () => {
+    const restoreFonts = shadowFonts(undefined);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const root = rootIn();
@@ -1261,6 +1326,30 @@ describe("a fontReady the document cannot resolve", () => {
         expect.anything(),
       );
       expect(root.querySelector(".term-output")).not.toBeNull();
+      handle.destroy();
+    } finally {
+      warn.mockRestore();
+      restoreFonts();
+    }
+  });
+
+  it("reports a descriptor the document refuses by name, and does not wedge startup", async () => {
+    // The other arm, on the platform's own FontFaceSet: the load rejects, and the
+    // rejection handler has to warn and settle the gate rather than leave the
+    // overlay up forever.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const root = rootIn();
+      const handle = createTerminal(root, {
+        features: () => [],
+        fontReady: "not a font at all",
+      });
+      expect(root.querySelector(".term-output")).not.toBeNull();
+      await tick();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("web font not a font at all failed to load"),
+        expect.anything(),
+      );
       handle.destroy();
     } finally {
       warn.mockRestore();

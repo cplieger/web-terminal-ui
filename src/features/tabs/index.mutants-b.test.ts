@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Additional tabs-feature tests for the middle third of src/features/tabs/index.ts:
 // the order write and its 409 answer, the explicit drag image, ordered adoption of a
 // session the server already placed, the close paths' failure and neighbour rules,
@@ -373,9 +371,10 @@ function dragStartAt(dt: FakeDataTransfer, clientX: number, clientY: number): Ev
   Object.defineProperty(e, "clientY", { value: clientY });
   return e;
 }
-/** Give an element a fixed box. happy-dom reports 0 for every layout box, so a
- *  test about coordinates has to supply them; without this the ghost's placement
- *  arithmetic has no observable output at all. */
+/** Give an element a fixed box. A test about coordinates supplies the coordinates
+ *  it is reasoning about rather than measuring whatever an unstyled element
+ *  happened to lay out as; the box is an INPUT to the ghost's placement
+ *  arithmetic. */
 function stubRect(el: Element, left: number, top: number, width: number, height: number): void {
   el.getBoundingClientRect = () =>
     ({
@@ -694,6 +693,13 @@ describe("tabs: closing many tabs", () => {
 
     expect(toastText(root)).toBe("Couldn't close a terminal on the server");
     expect(labels(root)).toEqual(["one"]);
+    // The first toast is not the end of the bulk close: closeMany still has one
+    // DELETE to await and a final "did the strip empty?" check after it. Left
+    // in flight, that continuation runs during the NEXT test — against the next
+    // test's fetch stub, where it showed up as a POST /api/sessions nobody in
+    // that test asked for.
+    await until(() => labels(root).length === 1 && toastText(root) !== "");
+    await new Promise((r) => setTimeout(r, 0));
   });
 
   it("re-homes onto the first survivor when the bulk close took the active tab", async () => {
@@ -779,10 +785,21 @@ describe("tabs: the tab context menu", () => {
     const root = document.createElement("div");
     await mount(root);
 
+    // Give the menu the size its stylesheet would. No CSS is loaded here, so an
+    // unstyled block div measures the full body width (1280px) — wider than the
+    // viewport minus the 8px margin — and placeMenuAt correctly clamps the
+    // requested x back to the left margin. That clamp is real behaviour with a
+    // false premise: a menu is not viewport-wide.
+    const menu = root.querySelector<HTMLElement>(".wt-tab-menu");
+    if (menu) {
+      menu.style.width = "200px";
+      menu.style.height = "150px";
+      menu.style.boxSizing = "border-box";
+    }
+
     const items = openMenu(root, 0, 42, 24);
     expect(items.length).toBeGreaterThan(0);
     expect(items.every((b) => b.getAttribute("role") === "menuitem")).toBe(true);
-    const menu = root.querySelector<HTMLElement>(".wt-tab-menu");
     expect(menu?.querySelector(".wt-tab-menu-sep")?.getAttribute("role")).toBe("separator");
     expect(menu?.style.left).toBe("42px");
     expect(menu?.style.top).toBe("24px");

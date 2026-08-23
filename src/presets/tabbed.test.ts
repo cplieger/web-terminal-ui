@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Composition contract for the tabbed presets: WHICH OPTIONS buildTabbed hands
 // each feature it composes. presets.test.ts already proves the feature NAMES
 // line up; names cannot see the difference between presetTabbed and

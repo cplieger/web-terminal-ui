@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 import { describe, it, expect, vi } from "vitest";
 import { animations } from "./animations.js";
 import type { TerminalContext, FeatureInstance } from "../kernel/types.js";

@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // tabs/attention.ts tests: the unseen-cue fold and the three out-of-page sinks.
 // Every capability is injected (AttentionEnv), so the fold, the idempotence and
 // the degradation paths are exercised without an installed app, a Badging API or
@@ -244,28 +242,34 @@ describe("iconVariantHref follows the asset generator's naming", () => {
 });
 
 describe("browserAttentionEnv binds the sinks to the real browser", () => {
+  // Every case here shadows the whole `navigator` object rather than adding and
+  // deleting properties on the real one. Both halves matter in a real browser:
+  // Chromium SHIPS the Badging API, so absence has to be constructed rather than
+  // assumed, and `delete navigator.setAppBadge` cannot undo an
+  // `Object.assign(navigator, ...)` back to absence — setAppBadge is a
+  // Navigator.prototype method, so the delete drops the own shadow and
+  // re-exposes the platform's real one for whatever test runs next. A
+  // whole-object shadow has neither problem, and `unstubGlobals: true` restores
+  // it. attention.ts reads only setAppBadge/clearAppBadge off `globalThis.
+  // navigator`, so a bare object is a complete stand-in.
   it("omits the badge sink when the Badging API is absent", () => {
+    vi.stubGlobal("navigator", {});
     const env = browserAttentionEnv(vi.fn(), false);
     expect(env.setBadge).toBeUndefined();
     expect(env.setIcon).toBeUndefined();
   });
 
-  it("always passes a NUMBER, and clears through clearAppBadge", async () => {
+  it("always passes a NUMBER, and clears through clearAppBadge", () => {
     // iOS renders nothing at all for the spec's bare flag form, so a count is the
     // only shape that works everywhere the API exists.
     const setAppBadge = vi.fn(() => Promise.resolve());
     const clearAppBadge = vi.fn(() => Promise.resolve());
-    Object.assign(navigator, { setAppBadge, clearAppBadge });
-    try {
-      const env = browserAttentionEnv(vi.fn(), false);
-      env.setBadge?.(4);
-      env.setBadge?.(0);
-      expect(setAppBadge).toHaveBeenCalledExactlyOnceWith(4);
-      expect(clearAppBadge).toHaveBeenCalledOnce();
-    } finally {
-      delete (navigator as { setAppBadge?: unknown }).setAppBadge;
-      delete (navigator as { clearAppBadge?: unknown }).clearAppBadge;
-    }
+    vi.stubGlobal("navigator", { setAppBadge, clearAppBadge });
+    const env = browserAttentionEnv(vi.fn(), false);
+    env.setBadge?.(4);
+    env.setBadge?.(0);
+    expect(setAppBadge).toHaveBeenCalledExactlyOnceWith(4);
+    expect(clearAppBadge).toHaveBeenCalledOnce();
   });
 
   it("clears through setAppBadge(0) on a platform with no clearAppBadge", () => {
@@ -273,14 +277,10 @@ describe("browserAttentionEnv binds the sinks to the real browser", () => {
     // too, so the fallback arm is the only thing standing between that platform
     // and a badge that never goes away.
     const setAppBadge = vi.fn(() => Promise.resolve());
-    Object.assign(navigator, { setAppBadge });
-    try {
-      const env = browserAttentionEnv(vi.fn(), false);
-      env.setBadge?.(0);
-      expect(setAppBadge).toHaveBeenCalledExactlyOnceWith(0);
-    } finally {
-      delete (navigator as { setAppBadge?: unknown }).setAppBadge;
-    }
+    vi.stubGlobal("navigator", { setAppBadge });
+    const env = browserAttentionEnv(vi.fn(), false);
+    env.setBadge?.(0);
+    expect(setAppBadge).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it("swallows a rejected badge, because an OS that will not paint one is normal", async () => {
@@ -288,15 +288,11 @@ describe("browserAttentionEnv binds the sinks to the real browser", () => {
     // promise rejects. An unhandled rejection inside a status sweep would surface
     // as a page fault for a surface the user never asked about.
     const setAppBadge = vi.fn(() => Promise.reject(new Error("unsupported")));
-    Object.assign(navigator, { setAppBadge });
-    try {
-      const env = browserAttentionEnv(vi.fn(), false);
-      expect(() => env.setBadge?.(1)).not.toThrow();
-      await Promise.resolve();
-      await Promise.resolve();
-    } finally {
-      delete (navigator as { setAppBadge?: unknown }).setAppBadge;
-    }
+    vi.stubGlobal("navigator", { setAppBadge });
+    const env = browserAttentionEnv(vi.fn(), false);
+    expect(() => env.setBadge?.(1)).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 
   it("swaps EVERY icon link and restores each one", () => {

@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Additional tabs-feature tests for the FIRST ~1000 lines of
 // src/features/tabs/index.ts: the chrome the feature builds at setup (the two
 // ResizeObservers that publish the strip's measurements as CSS variables, the
@@ -105,9 +103,9 @@ function fakeKeyboardToggle(armedAtSetup = false): {
 }
 
 /** One observed element per constructed ResizeObserver, plus the callback, so a
- *  test can fire the resize happy-dom never fires: its own ResizeObserver is a
- *  documented no-op that does not even keep the callback, which is why every
- *  mutant inside these two callbacks reports NoCoverage. */
+ *  test can fire a resize on demand. A real ResizeObserver only fires when a box
+ *  actually changes, and these callbacks are about WHAT they do with an
+ *  observation rather than when the engine delivers one. */
 interface FakeObserver {
   callback: ResizeObserverCallback;
   targets: Element[];
@@ -672,9 +670,15 @@ describe("tabs: the attention icons are opt-in", () => {
     // friends, see .kiro/scripts/gen-attention-icons.py). An app that never
     // generated them would get 404s in place of its icon, so the capability is
     // off until the consumer says the assets exist.
-    document.head.insertAdjacentHTML("beforeend", '<link rel="icon" href="/favicon.svg">');
-    const iconHref = (): string | null =>
-      document.querySelector('link[rel~="icon"]')?.getAttribute("href") ?? null;
+    // Read back through the link this test inserted, not through the first
+    // `link[rel~="icon"]` in the document: the tester page ships an icon link of
+    // its own (`/__vitest__/favicon.svg`), so a document-wide query returns that
+    // one and the assertion measures the harness instead of the subject.
+    const ownIcon = document.createElement("link");
+    ownIcon.rel = "icon";
+    ownIcon.setAttribute("href", "/favicon.svg");
+    document.head.appendChild(ownIcon);
+    const iconHref = (): string | null => ownIcon.getAttribute("href");
     try {
       const { monitor } = await mountWithMonitor();
       monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
@@ -682,7 +686,7 @@ describe("tabs: the attention icons are opt-in", () => {
       expect(document.title).toBe("(1) Host page");
       expect(iconHref()).toBe("/favicon.svg");
     } finally {
-      document.querySelector('link[rel~="icon"]')?.remove();
+      ownIcon.remove();
     }
   });
 });
@@ -772,7 +776,11 @@ describe("tabs: physical-keyboard evidence is the whole key name", () => {
         input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...init }));
       },
       switchAndReportFocus: (index) => {
-        document.body.focus();
+        // `document.body.focus()` does not move focus in a real browser: the body
+        // has no tabindex, so focus() on it is ignored and the textarea keeps it.
+        // Blurring the input is what actually parks focus off it (Chromium then
+        // reports document.activeElement as <body>, never null).
+        input.blur();
         chip(index).click();
         return document.activeElement === input;
       },

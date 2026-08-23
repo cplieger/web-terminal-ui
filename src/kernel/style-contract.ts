@@ -25,7 +25,7 @@
 // These lists are HAND-WRITTEN on purpose. They are the public contract — a
 // decision about what this library promises to support — not a fact derived
 // from the stylesheets. What IS derived from the stylesheets is the
-// verification that the promise holds: `src/css-contract.test.ts` generates the
+// verification that the promise holds: `src/css-contract.node.test.ts` generates the
 // declared/referenced token inventory from the CSS itself and fails if any
 // token named here is not both DECLARED and READ by a rule. A token that is
 // declared but never read is the silent-no-op case above, reached from the

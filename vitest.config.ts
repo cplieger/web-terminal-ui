@@ -1,34 +1,79 @@
 // Vitest configuration for @cplieger/web-terminal-ui unit tests.
-// Default environment: node (pure functions, no DOM overhead). DOM-dependent
-// test files opt in with `// @vitest-environment happy-dom` at the top.
+//
+// Two projects, and the DEFAULT is the browser. A test file runs in a real
+// headless Chromium unless its name opts out, because the browser is the
+// environment this package actually ships into and a DOM emulator got a long
+// list of these assertions wrong for free (real layout, a real visualViewport,
+// real TouchEvent/DragEvent/AnimationEvent constructors, the real selection
+// fixup after a subtree is detached).
+//
+// The opt-out is the `.node.test.ts` suffix, and it is load-bearing rather than
+// decorative: placement has to be readable off the filename because one of the
+// two reasons a file needs Node fails SILENTLY when it is misplaced.
+//
+//   - A test that needs Node capabilities (reading the stylesheets with
+//     `node:fs`, writing a golden under UPDATE_GOLDEN=1) throws on the import
+//     when it lands in the browser. Loud, self-correcting.
+//   - A test that needs a browser capability to be ABSENT does not. It passes
+//     vacuously, having exercised the arm it was written to avoid. Those tests
+//     therefore do NOT belong in the node project either: Node has no
+//     `document` at all, which is a third wrong reason to pass. They stay in
+//     the browser project and remove the one capability at the site.
+//
 // Run: vitest --run (single pass) or vitest (watch mode).
+import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    environment: "node",
-    pool: "threads",
-
-    // Each test file gets its own module graph. isolate:false was faster but
-    // unsound here: kernel.test.ts and kernel-persist.test.ts each replace the
-    // WHOLE @cplieger/web-terminal-engine module with their own factory, and
-    // with a shared registry whichever file loads first wins for the rest of
-    // the worker. kernel.ts then called a function the other file's stub does
-    // not define. The symptom moves with the packing order, which is the tell:
-    // "render.dropBrowseCache is not a function" and
-    // "scroll.stickToBottom is not a function" from consecutive runs of the
-    // same commit. It only surfaces where workers are scarce enough to pack
-    // those two files together, so it was invisible locally (34 files, 650
-    // tests, all green) and failed on every 4-CPU CI run: 3 of 3 reproduced
-    // when pinned to 4 CPUs. vibekit's config carries the same note after the
-    // same bug. Measured cost here: 3.62s to 4.41s.
-    isolate: true,
-
-    include: ["src/**/*.test.ts"],
-    // .stryker-tmp holds Stryker's sandbox, a full copy of this directory. A
-    // run that dies before cleanTempDir leaves it behind, and without this the
-    // next plain `vitest --run` collects every test twice.
-    exclude: ["node_modules/**", "**/.stryker-tmp/**"],
+    // `extends: true` on every project is REQUIRED, not decorative: a project
+    // inherits NOTHING from this block without it, and losing a strictness
+    // option (expect.requireAssertions, allowOnly, mockReset, unstubGlobals,
+    // the timeouts, setupFiles) never fails a test, so the suite would go green
+    // while the bar dropped. It is a SIBLING of `test`, not a key inside it:
+    // spelled `test: { extends: true }` it type-checks, runs, and inherits
+    // nothing (measured on vitest 4.1.11 — setupFiles never loaded and a 2.5s
+    // test passed under a 2s testTimeout). Verified the other way by dropping a
+    // zero-assertion probe test into each project and confirming it FAILS.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "node",
+          environment: "node",
+          include: ["src/**/*.node.test.ts"],
+          // .stryker-tmp holds Stryker's sandbox, a full copy of this
+          // directory. A run that dies before cleanTempDir leaves it behind,
+          // and without this the next plain `vitest --run` collects every test
+          // twice.
+          exclude: ["node_modules/**", "**/.stryker-tmp/**"],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "browser",
+          include: ["src/**/*.test.ts"],
+          exclude: ["src/**/*.node.test.ts", "node_modules/**", "**/.stryker-tmp/**"],
+          browser: {
+            enabled: true,
+            headless: true,
+            provider: playwright({
+              launchOptions: {
+                channel: "chromium",
+              },
+            }),
+            instances: [{ browser: "chromium" }],
+            // Fixed viewport so layout-dependent assertions are reproducible;
+            // a real browser computes real boxes.
+            viewport: { width: 1280, height: 720 },
+            // A failure screenshot per failing test is noise in CI and cannot
+            // be read from a job log; the assertion diff is the artifact.
+            screenshotFailures: false,
+          },
+        },
+      },
+    ],
     passWithNoTests: false,
     allowOnly: false,
     globals: false,
@@ -43,6 +88,7 @@ export default defineConfig({
     bail: process.env["CI"] ? 1 : 0,
     testTimeout: 2000,
     hookTimeout: 5000,
+    // Root-only in vitest 4: it cannot be set per project.
     slowTestThreshold: 100,
     sequence: {
       shuffle: { files: false, tests: false },
@@ -55,7 +101,7 @@ export default defineConfig({
     // coverage exclude below, scripts/verify.sh): they import vitest, which a
     // consumer does not install, so shipping one breaks the consumer's build.
     // Name any new setup file `*-setup.ts` and every filter covers it already.
-    setupFiles: ["./src/fc-strict-setup.ts", "./src/dom-isolation-setup.ts"],
+    setupFiles: ["./src/fc-strict-setup.ts"],
     printConsoleTrace: true,
     expandSnapshotDiff: true,
     coverage: {

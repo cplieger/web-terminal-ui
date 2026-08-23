@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // tabs feature, the wire-driven and reorder-mechanics half: the two kernel
 // events the strip subscribes to (`wire:screen` arming the catching-up cue,
 // `wire:title` relabelling the active tab from a live OSC 0/2 title), the cue's
@@ -487,13 +485,12 @@ describe("tabs: the mobile swipe on a lone tab", () => {
 
 // --- the reorder preview ----------------------------------------------------
 //
-// happy-dom applies no stylesheet and reports every box as zero, so the geometry
-// a test wants has to be stubbed explicitly — and WHICH geometry matters: the hit
-// test reads LAYOUT offsets (offsetLeft/offsetWidth, plus the scroller's own
-// offsetLeft as the base) while the FLIP reads visual RECTS. The two helpers below
-// stub them separately for that reason. A test that stubs neither is exercising
-// the "every candidate is past the last chip" case, which is what index.test.ts's
-// reorder suite does throughout.
+// No stylesheet is loaded, so the geometry a test reasons about is declared
+// explicitly — and WHICH geometry matters: the hit test reads LAYOUT offsets
+// (offsetLeft/offsetWidth, plus the scroller's own offsetLeft as the base) while
+// the FLIP reads visual RECTS. The two helpers below declare them separately for
+// that reason. A test that declares neither is aiming at whatever the default font
+// laid the chips out as, which is nobody's chosen target.
 
 interface FakeDataTransfer {
   effectAllowed: string;
@@ -537,9 +534,10 @@ function idsOf(root: HTMLElement): string[] {
   ].map((e) => e.textContent ?? "");
 }
 
-// happy-dom returns undefined for a `translate` never set and "" for one that was
-// cleared; a real browser returns "" for both. Normalise so "no displacement"
-// reads the same either way.
+// A real browser returns "" for a `translate` that was never set and for one that
+// was cleared, so "no displacement" is one value. The `?? ""` and the cast are kept
+// because lib.dom types this as a plain string while the property is newer than
+// some engines the library supports.
 function translateOf(el: HTMLElement): string {
   return (el.style.translate as string | undefined) ?? "";
 }
@@ -644,7 +642,13 @@ async function mountDrag(
     stubLayout: (o = {}) => {
       const base = o.base ?? 0;
       Object.defineProperty(scroller, "offsetLeft", { value: base, configurable: true });
-      scroller.scrollLeft = o.scrollLeft ?? 0;
+      // Declared, not assigned: the scroller has nothing overflowing it in a bare
+      // test document, so a real browser clamps `scroller.scrollLeft = 100` back to
+      // 0 and the conversion under test reads the wrong term. It is an INPUT here.
+      Object.defineProperty(scroller, "scrollLeft", {
+        value: o.scrollLeft ?? 0,
+        configurable: true,
+      });
       const rectLeft = o.rectLeft ?? 0;
       scroller.getBoundingClientRect = (): DOMRect => flatRect(rectLeft);
       chips().forEach((chipEl, i) => {
@@ -724,11 +728,18 @@ describe("tabs reorder: rest detection", () => {
     // a mouse actually produces: at the epsilon itself the pointer has NOT moved,
     // so the stop still counts and the slot opens.
     const h = await mountDrag(3);
+    // stubLayout as well as stubRects: the hit test reads LAYOUT offsets
+    // (offsetLeft/offsetWidth), which a real browser answers for real. Left
+    // unstubbed, three chips of text width put every midpoint somewhere the test
+    // never chose, and the sweep below lands in whichever slot that happens to be.
+    // With the layout declared, x past the last midpoint (250 for chips of 100 at
+    // 0/100/200) is what sends the dragged chip to the end.
+    h.stubLayout();
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(50);
+    h.sweepTo(260);
     vi.advanceTimersByTime(REORDER_STILL_MS);
 
-    h.sweepTo(50 + REORDER_MOVE_EPS_PX);
+    h.sweepTo(260 + REORDER_MOVE_EPS_PX);
 
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
   });
@@ -740,10 +751,17 @@ describe("tabs reorder: the slide", () => {
     // of it. A hole travelling across the strip alongside that copy is two things
     // moving at once.
     const h = await mountDrag(3);
+    // stubLayout as well as stubRects: the hit test reads LAYOUT offsets
+    // (offsetLeft/offsetWidth), which a real browser answers for real. Left
+    // unstubbed, three chips of text width put every midpoint somewhere the test
+    // never chose, and the sweep below lands in whichever slot that happens to be.
+    // With the layout declared, x past the last midpoint (250 for chips of 100 at
+    // 0/100/200) is what sends the dragged chip to the end.
+    h.stubLayout();
     h.stubRects();
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(260);
     vi.advanceTimersByTime(REORDER_REST_MS);
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
 
@@ -761,6 +779,13 @@ describe("tabs reorder: the slide", () => {
     // animate nothing at all. So the observable is the read itself: the scroller's
     // rect is measured with the displacements in place.
     const h = await mountDrag(3);
+    // stubLayout as well as stubRects: the hit test reads LAYOUT offsets
+    // (offsetLeft/offsetWidth), which a real browser answers for real. Left
+    // unstubbed, three chips of text width put every midpoint somewhere the test
+    // never chose, and the sweep below lands in whichever slot that happens to be.
+    // With the layout declared, x past the last midpoint (250 for chips of 100 at
+    // 0/100/200) is what sends the dragged chip to the end.
+    h.stubLayout(); // before the rect override below, which stubLayout also sets
     h.stubRects();
     const seen: string[][] = [];
     h.scroller.getBoundingClientRect = (): DOMRect => {
@@ -769,7 +794,7 @@ describe("tabs reorder: the slide", () => {
     };
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
 
-    h.sweepTo(10);
+    h.sweepTo(260);
     vi.advanceTimersByTime(REORDER_REST_MS);
 
     // "one" goes to the end, so "two" and "three" each slide 100px left and are
@@ -842,10 +867,17 @@ describe("tabs reorder: the slide", () => {
     // real geometry in place the reorder must still happen and still write
     // nothing.
     const h = await mountDrag(3, { reducedMotion: true });
+    // stubLayout as well as stubRects: the hit test reads LAYOUT offsets
+    // (offsetLeft/offsetWidth), which a real browser answers for real. Left
+    // unstubbed, three chips of text width put every midpoint somewhere the test
+    // never chose, and the sweep below lands in whichever slot that happens to be.
+    // With the layout declared, x past the last midpoint (250 for chips of 100 at
+    // 0/100/200) is what sends the dragged chip to the end.
+    h.stubLayout();
     h.stubRects();
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
 
-    h.sweepTo(10);
+    h.sweepTo(260);
     vi.advanceTimersByTime(REORDER_REST_MS);
 
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
@@ -904,10 +936,15 @@ describe("tabs reorder: what a commit refuses to do", () => {
     // asking for the position the tab is already in. That is not a move, so there
     // is nothing to slide and no slot to fade in at a new home.
     const h = await mountDrag(3);
+    // Layout declared, and the release aimed PAST the last midpoint (250, for
+    // chips of 100 at 0/100/200) so it really is the position "three" already
+    // holds. `dragEvent` releases at clientX 0, which with real chip widths is the
+    // HEAD of the strip — a move, and the opposite of this test's premise.
+    h.stubLayout();
     const dragged = h.chip("three"); // the last chip, released past the end
     dragged.dispatchEvent(dragEvent("dragstart", h.dt));
 
-    dragged.dispatchEvent(dragEvent("drop", h.dt));
+    dragged.dispatchEvent(dragAt("drop", h.dt, 260));
 
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
     expect(dragged.classList.contains("wt-tab-slotted")).toBe(false);
@@ -993,9 +1030,13 @@ describe("tabs reorder: the slot's fade", () => {
     // more, and a class that outlives it renders a finished tab as a pending drop
     // target for another third of a second.
     const h = await mountDrag(3);
+    // Declared layout, and a sweep past the last midpoint: a slot only opens for a
+    // position the chip is not already in, and with real chip widths x=10 is a
+    // position "one" already holds.
+    h.stubLayout();
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(260);
     vi.advanceTimersByTime(REORDER_REST_MS);
     expect(dragged?.classList.contains("wt-tab-slotted")).toBe(true);
 
@@ -1043,10 +1084,9 @@ interface ReelHarness {
 }
 
 /** Three tabs with the list expanded, and rows with a real HEIGHT. The height is
- *  load-bearing rather than cosmetic: animateRowIn bails out when the box
- *  measures zero, which is what happy-dom reports for everything, so without it
- *  the enter animation this test is about cannot run either way and the assertion
- *  would be vacuous. */
+ *  load-bearing rather than cosmetic: animateRowIn bails out when the box measures
+ *  zero, which is what an unstyled row measures, so without it the enter animation
+ *  this test is about cannot run either way and the assertion would be vacuous. */
 async function mountReel(): Promise<ReelHarness> {
   threeSessions();
   const realRect = Element.prototype.getBoundingClientRect;

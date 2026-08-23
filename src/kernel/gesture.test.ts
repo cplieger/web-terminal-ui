@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // The tap/long-press boundary's shared inputs. The thresholds were shared from
 // the start; the link predicate was not, and the two copies had already diverged
 // — the kernel matched only `.term-link` while the context menu matched

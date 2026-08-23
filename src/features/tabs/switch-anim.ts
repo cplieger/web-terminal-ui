@@ -10,7 +10,7 @@
 // on the 360 ms fallback timer instead of the animation's own end, and every test
 // still passes because the tests dispatch the JS constant.
 //
-// Living here rather than inside the feature is what lets `css-contract.test.ts`
+// Living here rather than inside the feature is what lets `css-contract.node.test.ts`
 // import it and assert the CSS agrees. Same reason `input-placeholder.ts` and
 // `kernel/gesture.ts` exist: a constant two places must keep in lockstep gets its
 // own module. NOT part of the package's `exports` map, so it is internal and can
