@@ -1018,6 +1018,69 @@ describe("tabs: a remote pinned name", () => {
     expect(toastText(root)).toBe("Couldn't save the terminal name");
     expect(labels(root)[0]).toBe("old");
   });
+
+  it("still rolls a failed rename back when an earlier rename of the same tab has already answered", async () => {
+    // Two renames of ONE tab overlap. The in-flight marker exists so that a status
+    // record arriving mid-request is applied for display without being treated as
+    // newer authority; while it is held, the request's own rollback and failure
+    // toast survive. So the marker has to stay held until the LAST request for that
+    // id answers — a first request completing while a second PUT is still open must
+    // not release it, or the second rename fails silently and the user is left
+    // looking at a name the server never accepted.
+    server.list = [
+      { id: "s1", title: "one", pinnedTitle: "old", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+    ];
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    await mount(root, monitor.feature);
+
+    // Each pinned-title write answers on this test's word rather than on the shared
+    // delay: the ordering the rule turns on (first answers, stale record lands,
+    // second answers) has to be exact, and two requests sharing one delay decide it
+    // by a race of a millisecond.
+    const answer: ((r: Response) => void)[] = [];
+    vi.stubGlobal("fetch", (url: string | URL, init?: RequestInit) => {
+      if (String(url).includes("/pinned-title")) {
+        return new Promise<Response>((resolve) => {
+          answer.push(resolve);
+        });
+      }
+      return fetchMock(url, init);
+    });
+
+    const rename = async (value: string): Promise<void> => {
+      item(openMenu(root, 0), "Rename\u2026")?.click();
+      const input = field(root);
+      if (!input) {
+        throw new Error("no rename field");
+      }
+      input.value = value;
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await until(() => labels(root)[0] === value);
+    };
+
+    await rename("first");
+    await rename("second");
+    expect(answer).toHaveLength(2);
+
+    // The first write SUCCEEDS, so the server's pinned name is now "first". One
+    // macrotask boundary drains every microtask its completion queues, including
+    // the request chain's own finally.
+    answer[0]?.(jsonResponse(null, 204));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // A record sampled before either PUT, carrying the value the server had then.
+    monitor.emit({ id: "s1", status: "idle", title: "one", createdAt: "1", pinnedTitle: "old" });
+
+    // The second write fails. Its toast is the user's only notice, and its rollback
+    // target — "first" — is what the server actually holds.
+    answer[1]?.(jsonResponse({ error: "nope" }, 500));
+
+    await until(() => toastText(root) !== "", 80);
+    expect(toastText(root)).toBe("Couldn't save the terminal name");
+    expect(labels(root)[0]).toBe("first");
+  });
 });
 
 // --- What a rename says out loud ---
