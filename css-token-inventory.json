@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedBy": "src/css-contract.test.ts",
+  "generatedBy": "src/css-contract.node.test.ts",
   "bundle": "css/MANIFEST",
   "declared": [
     "--accent",
