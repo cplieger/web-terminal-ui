@@ -39,6 +39,7 @@ const hoisted = vi.hoisted(() => ({
   serverEpochOf: vi.fn<(id: string) => number>(() => 0),
   adoptPersistedEpoch: vi.fn<(id: string, epoch: number) => void>(),
   bind: vi.fn(),
+  resetScreen: vi.fn(),
 }));
 /** The renderer's bound store, reachable from the tests so output can be printed
  *  onto whatever the kernel actually left the renderer pointing at. */
@@ -70,7 +71,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       resetScrollback: (): void => {
         boundStore().reset();
       },
-      resetScreen: vi.fn(),
+      resetScreen: hoisted.resetScreen,
       // Demand-paged scrollback: the kernel's browse-cache TTL reads these on
       // every visibility transition and on its sweep, so the double has to carry
       // them. Zero cache means the TTL is a no-op, which is what these
@@ -124,6 +125,7 @@ const {
   serverEpochOf,
   adoptPersistedEpoch,
   bind,
+  resetScreen,
 } = hoisted;
 
 let createTerminal: (typeof KernelModule)["createTerminal"];
@@ -289,6 +291,21 @@ describe("persistScrollback: the single unmanaged terminal", () => {
       expect(bind).not.toHaveBeenCalled();
       expect(currentSessionId).not.toHaveBeenCalled();
       expect(adoptPersistedEpoch).not.toHaveBeenCalled();
+    } finally {
+      term.destroy();
+    }
+  });
+
+  it("restores a snapshot of a single line, which is the boundary the check sits on", () => {
+    // One line of output is a real snapshot, and the smallest one that exists:
+    // highestIndex() is 0, not a positive number. A check written one off starts
+    // the resume from nothing instead, so the server replays a page this client
+    // is already holding — the exact cost this feature exists to avoid.
+    const store = storage({ "unmanaged-1": entryFor(seeded(1, 0), 777) });
+    const term = createTerminal(rootIn(), { persistScrollback: store });
+    try {
+      expect(bind).toHaveBeenCalledTimes(1);
+      expect(haveThrough()).toBe(0);
     } finally {
       term.destroy();
     }
@@ -626,6 +643,91 @@ describe("persistScrollback: a restore that will never be verified", () => {
       engineCallbacks().onProcessExit?.();
       // Live content, not a restore: an exit must not erase what this session drew.
       expect(haveThrough()).toBe(3);
+    } finally {
+      term.destroy();
+    }
+  });
+
+  it("reconciles the SCREEN as well when the discarded restore is the bound one", () => {
+    // The bound store is the one with a reader, and the DOM belongs to the
+    // renderer: resetting the store directly empties the model and leaves the
+    // previous run's rows on display, which is the exact picture this guard exists
+    // to prevent.
+    const { term, cb } = bootRestored();
+    try {
+      resetScreen.mockClear();
+
+      cb.onProcessExit?.();
+
+      expect(resetScreen).toHaveBeenCalledTimes(1);
+      expect(haveThrough()).toBe(-1);
+    } finally {
+      term.destroy();
+    }
+  });
+
+  it("condemns a one-line restore too, which is the smallest one there is", () => {
+    // The per-session hydration arms the guard on the same boundary the unmanaged
+    // path uses: a session restored from a single line is still showing last
+    // run's output, and a check written one off would leave it on display under a
+    // "Session ended" banner.
+    const store = storage({ "sess-a": entryFor(seeded(1, 0), 777) });
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "probe",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    const term = createTerminal(rootIn(), { persistScrollback: store, features: () => [probe] });
+    try {
+      const a = captured?.newLineStore("sess-a");
+      if (a === undefined) {
+        throw new Error("the feature never ran");
+      }
+      expect(a.highestIndex()).toBe(0);
+
+      currentSessionId.mockReturnValue("sess-a");
+      engineCallbacks().onProcessExit?.();
+
+      expect(a.highestIndex()).toBe(-1);
+    } finally {
+      term.destroy();
+    }
+  });
+
+  it("arms nothing for a session with no snapshot, so its LIVE output survives an exit", () => {
+    // The stated invariant of this guard: it only ever discards a restore, never
+    // content this run drew. A session that was never hydrated must not enter the
+    // set at all — otherwise the first process exit wipes the output the user was
+    // reading, which is strictly worse than the stale-restore case the guard is for.
+    const store = storage();
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "probe",
+      setup(ctx) {
+        captured = ctx;
+        return { teardown: () => undefined };
+      },
+    };
+    const term = createTerminal(rootIn(), { persistScrollback: store, features: () => [probe] });
+    try {
+      const a = captured?.newLineStore("sess-a");
+      if (a === undefined) {
+        throw new Error("the feature never ran");
+      }
+      a.applyScroll({
+        type: "scroll",
+        firstIndex: 0,
+        lines: Array.from({ length: 4 }, (_, i) => row(`live ${String(i)}`)),
+      });
+      expect(a.highestIndex()).toBe(3);
+
+      currentSessionId.mockReturnValue("sess-a");
+      engineCallbacks().onProcessExit?.();
+
+      expect(a.highestIndex()).toBe(3);
     } finally {
       term.destroy();
     }

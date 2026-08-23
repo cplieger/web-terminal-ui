@@ -275,7 +275,10 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
       },
     });
     expect(() => createTerminal(root, { features: () => [mk("a"), mk("b")] })).toThrow(
-      /multiple session-owning features/,
+      // Names the collision: a consumer composing presets sees two features it
+      // did not know both claimed sessions, and the names are the only way to
+      // know which one to drop.
+      /multiple session-owning features: a, b/,
     );
   });
 });
