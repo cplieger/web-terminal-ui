@@ -18,7 +18,7 @@
 
 import { LineStore, connection } from "@cplieger/web-terminal-engine";
 import { positiveIntOption } from "./options.js";
-import type { PersistedScrollback, ScrollbackPersistence } from "./types.js";
+import type { ScrollbackPersistence } from "./types.js";
 
 /**
  * Newest lines persisted per session when the consumer names no bound.
@@ -69,33 +69,72 @@ export interface ScrollbackKeeper {
   stop(): void;
 }
 
-/** Read a stored entry's timestamp defensively. The value has been outside this
- *  program's memory, so its type is an assumption until checked. */
-function savedAtOf(entry: unknown): number | null {
-  if (typeof entry !== "object" || entry === null) {
-    return null;
-  }
-  const at = (entry as Record<string, unknown>)["savedAt"];
-  return typeof at === "number" && Number.isFinite(at) ? at : null;
+/** A stored entry that has been read and proven: every field is what it says, so
+ *  nothing downstream re-checks it. `readStoredEntry` is the only constructor,
+ *  which is what makes that promise keepable. */
+interface StoredEntry {
+  /** `Date.now()` at the write. Finite. */
+  readonly savedAt: number;
+  /** The snapshot's server epoch, or null when the entry names no server
+   *  process.
+   *
+   *  Stricter than "a finite number", because this value is adopted as a
+   *  session's IDENTITY: the server reports a process-start timestamp in
+   *  nanoseconds, so a negative or fractional value cannot have come from one
+   *  and is a corrupt or hand-edited entry wearing the shape of a real one.
+   *
+   *  NOT 0-for-unknown. The engine spells "unknown" as 0 on its own surface and
+   *  that is its contract, but inheriting the spelling here put the rejection
+   *  value inside the range of accepted values, so `epoch > 0` and `epoch >= 0`
+   *  could not differ: at `epoch === 0` both yielded 0 and both were rejected
+   *  downstream. Out-of-band restores the distinction, and 0 goes back to being
+   *  a value the boundary refuses rather than the way it says no. */
+  readonly serverEpoch: number | null;
+  /** Still the engine's to parse. `LineStore.fromSnapshot` takes `unknown` and
+   *  is the authority on a snapshot's contents (engine store.ts:1584), so a
+   *  shape check here would be a second owner of one obligation. */
+  readonly snapshot: unknown;
 }
 
-/** Read a stored snapshot's server epoch defensively, or 0 for "unknown".
+/**
+ * Read a stored entry, or null when it cannot be used.
  *
- *  Stricter than "a finite number", because this value is adopted as a session's
- *  IDENTITY: the server reports a process-start timestamp in nanoseconds, so a
- *  negative or fractional value cannot have come from one and is a corrupt or
- *  hand-edited entry wearing the shape of a real one. 0 is the library's existing
- *  "unknown", and every rejection lands there. */
-function epochOf(entry: unknown): number {
-  if (typeof entry !== "object" || entry === null) {
-    return 0;
+ * `unknown` in, because the value has been outside this program's memory and
+ * `ScrollbackPersistence.load`'s declared return type is an assumption about a
+ * consumer's storage rather than a fact about its contents — the library's own
+ * implementation produces one by `JSON.parse`. A `StoredEntry` out, so every
+ * later line reads fields instead of re-establishing them.
+ *
+ * The parameter type carries the caller's proof: `hydrate` must separate "no
+ * entry" from "bad entry" before calling, because those two have different
+ * handling, so non-nullishness is already established. That is why there is no
+ * object test here and why there must not be one — a property read on any other
+ * primitive yields undefined and the field checks below reject it, so a `typeof
+ * entry !== "object"` test would be a second statement of a thing the signature
+ * already guarantees. This function had two of them, one per field it read, and
+ * neither could be observed: 15 of the file's 19 surviving mutants were those
+ * two guards and their bodies.
+ */
+function readStoredEntry(entry: NonNullable<unknown>): StoredEntry | null {
+  const rec = entry as Record<string, unknown>;
+  const savedAt = rec["savedAt"];
+  // Finite, not merely a number: the age comparison below is a subtraction, and
+  // `Math.abs(Date.now() - NaN) > maxAgeMs` is false, so a NaN timestamp would
+  // read as freshly written forever.
+  if (typeof savedAt !== "number" || !Number.isFinite(savedAt)) {
+    return null;
   }
-  const snap = (entry as Record<string, unknown>)["snapshot"];
-  if (typeof snap !== "object" || snap === null) {
-    return 0;
-  }
-  const epoch = (snap as Record<string, unknown>)["serverEpoch"];
-  return typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch > 0 ? epoch : 0;
+  // Read through a nullable cast rather than a typeof test: `?.` is safe on a
+  // primitive as well as on null, so one operator covers every shape a stored
+  // value can have, and `fromSnapshot` owns what a usable snapshot contains.
+  const snapshot = rec["snapshot"] as Record<string, unknown> | null | undefined;
+  const epoch = snapshot?.["serverEpoch"];
+  return {
+    savedAt,
+    serverEpoch:
+      typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch > 0 ? epoch : null,
+    snapshot,
+  };
 }
 
 export function createScrollbackKeeper(
@@ -143,22 +182,41 @@ export function createScrollbackKeeper(
    *  Every rejection below has that same correct handling, which is why none of
    *  them throws or reports: the worst outcome of starting empty is one slow
    *  restore, and the worst outcome of hydrating something unsound is a terminal
-   *  that shows content from a session that no longer exists. */
+   *  that shows content from a session that no longer exists.
+   *
+   *  This function owns exactly two decisions and delegates the rest, which is
+   *  the point of its shape. It decides whether there is an entry at all, and
+   *  whether an entry that parsed may be USED (age, and verifiability). What an
+   *  entry's envelope must look like is `readStoredEntry`'s; what a snapshot must
+   *  contain is `LineStore.fromSnapshot`'s. Three owners, three depths, no
+   *  overlap — the arrangement this module did not have when its two readers each
+   *  re-established that the entry was an object. */
   function hydrate(sessionId: string): LineStore | null {
-    let entry: PersistedScrollback | null | undefined;
+    let raw: unknown;
     try {
-      entry = cfg.load(sessionId);
+      raw = cfg.load(sessionId);
     } catch {
-      return null;
+      // Deliberately empty: a seam that threw has told us there is no entry, and
+      // `raw` is still undefined, which is exactly what the check below concludes.
+      // A `return null` here would be a second owner of "there is no entry".
     }
-    if (entry === null || entry === undefined) {
+    // "No entry" is silent and is not a rejection: nothing is dropped, because
+    // there is nothing to drop. Every path below this line has an entry to
+    // account for. This is also what lets `readStoredEntry` take a non-nullish
+    // parameter and therefore need no object test.
+    if (raw === null || raw === undefined) {
       return null;
     }
 
-    const savedAt = savedAtOf(entry);
+    const entry = readStoredEntry(raw);
+    if (entry === null) {
+      drop(sessionId);
+      return null;
+    }
+
     // Distance in either direction: a clock that moved backwards would otherwise
     // leave an entry whose age never reaches the bound.
-    if (savedAt === null || Math.abs(Date.now() - savedAt) > maxAgeMs) {
+    if (Math.abs(Date.now() - entry.savedAt) > maxAgeMs) {
       drop(sessionId);
       return null;
     }
@@ -170,19 +228,22 @@ export function createScrollbackKeeper(
     }
 
     // Structure checked; now the one rejection that is a real decision rather
-    // than a validation. An entry with no server epoch cannot be verified
-    // against the server it is about to be shown next to, and absolute line
-    // indices only mean anything within one server process: a restarted server
-    // begins again near 0, so a hydrated store whose epoch cannot be compared
-    // would present old content as live AND then refuse the new session's
-    // output, because those low indices fall below what the hydrated store
-    // believes it evicted. A terminal that fills in slowly is a far better
-    // failure than one that is wrong and then permanently blank, so an
-    // unverifiable entry is discarded. In practice this never fires: an epoch is
-    // missing only from a server that reports none at all, in which case restart
-    // detection was never available to anyone.
-    const epoch = epochOf(entry);
-    if (epoch === 0) {
+    // than a validation, and the reason the epoch is read at the boundary but
+    // JUDGED here. An entry with no server epoch cannot be verified against the
+    // server it is about to be shown next to, and absolute line indices only
+    // mean anything within one server process: a restarted server begins again
+    // near 0, so a hydrated store whose epoch cannot be compared would present
+    // old content as live AND then refuse the new session's output, because
+    // those low indices fall below what the hydrated store believes it evicted.
+    // A terminal that fills in slowly is a far better failure than one that is
+    // wrong and then permanently blank, so an unverifiable entry is discarded.
+    // In practice this never fires: an epoch is missing only from a server that
+    // reports none at all, in which case restart detection was never available
+    // to anyone.
+    //
+    // AFTER fromSnapshot, deliberately: reading it earlier would fire the warning
+    // below for a snapshot the engine was going to reject anyway.
+    if (entry.serverEpoch === null) {
       if (!warnedNoEpoch) {
         warnedNoEpoch = true;
         console.warn(
@@ -196,7 +257,7 @@ export function createScrollbackKeeper(
     // The epoch must reach the connection layer BEFORE this session's resume, or
     // the first resumeAck records it with nothing to compare against and a
     // restart goes undetected for exactly the content that needed checking.
-    connection.adoptPersistedEpoch(sessionId, epoch);
+    connection.adoptPersistedEpoch(sessionId, entry.serverEpoch);
     return store;
   }
 

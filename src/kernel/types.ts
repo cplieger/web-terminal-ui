@@ -498,9 +498,28 @@ export interface PersistedScrollback {
  *  treats any failure as "nothing was restored" and takes a full resume, exactly
  *  as if persistence were switched off. */
 export interface ScrollbackPersistence {
-  /** Return the stored entry for a session, or null/undefined when there is
-   *  none. Called once per session, before that session connects. */
-  load(sessionId: string): PersistedScrollback | null | undefined;
+  /** Return whatever was stored for a session, or null/undefined when there is
+   *  nothing. Called once per session, before that session connects.
+   *
+   *  `unknown`, not `PersistedScrollback`, and the asymmetry with `save` below is
+   *  the point: an entry going OUT was produced by the engine and is proven, while
+   *  an entry coming BACK has been outside this program's memory and is a claim.
+   *  Declaring the proven type on both sides told the compiler the returned value
+   *  was verified — which no implementation of this seam can promise, this
+   *  library's own `localScrollbackStorage` least of all, since it hands back a
+   *  `JSON.parse` result. The kernel parsed it anyway, and because the type said
+   *  otherwise it did so in helpers that each re-established the shape from
+   *  scratch: measured 2026-08, 15 of `scrollback.ts`'s 19 permanently unkillable
+   *  mutants were those duplicate checks.
+   *
+   *  Nothing is lost by an implementation: a `load` annotated
+   *  `PersistedScrollback | null` still satisfies this, so a consumer that holds
+   *  real entries in memory keeps its own type checking. What goes is only the
+   *  false guarantee at the boundary that cannot honour it.
+   *
+   *  `PersistedScrollback` remains the shape to store and the shape you get back
+   *  when storage is intact; see `save`. */
+  load(sessionId: string): unknown;
   /** Store an entry, replacing any previous one for the session.
    *
    *  THROW when nothing was persisted (over quota, storage revoked, an entry the
