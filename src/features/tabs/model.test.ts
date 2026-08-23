@@ -431,6 +431,24 @@ describe("compareTabOrder is a total order", () => {
     }
   });
 
+  it("inserts a key equal to one on the strip AFTER it, never in front of it", () => {
+    // orderedInsertIndex answers "the first tab that sorts AFTER this one", and an
+    // equal key sorts after nothing: the same session can be delivered twice (the
+    // status stream's snapshot races the bootstrap's list), and the answer for it
+    // has to be the slot behind its twin. Answering the twin's own index instead
+    // is the one placement that puts a tab in front of a key it compares EQUAL to,
+    // which is also what would break the convergence property above: repeated
+    // insertion of one key would walk it backwards through the strip.
+    const strip = [at(early, "a", 0), at(late, "b", 1)];
+    expect(orderedInsertIndex(strip, at(early, "a", 0))).toBe(1);
+    expect(orderedInsertIndex(strip, at(late, "b", 1))).toBe(2);
+
+    const grown = [...strip];
+    const twin = at(early, "a", 0);
+    grown.splice(orderedInsertIndex(grown, twin), 0, twin);
+    expect(grown.map((k) => k.id)).toEqual(["a", "a", "b"]);
+  });
+
   it("sorts a whole strip the same way inserting one at a time does", () => {
     // applyServerOrder sorts the live list; adoptSession inserts into it. The two
     // must agree, or a remote reorder and a fresh adopt would fight.
