@@ -859,3 +859,44 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe("scrollback persistence: forgetting a session forgets the watermark too", () => {
+  it("saves a session that comes back after a forget, rather than trusting the deleted entry's watermark", () => {
+    // The watermark means "these bytes are on disk", and forget() deletes the
+    // entry -- so the claim is false the moment it does. A session id can come
+    // back: a consumer that names its sessions and restarts one reuses the name,
+    // and the unmanaged terminal's id is a stable per-tab id by design. A
+    // watermark that outlived its entry then matches the returning store's
+    // highest index, the background pass skips the session, and it persists
+    // nothing at all while believing it already has -- the same failure shape the
+    // module documents for a failed save.
+    serverEpochOf.mockReturnValue(999);
+    const storage = fakeStorage();
+    const keeper = createScrollbackKeeper(storage, undefined);
+
+    keeper.track("sess-a", seeded(3, 10));
+    keeper.flush();
+    expect(storage.entries.get("sess-a")?.snapshot.highest).toBe(12);
+
+    keeper.forget("sess-a");
+    expect(storage.entries.has("sess-a")).toBe(false);
+
+    // The id comes back, and its store reaches the same absolute index the
+    // deleted entry had recorded (a restarted server begins again near 0, so the
+    // indices a new session prints are the ones an old entry already claimed).
+    const returned = keeper.storeFor("sess-a");
+    returned.applyScroll({
+      type: "scroll",
+      firstIndex: 10,
+      lines: Array.from({ length: 3 }, (_, i) => [
+        { t: `L${String(10 + i)}`, f: -1, b: -1, a: 0, uc: -1 },
+      ]),
+    });
+    expect(returned.highestIndex()).toBe(12);
+
+    keeper.flush();
+
+    expect(storage.entries.get("sess-a")?.snapshot.highest).toBe(12);
+    keeper.stop();
+  });
+});

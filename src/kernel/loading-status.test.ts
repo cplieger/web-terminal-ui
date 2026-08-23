@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   attachLoadingStatus,
   DEFAULT_LOADING_MESSAGES,
+  type LoadingMessages,
   type LoadingStatus,
 } from "./loading-status.js";
 
@@ -355,5 +356,61 @@ describe("loading overlay status text", () => {
 
     expect(visibleText(o)).toBe("Waking the dev box…");
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("loading overlay status text: the wording the library ships", () => {
+  // DEFAULT_LOADING_MESSAGES is built when the module is evaluated, so the copy
+  // the suite above imported statically was already fixed before any test ran:
+  // those tests exercise the code that READS the table. Re-importing per test is
+  // what puts the shipped table itself under test.
+  let attach: typeof attachLoadingStatus;
+  let defaults: LoadingMessages;
+  let status: LoadingStatus | undefined;
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    document.body.replaceChildren();
+    status = undefined;
+    ({ attachLoadingStatus: attach, DEFAULT_LOADING_MESSAGES: defaults } =
+      await import("./loading-status.js"));
+  });
+  afterEach(() => {
+    status?.stop();
+    vi.useRealTimers();
+  });
+
+  it("ships more than one waiting line, because one line cannot rotate", () => {
+    // Step 3 of the design: a single sentence held for nineteen more minutes reads
+    // exactly as hung as no sentence at all. The rotation is the point, and a
+    // consumer that reworded nothing depends entirely on this table having
+    // something in it.
+    expect(defaults.waiting.length).toBeGreaterThan(1);
+    for (const line of defaults.waiting) {
+      expect(line).not.toBe("");
+    }
+  });
+
+  it("moves off the initial line at the rotation threshold, and keeps moving", () => {
+    // The observable consequence of the table for a consumer that overrides
+    // nothing: at a minute the wording changes, and it changes again after that.
+    // An empty table leaves the initial line frozen for the whole wait, silently.
+    const o = overlayIn();
+    status = attach(o);
+
+    vi.advanceTimersByTime(INITIAL_DELAY_MS);
+    settleSwap();
+    expect(visibleText(o)).toBe(defaults.initial);
+
+    vi.advanceTimersByTime(WAITING_AFTER_MS - INITIAL_DELAY_MS);
+    settleSwap();
+    const firstWaiting = visibleText(o);
+    expect(firstWaiting).not.toBe(defaults.initial);
+    expect(firstWaiting).not.toBe("");
+
+    vi.advanceTimersByTime(ROTATE_EVERY_MS);
+    settleSwap();
+    expect(visibleText(o)).not.toBe(firstWaiting);
   });
 });

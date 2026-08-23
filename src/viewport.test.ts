@@ -400,4 +400,198 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
     window.dispatchEvent(new Event("orientationchange"));
     expect(viewport.isInTransition()).toBe(false);
   });
+
+  it("releases the screen.orientation listener on teardown", () => {
+    // screen.orientation is a global the terminal does not own: a listener left on
+    // it survives destroy() and keeps calling into a torn-down module, and a
+    // remount then re-measures twice per rotation.
+    viewport.teardown();
+    const orientation = liveVisualViewport(0, 0); // reused as a bare event target
+    Object.defineProperty(screen, "orientation", { configurable: true, value: orientation });
+    viewport.init({ termWrap, onSettled });
+
+    viewport.teardown();
+    orientation.fire("change");
+
+    expect(viewport.isInTransition()).toBe(false);
+  });
+});
+
+// A ResizeObserver whose callback a test can actually fire. happy-dom's own is a
+// documented no-op that does not even keep the callback, so nothing here reaches
+// the term-wrap observation init makes — the signal that catches a font load, a
+// devtools dock, and an embedder resizing its panel, none of which raise a window
+// resize event. `disconnect()` is modelled faithfully because teardown's release
+// of the observer is half of what is under test.
+interface FakeObserver {
+  callback: ResizeObserverCallback;
+  targets: Element[];
+}
+let observers: FakeObserver[] = [];
+
+function stubResizeObserver(): void {
+  observers = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class implements ResizeObserver {
+      private readonly record: FakeObserver;
+      constructor(callback: ResizeObserverCallback) {
+        this.record = { callback, targets: [] };
+        observers.push(this.record);
+      }
+      observe(target: Element): void {
+        this.record.targets.push(target);
+      }
+      unobserve(target: Element): void {
+        this.record.targets = this.record.targets.filter((t) => t !== target);
+      }
+      disconnect(): void {
+        this.record.targets.length = 0;
+      }
+    },
+  );
+}
+
+/** Fire every observer watching `target`, and report how many there were, so a
+ *  test can tell "the callback did nothing" from "nothing was ever observing". */
+function fireResize(target: Element): number {
+  const watching = observers.filter((o) => o.targets.includes(target));
+  for (const o of watching) {
+    o.callback([], {} as ResizeObserver);
+  }
+  return watching.length;
+}
+
+describe("viewport: the term wrap's own size is a re-measure signal", () => {
+  let tw: HTMLElement;
+
+  beforeEach(() => {
+    viewport.teardown(); // drop the outer init's window listeners first
+    stubResizeObserver();
+    tw = document.createElement("div");
+    document.body.replaceChildren(tw);
+    viewport.init({ termWrap: tw, onSettled });
+    vi.advanceTimersByTime(SETTLE_MS + 50);
+    onSettled.mockClear();
+    stickToBottom.mockClear();
+  });
+
+  afterEach(() => {
+    viewport.teardown();
+    vi.unstubAllGlobals();
+  });
+
+  it("observes the term wrap, so a font load or a panel resize settles like any other change", () => {
+    // A window resize is not the only way the terminal's box changes: a webfont
+    // arriving, devtools docking, or an embedder resizing its own panel move it
+    // with no window event at all.
+    expect(viewport.isInTransition()).toBe(false);
+
+    expect(fireResize(tw)).toBe(1);
+
+    expect(viewport.isInTransition()).toBe(true);
+    vi.advanceTimersByTime(SETTLE_MS);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("disconnects that observer on teardown, so a destroyed terminal stops re-measuring", () => {
+    // The observer outliving destroy() is how a create->destroy->create remount
+    // ends up with two of them driving one settle lifecycle.
+    viewport.teardown();
+
+    expect(fireResize(tw)).toBe(0);
+    expect(viewport.isInTransition()).toBe(false);
+    vi.advanceTimersByTime(SETTLE_MS + 50);
+    expect(onSettled).not.toHaveBeenCalled();
+  });
+});
+
+describe("viewport: rotation on older Safari (the deprecated window event)", () => {
+  // screen.orientation is the canonical rotation signal, and happy-dom exposes
+  // neither it nor the legacy fallback — so the else arm below is reached by
+  // giving the window the property older Safari has and nothing else does.
+  beforeEach(() => {
+    viewport.teardown();
+    Object.defineProperty(window, "onorientationchange", { configurable: true, value: null });
+    viewport.init({ termWrap, onSettled });
+    vi.advanceTimersByTime(SETTLE_MS + 50);
+    onSettled.mockClear();
+  });
+
+  afterEach(() => {
+    viewport.teardown();
+    Reflect.deleteProperty(window, "onorientationchange");
+  });
+
+  it("re-measures on window orientationchange where screen.orientation is absent", () => {
+    // iOS Safari emits window.resize late or not at all on rotation, so without
+    // this arm an older device rotates and never re-measures: the terminal keeps
+    // the portrait geometry it had.
+    expect(viewport.isInTransition()).toBe(false);
+
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(viewport.isInTransition()).toBe(true);
+  });
+
+  it("releases that listener on teardown too", () => {
+    viewport.teardown();
+
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(viewport.isInTransition()).toBe(false);
+  });
+});
+
+describe("viewport: teardown and a settle already in flight", () => {
+  // Driven through the fake ResizeObserver rather than a window event: earlier
+  // suites in this file deliberately leave their instances mounted, so a window
+  // resize reaches all of them and the engine mock counts their settles too. An
+  // observer fire reaches exactly this instance.
+  let tw: HTMLElement;
+
+  beforeEach(() => {
+    viewport.teardown();
+    stubResizeObserver();
+    tw = document.createElement("div");
+    document.body.replaceChildren(tw);
+    viewport.init({ termWrap: tw, onSettled });
+    vi.advanceTimersByTime(SETTLE_MS + 50);
+    onSettled.mockClear();
+    stickToBottom.mockClear();
+    scrollToBottom.mockClear();
+  });
+
+  afterEach(() => {
+    viewport.teardown();
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels the pending settle, so nothing reaches the scroll controller after destroy", () => {
+    // destroy() during an iOS keyboard slide is ordinary (a tab close mid-slide),
+    // and the settle callback drives the engine's scroll controller. Firing it
+    // after teardown pins a terminal that no longer exists to the bottom.
+    expect(fireResize(tw)).toBe(1);
+    expect(viewport.isInTransition()).toBe(true);
+
+    viewport.teardown();
+    vi.advanceTimersByTime(SETTLE_MS + 50);
+
+    expect(onSettled).not.toHaveBeenCalled();
+    expect(stickToBottom).not.toHaveBeenCalled();
+    expect(scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it("survives a teardown that runs before any init", async () => {
+    // The kernel calls teardown from destroy(), and a consumer that destroys a
+    // terminal whose init never ran (a failed bootstrap) must not get a crash out
+    // of the cleanup path.
+    vi.resetModules();
+    const fresh = await import("./viewport.js");
+
+    expect(() => {
+      fresh.teardown();
+    }).not.toThrow();
+    expect(fresh.isInTransition()).toBe(false);
+  });
 });
