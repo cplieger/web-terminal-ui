@@ -11,7 +11,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as KernelModule from "../kernel/kernel.js";
 import type * as CtxMenuModule from "./context-menu.js";
-import type { TerminalFeature } from "../kernel/types.js";
+import type {
+  FeatureInstance,
+  TerminalContext,
+  TerminalFeature,
+  Unsubscribe,
+} from "../kernel/types.js";
 import type { ClipboardApi } from "./clipboard.js";
 
 // Hoisted so a test can read what reached the PTY: the Escape rule is "close the
@@ -827,5 +832,269 @@ describe("contextMenu — what counts as a stationary press", () => {
     surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 3000));
 
     expect(isOpen(root)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The feature driven through a hand-made TerminalContext.
+//
+// Two contracts a real-kernel mount cannot see. WHICH options each surface
+// gesture is registered with: a non-passive touchmove listener blocks scrolling
+// for the whole gesture on every real long-press, and a passive `contextmenu`
+// would silently lose the preventDefault that stops the platform menu appearing
+// beside ours. And whether teardown gives back everything setup took: a leaked
+// document listener keeps a detached menu alive across a create->destroy->create
+// remount, which is exactly what a consumer switching presets does.
+//
+// A fake context is used for both so the surface and the document carry this
+// feature's listeners and nothing else.
+// ---------------------------------------------------------------------------
+
+interface Registration {
+  readonly on: "surface" | "document";
+  readonly type: string;
+  readonly fn: EventListenerOrEventListenerObject | null;
+  readonly options: unknown;
+}
+
+/** Record every add/remove on one target, passing each call through, so a test
+ *  can compare what setup took against what teardown gave back. */
+function recordListeners(
+  target: EventTarget,
+  on: "surface" | "document",
+  added: Registration[],
+  removed: Registration[],
+): void {
+  const add = target.addEventListener.bind(target);
+  const remove = target.removeEventListener.bind(target);
+  vi.spyOn(target, "addEventListener").mockImplementation((type, fn, options) => {
+    added.push({ on, type, fn, options });
+    add(type, fn, options);
+  });
+  vi.spyOn(target, "removeEventListener").mockImplementation((type, fn, options) => {
+    removed.push({ on, type, fn, options });
+    remove(type, fn, options);
+  });
+}
+
+interface Harness {
+  readonly surface: HTMLElement;
+  readonly slot: HTMLElement;
+  readonly inst: FeatureInstance;
+  readonly added: Registration[];
+  readonly removed: Registration[];
+  readonly keydowns: Set<(ev: KeyboardEvent) => boolean>;
+  menu(): HTMLElement | null;
+  rightClick(x?: number, y?: number): MouseEvent;
+}
+
+/** contextMenu set up against a fake context: a bare surface carrying the two
+ *  elements the feature queries (.term-input, .term-output) and a slot element
+ *  standing in for the overlay region. */
+async function harnessed(withClipboard = true): Promise<Harness> {
+  const surface = document.createElement("div");
+  surface.className = "term";
+  const input = document.createElement("textarea");
+  input.className = "term-input";
+  const output = document.createElement("div");
+  output.className = "term-output";
+  surface.append(input, output);
+  const slot = document.createElement("div");
+  document.body.append(surface, slot);
+
+  const added: Registration[] = [];
+  const removed: Registration[] = [];
+  recordListeners(surface, "surface", added, removed);
+  recordListeners(document, "document", added, removed);
+
+  const keydowns = new Set<(ev: KeyboardEvent) => boolean>();
+  const clipFeature = fakeClipboard();
+  const ctx = {
+    surface: () => surface,
+    region: () => slot,
+    registerKeydown: (fn: (ev: KeyboardEvent) => boolean): Unsubscribe => {
+      keydowns.add(fn);
+      return () => keydowns.delete(fn);
+    },
+    use: () => ({ copy: copySpy, paste: pasteSpy }),
+  } as unknown as TerminalContext;
+
+  const inst = await contextMenu(withClipboard ? { clipboard: clipFeature } : {}).setup(ctx);
+  return {
+    surface,
+    slot,
+    inst,
+    added,
+    removed,
+    keydowns,
+    menu: () => slot.querySelector<HTMLElement>(".wt-ctx-menu"),
+    rightClick: (x = 20, y = 20) => {
+      const ev = new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+      });
+      surface.dispatchEvent(ev);
+      return ev;
+    },
+  };
+}
+
+describe("contextMenu — how its gestures are registered", () => {
+  it("takes every touch gesture passively, so a hold never blocks the scroll it might become", async () => {
+    // A long-press starts life indistinguishable from a scroll or a
+    // selection-extend, all of which are the browser's. Registering these
+    // non-passively tells the browser a handler MIGHT cancel the gesture, so it
+    // withholds scrolling until the listener returns — on every touch, for a
+    // feature that cancels nothing here (the whole touch decision is deferred to
+    // touchend). pointerdown only records the device, so it is passive too.
+    const h = await harnessed();
+
+    for (const type of ["pointerdown", "touchstart", "touchmove", "touchend", "touchcancel"]) {
+      const reg = h.added.find((r) => r.on === "surface" && r.type === type);
+      expect(reg, `no surface listener for ${type}`).toBeDefined();
+      expect(reg?.options, `${type} must be registered passive`).toEqual({ passive: true });
+    }
+
+    h.inst.teardown();
+  });
+
+  it("keeps `contextmenu` cancellable, because suppressing the platform menu is a preventDefault", async () => {
+    // The other half of the same contract: this one listener MUST be able to
+    // cancel, and a passive registration would drop its preventDefault with only
+    // a console warning to show for it.
+    const h = await harnessed();
+
+    const reg = h.added.find((r) => r.on === "surface" && r.type === "contextmenu");
+    expect(reg).toBeDefined();
+    expect(reg?.options).toBeUndefined();
+    expect(h.rightClick().defaultPrevented).toBe(true);
+
+    h.inst.teardown();
+  });
+});
+
+describe("contextMenu — teardown", () => {
+  it("gives back every listener it took, on the surface and on the document", async () => {
+    // A leaked listener outlives the menu it drives: after a destroy the handler
+    // still runs, against a detached menu element, and a remounted terminal then
+    // has two of everything.
+    const h = await harnessed();
+    expect(h.added.length).toBeGreaterThan(0);
+
+    h.inst.teardown();
+
+    const leaked = h.added.filter(
+      (a) => !h.removed.some((r) => r.on === a.on && r.type === a.type && r.fn === a.fn),
+    );
+    expect(leaked.map((r) => `${r.on}:${r.type}`)).toEqual([]);
+  });
+
+  it("takes the menu out of the DOM, so the region slot is left as it was found", async () => {
+    const h = await harnessed();
+    h.rightClick();
+    expect(h.menu()).not.toBeNull();
+
+    h.inst.teardown();
+
+    expect(h.menu()).toBeNull();
+    expect(h.slot.childElementCount).toBe(0);
+  });
+
+  it("releases the Escape intercept, so Escape belongs to the program again", async () => {
+    // The intercept consumes Escape whenever the menu carries the visible class,
+    // and teardown does not clear that class — it removes the element. A handler
+    // left registered would swallow every Escape for the rest of the page's life
+    // while the menu it is protecting no longer exists.
+    const h = await harnessed();
+    h.rightClick();
+    expect(h.keydowns.size).toBe(1);
+
+    h.inst.teardown();
+
+    expect(h.keydowns.size).toBe(0);
+  });
+
+  it("stops answering the gestures it registered", async () => {
+    // The behavioural half of the listener comparison above: after teardown the
+    // menu must not reopen, from a right-click or from a long-press.
+    const h = await harnessed();
+    h.inst.teardown();
+
+    h.rightClick();
+    expect(h.menu()).toBeNull();
+    h.surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
+    h.surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 1700));
+    expect(h.menu()).toBeNull();
+  });
+});
+
+describe("contextMenu — an environment with no navigator", () => {
+  // isAppleTouchDevice runs at setup and reads navigator three times. The guard
+  // in front of it is not decoration: the kernel is published as a library, and a
+  // consumer that renders the page on a server (or in a worker) reaches setup
+  // with no navigator binding at all.
+  it("sets up without a navigator, rather than throwing on the way in", async () => {
+    vi.stubGlobal("navigator", undefined);
+
+    const h = await harnessed();
+    h.rightClick();
+
+    expect(h.menu()?.classList.contains("visible")).toBe(true);
+    h.inst.teardown();
+  });
+
+  it("treats an unknown device as non-Apple, so the platform's own touch menu is still suppressed", async () => {
+    // The one thing the answer decides. Unknown means "not WebKit", where
+    // cancelling a touch contextmenu is how the platform's menu and ours do not
+    // both appear; the Apple answer would leave both.
+    vi.stubGlobal("navigator", undefined);
+    const h = await harnessed();
+
+    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
+    Object.defineProperty(pd, "pointerType", { value: "touch" });
+    h.surface.dispatchEvent(pd);
+
+    expect(h.rightClick().defaultPrevented).toBe(true);
+    h.inst.teardown();
+  });
+});
+
+describe("contextMenu — a click on the menu itself is not a click-away", () => {
+  it("stays open for a click that lands on the menu's own box rather than on an item", async () => {
+    // The document dismiss has to ignore clicks inside the menu: an item's own
+    // handler owns the close (Select All deliberately does not refocus the input),
+    // and a click on the box between items is not a request to dismiss at all.
+    const h = await harnessed();
+    h.rightClick();
+    const menu = h.menu();
+    expect(menu?.classList.contains("visible")).toBe(true);
+
+    menu?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(menu?.classList.contains("visible")).toBe(true);
+    h.inst.teardown();
+  });
+});
+
+describe("contextMenu — returning the keyboard without moving the page", () => {
+  it("refocuses the input with preventScroll, so recovering focus never scrolls the terminal away", async () => {
+    // The keyboard target is a 1x1 element pinned near the caret; focusing it
+    // without preventScroll asks the browser to scroll that 1x1 box into view,
+    // which on a mobile browser mid-keyboard-transition moves the whole page.
+    const { root, surface } = await mount();
+    const input = root.querySelector<HTMLTextAreaElement>(".term-input");
+    expect(input).not.toBeNull();
+    const focusSpy = vi.spyOn(input as HTMLTextAreaElement, "focus");
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+    const paste = itemNamed(root, "Paste");
+    paste?.focus();
+
+    paste?.click();
+
+    expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
   });
 });
