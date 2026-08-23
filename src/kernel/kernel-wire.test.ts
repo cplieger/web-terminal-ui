@@ -161,6 +161,33 @@ const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
  *  viewport gate has its own test, on fake timers. */
 const viewportSettled = (): Promise<void> => new Promise((r) => setTimeout(r, 400));
 
+/** Advances FAKE timers a settle window at a time until `done()` holds.
+ *
+ *  A single fixed advance is a race, and it is the kind that wins on a fast
+ *  machine and loses on a CI runner: the ResizeObserver behind
+ *  viewport.startTransition is REAL, it delivers whenever the browser schedules
+ *  it, and every delivery re-arms the 350ms settle timer. An advance that lands
+ *  before the last delivery leaves the viewport in transition, and the size then
+ *  reads null for the viewport's reason rather than for the test's.
+ *
+ *  Waiting for the OBSERVABLE asserts the same contract ("it settles, and then
+ *  this becomes true") without pinning when the observer happened to fire. The
+ *  bound is what keeps a genuine never-settles regression a failure rather than a
+ *  hang. Deliberately predicate-based rather than reading viewport.isInTransition:
+ *  importing the viewport module here breaks this file's engine mock, which is
+ *  hoisted above the imports. */
+async function settleUntil(done: () => boolean, windows = 8): Promise<void> {
+  for (let i = 0; i < windows; i++) {
+    if (done()) {
+      return;
+    }
+    await vi.advanceTimersByTimeAsync(400);
+  }
+  if (!done()) {
+    throw new Error(`condition not reached within ${windows} viewport settle windows`);
+  }
+}
+
 const nextFrame = (): Promise<void> =>
   new Promise((r) => {
     requestAnimationFrame(() => {
@@ -664,7 +691,7 @@ describe("the resize announce, and the two things it waits for", () => {
     window.dispatchEvent(new Event("resize"));
     expect(wire().initialSize?.()).toBeNull();
 
-    await vi.advanceTimersByTimeAsync(400);
+    await settleUntil(() => wire().initialSize?.() != null);
     expect(wire().initialSize?.()).toEqual({ cols: 80, rows: 24 });
   });
 });
@@ -737,7 +764,7 @@ describe("the settle after a viewport transition", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(sendResize).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(400);
+    await settleUntil(() => sendResize.mock.calls.length > 0);
 
     expect(sendResize).toHaveBeenCalledTimes(1);
   });
