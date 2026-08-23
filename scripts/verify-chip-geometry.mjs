@@ -42,9 +42,10 @@ import { pathToFileURL } from "node:url";
 const REPO = resolve(dirname(new URL(import.meta.url).pathname), "..");
 
 // Sub-pixel, but not arbitrary: the measured worst case of the shipped
-// implementation across this sweep is 0.011px in the loosest engine, and the
-// defect this replaced was 0.33px. Anything above this is a real regression, not
-// float noise.
+// implementation across this sweep is 0.016px in the loosest engine (WebKit,
+// switcher, 18px; re-measured 2026-08-23 against WebKit 26.5, Blink 151 and Gecko
+// 153 with the bundled face), and the defect this replaced was 0.33px. Anything
+// above this is a real regression, not float noise.
 const TOLERANCE_PX = 0.05;
 
 // 11 through 20 covers both label sizes in production (13px strip, 14px

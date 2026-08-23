@@ -19,10 +19,25 @@
 // the switcher's aggregate dot about what wants the user; the fold and the raise
 // share isUnseenCue (model.ts).
 //
-// DOM-free and global-free by construction, like notify.ts: every capability
-// arrives through AttentionEnv, so the decisions are unit-testable with no
-// document, no navigator and no icon assets, and browserAttentionEnv() below is
-// the one place that touches globals.
+// DOM-free by construction, like notify.ts: every capability arrives through
+// AttentionEnv, so the fold, the idempotence and the degradation paths are driven
+// in the tests by plain recorder functions, and browserAttentionEnv() below is the
+// only function here that reads a global (globalThis.navigator, document).
+//
+// That last clause is a reading of the source, and nothing enforces it — on
+// purpose, not by omission. An ambient-absence test would assert the RUNTIME
+// rather than this module: the only importer is tabs/index.ts, the node project
+// holds one file and it reads stylesheets off disk, so nothing here loads this
+// module outside a browser and no test can observe an absent `document` without
+// passing for a third wrong reason (.kiro/steering/testing-ts.md,
+// "Capability-absence is NOT a project selection"). The half that does ship IS
+// enforced, and at the site: attention.test.ts shadows the whole `navigator`
+// object and drives the real browserAttentionEnv through it. The mechanism that
+// could enforce the load-time half is an AST scan of this file's top-level
+// statements — vibekit carries one for its ported copy, where a node-project test
+// statically imports the module and a module-scope global read really does break
+// something. Copy it here the day anything needs this module to load without a
+// document.
 
 import { type CueStatus, cueIconName, isUnseenCue, worseCue } from "./model.js";
 

@@ -75,6 +75,16 @@ export interface ContextMenuOptions {
  *  opens, so a wrong answer here costs at most a duplicated menu on an unusual
  *  device, never a broken selection and never a lost paste. */
 function isAppleTouchDevice(): boolean {
+  // Dead in every runtime that reaches this, and left in place deliberately.
+  // Measured on this repo's Node (v24.18.0, the version ts-ci pins): `typeof
+  // navigator` is "object", with userAgent "Node.js/24", platform
+  // "Linux x86_64" and maxTouchPoints undefined — so the fall-through already
+  // answers false there, by the same route a browser on a non-Apple device
+  // takes. A Web Worker has a WorkerNavigator, so it does not reach this
+  // either. What the guard still buys is totality: without it the bare
+  // `navigator` reads below would throw a ReferenceError in a runtime that has
+  // no navigator at all. It answers the same `false` the fall-through would, so
+  // nothing depends on reaching it, and no test can reach it without stubbing.
   if (typeof navigator === "undefined") {
     return false;
   }
