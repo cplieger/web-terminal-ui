@@ -274,17 +274,21 @@ function buildTerminal(
   // Narrow = compact in EITHER dimension: skinny (a phone in portrait, a
   // narrow embedded panel) or short (a phone in landscape). The one
   // ResizeObserver below fires on both width and height changes.
+  //
+  // Constructed unconditionally: ResizeObserver is a hard requirement of this
+  // library, not an enhancement. viewport.init() and the tabs strip both
+  // construct one with no guard, and the same buildTerminal builds a WeakRef
+  // (whose browser floor is strictly higher), so a `typeof ResizeObserver ===
+  // "function"` guard here could only ever protect a browser that crashes
+  // moments later. It used to be here, and it was measured dead.
   const isNarrow = (): boolean =>
     root.clientWidth <= NARROW_MAX_PX || root.clientHeight <= SHORT_MAX_PX;
   function updateNarrow(): void {
     root.classList.toggle("wt-narrow", isNarrow());
   }
   updateNarrow();
-  let narrowObserver: ResizeObserver | null = null;
-  if (typeof ResizeObserver === "function") {
-    narrowObserver = new ResizeObserver(updateNarrow);
-    narrowObserver.observe(root);
-  }
+  let narrowObserver: ResizeObserver | null = new ResizeObserver(updateNarrow);
+  narrowObserver.observe(root);
 
   // --- Document title (kernel-owned, composed from two inputs) ---
   //

@@ -1015,6 +1015,25 @@ describe("the narrow-layout driver", () => {
       observe.mockRestore();
     }
   });
+
+  it("requires ResizeObserver rather than pretending to degrade without it", () => {
+    // kernel.ts used to guard this observer with `typeof ResizeObserver ===
+    // "function"`, promising a browser without the constructor a terminal minus
+    // the narrow-layout enhancement. It never delivered one: viewport.init()
+    // (same buildTerminal, ~900 lines later) and the tabs strip both construct a
+    // ResizeObserver with no guard, so the build threw either way — this test
+    // failed with `TypeError: ResizeObserver is not a constructor` from
+    // viewport.ts:182 while the guard was still in place. The requirement is real
+    // and unguardable here; the assertion is that it is stated honestly.
+    vi.stubGlobal("ResizeObserver", undefined);
+    try {
+      expect(() => createTerminal(rootIn(), { features: () => [] })).toThrow(
+        /ResizeObserver is not a constructor/,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("the browse-cache sweep", () => {
