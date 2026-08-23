@@ -37,16 +37,38 @@ async function freshInkCentre(): Promise<typeof centreChipLabels> {
   return mod.centreChipLabels;
 }
 
-// The numbers below are not invented: each row's fontBox, baseline and capInk are
-// what the named engine actually reported for the bundled Monaspace Neon NF
-// against the deployed bundle, read via Playwright (fontBox and baseline from a
-// strut probe, cap ink from canvas TextMetrics at 400px). They exist to pin the
-// arithmetic to observed reality, and to document WHY a single em constant could
-// not work — the last column is the shift as a ratio of font size, and it is not
-// constant down any of them, nor even of one sign.
+// The numbers below started as readings, not inventions: each row's fontBox,
+// baseline and capInk is what the named engine once reported for the bundled
+// Monaspace Neon NF against the deployed bundle, read via Playwright (fontBox and
+// baseline from a strut probe, cap ink from canvas TextMetrics at 400px). They
+// exist to pin the arithmetic to engine-shaped readings, and to document WHY a
+// single em constant could not work — the last column is the shift as a ratio of
+// font size, and it is not constant down any of them, nor even of one sign.
+//
+// They are now a HISTORICAL record rather than a current reading, and the gap has
+// been measured. Re-read 2026-08-23 in the fixture the numbers came from
+// (scripts/verify-chip-geometry.mjs, WebKit 26.5 / Blink 151.0.7922.34 / Gecko
+// 153.0, bundled face served): not one row's fontBox-and-baseline pair is what its
+// engine reports today, and on FOUR of the seven the resulting shift is out by
+// almost exactly half a pixel — webkit 13px (row +0.226px, engine -0.273px),
+// chromium 13px (+0.223 / -0.277), chromium 14px (-0.145 / -0.645) and firefox
+// 14px (+0.391 / -0.110). The other three land within 0.01px, webkit 14px among
+// them only because its box and its baseline are both wrong and cancel. One cause,
+// not several: the engines' line boxes have moved. The --font-ui list was
+// suspected and refuted — `"Monaspace Neon NF", monospace` and `"Monaspace Neon
+// NF", ui-monospace, monospace` produce identical boxes, baselines and shifts in
+// all three — and Gecko now reports FRACTIONAL boxes (17.183px at 13px), which no
+// integer row can describe at all.
+//
+// Nothing here fails for that drift, deliberately: the cases below assert
+// inkShiftPx(m)/fontSizePx against each row's own expectedEm, which is arithmetic
+// over the row's own numbers, and the module exists precisely because no number is
+// portable. The CURRENT cross-engine readings live in
+// scripts/verify-chip-geometry.mjs, which measures them instead of recording them.
 const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[] = [
-  // WebKit 26.5 (the engine behind Safari 26). 13px rounds descent down to a
-  // 16px box; 14px rounds it up to 18px, which is the whole bug.
+  // WebKit 26.5 (the engine behind Safari 26), as it read then: 13px rounded
+  // descent down to a 16px box and 14px up to 18px, which is the whole bug — one
+  // size crossing a rounding boundary moves the shift. It reports 16 and 17 today.
   {
     engine: "webkit",
     fontSizePx: 13,
@@ -71,7 +93,8 @@ const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[]
     capInkEm: 0.7344,
     expectedEm: -0.0061,
   },
-  // Blink agrees with WebKit on the boxes and differs slightly on ink extents.
+  // Blink agreed with WebKit on the boxes then and differed slightly on ink
+  // extents. Today it reports 17 and 19 against WebKit's 16 and 17.
   {
     engine: "chromium",
     fontSizePx: 13,
@@ -88,8 +111,8 @@ const OBSERVED: readonly (InkMetrics & { engine: string; expectedEm: number })[]
     capInkEm: 0.735,
     expectedEm: -0.0104,
   },
-  // Gecko makes the 14px box 17px, not 18px, so it needs a different shift again
-  // at the size the other two share.
+  // Gecko made that 14px box 17px, not 18px, so it needed a different shift again
+  // at the size the other two share. Today it reports a fractional 18.433px.
   {
     engine: "firefox",
     fontSizePx: 13,
@@ -205,7 +228,8 @@ describe("centreChipLabels", () => {
     // would assert the browser, not the module. What IS pinned: a value is
     // written, to BOTH hosts, in the `toFixed(3)` px form the stylesheet's
     // calc() consumes, and it is finite. The cross-engine numbers live in
-    // scripts/verify-chip-geometry.mjs and in the OBSERVED table above.
+    // scripts/verify-chip-geometry.mjs and in the OBSERVED table above; what the
+    // shift DOES once the stylesheet consumes it is chip-geometry.test.ts.
     const { root, strip, switcher } = mount();
     const stop = centreChipLabels(root, { strip, switcher });
     const onStrip = strip.style.getPropertyValue("--label-ink-shift");
