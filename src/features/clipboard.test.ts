@@ -300,3 +300,77 @@ describe("clipboard: native-copy feedback toast is scoped to the terminal surfac
     expect(toast).not.toHaveBeenCalled();
   });
 });
+
+// The two kernel seams this feature holds — a keydown registration and a bus
+// subscription — are handed back as unsubscribe functions, and teardown calls
+// both. The fixtures above return no-op unsubscribes because those tests are
+// about what the feature DOES while mounted; this one models the kernel's actual
+// contract (the returned function removes the handler) so teardown has something
+// to fail at.
+describe("clipboard: teardown releases both kernel seams", () => {
+  function setupReleasable(): {
+    keydown: (ev: KeyboardEvent) => boolean;
+    emit: (topic: string, payload: unknown) => void;
+    toast: ReturnType<typeof vi.fn>;
+    inst: FeatureInstance<ClipboardApi>;
+  } {
+    let keydownFn: ((ev: KeyboardEvent) => boolean) | undefined;
+    const handlers = new Map<string, (payload: never) => void>();
+    const toast = vi.fn();
+    const ctx = {
+      registerKeydown: (fn: (ev: KeyboardEvent) => boolean): Unsubscribe => {
+        keydownFn = fn;
+        return () => {
+          keydownFn = undefined;
+        };
+      },
+      on: (topic: string, fn: (payload: never) => void): Unsubscribe => {
+        handlers.set(topic, fn);
+        return () => handlers.delete(topic);
+      },
+      surface: () => document.createElement("div"),
+      toast,
+      paste: vi.fn(),
+    } as unknown as TerminalContext;
+    const inst = clipboard().setup(ctx) as FeatureInstance<ClipboardApi>;
+    return {
+      keydown: (ev) => keydownFn?.(ev) ?? false,
+      emit: (topic, payload) => {
+        handlers.get(topic)?.(payload as never);
+      },
+      toast,
+      inst,
+    };
+  }
+
+  it("gives up the keydown registration, so Ctrl+Shift+V no longer reads the clipboard", () => {
+    // Held past teardown, the shortcut would keep consuming the chord for a
+    // feature that is gone: the keystroke reaches neither the clipboard nor the
+    // kernel's own mapping.
+    const readText = vi.fn().mockResolvedValue("x");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { keydown, inst } = setupReleasable();
+    expect(keydown(keyEvent({ code: "KeyV", ctrl: true, shift: true }))).toBe(true);
+
+    inst.teardown();
+
+    expect(keydown(keyEvent({ code: "KeyV", ctrl: true, shift: true }))).toBe(false);
+    expect(readText).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up the wire:clipboard subscription, so a late OSC 52 mirrors nothing", () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { emit, toast, inst } = setupReleasable();
+    emit("wire:clipboard", "from the app");
+    expect(writeText).toHaveBeenCalledWith("from the app");
+
+    inst.teardown();
+    emit("wire:clipboard", "after teardown");
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    // And no toast either: a mirror after teardown would surface "Copied" over a
+    // terminal the host has already taken down.
+    expect(toast).not.toHaveBeenCalled();
+  });
+});

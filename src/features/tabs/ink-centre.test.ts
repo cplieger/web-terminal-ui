@@ -458,3 +458,135 @@ describe("centreChipLabels — a site the engine can measure", () => {
     expect(shiftOn(switcher)).toBe("");
   });
 });
+
+// The measurement pipeline guards every reading it takes FROM the engine, and
+// the last guard covers the derived number rather than an input: three finite
+// readings can still combine into a non-finite shift, and the property is a
+// pixel length the stylesheet's own `calc()` consumes. `--label-ink-shift:
+// Infinitypx` is not a shift the CSS falls back from — it is an invalid value
+// that poisons the calc for every label at that site, which is strictly worse
+// than the em default the guard leaves in place.
+describe("centreChipLabels — a measurement that does not resolve to a number", () => {
+  const rect = (over: Partial<DOMRect>): DOMRect =>
+    ({
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      toJSON: () => ({}),
+      ...over,
+    }) as DOMRect;
+
+  const mount = (): { root: HTMLElement; strip: HTMLElement; switcher: HTMLElement } => {
+    const root = document.createElement("div");
+    root.className = "wt-root";
+    const strip = document.createElement("div");
+    strip.className = "wt-tab-bar";
+    const switcher = document.createElement("div");
+    switcher.className = "wt-switcher";
+    root.append(strip, switcher);
+    document.body.appendChild(root);
+    return { root, strip, switcher };
+  };
+
+  /** Every reading the module takes, with the ink extent under the test's
+   *  control. The rects are the same shape the measurable block above uses: a
+   *  19px line box at y=100 with the baseline 16px down. */
+  function stubReadings(inkAscentPx: number): void {
+    document.body.replaceChildren();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      font: "",
+      measureText: () => ({ actualBoundingBoxAscent: inkAscentPx }),
+    } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      () =>
+        ({
+          fontStyle: "normal",
+          fontWeight: "400",
+          fontSize: "16px",
+          fontFamily: '"Monaspace Neon NF"',
+        }) as unknown as CSSStyleDeclaration,
+    );
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: Element,
+    ) {
+      if (!this.isConnected) {
+        return rect({});
+      }
+      if ((this as HTMLElement).style.display === "inline-block") {
+        return rect({ top: 116, bottom: 116 });
+      }
+      return rect({ top: 100, bottom: 119, height: 19 });
+    });
+  }
+
+  it("leaves the CSS default in place when the shift does not come out finite", async () => {
+    // A non-finite ink extent passes the `capInk > 0` guard — Infinity is greater
+    // than zero — and the cap band it implies is unbounded, so the shift is
+    // -Infinity. Nothing about that is writable.
+    //
+    // Loaded fresh because the module caches the first non-null 2d context it
+    // gets in a module-level variable, so the block above's context (and its own
+    // ink knob) would answer this block's measurements.
+    vi.resetModules();
+    stubReadings(Number.POSITIVE_INFINITY);
+    const { centreChipLabels: fresh } = await import("./ink-centre.js");
+    const { root, strip, switcher } = mount();
+
+    const stop = fresh(root, { strip, switcher });
+
+    expect(strip.style.getPropertyValue("--label-ink-shift")).toBe("");
+    expect(switcher.style.getPropertyValue("--label-ink-shift")).toBe("");
+    stop();
+  });
+
+  it("still writes the shift for the same readings with a finite ink extent", async () => {
+    // The control for the case above: the pipeline is otherwise identical, so a
+    // guard that rejected everything would pass the previous test for the wrong
+    // reason.
+    vi.resetModules();
+    stubReadings(300);
+    const { centreChipLabels: fresh } = await import("./ink-centre.js");
+    const { root, strip, switcher } = mount();
+
+    const stop = fresh(root, { strip, switcher });
+
+    expect(strip.style.getPropertyValue("--label-ink-shift")).toBe("0.500px");
+    stop();
+  });
+});
+
+// The teardown contract says it "drops the listeners", and `disposed` makes a
+// surviving resize listener behaviourally silent — remeasure returns before it
+// touches anything, which is why the assertions above cannot tell a released
+// listener from a retained one. What a retained one still costs is a window
+// listener per mount, holding the closure (and through it the root and both
+// hosts) for the life of the page: a host that remounts the terminal accumulates
+// them. So the release itself is the assertion.
+describe("centreChipLabels — teardown releases the window listener it added", () => {
+  it("hands removeEventListener the very resize handler it registered", () => {
+    const added = vi.spyOn(window, "addEventListener");
+    const removed = vi.spyOn(window, "removeEventListener");
+    const root = document.createElement("div");
+    const strip = document.createElement("div");
+    const switcher = document.createElement("div");
+    root.append(strip, switcher);
+    document.body.appendChild(root);
+
+    const stop = centreChipLabels(root, { strip, switcher });
+    const registered = added.mock.calls.filter(([type]) => type === "resize");
+    expect(registered).toHaveLength(1);
+
+    stop();
+
+    const released = removed.mock.calls.filter(([type]) => type === "resize");
+    expect(released).toHaveLength(1);
+    // The same function object: removing a different one leaves the original
+    // bound, which is the shape this mistake actually takes.
+    expect(released[0]?.[1]).toBe(registered[0]?.[1]);
+  });
+});

@@ -183,3 +183,28 @@ describe("mobileToolbar: API + lifecycle", () => {
     expect(f.slot.querySelector(".key-toolbar")).toBeNull();
   });
 });
+
+describe("mobileToolbar: teardown releases the arm/disarm subscribers", () => {
+  it("a late arm from the engine reaches nobody once the toolbar is torn down", async () => {
+    // The subscriber here is the tab bar's keyboard button, which mirrors a
+    // pending Ctrl. It is the PEER's lifetime, not this feature's, so nothing
+    // guarantees it unsubscribed first — and ctrl.dispose() is the engine's
+    // binding, not a promise that no further arm/disarm arrives (the engine's
+    // own listeners can outlive a dispose by one dispatch). So the set is
+    // dropped, and a fan-out after teardown paints nothing on a chrome the
+    // composition has already taken down.
+    const f = fakeCtx();
+    const inst = (await mobileToolbar().setup(f.ctx)) as FeatureInstance<MobileToolbarApi>;
+    const api = inst.api as MobileToolbarApi;
+    const seen: boolean[] = [];
+    api.onCtrlArmedChange((a) => seen.push(a));
+    onCtrlChange?.(true);
+    expect(seen).toEqual([true]);
+
+    inst.teardown();
+    onCtrlChange?.(false);
+    onCtrlChange?.(true);
+
+    expect(seen).toEqual([true]);
+  });
+});

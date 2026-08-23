@@ -5,7 +5,7 @@
 // wrong predictions are worse than missing predictions, so anything
 // we don't model must suspend, not guess.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as predict from "./predict.js";
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
@@ -326,5 +326,50 @@ describe("predict: a consumed wrap does not wrap the next character too", () => 
     predict.applyInput(enc("y")); // consumes the wrap: (1,0) then advance
     predict.applyInput(enc("z")); // must NOT wrap again
     expect(predict.get()).toEqual({ row: 1, col: 2, active: true });
+  });
+});
+
+describe("predict: prediction is off until the first server frame", () => {
+  // Every test above starts from an onScreenFrame, because that is the state the
+  // renderer is in once a session is running. The state a page BOOTS in is
+  // different and is never re-entered: prediction is not armed, so nothing the
+  // user types moves the ghost cursor before the server has said where the real
+  // one is. Guessing from (0,0) would put a ghost cursor on a screen that has not
+  // been painted yet, over a session whose cursor is wherever the shell left it.
+  //
+  // The module keeps this state in module-scope variables, so the boot state only
+  // exists at load: the module is imported inside the test for that reason.
+  async function freshPredict(): Promise<typeof predict> {
+    vi.resetModules();
+    return import("./predict.js");
+  }
+
+  it("reports an inactive cursor at the origin before any frame arrives", async () => {
+    const p = await freshPredict();
+    expect(p.get()).toEqual({ row: 0, col: 0, active: false });
+  });
+
+  it("ignores typed input until a frame arms it", async () => {
+    const p = await freshPredict();
+    p.applyInput(new TextEncoder().encode("hello"));
+    expect(p.get()).toEqual({ row: 0, col: 0, active: false });
+  });
+
+  it("notifies no subscriber for input it ignored", async () => {
+    // The renderer redraws its overlay on every notification; an unarmed module
+    // that still called back would make it redraw a cursor it must not show.
+    const p = await freshPredict();
+    const onChange = vi.fn();
+    p.subscribe(onChange);
+    p.applyInput(new TextEncoder().encode("x"));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("starts predicting from the position the first frame reports", async () => {
+    const p = await freshPredict();
+    p.setDimensions(80, 24);
+    p.onScreenFrame(3, 7);
+    p.applyInput(new TextEncoder().encode("ab"));
+    expect(p.get()).toEqual({ row: 3, col: 9, active: true });
   });
 });

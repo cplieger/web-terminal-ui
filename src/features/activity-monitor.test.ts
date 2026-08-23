@@ -162,3 +162,39 @@ describe("activityMonitor: stream-open fan-out (restart reconcile hook)", () => 
     errSpy.mockRestore();
   });
 });
+
+describe("activityMonitor: teardown releases the subscribers", () => {
+  // stream.close() stops the SSE reader, but an event already handed to the
+  // callback is in flight and arrives afterwards; and the consumer (tabs) holds
+  // its subscription across a whole page lifetime. So teardown drops the
+  // subscriber sets rather than trusting the transport to fall silent, which is
+  // what keeps a torn-down feature from calling back into a torn-down consumer.
+  it("delivers no status to a subscriber registered before teardown", async () => {
+    const inst = await activityMonitor().setup(ctx);
+    const seen: string[] = [];
+    inst.api?.onStatus((s) => seen.push(s.id));
+    captured?.(status("before"));
+    expect(seen).toEqual(["before"]);
+
+    inst.teardown();
+    captured?.(status("after"));
+
+    expect(seen).toEqual(["before"]);
+  });
+
+  it("delivers no stream-open signal to a subscriber registered before teardown", async () => {
+    // The open signal is the one that makes tabs run a full GET /api/sessions
+    // reconcile, so a late one against a torn-down consumer is a request nobody
+    // asked for, against state nobody owns any more.
+    const inst = await activityMonitor().setup(ctx);
+    const opens = vi.fn();
+    inst.api?.onStreamOpen?.(opens);
+    capturedOpen?.();
+    expect(opens).toHaveBeenCalledTimes(1);
+
+    inst.teardown();
+    capturedOpen?.();
+
+    expect(opens).toHaveBeenCalledTimes(1);
+  });
+});

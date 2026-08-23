@@ -137,3 +137,21 @@ describe("scrollToBottom feature", () => {
     expect(offSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("scrollToBottom: an engine with no matchMedia at all", () => {
+  it("still smooth-scrolls, rather than failing on the media query", () => {
+    // window.matchMedia is feature-detected because the reduced-motion answer is
+    // an optimisation, not a requirement: an engine (or an embedding webview)
+    // without the media-query API must still get a working button. Calling it
+    // unguarded throws inside the click handler, which loses the scroll AND
+    // whatever the handler would have done next.
+    vi.stubGlobal("matchMedia", undefined);
+    const { ctx, slot, surface, scrollToBottomSpy } = fakeCtx();
+    scrollToBottom().setup(ctx);
+
+    button(slot)?.click();
+
+    expect(surface.scrollTo).toHaveBeenCalledWith({ top: 700, behavior: "smooth" });
+    expect(scrollToBottomSpy).not.toHaveBeenCalled();
+  });
+});

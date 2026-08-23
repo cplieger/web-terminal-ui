@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { fromHTML, holdFocusOnPress, PRESSED_CLASS } from "./dom.js";
 
 // happy-dom ships no PointerEvent, so the pointer events are spelled as
@@ -87,5 +87,113 @@ describe("holdFocusOnPress", () => {
     btn.classList.add(PRESSED_CLASS);
     window.dispatchEvent(pointer("pointerup"));
     expect(btn.classList.contains(PRESSED_CLASS)).toBe(true);
+  });
+});
+
+// The release listeners are the one part of holdFocusOnPress with no visible
+// effect of its own: `end` only calls `release?.()`, so a listener left behind
+// after a press is INDISTINGUISHABLE from a fresh one by dispatching events —
+// it does the same nothing. What it is not is free: it is a window listener per
+// press that keeps the button alive for the life of the page, which is why the
+// module binds every one of them to the press's own AbortController. These tests
+// assert that registration, because it is the only observable the contract has.
+describe("holdFocusOnPress — a press owns its release listeners", () => {
+  const button = (): HTMLElement => fromHTML(`<button type="button" class="wt-btn"></button>`);
+
+  const pointer = (type: string, init: MouseEventInit = {}): MouseEvent =>
+    new MouseEvent(type, { bubbles: true, cancelable: true, ...init });
+
+  interface Registration {
+    readonly target: "window" | "button";
+    readonly type: string;
+    readonly options: AddEventListenerOptions | undefined;
+  }
+
+  /** Records the release-listener registrations holdFocusOnPress makes, in order.
+   *  The spies call through, so the real wiring still happens; the pointerdown
+   *  registration that arms the press is not a release listener and is filtered
+   *  out. */
+  function watchRegistrations(btn: HTMLElement): () => Registration[] {
+    const onWindow = vi.spyOn(window, "addEventListener");
+    const onButton = vi.spyOn(btn, "addEventListener");
+    const collect = (target: "window" | "button", spy: typeof onWindow): Registration[] =>
+      spy.mock.calls
+        .filter(([type]) => type !== "pointerdown")
+        .map(([type, , options]) => ({
+          target,
+          type: String(type),
+          options: (typeof options === "object" ? options : undefined) ?? undefined,
+        }));
+    return () => [...collect("window", onWindow), ...collect("button", onButton)];
+  }
+
+  it("registers every release listener against one abort signal for the press", () => {
+    const btn = button();
+    const registrations = watchRegistrations(btn);
+    holdFocusOnPress(btn);
+    btn.dispatchEvent(pointer("pointerdown"));
+
+    const regs = registrations();
+    expect(regs.map((r) => `${r.target}:${r.type}`)).toEqual([
+      "window:pointerup",
+      "window:pointercancel",
+      "button:pointerleave",
+    ]);
+    // One controller for the whole press: a release cannot drop two of the three
+    // and leave the last one bound to a button that has already come back up.
+    const signals = regs.map((r) => r.options?.signal);
+    expect(signals.every((s) => s !== undefined)).toBe(true);
+    expect(new Set(signals).size).toBe(1);
+    expect(signals[0]?.aborted).toBe(false);
+  });
+
+  it("aborts that signal on the release, so the listeners are gone and not merely inert", () => {
+    const btn = button();
+    const registrations = watchRegistrations(btn);
+    holdFocusOnPress(btn);
+    btn.dispatchEvent(pointer("pointerdown"));
+    const signal = registrations()[0]?.options?.signal;
+
+    window.dispatchEvent(pointer("pointerup"));
+
+    expect(btn.classList.contains(PRESSED_CLASS)).toBe(false);
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it.each(["pointercancel", "pointerleave"])(
+    "aborts that signal when the press ends on %s too",
+    (type) => {
+      const btn = button();
+      const registrations = watchRegistrations(btn);
+      holdFocusOnPress(btn);
+      btn.dispatchEvent(pointer("pointerdown"));
+      const signal = registrations()[0]?.options?.signal;
+
+      if (type === "pointerleave") {
+        btn.dispatchEvent(pointer(type));
+      } else {
+        window.dispatchEvent(pointer(type));
+      }
+
+      expect(signal?.aborted).toBe(true);
+    },
+  );
+
+  it("ignores a second pointerdown while the press is live instead of starting a second press", () => {
+    // A second finger, or a synthetic pointerdown from an embedding host. Without
+    // the guard the second press installs its own controller and orphans the
+    // first one's listeners: the release aborts only the newest, so the page
+    // accumulates window listeners for as long as the user keeps pressing.
+    const btn = button();
+    const registrations = watchRegistrations(btn);
+    holdFocusOnPress(btn);
+    btn.dispatchEvent(pointer("pointerdown"));
+    btn.dispatchEvent(pointer("pointerdown"));
+
+    const regs = registrations();
+    expect(regs).toHaveLength(3);
+
+    window.dispatchEvent(pointer("pointerup"));
+    expect(regs.every((r) => r.options?.signal?.aborted === true)).toBe(true);
   });
 });
