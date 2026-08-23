@@ -98,20 +98,36 @@ visible ink centres on its chip within 0.05px, and the gap from the chip's inner
 edge to the activity dot equals the gap from the dot to the label. Four earlier
 fixes to the centring shipped a hardcoded correction constant and each was wrong
 somewhere else, and the dot's gaps sat 8px against 6px for as long. Both classes
-are invisible to the rest of the battery: sub-pixel or single-pixel, needing real
-layout that `happy-dom` does not have, and only visible at a size or in an engine
-the author did not happen to open.
+are invisible to the rest of the battery: sub-pixel or single-pixel, and only
+visible at a size or in an engine the author did not happen to open. The unit
+suite runs in a real headless Chromium and does measure real layout, but only in
+Chromium and only at the one viewport the config pins.
 
-Playwright is not a devDependency here (three engines is ~300 MB, and the
-`validate` gate is deliberately cheap, so this is not wired into CI). The script
-resolves `playwright-core` from the sibling engine checkout, the same way
-`verify.sh` reaches for the local engine; override with `PLAYWRIGHT_DIR`. Once
+This script is not wired into CI: it drives three engines (~300 MB of browsers)
+and the `validate` gate is deliberately cheap. The unit suite's own Chromium
+arrives with the `playwright` devDependency, so Blink is now available in CI if
+this is ever wired up; WebKit and Gecko still are not. The script resolves
+`playwright-core` from the sibling engine checkout, the same way `verify.sh`
+reaches for the local engine; override with `PLAYWRIGHT_DIR`. Once
 per machine: `npx playwright install webkit chromium firefox`. Without `--font`
 it measures the platform monospace instead, which is a useful second case since
 the correction must not depend on the font.
 
 ### Conventions and gotchas
 
+- **Tests run in a real browser by default; `.node.test.ts` is the opt-out.**
+  `vitest --run` has two projects: `browser`, a headless Chromium at a pinned
+  1280x720 viewport, which takes every `src/**/*.test.ts`; and `node`, which takes
+  only `src/**/*.node.test.ts`. Use the suffix ONLY for a test that needs a Node
+  capability — a `node:fs` read, a golden written under `UPDATE_GOLDEN=1` — because
+  that is the case which fails loudly when it is misplaced. A test whose subject is
+  a browser capability being ABSENT (`document.fonts`, `screen.orientation`,
+  `navigator.setAppBadge`) does NOT belong in the node project: Node has no
+  `document` either, so it would pass for a third wrong reason. Keep it in the
+  browser project and shadow the one capability at the site with an own
+  `undefined`, restoring the captured descriptor afterwards. A plain `delete`
+  cannot create absence for anything defined on a prototype — it drops your shadow
+  and re-exposes the real API for whatever test runs next.
 - **Never hardcode a font-metric constant.** Engines round a font's ascent and
   descent to whole CSS pixels before laying out a line box, so anything derived
   from them is a sawtooth in font size, not a ratio: the shift a 14px label needs

@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 import { describe, it, expect, vi } from "vitest";
 import { connectionBanner } from "./connection-banner.js";
 import type { ConnState, TerminalContext, FeatureInstance } from "../kernel/types.js";

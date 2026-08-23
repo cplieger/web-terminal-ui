@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // The kernel's ENGINE SEAM: every callback the kernel hands the engine's
 // connection/render/scroll modules, driven from the outside.
 //
@@ -16,11 +14,14 @@
 // render.init and scroll.init. That is also the seam a FEATURE test needs to reach
 // the kernel's wire:* events — the frame goes in here and comes out on the bus.
 //
-// happy-dom has no `document.fonts`, so the kernel's font-ready path takes its
-// synchronous catch and `fontsLoaded` is already true by the time any test runs.
-// The suites that care about the not-yet-loaded state install a real-shaped
-// `document.fonts` first (stubFonts below); everything else gets the settled
-// state, which is the common case anyway.
+// The kernel's font-ready path is gated on `document.fonts`, which a real
+// browser always provides, so this file installs the shape it wants rather than
+// inheriting one. Every test starts from the SETTLED shape (a load that has
+// already resolved), because that is the common case and the state most suites
+// assume; the suites that care about the not-yet-loaded state install the
+// controllable pending shape instead (stubFonts below). Stating it per test
+// rather than once in this header is the point: a premise no filename and no
+// environment can carry is a premise ~40 tests inherit without declaring it.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -131,6 +132,10 @@ beforeEach(async () => {
   updateFontMetrics.mockClear();
   currentSessionId.mockReturnValue("session-under-test");
   document.body.replaceChildren();
+  // The settled shape, stated rather than inherited: a load that has already
+  // resolved, so the kernel's font gate opens on the first microtask after mount
+  // instead of depending on what the host environment happens to provide.
+  restoreFonts = shadowFonts({ load: () => Promise.resolve([]) });
   ({ createTerminal } = await import("./kernel.js"));
 });
 
@@ -138,11 +143,24 @@ afterEach(() => {
   while (mounted.length > 0) {
     mounted.pop()?.destroy();
   }
-  Reflect.deleteProperty(document, "fonts");
+  restoreFonts();
+  restoreFonts = () => undefined;
   vi.useRealTimers();
 });
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+/** Waits out the viewport settle window that every mount opens.
+ *
+ *  viewport.init() observes the terminal wrap with a ResizeObserver, and a real
+ *  one delivers its FIRST observation asynchronously after observe(), so mounting
+ *  a terminal always starts a transition. `measurableSize()` declines while one
+ *  is in flight, which is a SECOND reason for a null size on top of the fonts
+ *  gate — so a fonts assertion that skips this can pass for the viewport's
+ *  reason instead of its own. 400ms clears viewport.ts's 350ms settle. The
+ *  viewport gate has its own test, on fake timers. */
+const viewportSettled = (): Promise<void> => new Promise((r) => setTimeout(r, 400));
+
 const nextFrame = (): Promise<void> =>
   new Promise((r) => {
     requestAnimationFrame(() => {
@@ -156,9 +174,32 @@ function rootIn(): HTMLElement {
   return root;
 }
 
-/** Install a `document.fonts` happy-dom does not provide, whose load promise this
- *  test controls. Returns the resolver; calling it settles the font load the way a
- *  webfont swap does. */
+/** Installs `value` as an own `document.fonts` and returns the restore.
+ *
+ *  `fonts` is an accessor on Document.prototype, so `delete document.fonts` does
+ *  not remove it — it drops the own shadow and re-exposes the platform's real
+ *  FontFaceSet. The restore therefore has to put back the descriptor that was
+ *  actually there, which for the platform's own accessor means removing the
+ *  shadow and nothing else. */
+function shadowFonts(value: unknown): () => void {
+  const saved = Object.getOwnPropertyDescriptor(document, "fonts");
+  Object.defineProperty(document, "fonts", { value, configurable: true, writable: true });
+  return () => {
+    if (saved) {
+      Object.defineProperty(document, "fonts", saved);
+    } else {
+      Reflect.deleteProperty(document, "fonts");
+    }
+  };
+}
+
+/** Undoes whatever shape the current test installed. Set in beforeEach, before
+ *  anything is installed, so it always returns to the platform's own state
+ *  regardless of how many times a test re-shaped `document.fonts`. */
+let restoreFonts: () => void = () => undefined;
+
+/** Replace the settled default with a load promise this test controls. Returns
+ *  the resolver; calling it settles the font load the way a webfont swap does. */
 function stubFonts(): () => void {
   let settle = (): void => undefined;
   const pending = new Promise<FontFace[]>((resolve) => {
@@ -543,7 +584,7 @@ describe("the resize announce, and the two things it waits for", () => {
   it("does not announce a size while the fonts are still loading", async () => {
     stubFonts();
     mount({ features: () => [] });
-    await tick();
+    await viewportSettled();
     sendResize.mockClear();
 
     wire().onOpen();
@@ -553,7 +594,7 @@ describe("the resize announce, and the two things it waits for", () => {
 
   it("announces on open once the fonts have settled", async () => {
     mount({ features: () => [] });
-    await tick();
+    await viewportSettled();
     sendResize.mockClear();
 
     wire().onOpen();
@@ -564,7 +605,7 @@ describe("the resize announce, and the two things it waits for", () => {
   it("announces when the fonts settle after the socket is already open", async () => {
     const settle = stubFonts();
     mount({ features: () => [] });
-    await tick();
+    await viewportSettled();
     wire().onOpen();
     sendResize.mockClear();
 
@@ -578,7 +619,11 @@ describe("the resize announce, and the two things it waits for", () => {
   it("does not announce a size before the socket is open, however measurable it is", async () => {
     // The fonts settle during startup and schedule their own attempt; with no
     // socket open it has to decline, or the engine buffers a resize for a
-    // connection that has not negotiated yet.
+    // connection that has not negotiated yet. That font-settle attempt is this
+    // test's subject, so it deliberately does NOT wait out the viewport settle:
+    // the kernel's viewport-settle arm calls connection.sendResize() without
+    // consulting wsOpen, relying on the engine's own `connState.status !==
+    // "connected"` early return, which a mocked engine cannot show.
     mount({ features: () => [] });
     await tick();
     await nextFrame();
@@ -591,7 +636,7 @@ describe("the resize announce, and the two things it waits for", () => {
     // computed from metrics measured before the webfont swapped is wrong in
     // exactly the way the fonts gate exists to avoid.
     mount({ features: () => [] });
-    await tick();
+    await viewportSettled();
     updateFontMetrics.mockClear();
 
     const size = wire().initialSize?.();
@@ -603,7 +648,7 @@ describe("the resize announce, and the two things it waits for", () => {
   it("reports NO size to the resume while the fonts are still loading", async () => {
     stubFonts();
     mount({ features: () => [] });
-    await tick();
+    await viewportSettled();
 
     expect(wire().initialSize?.()).toBeNull();
   });

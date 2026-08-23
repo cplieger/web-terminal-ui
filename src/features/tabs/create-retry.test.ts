@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // createSessionHonouringRetry: the loop that answers a host which TEMPORARILY
 // refuses session creation (web-terminal-kiro's 503 + Retry-After while its tool
 // engine installs the manifest's tools on first boot). index.test.ts covers the

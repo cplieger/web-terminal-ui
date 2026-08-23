@@ -249,9 +249,9 @@ export function centreChipLabels(
   };
 
   remeasure(false);
-  // The DOM lib types document.fonts as always present; happy-dom ships no
-  // FontFaceSet at all, and neither does any engine without the CSS Font
-  // Loading API, so the honest type is the optional one.
+  // The DOM lib types document.fonts as always present; an engine without the CSS
+  // Font Loading API ships no FontFaceSet at all, so the honest type is the
+  // optional one.
   const fonts = document.fonts as FontFaceSet | undefined;
   // `ready` settles the initial load (including a failed one); `loadingdone`
   // covers a face the host page adds afterwards, which `ready` never reports.

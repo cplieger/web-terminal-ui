@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 import { describe, it, expect, vi } from "vitest";
 import { scrollToBottom } from "./scroll-to-bottom.js";
 import type { TerminalContext, FeatureInstance } from "../kernel/types.js";
@@ -18,7 +17,9 @@ function fakeCtx(): {
   const slot = document.createElement("div");
   const surface = document.createElement("div");
   surface.scrollTo = vi.fn();
-  // happy-dom has no layout, so the scroll geometry is declared. The default is
+  // The scroll geometry is declared, not measured: it is an INPUT to the distance
+  // arithmetic under test, and a detached div with no content has none. The default
+  // is
   // "there is somewhere to scroll to" (700px of range, parked at the top), which
   // is the state the button exists for; the zero-distance case gets its own test
   // because the feature branches on it.
@@ -39,6 +40,12 @@ function fakeCtx(): {
     region: () => slot,
     surface: () => surface,
     scroll: {
+      // Reached through viewport.ts's settle handler, which a real browser fires on
+      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
+      // real one delivers its first observation asynchronously, so every mount opens a
+      // transition that settles ~350ms later and pins to the bottom. Absent from the
+      // double, that settle throws out of a timer as an unhandled error.
+      stickToBottom: vi.fn(),
       scrollToBottom: scrollToBottomSpy,
       isUserScrolledUp: () => false,
       currentScrollTop: () => 0,

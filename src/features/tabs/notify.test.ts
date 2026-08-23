@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // tabs/notify.ts tests: the OSC 9 Form B notification policy. Every capability
 // is injected (NotifierEnv), so the suppression rule, the dedupe, the
 // gesture-gated permission request and the degradation paths are exercised
@@ -137,10 +135,15 @@ describe("createNotifier delivery", () => {
     // Verbatim, unescaped, unparsed: the browser renders it as text.
     expect(posts[0]?.body).toBe(hostile);
     expect(posts[0]?.title).toBe("<b>agent</b>");
-    // And no markup materialised anywhere in the document.
-    expect(document.querySelector("img")).toBeNull();
-    expect(document.querySelector("script")).toBeNull();
+    // And no markup materialised anywhere in the document. Scoped to body for the
+    // element queries because the test page has <script> tags of its own, which a
+    // document-wide querySelector finds and which have nothing to do with this
+    // payload; the whole-document check is on the payload's own text instead, which
+    // is stricter than either query — it would catch the string landing in <head>.
+    expect(document.body.querySelector("img")).toBeNull();
+    expect(document.body.querySelector("script")).toBeNull();
     expect(document.body.innerHTML).toBe("");
+    expect(document.documentElement.innerHTML).not.toContain("globalThis.__pwned");
     expect((globalThis as { __pwned?: boolean }).__pwned).toBeUndefined();
   });
 

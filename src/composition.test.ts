@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
 import * as composition from "./composition.js";
 import { keyboard } from "@cplieger/web-terminal-engine";
@@ -46,12 +45,8 @@ function pasteEvent(text: string): ClipboardEvent {
   return ev;
 }
 
-// happy-dom's CompositionEvent constructor drops the `data` init member, so the
-// in-progress text has to be planted on the event the same way clipboardData is.
 function compositionUpdate(data: string): CompositionEvent {
-  const ev = new CompositionEvent("compositionupdate");
-  Object.defineProperty(ev, "data", { configurable: true, value: data });
-  return ev;
+  return new CompositionEvent("compositionupdate", { data });
 }
 
 describe("composition: native paste is bracketed and sanitized (paste-jacking defense)", () => {

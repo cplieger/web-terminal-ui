@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // contextMenu tests. The terminal's keyboard target is a 1x1
 // pointer-events:none textarea, so no platform can offer a native Paste over the
 // output; this menu is the paste path, on a desktop right-click and on a touch
@@ -45,6 +43,12 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       boundStore: vi.fn(),
     },
     scroll: {
+      // Reached through viewport.ts's settle handler, which a real browser fires on
+      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
+      // real one delivers its first observation asynchronously, so every mount opens a
+      // transition that settles ~350ms later and pins to the bottom. Absent from the
+      // double, that settle throws out of a timer as an unhandled error.
+      stickToBottom: vi.fn(),
       init: vi.fn(),
       scrollToBottom: vi.fn(),
       isUserScrolledUp: vi.fn(() => false),
@@ -93,10 +97,11 @@ const itemNamed = (root: HTMLElement, label: string): HTMLButtonElement | undefi
     (b) => b.textContent === label,
   );
 
-// happy-dom has no TouchEvent constructor, so shape a plain event with the
-// single-touch fields the handlers read. `timeStamp` is set explicitly: the touch
-// classifier measures the press from touchstart to touchend, so a hold of any
-// length is expressed here without the test actually waiting for it.
+// A single-touch event with the fields the handlers read. `timeStamp` is set
+// explicitly: the touch classifier measures the press from touchstart to touchend,
+// so a hold of any length is expressed here without the test actually waiting for
+// it, which a constructed TouchEvent cannot express (timeStamp is read-only and
+// set by the engine).
 interface TouchPoint {
   x: number;
   y: number;
@@ -220,7 +225,9 @@ describe("contextMenu — desktop right-click", () => {
     if (!menu) {
       return;
     }
-    // happy-dom has no layout, so give the menu a measurable size.
+    // The menu's measured size is an INPUT to the placement under test. Declared
+    // rather than measured because no stylesheet is loaded here, so an unstyled
+    // block div measures the full body width and nothing like a real menu.
     Object.defineProperty(menu, "offsetHeight", { configurable: true, value: 200 });
     Object.defineProperty(menu, "offsetWidth", { configurable: true, value: 160 });
 
@@ -642,6 +649,15 @@ describe("contextMenu — Select All", () => {
     // selected nothing, Copy would have nothing to copy the next time round.
     const { root, surface } = await mount();
     const output = root.querySelector<HTMLElement>(".term-output");
+    // The stylesheet is not loaded here, and `white-space` decides what a selection
+    // READS as: a real browser collapses the newline in this text node to a space
+    // unless the box preserves it, so toString() would report "line one line two"
+    // for a selection that is in fact correct. `pre` is what 02-terminal.css gives
+    // .term-output, so this restores the production premise rather than relaxing the
+    // assertion.
+    if (output) {
+      output.style.whiteSpace = "pre";
+    }
     output?.append(document.createTextNode("line one\nline two"));
     surface.dispatchEvent(
       new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),

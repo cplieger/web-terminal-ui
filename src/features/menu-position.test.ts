@@ -1,9 +1,17 @@
-// @vitest-environment happy-dom
 import { describe, it, expect, afterEach, vi } from "vitest";
 
 import { createClickSwallow, placeMenuAt } from "./menu-position.js";
 
-// happy-dom does no layout: stub the menu's measured size and the viewport.
+// The menu's measured size and the viewport are both INPUTS here, stubbed so the
+// derived pixels are pinned exactly. The size stub is not an emulator
+// workaround: an empty block div has no intrinsic 100x150, in any engine.
+//
+// The viewport stub is fakeVisualViewport, and it has to be, because
+// menu-position.ts reads window.visualViewport FIRST and only falls back to
+// innerWidth/innerHeight. Stubbing the two inner* globals instead leaves the real
+// visualViewport in place, so production reads the real window and every derived
+// pixel below is computed against the wrong box. The fallback arm has its own
+// test at the end of the first block.
 
 function makeMenu(width: number, height: number): HTMLElement {
   const menu = document.createElement("div");
@@ -28,8 +36,7 @@ afterEach(() => {
 
 describe("placeMenuAt", () => {
   it("opens just below the point when it fits", () => {
-    vi.stubGlobal("innerWidth", 800);
-    vi.stubGlobal("innerHeight", 600);
+    fakeVisualViewport({ offsetLeft: 0, offsetTop: 0, width: 800, height: 600 });
     const menu = makeMenu(100, 150);
     placeMenuAt(menu, 200, 100);
     expect(menu.style.left).toBe("200px");
@@ -37,8 +44,7 @@ describe("placeMenuAt", () => {
   });
 
   it("clamps to the right and left edges with the 8px margin", () => {
-    vi.stubGlobal("innerWidth", 800);
-    vi.stubGlobal("innerHeight", 600);
+    fakeVisualViewport({ offsetLeft: 0, offsetTop: 0, width: 800, height: 600 });
     const menu = makeMenu(100, 150);
     placeMenuAt(menu, 790, 100);
     expect(menu.style.left).toBe("692px"); // 800 - 100 - 8
@@ -47,8 +53,7 @@ describe("placeMenuAt", () => {
   });
 
   it("flips above the point near the bottom edge, with the 16px fingertip gap", () => {
-    vi.stubGlobal("innerWidth", 800);
-    vi.stubGlobal("innerHeight", 600);
+    fakeVisualViewport({ offsetLeft: 0, offsetTop: 0, width: 800, height: 600 });
     const menu = makeMenu(100, 150);
     placeMenuAt(menu, 200, 580);
     // 580 + 150 + 8 > 600 → flip: 580 - 150 - 16 = 414
@@ -66,28 +71,43 @@ describe("placeMenuAt", () => {
   });
 
   it("never places above the visible top (clamps the flipped position)", () => {
-    vi.stubGlobal("innerWidth", 800);
-    vi.stubGlobal("innerHeight", 200);
+    fakeVisualViewport({ offsetLeft: 0, offsetTop: 0, width: 800, height: 200 });
     const menu = makeMenu(100, 190);
     placeMenuAt(menu, 10, 195);
     // The flip target (195 - 190 - 16 = -11) is off-screen; the top clamp
     // wins so the menu pins to the 8px margin.
     expect(menu.style.top).toBe("8px");
   });
+  it("falls back to the layout viewport where there is no visual viewport", () => {
+    // Every other case here goes through visualViewport because that is what
+    // production prefers. This one pins the else: a browser without the API (or a
+    // context where it is absent) has to place off innerWidth/innerHeight, with
+    // the view origin at 0,0. Shadowing it with undefined is the only way to
+    // reach that arm in a browser that ships the API.
+    vi.stubGlobal("visualViewport", undefined);
+    vi.stubGlobal("innerWidth", 800);
+    vi.stubGlobal("innerHeight", 600);
+    const menu = makeMenu(100, 150);
+    placeMenuAt(menu, 200, 100);
+    expect(menu.style.left).toBe("200px");
+    expect(menu.style.top).toBe("100px");
+    // The same right-edge clamp as the visualViewport case, derived from
+    // innerWidth this time.
+    placeMenuAt(menu, 790, 100);
+    expect(menu.style.left).toBe("692px"); // 800 - 100 - 8
+  });
 });
 
 describe("placeMenuAt: the flip boundary", () => {
   it("keeps the menu below the point when its bottom lands exactly on the margin", () => {
-    vi.stubGlobal("innerWidth", 800);
-    vi.stubGlobal("innerHeight", 600);
+    fakeVisualViewport({ offsetLeft: 0, offsetTop: 0, width: 800, height: 600 });
     const menu = makeMenu(100, 150);
     placeMenuAt(menu, 200, 442); // 442 + 150 + 8 === 600, the margin itself
     expect(menu.style.top).toBe("442px");
   });
 
   it("flips as soon as the menu would cross the bottom margin", () => {
-    vi.stubGlobal("innerWidth", 800);
-    vi.stubGlobal("innerHeight", 600);
+    fakeVisualViewport({ offsetLeft: 0, offsetTop: 0, width: 800, height: 600 });
     const menu = makeMenu(100, 150);
     placeMenuAt(menu, 200, 445); // 445 + 150 + 8 = 603, three past the margin
     expect(menu.style.top).toBe("279px"); // 445 - 150 - 16
@@ -106,8 +126,7 @@ describe("placeMenuAt: the flip boundary", () => {
   it("rebases the viewport-space result onto the offsetParent's box", () => {
     // The menu is absolute-positioned against .wt-root, which need not sit at the
     // viewport origin when the terminal is embedded in a panel.
-    vi.stubGlobal("innerWidth", 800);
-    vi.stubGlobal("innerHeight", 600);
+    fakeVisualViewport({ offsetLeft: 0, offsetTop: 0, width: 800, height: 600 });
     const menu = makeMenu(100, 150);
     const hostRect = {
       x: 40,

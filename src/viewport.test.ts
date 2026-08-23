@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as ViewportModule from "./viewport.js";
@@ -29,11 +28,55 @@ let viewport: typeof ViewportModule;
 let termWrap: HTMLElement;
 let onSettled: Mock<(wasAtBottom: boolean) => void>;
 
+/** Installs `value` as an own property of `host` and returns the restore.
+ *
+ *  A plain `delete` cannot be the restore. `visualViewport` and
+ *  `screen.orientation` are accessors on Window.prototype / Screen.prototype, so
+ *  deleting the own shadow does not remove the property — it re-exposes the
+ *  platform's real one. Capturing the descriptor and putting that back means the
+ *  same thing whether or not the platform provides it, which is what a cleanup
+ *  has to do when the next test's premise may be either. */
+function shadowOwn(host: object, key: string, value: unknown): () => void {
+  const saved = Object.getOwnPropertyDescriptor(host, key);
+  Object.defineProperty(host, key, { configurable: true, value, writable: true });
+  return () => {
+    if (saved) {
+      Object.defineProperty(host, key, saved);
+    } else {
+      Reflect.deleteProperty(host, key);
+    }
+  };
+}
+
+/** Restores whatever this test shadowed. Reassigned per install; called from the
+ *  owning afterEach. */
+let restoreShadow: () => void = () => undefined;
+function undoShadow(): void {
+  restoreShadow();
+  restoreShadow = () => undefined;
+}
+
+/** A fresh evaluation of viewport.ts.
+ *
+ *  viewport.ts keeps module-level state (the transition latch, the settle timer,
+ *  the cleanup list), and every test here calls init(), so the state has to start
+ *  clean. `vi.resetModules()` cannot do that in a browser: the module map is
+ *  URL-keyed, so the re-import returns the CACHED instance and every test shares
+ *  one latch and one growing cleanup list. Busting the query mints a new
+ *  instance. The `.ts` extension is load-bearing: written `.js` the suite still
+ *  passes while v8 attributes every evaluation to a file that does not exist and
+ *  coverage for this module collapses to nothing. */
+let bootCount = 0;
+async function freshViewport(): Promise<typeof ViewportModule> {
+  return (await import(
+    /* @vite-ignore */ `./viewport.ts?boot=${++bootCount}`
+  )) as typeof ViewportModule;
+}
+
 beforeEach(async () => {
   vi.useFakeTimers();
-  vi.resetModules();
   isUserScrolledUp.mockReturnValue(false);
-  viewport = await import("./viewport.js");
+  viewport = await freshViewport();
   termWrap = document.createElement("div");
   document.body.replaceChildren(termWrap);
   onSettled = vi.fn<(wasAtBottom: boolean) => void>();
@@ -116,7 +159,7 @@ describe("viewport: settle lifecycle", () => {
 describe("viewport: visualViewport keyboard inset", () => {
   afterEach(() => {
     viewport.teardown();
-    Reflect.deleteProperty(window, "visualViewport");
+    undoShadow();
   });
 
   it("pins the term wrap to the visual viewport and publishes --kb-inset/--vv-top", () => {
@@ -126,7 +169,7 @@ describe("viewport: visualViewport keyboard inset", () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     };
-    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
     const tw = document.createElement("div");
     const root = document.createElement("div");
     root.appendChild(tw);
@@ -148,7 +191,7 @@ describe("viewport: visualViewport keyboard inset", () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     };
-    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
     const tw = document.createElement("div");
     const root = document.createElement("div");
     root.appendChild(tw);
@@ -172,7 +215,7 @@ describe("viewport: visualViewport keyboard inset", () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     };
-    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
     const tw = document.createElement("div");
     const root = document.createElement("div");
     root.appendChild(tw);
@@ -192,7 +235,7 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
   });
   afterEach(() => {
     viewport.teardown();
-    Reflect.deleteProperty(window, "visualViewport");
+    undoShadow();
     Object.defineProperty(window, "innerHeight", { configurable: true, value: realInnerHeight });
   });
 
@@ -203,7 +246,7 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     };
-    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
     const tw = document.createElement("div");
     tw.style.setProperty("--wt-reserve-bottom", "48px");
     const root = document.createElement("div");
@@ -222,7 +265,7 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     };
-    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
     // A reserve near/over the screen height (e.g. the switcher bar measured while a
     // phantom keyboard inset had lifted it) must be clamped so it never strands the
     // lower screen black. round(innerHeight / 3) == round(900 / 3) == 300.
@@ -278,7 +321,7 @@ describe("viewport: the visual-viewport wiring reacts after init", () => {
   beforeEach(() => {
     viewport.teardown(); // drop the beforeEach init's window listeners first
     vv = liveVisualViewport(window.innerHeight, 0);
-    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
     root = document.createElement("div");
     const tw = document.createElement("div");
     root.appendChild(tw);
@@ -288,7 +331,7 @@ describe("viewport: the visual-viewport wiring reacts after init", () => {
 
   afterEach(() => {
     viewport.teardown();
-    Reflect.deleteProperty(window, "visualViewport");
+    undoShadow();
   });
 
   it("republishes the keyboard inset when the keyboard opens after init", () => {
@@ -329,7 +372,7 @@ describe("viewport: teardown releases every listener it attached", () => {
   beforeEach(() => {
     viewport.teardown();
     vv = liveVisualViewport(window.innerHeight - 200, 0);
-    Object.defineProperty(window, "visualViewport", { configurable: true, value: vv });
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
     root = document.createElement("div");
     const tw = document.createElement("div");
     root.appendChild(tw);
@@ -340,7 +383,7 @@ describe("viewport: teardown releases every listener it attached", () => {
   });
 
   afterEach(() => {
-    Reflect.deleteProperty(window, "visualViewport");
+    undoShadow();
   });
 
   it("clears the geometry vars it published, so a destroy without a remount leaves no inset", () => {
@@ -379,24 +422,39 @@ describe("viewport: teardown releases every listener it attached", () => {
 describe("viewport: rotation is a re-measure signal on both Safari generations", () => {
   afterEach(() => {
     viewport.teardown();
-    Reflect.deleteProperty(screen, "orientation");
+    undoShadow();
   });
 
   it("re-measures on screen.orientation change where the modern API exists", () => {
     viewport.teardown();
     const orientation = liveVisualViewport(0, 0); // reused as a bare event target
-    Object.defineProperty(screen, "orientation", { configurable: true, value: orientation });
+    restoreShadow = shadowOwn(screen, "orientation", orientation);
     viewport.init({ termWrap, onSettled });
+    // init() reads the real visualViewport and publishes its geometry, which
+    // starts a transition of its own; flush it so the rotation below is the only
+    // signal under test (the outer beforeEach does the same after its init).
+    vi.advanceTimersByTime(SETTLE_MS + 50);
     expect(viewport.isInTransition()).toBe(false);
     orientation.fire("change");
     expect(viewport.isInTransition()).toBe(true);
   });
 
   it("does not listen for the deprecated window event on a browser that lacks it", () => {
-    // happy-dom exposes neither screen.orientation nor onorientationchange, which
-    // is the older-Safari-absent case: nothing must be bound to the window event.
+    // The older-Safari-absent case: neither screen.orientation nor
+    // onorientationchange, so nothing must be bound to the window event.
+    //
+    // screen.orientation has to be shadowed away for this to mean anything.
+    // Chromium provides it, so left alone production takes the FIRST arm, the
+    // else-if is unreachable, and the assertion below is true for a reason that
+    // has nothing to do with the fallback it exists to describe.
     viewport.teardown();
+    restoreShadow = shadowOwn(screen, "orientation", undefined);
+    // The other half of "lacks it": this browser genuinely has no
+    // onorientationchange, so the else-if condition is false on its own merits.
+    expect("onorientationchange" in window).toBe(false);
     viewport.init({ termWrap, onSettled });
+    vi.advanceTimersByTime(SETTLE_MS + 50);
+    expect(viewport.isInTransition()).toBe(false);
     window.dispatchEvent(new Event("orientationchange"));
     expect(viewport.isInTransition()).toBe(false);
   });
@@ -407,7 +465,7 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
     // remount then re-measures twice per rotation.
     viewport.teardown();
     const orientation = liveVisualViewport(0, 0); // reused as a bare event target
-    Object.defineProperty(screen, "orientation", { configurable: true, value: orientation });
+    restoreShadow = shadowOwn(screen, "orientation", orientation);
     viewport.init({ termWrap, onSettled });
 
     viewport.teardown();
@@ -417,12 +475,13 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
   });
 });
 
-// A ResizeObserver whose callback a test can actually fire. happy-dom's own is a
-// documented no-op that does not even keep the callback, so nothing here reaches
-// the term-wrap observation init makes — the signal that catches a font load, a
-// devtools dock, and an embedder resizing its panel, none of which raise a window
-// resize event. `disconnect()` is modelled faithfully because teardown's release
-// of the observer is half of what is under test.
+// A ResizeObserver whose callback a test can actually fire. The real one only
+// reports a size change it observed, on a later frame of its own choosing, so
+// nothing a test does reaches the term-wrap observation init makes on a schedule
+// it can assert against — and that observation is the signal that catches a font
+// load, a devtools dock, and an embedder resizing its panel, none of which raise
+// a window resize event. `disconnect()` is modelled faithfully because teardown's
+// release of the observer is half of what is under test.
 interface FakeObserver {
   callback: ResizeObserverCallback;
   targets: Element[];
@@ -507,12 +566,18 @@ describe("viewport: the term wrap's own size is a re-measure signal", () => {
 });
 
 describe("viewport: rotation on older Safari (the deprecated window event)", () => {
-  // screen.orientation is the canonical rotation signal, and happy-dom exposes
-  // neither it nor the legacy fallback — so the else arm below is reached by
-  // giving the window the property older Safari has and nothing else does.
+  // screen.orientation is the canonical rotation signal and Chromium provides
+  // it, so the else arm is reached by removing it and giving the window the
+  // property older Safari has and nothing else does. Both halves are needed:
+  // with screen.orientation left in place production binds the modern listener
+  // and the window event goes nowhere, which is how this whole describe block
+  // would pass without ever reaching the fallback it is named after.
+  let restoreOrientation: () => void = () => undefined;
+
   beforeEach(() => {
     viewport.teardown();
-    Object.defineProperty(window, "onorientationchange", { configurable: true, value: null });
+    restoreOrientation = shadowOwn(screen, "orientation", undefined);
+    restoreShadow = shadowOwn(window, "onorientationchange", null);
     viewport.init({ termWrap, onSettled });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     onSettled.mockClear();
@@ -520,7 +585,9 @@ describe("viewport: rotation on older Safari (the deprecated window event)", () 
 
   afterEach(() => {
     viewport.teardown();
-    Reflect.deleteProperty(window, "onorientationchange");
+    undoShadow();
+    restoreOrientation();
+    restoreOrientation = () => undefined;
   });
 
   it("re-measures on window orientationchange where screen.orientation is absent", () => {

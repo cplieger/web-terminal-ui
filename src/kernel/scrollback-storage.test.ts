@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // The supplied localStorage store. Its own job is narrow — keys, JSON, and the
 // orphan collection the kernel cannot do — so that is what is tested here;
 // scrollback.test.ts owns whether an entry may be USED.

@@ -40,6 +40,7 @@ import { createConnState } from "./conn-state.js";
 import { createScrollbackKeeper } from "./scrollback.js";
 import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
 import { attachLoadingStatus, DEFAULT_LOADING_MESSAGES } from "./loading-status.js";
+import { reloadPage } from "./navigation.js";
 import type {
   CreateTerminalOptions,
   FeatureInstance,
@@ -184,7 +185,7 @@ function renderFatalStartupInto(
   reloadButton.type = "button";
   reloadButton.textContent = STARTUP_FAILURE_COPY.reloadLabel;
   reloadButton.addEventListener("click", () => {
-    window.location.reload();
+    reloadPage();
   });
   card.append(title, messageEl, reloadButton);
   surface.appendChild(card);

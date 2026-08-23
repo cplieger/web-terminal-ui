@@ -1,5 +1,3 @@
-// @vitest-environment happy-dom
-//
 // Contract tests for the loading overlay's progressive status text. The
 // behaviour under test is a TIMELINE, so every case drives fake timers rather
 // than waiting: what a user reads at 0s, 5s, 60s and beyond is the whole point

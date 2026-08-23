@@ -48,7 +48,7 @@ export type NotificationCtorLike = new (
  *  not recognise must degrade rather than be asserted. */
 export interface NotifierEnv {
   /** The Notification constructor, or undefined where the API does not exist
-   *  (iOS Safari outside an installed PWA, a non-secure context, happy-dom). */
+   *  (iOS Safari outside an installed PWA, a non-secure context). */
   ctor: NotificationCtorLike | undefined;
   /** Current permission: "default" | "granted" | "denied" (or anything else). */
   permission: () => string;

@@ -4,9 +4,10 @@
 // bundle breaks a terminal behavior with no compile-time or unit-test signal
 // anywhere else (DECSCNM reverse video shipped broken for exactly this reason:
 // the engine toggled .term-reverse-video and no stylesheet ever styled it).
-// happy-dom applies no real CSS, so these assert on the stylesheet TEXT — a
-// deliberate grep-level guard, not a rendering test (the engine's Playwright
-// e2e covers pixels).
+// These assert on the stylesheet TEXT — a deliberate grep-level guard, not a
+// rendering test (the engine's Playwright e2e covers pixels). Text-level is also
+// why this file is the one that stays in Node: it reads the bundle by name and by
+// manifest with node:fs, and regenerates a golden under UPDATE_GOLDEN=1.
 import { describe, it, expect } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -83,8 +84,8 @@ describe("engine-toggled class contract", () => {
 // every row. The fix is the ascent-override/descent-override pair on each face
 // (page.css); this test is what makes the pairing CHECKED rather than
 // remembered, because the two halves live in different files and each looks
-// self-consistent alone. Text-level, like its neighbours: happy-dom applies no
-// CSS, so a rendering assertion is not available here.
+// self-consistent alone. Text-level, like its neighbours: the pairing is a
+// property of the declarations, not of any one rendered box.
 describe("bundled-font cell coverage", () => {
   /** Reads one declaration out of a rule body as a float, dropping its unit. */
   const decl = (body: string, prop: string): number | null => {
@@ -127,8 +128,8 @@ describe("bundled-font cell coverage", () => {
 // pointerdown default (holdFocusOnPress, features/dom.ts) paint .wt-pressed on
 // themselves because Firefox gives them no :active, so a press rule written for
 // :active alone is a control with no press feedback in that engine — silently,
-// since happy-dom applies no CSS and the other engines look fine. Assert the
-// pairing for every such control.
+// since the other engines look fine and no unit suite loads the stylesheet. Assert
+// the pairing for every such control.
 describe("press-class contract for the focus-holding buttons", () => {
   const PRESS_RULES: [name: string, css: string, selector: string][] = [
     ["the shared .wt-btn primitive (keyboard + switcher buttons)", primitives, ".wt-btn"],
@@ -213,10 +214,10 @@ describe("bottom-strip clearance contract (the safe-area pairing)", () => {
   });
 });
 
-// The desktop reorder preview is CSS-only where it is visible (happy-dom applies
-// no styles and reports zero geometry, so the feature's own suite can prove the
-// state machine but not one pixel of the result). These are grep-level guards on
-// the three decisions that would fail silently.
+// The desktop reorder preview is CSS-only where it is visible: the feature's own
+// suite loads no stylesheet, so it can prove the state machine but not one pixel of
+// the result. These are grep-level guards on the three decisions that would fail
+// silently.
 describe("reorder drop-slot contract", () => {
   it("renders the dragged chip as a dashed outline, not a dimmed copy of the tab", () => {
     // The whole point of the slot: one solid thing under the pointer, one hollow
@@ -258,8 +259,8 @@ describe("reorder drop-slot contract", () => {
   });
 });
 
-// The activity-dot vocabulary is CSS-only (happy-dom applies no styles), so the
-// visual decisions the OSC 9 states rest on have no other automated guard. Same
+// The activity-dot vocabulary is CSS-only, and no unit suite loads the stylesheet,
+// so the visual decisions the OSC 9 states rest on have no other automated guard. Same
 // grep-level posture as the rules above, plus one genuinely computed check: the
 // lightness spread between the three animated hues is a correctness requirement,
 // not a taste one, so it is measured rather than described.
@@ -488,7 +489,7 @@ function buildCssTokenInventory(): CssTokenInventory {
   const bundle = readBundle();
   return {
     schemaVersion: CSS_TOKEN_INVENTORY_SCHEMA_VERSION,
-    generatedBy: "src/css-contract.test.ts",
+    generatedBy: "src/css-contract.node.test.ts",
     bundle: INVENTORY_BUNDLE,
     declared: declaredTokens(bundle),
     referenced: referencedTokens(bundle),
@@ -522,7 +523,7 @@ describe("generated CSS token inventory", () => {
     expect(
       readFileSync(inventoryPath, "utf8"),
       `${CSS_TOKEN_INVENTORY_PATH} drifted from css/. Regenerate with: ` +
-        "UPDATE_GOLDEN=1 npx vitest --run src/css-contract.test.ts",
+        "UPDATE_GOLDEN=1 npx vitest --run src/css-contract.node.test.ts",
     ).toBe(rendered);
   });
 
@@ -688,9 +689,9 @@ describe("the switcher's aggregate cue dot survives every cue-worthy status", ()
   // of the button's corner into its normal flow AND pin a perpetual animation to
   // it for a state that persists until the program's next status change.
   //
-  // happy-dom applies no CSS, so the behavioural test in features/tabs cannot see
-  // any of that: it asserts data-status and a tooltip, and passes either way. This
-  // is the grep-level guard instead, and it is derived from CueStatus rather than a
+  // The behavioural test in features/tabs loads no stylesheet, so it cannot see any
+  // of that: it asserts data-status and a tooltip, and passes either way. This is
+  // the grep-level guard instead, and it is derived from CueStatus rather than a
   // literal list so a fifth cue status cannot be added without answering it.
 
   /** The animated per-tab states, read out of 30-tabs.css itself rather than
