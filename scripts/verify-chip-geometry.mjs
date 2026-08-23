@@ -6,11 +6,11 @@
 // and each was correct only in the engine, at the size and on the platform it was
 // tuned against — the fourth read correct on a 13px desktop strip in Blink and sat
 // 0.33px high on a 14px mobile chip in WebKit. Defects in this area are invisible
-// to every other gate in this repo: they are sub-pixel or single-pixel, they need
-// real layout (happy-dom has none), and they only appear at a size or in an engine
-// the author did not happen to look at. This script is the gate that closes that
-// hole. Run it before changing anything about label geometry, the label font
-// sizes, the chip's spacing, or the bundled font.
+// to every other gate in this repo: they are sub-pixel or single-pixel, and they
+// only appear at a size or in an engine the author did not happen to look at (the
+// unit suite measures real layout, but only in Chromium and at one viewport). This
+// script is the gate that closes that hole. Run it before changing anything about
+// label geometry, the label font sizes, the chip's spacing, or the bundled font.
 //
 // It drives the REAL src/features/tabs/ink-centre.ts (compiled, not
 // reimplemented) against the repo's own CSS bundle in WebKit, Blink and Gecko,
