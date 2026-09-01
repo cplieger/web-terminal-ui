@@ -355,27 +355,6 @@
   color: var(--text);
 }
 
-/* On an inactive tab the close appears only on hover, kept in the layout via
-   visibility so the tab width never jumps; on the active tab it is always shown. */
-:where(.wt-root) .wt-tab:not(.wt-tab-active) .wt-tab-close {
-  visibility: hidden;
-}
-
-:where(.wt-root) .wt-tab:not(.wt-tab-active):hover .wt-tab-close {
-  visibility: visible;
-}
-
-/* Coarse pointer (an iPad using the strip): no hover fires, so an inactive tab's close
-   would be unreachable without first activating the tab. Reveal every tab's close there,
-   matching the always-visible mobile switcher closes. No narrow gate needed: on the
-   narrow-coarse phone the whole strip is display:none (31-switcher.css), so this rule
-   is moot there. */
-@media (pointer: coarse) {
-  :where(.wt-root) .wt-tab:not(.wt-tab-active) .wt-tab-close {
-    visibility: visible;
-  }
-}
-
 /* The add-tab (+) button: a fixed bar item OUTSIDE the tab scroller (it never
    scrolls away with an overflowing list; the shrink-wrapped scroller keeps it
    visually trailing the last tab while the tabs fit — see .wt-tab-scroll). Its
