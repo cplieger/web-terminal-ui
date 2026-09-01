@@ -10,6 +10,18 @@ import { activityMonitor } from "../features/activity-monitor.js";
 import { animations } from "../features/animations.js";
 import { presetSingle } from "./single.js";
 
+/** Options shared by the two tabbed presets, passed through to the tabs feature.
+ *  A preset that takes arguments is called as `features: () =>
+ *  presetTabbed({...})`, which keeps the call inside createTerminal's failure
+ *  boundary (see CreateTerminalOptions.features). */
+export interface TabbedPresetOptions {
+  /** Swap the page's icon links to a status variant while a background session
+   *  wants the user. Off by default, and enabling it is a promise that the
+   *  variant assets are served — see TabsOptions.attentionIcons for the naming
+   *  contract and .kiro/scripts/gen-attention-icons.py, which writes them. */
+  attentionIcons?: boolean;
+}
+
 /** buildTabbed composes the tabbed UI: the single-pane touch features, an
  *  externally-driven mobile toolbar (its grid is opened from a keyboard button
  *  in the tab bar, not its own toggle), the activity monitor (the status-SSE
@@ -27,18 +39,6 @@ import { presetSingle } from "./single.js";
  *  foreground-process/cwd inference — and both presets render what it reports. A
  *  browser that re-derived any of that could only disagree with the server and
  *  with every other client attached to the same session. */
-/** Options shared by the two tabbed presets, passed through to the tabs feature.
- *  A preset that takes arguments is called as `features: () =>
- *  presetTabbed({...})`, which keeps the call inside createTerminal's failure
- *  boundary (see CreateTerminalOptions.features). */
-export interface TabbedPresetOptions {
-  /** Swap the page's icon links to a status variant while a background session
-   *  wants the user. Off by default, and enabling it is a promise that the
-   *  variant assets are served — see TabsOptions.attentionIcons for the naming
-   *  contract and .kiro/scripts/gen-attention-icons.py, which writes them. */
-  attentionIcons?: boolean;
-}
-
 export function buildTabbed(
   agentShell: boolean,
   opts: TabbedPresetOptions = {},
@@ -59,12 +59,8 @@ export function buildTabbed(
   ];
 }
 
-/** Tabbed UI: the touch features, tabs, the mobile keyboard bar, the activity
- *  monitor, and animations. Each tab's title follows the process OSC 0/2 window
- *  title when the program sets one, else the last submitted line; each tab's
- *  activity dot stays hidden until its session reports activity via OSC 9;4
- *  progress (kiro-cli, Claude Code, …), so a plain bash/sh keeps clean,
- *  label-only tabs. */
+/** Tabbed UI: buildTabbed with agent activity presumed off (see buildTabbed for
+ *  title and activity-dot sourcing). */
 export function presetTabbed(opts: TabbedPresetOptions = {}): TerminalFeature<unknown>[] {
   return buildTabbed(false, opts);
 }
