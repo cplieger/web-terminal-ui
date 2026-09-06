@@ -2682,39 +2682,146 @@ describe("the input funnel's transform and observer chains", () => {
   });
 });
 
-describe("a keyboard that announces its composition only at commit time (Android SwiftKey)", () => {
-  // The reported sequence: typing "hello" then space put "hellohello  " on the
-  // wire. Each character arrives as an ordinary insertion with no composition
-  // running, so the kernel sends it; the keyboard then announces its whole
-  // accumulated word inside the committing keystroke, which the composition
-  // finaliser sent a second time.
+describe("a stale composition gate must not leak control bytes (desktop/iOS CJK)", () => {
+  // The staleness read opens the input gate after COMPOSITION_IDLE_MS so a
+  // stranded composition cannot kill typing. That must not let a keydown through
+  // while the PLATFORM still considers a composition live: a CJK user who left a
+  // candidate window open past the bound would otherwise have Enter put \r on
+  // the wire before the composed phrase, executing a half-typed line.
   const ta = (): HTMLTextAreaElement =>
     document.querySelector(".term-input") as HTMLTextAreaElement;
-  const typeChar = (ch: string): void => {
-    const el = ta();
-    el.value = `${el.value}${ch}`;
-    el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: ch }));
-  };
 
-  it("puts each keystroke on the wire exactly once", async () => {
+  afterEach(async () => {
+    const composition = await import("../composition.js");
+    composition.cancelComposition();
+  });
+
+  it("sends nothing for a keydown the event itself marks as composing", () => {
     createTerminal(rootIn(), { features: () => [] });
     const el = ta();
-    for (const ch of "hello") {
-      typeChar(ch);
-    }
-    expect(sentText()).toBe("hello");
+    el.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, isComposing: true }),
+    );
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
 
-    // The commit: compositionstart and compositionend within the space
-    // keystroke, with the whole word written into the textarea.
+  it("still sends an ordinary Enter, so the guard has not swallowed the terminal", () => {
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13 }));
+    expect(sentText()).toBe("\r");
+  });
+
+  it("still sends CR for an Android Enter, which reports 229 with no composition", () => {
+    // Android reports keyCode 229 for nearly every soft-keyboard key, so an
+    // UNGATED 229 guard swallowed ordinary Enter and the terminal then received
+    // the textarea's own LF instead of CR. That regression shipped in this branch
+    // and was caught in review; the guard is gated on an open composition.
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    el.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, isComposing: false }),
+    );
+    expect(sentText()).toBe("\r");
+  });
+
+  it("still sends DEL for an Android Backspace, which reports 229 with no composition", () => {
+    // Same regression, other control: with the guard ungated, held Backspace did
+    // nothing at all, because the input listener's deletion branch deliberately
+    // sends nothing on the premise that keydown already sent the byte.
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    el.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Backspace", keyCode: 229, isComposing: false }),
+    );
+    expect(sentText()).toBe("\x7f");
+  });
+
+  it("swallows the 229 commit key only while a composition is open", () => {
+    // The gate itself: the same event is a real Enter with no composition (above)
+    // and a composition commit with one. Chrome and Safari both report keyCode
+    // 229 for that commit key and Safari reports isComposing false for it
+    // (measured in quill PR #3445), which is why the second signal exists.
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
     el.dispatchEvent(new CompositionEvent("compositionstart"));
-    el.value = `${el.value}hello `;
-    el.dispatchEvent(new CompositionEvent("compositionend"));
-    await tick();
+    el.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, isComposing: false }),
+    );
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+});
 
-    // The committing space follows as its own insertion.
-    typeChar(" ");
+describe("autocorrect: a retroactive rewrite is dropped, not applied", () => {
+  // inputType insertReplacementText is the spec's name for text replaced by a
+  // spellcheck / autocorrect / autofill suggestion. The bytes it corrects have
+  // already reached the pty and a terminal cannot retract them, so the rewrite
+  // is refused rather than duplicated. Reported on Android Chrome with SwiftKey,
+  // which ignores autocorrect="off" by policy.
+  const ta = (): HTMLTextAreaElement =>
+    document.querySelector(".term-input") as HTMLTextAreaElement;
 
-    expect(sentText()).toBe("hello ");
+  it("sends nothing when a suggestion rewrites text already typed", () => {
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    el.value = `${el.value}hello`;
+    el.dispatchEvent(
+      new InputEvent("input", { inputType: "insertReplacementText", data: "hello" }),
+    );
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("restores the placeholder so the next keystroke and held-Backspace still work", () => {
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    const placeholder = el.value;
+    el.value = `${placeholder}hello`;
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertReplacementText" }));
+    expect(el.value).toBe(placeholder);
+  });
+
+  it("still sends ordinary typing, which is a different inputType", () => {
+    // The guard must not widen: insertText is the user typing.
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "ls" }));
+    expect(sentText()).toBe("ls");
+  });
+
+  it("still sends a glide-typed word, which arrives as one insertText", () => {
+    // A length-based guard would have refused this; SwiftKey's flagship input
+    // method delivers a whole word in one event and it is real user intent.
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "kubectl" }));
+    expect(sentText()).toBe("kubectl");
+  });
+});
+
+describe("blur must not leave a composition holding the input gate", () => {
+  const ta = (): HTMLTextAreaElement =>
+    document.querySelector(".term-input") as HTMLTextAreaElement;
+
+  // composition.ts keeps its state at module scope, so a case that leaves a
+  // composition open would hand it to every later test in this file. Without
+  // this, a regression here fails a dozen unrelated tests instead of this one.
+  afterEach(async () => {
+    const composition = await import("../composition.js");
+    composition.cancelComposition();
+  });
+
+  it("clears composition state so focus returning can type again", async () => {
+    const composition = await import("../composition.js");
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    el.dispatchEvent(new CompositionEvent("compositionstart"));
+    expect(composition.isComposing()).toBe(true);
+
+    el.dispatchEvent(new FocusEvent("blur"));
+
+    expect(composition.isComposing()).toBe(false);
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "x" }));
+    expect(sentText()).toBe("x");
   });
 });
 

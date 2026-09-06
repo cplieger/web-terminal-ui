@@ -120,6 +120,16 @@ function normalizeTypedText(text: string): string {
   return text.replace(/\u00A0/g, " ");
 }
 
+/** `KeyboardEvent.keyCode` for a key an IME has claimed. Windows' VK_PROCESS,
+ *  reported by Blink and WebKit for the key that commits a composition, and by
+ *  Android for essentially every soft-keyboard key — which is why every read of
+ *  it is gated on a composition being open.
+ *
+ *  Deprecated and nonetheless the only carrier of this fact: for that commit key
+ *  both engines report `key` as the ordinary `"Enter"`, and Safari reports
+ *  `isComposing` false, so neither the modern flag nor `key` distinguishes it. */
+const IME_COMMIT_KEYCODE = 229;
+
 function pick(root: ParentNode, selector: string): HTMLElement {
   const el = root.querySelector<HTMLElement>(selector);
   if (!el) {
@@ -389,14 +399,6 @@ function buildTerminal(
   }
   function sendText(text: string): void {
     sendBytes(encoder.encode(text));
-  }
-  /** A keystroke the user typed with no composition running. Recorded so a
-   *  keyboard that announces its composition only at commit time cannot have
-   *  the same characters delivered twice (composition.ts, the ECHO_* note). */
-  function sendTyped(text: string): void {
-    const out = normalizeTypedText(text);
-    sendText(out);
-    composition.noteDirectSend(out);
   }
   function paste(text: string): void {
     // The one bracketed-paste + newline-normalize funnel; every feature and the
@@ -766,19 +768,43 @@ function buildTerminal(
       ) {
         resetToPlaceholder(input);
         return;
+      } else if (inputType === "insertReplacementText") {
+        // A spellcheck / autocorrect / autofill REWRITE of text already typed.
+        // The bytes it is correcting have already gone to the pty and a terminal
+        // cannot retract them: 0x7f means whatever the remote application decides
+        // it means, so a pager, vim, a y/n prompt and a no-echo password prompt
+        // each read it as their own input. Applying the rewrite forward instead
+        // duplicates — measured on xterm.js's value-diff, where `helo` corrected
+        // to `hello` puts `helohello` on the wire (its issue #3600). So drop it
+        // and leave the typed text standing, which is also what a shell wants:
+        // `cd /usr` silently becoming `cd /use` is worse than no autocorrect.
+        //
+        // The spec's own signal for this, so no length heuristic is needed: a
+        // max-one-character rule would break glide typing (a whole word in one
+        // event, and SwiftKey's flagship input method) while still admitting
+        // CJK's one-for-one in-place replacement. Cancelling is not an option
+        // either — preventDefault on beforeinput is a no-op in Chrome, per
+        // CodeMirror's own note — but declining to SEND is entirely ours.
+        //
+        // Reachable on more than Android: WebKit fires this type for a spelling
+        // suggestion and for a macOS system text substitution whatever
+        // autocorrect="off" says. Dropping is right wherever it fires, because
+        // what it carries is always a replacement for bytes the pty already has.
+        resetToPlaceholder(input);
+        return;
       } else if (typeof ev.data === "string" && ev.data.length > 0) {
         if (inputType === "insertFromPaste") {
           paste(ev.data);
         } else {
           // Normalize iOS's NBSP-for-space quirk, then send through the funnel.
-          sendTyped(ev.data);
+          sendText(normalizeTypedText(ev.data));
         }
       } else {
         const v = input.value;
         if (v.length > INPUT_PLACEHOLDER.length && v.startsWith(INPUT_PLACEHOLDER)) {
-          sendTyped(v.slice(INPUT_PLACEHOLDER.length));
+          sendText(normalizeTypedText(v.slice(INPUT_PLACEHOLDER.length)));
         } else if (v !== INPUT_PLACEHOLDER && v.length > 0) {
-          sendTyped(v);
+          sendText(normalizeTypedText(v));
         }
       }
       resetToPlaceholder(input);
@@ -796,7 +822,12 @@ function buildTerminal(
   input.addEventListener(
     "blur",
     () => {
-      resetToPlaceholder(input);
+      // cancelComposition, not just resetToPlaceholder: `composing` gates both
+      // input listeners, so a composition abandoned by losing focus would
+      // otherwise keep the gate shut and the terminal would take no input when
+      // focus came back. The staleness read covers a keyboard that strands us
+      // while still focused; this covers the case with a definite signal.
+      composition.cancelComposition();
       termWrap.classList.remove("focus");
     },
     { signal },
@@ -846,6 +877,33 @@ function buildTerminal(
   input.addEventListener(
     "keydown",
     (ev: KeyboardEvent) => {
+      // Three gates, and the order is the design. The spec signal first: UI
+      // Events requires a key event inside a composition session to carry
+      // isComposing, which covers every engine except one case.
+      //
+      // That case is the key which COMMITS a composition: Chrome and Safari both
+      // report keyCode 229 for it and Safari reports isComposing false (measured
+      // in quill PR #3445), so a second signal is needed. It is read against the
+      // RAW latch, before the reconciling isComposing() below, and both halves of
+      // that matter. Gated, because on Android 229 is the value for nearly every
+      // soft-keyboard key, so an unconditional check swallows ordinary Backspace
+      // and Enter — found in review after exactly that shipped here. Before the
+      // reconcile, because reconciling clears the latch, and a CJK user who left
+      // a candidate window open past the idle bound is still committing a real
+      // composition: taking this key as an ordinary Enter would send a carriage
+      // return before the composed phrase and execute a half-typed line.
+      //
+      // The consequence to know: in a stranded composition on Android, Enter and
+      // Backspace stay blocked until a character arrives (which reconciles the
+      // latch and releases them) or focus is lost. That is the deliberate side
+      // of the trade, because the alternative costs desktop and iOS correctness.
+      if (ev.isComposing) {
+        return;
+      }
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- see above
+      if (composition.isCompositionOpen() && ev.keyCode === IME_COMMIT_KEYCODE) {
+        return;
+      }
       if (composition.isComposing()) {
         return;
       }
@@ -1179,7 +1237,7 @@ function buildTerminal(
         // an uncanceled keydown's insertion target after a listener moved focus
         // mid-dispatch. Chromium does; no specification requires it.
         ev.preventDefault();
-        sendTyped(char);
+        sendText(normalizeTypedText(char));
         return;
       }
       applyMappedKey(ev, result);

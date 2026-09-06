@@ -39,30 +39,38 @@ let sendingComposition = false;
 let compositionStart = 0;
 let compositionSuffix = "";
 
-// A soft keyboard may announce its composition only at COMMIT time: the
-// per-character `input` events arrive with no composition in progress, the
-// kernel sends each keystroke as typed, and then the keyboard fires
-// compositionstart + compositionend back-to-back on the committing key while
-// writing the WHOLE accumulated word into the textarea. The deferred read below
-// then sends that word a second time — reported on Android Chrome with
-// SwiftKey, where typing "hello" and pressing space produced "hellohello  ".
+// A composition that never ENDS used to stop the terminal accepting input at
+// all. `composing` gates both the kernel's `input` and `keydown` listeners, and
+// nothing cleared it: no blur handler, no timer. So a keyboard that opened a
+// composition and never closed it left every subsequent keystroke, Enter
+// included, dropped on the floor — reported on Android Chrome with SwiftKey as
+// "typing does not work", recoverable only by tapping a word suggestion, which
+// is what finally fired compositionend.
 //
-// The terminal has already been given the literal keystrokes and cannot be
-// asked to retract them, so a commit that only repeats them is a no-op.
-// `noteDirectSend` records what the kernel sent with no composition running;
-// the finaliser drops a commit that matches it.
+// Not a SwiftKey quirk to special-case. Chromium has a filed defect for
+// compositionend going missing (crbug 446714223, in EditContext rather than a
+// textarea, so it is adjacent evidence and not proof of this exact path), and
+// CodeMirror synthesises the event outright for Safari dead keys, which is a
+// working implementation treating the same absence as real.
 //
-// Unreachable on a keyboard that announces its composition BEFORE the
-// keystrokes (every desktop IME, iOS, Android's own keyboard): there the
-// kernel's `input` listener returns early while composing, so nothing is
-// recorded and there is nothing for a commit to match.
-const ECHO_TAIL_MAX = 64;
-const ECHO_WINDOW_MS = 1500;
-const ECHO_MAX_COMPOSE_MS = 60;
+// The fix is a STALENESS READ rather than a timer. A composition the user is
+// typing into keeps firing compositionupdate, so its clock keeps refreshing; an
+// abandoned one stops and ages out, releasing the gate. UI Events promises one
+// or more compositionupdate events and one whenever the DOM is updated as part
+// of the composition, not strictly one per key, so this is a heuristic about
+// activity rather than a guaranteed per-keystroke signal. Deliberately NOT
+// refreshed by `input` events: in this failure the user IS typing and those
+// events ARE arriving, so refreshing there would defeat the mechanism.
+//
+// Five seconds is the number Slate's android-input-manager uses for its own
+// composition-gone-quiet bound (a DOM flush decision, not an input gate, so the
+// value is borrowed and the job is not the same). It is generous because the
+// residual risk runs the other way: a composition paused longer than this and
+// then resumed can duplicate its first character. That trade is deliberate —
+// the failure being replaced loses ALL input until an unrelated event fires.
+const COMPOSITION_IDLE_MS = 5000;
 
-let directTail = "";
-let directTailAt = 0;
-let compositionStartedAt: number | null = null;
+let lastCompositionActivity = 0;
 
 export function init(opts: {
   textarea: HTMLTextAreaElement;
@@ -85,61 +93,61 @@ export function init(opts: {
   textarea.addEventListener("paste", onPaste);
 }
 
-/** True while an IME composition is in progress. Caller's keydown
- *  listener must early-return on true to avoid sending raw key bytes
- *  during composition. */
+/** True while an IME composition is in progress, RECONCILED first: a composition
+ *  whose clock has not been refreshed for COMPOSITION_IDLE_MS is expired here,
+ *  clearing the latch, the clock and the overlay, so a keyboard that never fires
+ *  compositionend cannot strand the terminal or leave a stale panel on screen.
+ *  A late compositionend still delivers its text — `onEnd` snapshots what it
+ *  needs and does not require `composing` to have stayed true.
+ *
+ *  `sendingComposition` is exempt: that window is bounded by a setTimeout(0)
+ *  this module owns. */
 export function isComposing(): boolean {
+  if (sendingComposition) {
+    return true;
+  }
+  if (!composing) {
+    return false;
+  }
+  if (Date.now() - lastCompositionActivity <= COMPOSITION_IDLE_MS) {
+    return true;
+  }
+  expireComposition();
+  return false;
+}
+
+/** The RAW latch: is a composition open at all, regardless of whether it has
+ *  gone quiet. Read before the reconciling `isComposing()` by the keydown guard,
+ *  because the keyCode 229 signal only means "an IME claimed this key" while a
+ *  composition is genuinely open — on Android it is the value for nearly every
+ *  soft-keyboard key. */
+export function isCompositionOpen(): boolean {
   return composing || sendingComposition;
 }
 
-/** Record text the kernel put on the wire with no composition running, so a
- *  keyboard that announces its composition only at commit time cannot have the
- *  same keystrokes delivered twice (see the ECHO_* note above). Typed text
- *  only — a paste is never re-committed by a keyboard. */
-export function noteDirectSend(text: string): void {
-  if (text === "") {
-    return;
-  }
-  const now = Date.now();
-  if (now - directTailAt > ECHO_WINDOW_MS) {
-    directTail = "";
-  }
-  directTail = (directTail + text).slice(-ECHO_TAIL_MAX);
-  directTailAt = now;
-}
-
-/** Whether this commit merely repeats keystrokes already delivered literally. */
-function repeatsDirectSends(composed: string, startedAt: number | null, endedAt: number): boolean {
-  if (directTail === "") {
-    return false;
-  }
-  // A composition the user typed INTO spans human time; a commit-time
-  // announcement starts and ends inside one keystroke.
-  if (startedAt !== null && endedAt - startedAt > ECHO_MAX_COMPOSE_MS) {
-    return false;
-  }
-  // Only the burst still being typed can be a re-commit of itself.
-  if (endedAt - directTailAt > ECHO_WINDOW_MS) {
-    return false;
-  }
-  // The committing key (space, tab) is delivered as its own `input` event, so
-  // what has to match is the WORD the keyboard is re-committing.
-  const word = composed.replace(/[ \t]+$/u, "");
-  return word !== "" && directTail.endsWith(word);
+/** Drop a composition that has gone quiet: the latch, the clock and the visible
+ *  overlay together. Without the overlay half the gate would say no composition
+ *  while `.composition-view.active` still said there was one, leaving a stale
+ *  panel over the terminal for as long as the missing compositionend never
+ *  arrived. Does NOT touch the textarea: a late compositionend still reads it. */
+function expireComposition(): void {
+  composing = false;
+  lastCompositionActivity = 0;
+  compositionView.textContent = "";
+  compositionView.classList.remove("active");
 }
 
 /** Abort any in-flight composition without sending, and clear the textarea.
- *  The kernel calls this on a tab switch (detach): committing half-composed IME
- *  text to either the outgoing or the incoming session is wrong, so we discard
- *  it (design 5.1, "end any composition ... or cancel"). Clearing
- *  sendingComposition also neutralizes a just-fired compositionend whose
- *  deferred send is still pending on the microtask/timeout queue, so it cannot
- *  land on whoever is active after the switch. */
+ *  The kernel calls this on a tab switch (detach) and on blur: committing
+ *  half-composed IME text to either the outgoing or the incoming session is
+ *  wrong, so we discard it (design 5.1, "end any composition ... or cancel").
+ *  Clearing sendingComposition also neutralizes a just-fired compositionend
+ *  whose deferred send is still pending on the microtask/timeout queue, so it
+ *  cannot land on whoever is active after the switch. */
 export function cancelComposition(): void {
   composing = false;
   sendingComposition = false;
-  compositionStartedAt = null;
-  directTail = "";
+  lastCompositionActivity = 0;
   compositionView.textContent = "";
   compositionView.classList.remove("active");
   resetToPlaceholder(textarea);
@@ -167,7 +175,7 @@ export function teardown(): void {
 
 function onStart(): void {
   composing = true;
-  compositionStartedAt = Date.now();
+  lastCompositionActivity = Date.now();
   const start = textarea.selectionStart;
   const end = textarea.selectionEnd;
   compositionStart = Math.min(start, end);
@@ -179,6 +187,10 @@ function onStart(): void {
 }
 
 function onUpdate(ev: CompositionEvent): void {
+  // Every keystroke of a live composition lands here, which is what keeps its
+  // staleness clock fresh (see COMPOSITION_IDLE_MS). An abandoned composition
+  // stops firing this and ages out of the gate.
+  lastCompositionActivity = Date.now();
   // \u200E (LTR mark) wrappers + CSS direction:rtl on the view make
   // long compositions show their trailing edge instead of being
   // clipped at the start. Pattern from xterm.js.
@@ -189,15 +201,13 @@ function onUpdate(ev: CompositionEvent): void {
 function onEnd(): void {
   compositionView.classList.remove("active");
   composing = false;
+  lastCompositionActivity = 0;
   // The compositionend event fires before the textarea reflects the
   // final value on most browsers (Chromium especially). Defer one tick
   // and read the textarea then; xterm.js's pattern.
   sendingComposition = true;
   const startSnapshot = compositionStart;
   const suffixSnapshot = compositionSuffix;
-  const startedAt = compositionStartedAt;
-  const endedAt = Date.now();
-  compositionStartedAt = null;
   setTimeout(() => {
     if (!sendingComposition) {
       return;
@@ -211,10 +221,9 @@ function onEnd(): void {
     const composed = value
       .substring(startSnapshot, Math.max(startSnapshot, valueEnd))
       .replace(/\u00A0/g, " ");
-    if (composed.length > 0 && !repeatsDirectSends(composed, startedAt, endedAt)) {
+    if (composed.length > 0) {
       send(composed);
     }
-    directTail = "";
     resetToPlaceholder(textarea);
   }, 0);
 }
