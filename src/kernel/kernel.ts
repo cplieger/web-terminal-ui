@@ -390,6 +390,14 @@ function buildTerminal(
   function sendText(text: string): void {
     sendBytes(encoder.encode(text));
   }
+  /** A keystroke the user typed with no composition running. Recorded so a
+   *  keyboard that announces its composition only at commit time cannot have
+   *  the same characters delivered twice (composition.ts, the ECHO_* note). */
+  function sendTyped(text: string): void {
+    const out = normalizeTypedText(text);
+    sendText(out);
+    composition.noteDirectSend(out);
+  }
   function paste(text: string): void {
     // The one bracketed-paste + newline-normalize funnel; every feature and the
     // kernel's own paste paths route through here (paste-jacking defense).
@@ -763,14 +771,14 @@ function buildTerminal(
           paste(ev.data);
         } else {
           // Normalize iOS's NBSP-for-space quirk, then send through the funnel.
-          sendText(normalizeTypedText(ev.data));
+          sendTyped(ev.data);
         }
       } else {
         const v = input.value;
         if (v.length > INPUT_PLACEHOLDER.length && v.startsWith(INPUT_PLACEHOLDER)) {
-          sendText(normalizeTypedText(v.slice(INPUT_PLACEHOLDER.length)));
+          sendTyped(v.slice(INPUT_PLACEHOLDER.length));
         } else if (v !== INPUT_PLACEHOLDER && v.length > 0) {
-          sendText(normalizeTypedText(v));
+          sendTyped(v);
         }
       }
       resetToPlaceholder(input);
@@ -1171,7 +1179,7 @@ function buildTerminal(
         // an uncanceled keydown's insertion target after a listener moved focus
         // mid-dispatch. Chromium does; no specification requires it.
         ev.preventDefault();
-        sendText(normalizeTypedText(char));
+        sendTyped(char);
         return;
       }
       applyMappedKey(ev, result);
