@@ -1,6 +1,9 @@
 node_modules/
 dist/
 .vitest-cache/
+# vitest 5's shared artifact root: the html report VITEST_TRACE=1 writes, plus
+# any attachments or blob reports. One entry covers all of them.
+.vitest/
 coverage/
 
 # Local engine overlay for pre-publish typecheck (scripts/verify.sh)

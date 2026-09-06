@@ -24,17 +24,34 @@
 import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
 
+// Trace view records a DOM snapshot per browser interaction, and the recording
+// is only readable through a reporter that serves it. VITEST_TRACE=1 turns on
+// both halves together, so one variable produces something openable:
+//
+//   VITEST_TRACE=1 npx vitest run src/features/tabs/chip-geometry.test.ts
+//   then open .vitest/index.html
+//
+// Off by default because the snapshots cost time on every browser test and CI
+// has nowhere to publish them. `singleFile` inlines the UI assets so the report
+// is one file to open or attach to an issue, rather than a directory that needs
+// `vite preview` to serve it. This adds no devDependency: the html reporter's
+// @vitest/ui is a hard dependency of @vitest/browser, which is already declared.
+const traceView = process.env["VITEST_TRACE"] === "1";
+
 export default defineConfig({
   test: {
-    // `extends: true` on every project is REQUIRED, not decorative: a project
-    // inherits NOTHING from this block without it, and losing a strictness
+    ...(traceView ? { reporters: ["default", ["html", { singleFile: true }]] as const } : {}),
+    // `extends` is a key of the PROJECT, a sibling of `test` and never a key
+    // inside it: spelled `test: { extends: true }` it type-checks, runs, and
+    // inherits nothing (measured on vitest 4.1.11 — setupFiles never loaded and
+    // a 2.5s test passed under a 2s testTimeout). That trap is why the value is
+    // written out here even though vitest 5 defaults it to true: it puts the
+    // correct placement in front of the next reader, and losing a strictness
     // option (expect.requireAssertions, allowOnly, mockReset, unstubGlobals,
-    // the timeouts, setupFiles) never fails a test, so the suite would go green
-    // while the bar dropped. It is a SIBLING of `test`, not a key inside it:
-    // spelled `test: { extends: true }` it type-checks, runs, and inherits
-    // nothing (measured on vitest 4.1.11 — setupFiles never loaded and a 2.5s
-    // test passed under a 2s testTimeout). Verified the other way by dropping a
-    // zero-assertion probe test into each project and confirming it FAILS.
+    // the timeouts, setupFiles) never fails a test, so a mistake here would let
+    // the suite go green while the bar dropped. Verified the other way by
+    // dropping a zero-assertion probe test into each project and confirming it
+    // FAILS.
     projects: [
       {
         extends: true,
@@ -58,6 +75,7 @@ export default defineConfig({
           browser: {
             enabled: true,
             headless: true,
+            traceView,
             provider: playwright({
               launchOptions: {
                 channel: "chromium",
@@ -116,9 +134,19 @@ export default defineConfig({
       showDiff: true,
       includeStack: true,
     },
-    experimental: {
-      fsModuleCache: true,
-      fsModuleCachePath: ".vitest-cache",
-    },
+    // Persist transformed modules across runs. Top-level since vitest 5, which
+    // deprecated the `experimental.fsModuleCache` spelling this replaced (it
+    // still worked, and warned twice per project per run).
+    //
+    // The path is explicit rather than the v5 default of
+    // `node_modules/.vitest-cache`, because `.vitest-cache/` is already
+    // gitignored here. The tradeoff is that the default location is discarded
+    // by a reinstall while this one is not, and the cache key covers file
+    // content, module id, Vite's environment config and coverage status, but
+    // not installed dependency versions: delete it by hand
+    // (`vitest --clearCache`) if a dependency bump ever serves a stale
+    // transform.
+    fsModuleCache: true,
+    fsModuleCachePath: ".vitest-cache",
   },
 });
