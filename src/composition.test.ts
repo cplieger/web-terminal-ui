@@ -143,81 +143,70 @@ describe("composition: cancelComposition (tab-switch detach, design 5.1)", () =>
   });
 });
 
-describe("composition: a keyboard that announces its composition only at commit time", () => {
-  // Reported on Android Chrome with SwiftKey: typing "hello" then space produced
-  // "hellohello  ". The per-character `input` events arrive with no composition
-  // running, so the kernel sends each keystroke; the keyboard then announces
-  // compositionstart and compositionend inside the committing keystroke while
-  // writing the whole word into the textarea, and the deferred read sent it
-  // again. A terminal cannot retract what it has been given, so a commit that
-  // only repeats those keystrokes is dropped.
+describe("composition: a composition that never ends must not strand the terminal", () => {
+  // The wedge: `composing` gates both the kernel's input and keydown listeners,
+  // and before this nothing cleared it, so a keyboard that opened a composition
+  // and never closed it dropped every later keystroke including Enter.
 
-  it("drops a commit that only repeats keystrokes already sent literally", () => {
-    for (const ch of "hello") {
-      composition.noteDirectSend(ch);
+  it("keeps the gate shut while the composition is still being typed into", () => {
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    // Each keystroke of a live composition fires compositionupdate, refreshing
+    // the clock, so a long composition never ages out.
+    for (let i = 0; i < 10; i++) {
+      vi.advanceTimersByTime(4000);
+      textarea.dispatchEvent(compositionUpdate("\u3042"));
+      expect(composition.isComposing()).toBe(true);
     }
-    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
-    textarea.value = "hello ";
-    textarea.dispatchEvent(new CompositionEvent("compositionend"));
-    vi.advanceTimersByTime(0);
-    // The committing space arrives as its own insertion; the word does not.
-    expect(send).not.toHaveBeenCalled();
   });
 
-  it("still sends a commit whose word differs from what was typed", () => {
-    // An autocorrecting keyboard that rewrites the word is delivering something
-    // the terminal has not seen.
-    for (const ch of "helo") {
-      composition.noteDirectSend(ch);
-    }
+  it("releases the gate once a composition has gone quiet", () => {
     textarea.dispatchEvent(new CompositionEvent("compositionstart"));
-    textarea.value = "hello ";
-    textarea.dispatchEvent(new CompositionEvent("compositionend"));
-    vi.advanceTimersByTime(0);
-    expect(send).toHaveBeenCalledWith("hello ");
+    expect(composition.isComposing()).toBe(true);
+    vi.advanceTimersByTime(5001);
+    expect(composition.isComposing()).toBe(false);
   });
 
-  it("still sends a composition the user typed into", () => {
-    // The discriminator: a composition with a typing phase spans human time,
-    // while a commit-time announcement starts and ends inside one keystroke.
-    // Without it, composing text that matches recent keystrokes would be eaten.
-    composition.noteDirectSend("ls");
+  it("holds the gate one millisecond short of the idle bound", () => {
     textarea.dispatchEvent(new CompositionEvent("compositionstart"));
-    vi.advanceTimersByTime(200);
-    textarea.value = "ls ";
-    textarea.dispatchEvent(new CompositionEvent("compositionend"));
-    vi.advanceTimersByTime(0);
-    expect(send).toHaveBeenCalledWith("ls ");
-  });
-
-  it("still sends a commit that repeats a burst from a while ago", () => {
-    // Only the burst still being typed can be a re-commit of itself.
-    composition.noteDirectSend("ls");
     vi.advanceTimersByTime(5000);
-    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
-    textarea.value = "ls ";
-    textarea.dispatchEvent(new CompositionEvent("compositionend"));
-    vi.advanceTimersByTime(0);
-    expect(send).toHaveBeenCalledWith("ls ");
+    expect(composition.isComposing()).toBe(true);
   });
 
-  it("forgets the burst once a commit has been finalised", () => {
-    for (const ch of "hello") {
-      composition.noteDirectSend(ch);
-    }
+  it("clears the visible overlay when it expires, not just the gate", () => {
+    // Otherwise the gate says no composition while .composition-view.active still
+    // says there is one, leaving a stale panel over the terminal for as long as
+    // the missing compositionend never arrives.
     textarea.dispatchEvent(new CompositionEvent("compositionstart"));
-    textarea.value = "hello ";
-    textarea.dispatchEvent(new CompositionEvent("compositionend"));
-    vi.advanceTimersByTime(0);
-    expect(send).not.toHaveBeenCalled();
+    textarea.dispatchEvent(compositionUpdate("\u3042"));
+    expect(view.classList.contains("active")).toBe(true);
 
-    // A second composition of the same word is the user's, not an echo.
-    textarea.value = "";
+    vi.advanceTimersByTime(5001);
+    expect(composition.isComposing()).toBe(false);
+
+    expect(view.classList.contains("active")).toBe(false);
+    expect(view.textContent).toBe("");
+  });
+
+  it("still delivers the composed text if compositionend arrives after the gate released", () => {
+    // Ageing out releases the GATE; it must not discard a late commit.
     textarea.dispatchEvent(new CompositionEvent("compositionstart"));
-    textarea.value = "hello ";
+    vi.advanceTimersByTime(9000);
+    expect(composition.isComposing()).toBe(false);
+    textarea.value = "\u4F60\u597D";
     textarea.dispatchEvent(new CompositionEvent("compositionend"));
     vi.advanceTimersByTime(0);
-    expect(send).toHaveBeenCalledWith("hello ");
+    expect(send).toHaveBeenCalledWith("\u4F60\u597D");
+  });
+
+  it("keeps reporting a composition through the deferred read after compositionend", () => {
+    // sendingComposition is exempt from the staleness read: that window is
+    // bounded by a setTimeout(0) this module owns.
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    textarea.value = "\u4F60";
+    textarea.dispatchEvent(new CompositionEvent("compositionend"));
+    expect(composition.isComposing()).toBe(true);
+    vi.advanceTimersByTime(0);
+    expect(composition.isComposing()).toBe(false);
   });
 });
 
