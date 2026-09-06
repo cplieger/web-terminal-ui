@@ -2682,6 +2682,42 @@ describe("the input funnel's transform and observer chains", () => {
   });
 });
 
+describe("a keyboard that announces its composition only at commit time (Android SwiftKey)", () => {
+  // The reported sequence: typing "hello" then space put "hellohello  " on the
+  // wire. Each character arrives as an ordinary insertion with no composition
+  // running, so the kernel sends it; the keyboard then announces its whole
+  // accumulated word inside the committing keystroke, which the composition
+  // finaliser sent a second time.
+  const ta = (): HTMLTextAreaElement =>
+    document.querySelector(".term-input") as HTMLTextAreaElement;
+  const typeChar = (ch: string): void => {
+    const el = ta();
+    el.value = `${el.value}${ch}`;
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: ch }));
+  };
+
+  it("puts each keystroke on the wire exactly once", async () => {
+    createTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    for (const ch of "hello") {
+      typeChar(ch);
+    }
+    expect(sentText()).toBe("hello");
+
+    // The commit: compositionstart and compositionend within the space
+    // keystroke, with the whole word written into the textarea.
+    el.dispatchEvent(new CompositionEvent("compositionstart"));
+    el.value = `${el.value}hello `;
+    el.dispatchEvent(new CompositionEvent("compositionend"));
+    await tick();
+
+    // The committing space follows as its own insertion.
+    typeChar(" ");
+
+    expect(sentText()).toBe("hello ");
+  });
+});
+
 describe("the input event's value-recovery path (Android/IME, where ev.data is null)", () => {
   // The `input` event does not always carry what was typed: on Android's Gboard
   // and several IMEs `data` is null and the typed text is only visible as the

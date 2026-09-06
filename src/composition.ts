@@ -39,6 +39,31 @@ let sendingComposition = false;
 let compositionStart = 0;
 let compositionSuffix = "";
 
+// A soft keyboard may announce its composition only at COMMIT time: the
+// per-character `input` events arrive with no composition in progress, the
+// kernel sends each keystroke as typed, and then the keyboard fires
+// compositionstart + compositionend back-to-back on the committing key while
+// writing the WHOLE accumulated word into the textarea. The deferred read below
+// then sends that word a second time — reported on Android Chrome with
+// SwiftKey, where typing "hello" and pressing space produced "hellohello  ".
+//
+// The terminal has already been given the literal keystrokes and cannot be
+// asked to retract them, so a commit that only repeats them is a no-op.
+// `noteDirectSend` records what the kernel sent with no composition running;
+// the finaliser drops a commit that matches it.
+//
+// Unreachable on a keyboard that announces its composition BEFORE the
+// keystrokes (every desktop IME, iOS, Android's own keyboard): there the
+// kernel's `input` listener returns early while composing, so nothing is
+// recorded and there is nothing for a commit to match.
+const ECHO_TAIL_MAX = 64;
+const ECHO_WINDOW_MS = 1500;
+const ECHO_MAX_COMPOSE_MS = 60;
+
+let directTail = "";
+let directTailAt = 0;
+let compositionStartedAt: number | null = null;
+
 export function init(opts: {
   textarea: HTMLTextAreaElement;
   compositionView: HTMLElement;
@@ -67,6 +92,42 @@ export function isComposing(): boolean {
   return composing || sendingComposition;
 }
 
+/** Record text the kernel put on the wire with no composition running, so a
+ *  keyboard that announces its composition only at commit time cannot have the
+ *  same keystrokes delivered twice (see the ECHO_* note above). Typed text
+ *  only — a paste is never re-committed by a keyboard. */
+export function noteDirectSend(text: string): void {
+  if (text === "") {
+    return;
+  }
+  const now = Date.now();
+  if (now - directTailAt > ECHO_WINDOW_MS) {
+    directTail = "";
+  }
+  directTail = (directTail + text).slice(-ECHO_TAIL_MAX);
+  directTailAt = now;
+}
+
+/** Whether this commit merely repeats keystrokes already delivered literally. */
+function repeatsDirectSends(composed: string, startedAt: number | null, endedAt: number): boolean {
+  if (directTail === "") {
+    return false;
+  }
+  // A composition the user typed INTO spans human time; a commit-time
+  // announcement starts and ends inside one keystroke.
+  if (startedAt !== null && endedAt - startedAt > ECHO_MAX_COMPOSE_MS) {
+    return false;
+  }
+  // Only the burst still being typed can be a re-commit of itself.
+  if (endedAt - directTailAt > ECHO_WINDOW_MS) {
+    return false;
+  }
+  // The committing key (space, tab) is delivered as its own `input` event, so
+  // what has to match is the WORD the keyboard is re-committing.
+  const word = composed.replace(/[ \t]+$/u, "");
+  return word !== "" && directTail.endsWith(word);
+}
+
 /** Abort any in-flight composition without sending, and clear the textarea.
  *  The kernel calls this on a tab switch (detach): committing half-composed IME
  *  text to either the outgoing or the incoming session is wrong, so we discard
@@ -77,6 +138,8 @@ export function isComposing(): boolean {
 export function cancelComposition(): void {
   composing = false;
   sendingComposition = false;
+  compositionStartedAt = null;
+  directTail = "";
   compositionView.textContent = "";
   compositionView.classList.remove("active");
   resetToPlaceholder(textarea);
@@ -104,6 +167,7 @@ export function teardown(): void {
 
 function onStart(): void {
   composing = true;
+  compositionStartedAt = Date.now();
   const start = textarea.selectionStart;
   const end = textarea.selectionEnd;
   compositionStart = Math.min(start, end);
@@ -131,6 +195,9 @@ function onEnd(): void {
   sendingComposition = true;
   const startSnapshot = compositionStart;
   const suffixSnapshot = compositionSuffix;
+  const startedAt = compositionStartedAt;
+  const endedAt = Date.now();
+  compositionStartedAt = null;
   setTimeout(() => {
     if (!sendingComposition) {
       return;
@@ -144,9 +211,10 @@ function onEnd(): void {
     const composed = value
       .substring(startSnapshot, Math.max(startSnapshot, valueEnd))
       .replace(/\u00A0/g, " ");
-    if (composed.length > 0) {
+    if (composed.length > 0 && !repeatsDirectSends(composed, startedAt, endedAt)) {
       send(composed);
     }
+    directTail = "";
     resetToPlaceholder(textarea);
   }, 0);
 }
