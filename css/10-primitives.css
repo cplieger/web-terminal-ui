@@ -133,19 +133,65 @@
    Feature setup is part of the kernel composition contract. If it fails, the
    kernel removes the half-live terminal and fills only its own layout boundary
    with this recovery surface. In container mode that leaves the host app
-   outside the terminal fully visible and interactive. */
+   outside the terminal fully visible and interactive.
+
+   The surface is a native <dialog>: showModal() in wt-viewport, the bare `open`
+   attribute in wt-container. Modality is the only difference between them. */
 :where(.wt-root) .wt-fatal {
   position: absolute;
   inset: 0;
-  z-index: 100;
-  display: grid;
-  place-items: center;
+  /* The size resets are what let the insets stretch the panel: a <dialog> is
+     fit-content with the UA sheet's own `margin: auto`, and :modal additionally
+     caps both axes at calc(100% - 38px). margin, border-radius and box-shadow
+     answer an EMBEDDER's own `dialog { ... }` base rule rather than the UA sheet —
+     margin is the member that moves the box, the other two are cosmetic. */
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  inline-size: auto;
+  block-size: auto;
+  max-inline-size: none;
+  max-block-size: none;
   overflow: auto;
   padding: calc(var(--safe-top) + var(--sp-3)) var(--sp-3) calc(var(--safe-bottom) + var(--sp-3));
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-ui);
   text-align: center;
+}
+
+/* Scoped to [open]: an author `display` beats the UA's `dialog { display: none }`
+   at any specificity, so declared unconditionally a CLOSED panel would still
+   paint its full-surface background over the root. */
+:where(.wt-root) .wt-fatal[open] {
+  display: grid;
+  place-items: center;
+}
+
+/* The base rule's `position: absolute` serves the container half (it resolves
+   against .wt-root.wt-container, the embedder's box); this gives the viewport back
+   to the modal half. A top-layer absolute resolves against the initial containing
+   block — viewport-SIZED but canvas-anchored, so equivalent to fixed only at
+   scrollY 0 — and Blink does not lock document scrolling under a modal dialog.
+   Pinned by fatal-panel.test.ts's scrolled-document test. */
+:where(.wt-root) .wt-fatal:modal {
+  position: fixed;
+}
+
+/* The stacking order the top layer supplies for free, so it is declared only for
+   the half that is not in it. .wt-root.wt-container is the EMBEDDER's element and
+   forms no stacking context, so the panel competes in the host's. */
+:where(.wt-root) .wt-fatal:not(:modal) {
+  z-index: 100;
+}
+
+/* The panel IS the dim — it fills its whole surface in --bg — so the backdrop
+   agrees with it instead of adding a second, differently coloured layer. The UA's
+   rgba(0, 0, 0, 0.1) would show as a lighter seam if the panel were ever smaller
+   than the viewport. */
+:where(.wt-root) .wt-fatal::backdrop {
+  background: var(--bg);
 }
 
 :where(.wt-root) .wt-fatal-card {

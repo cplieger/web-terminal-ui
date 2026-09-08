@@ -168,17 +168,18 @@ function renderFatalStartupInto(
   layoutMode: "viewport" | "container",
   message: string = STARTUP_FAILURE_COPY.message,
 ): void {
-  const surface = document.createElement("section");
+  const surface = document.createElement("dialog");
   surface.className = "wt-fatal";
+  // alertdialog over the implicit `dialog` role: an urgent message to act on. No
+  // `aria-modal` — showModal() conveys modality; an authored value can contradict the UA.
   surface.setAttribute("role", "alertdialog");
   surface.setAttribute("aria-labelledby", "wt-fatal-title");
   surface.setAttribute("aria-describedby", "wt-fatal-message");
-  if (layoutMode === "viewport") {
-    // A full-page terminal has no usable host UI behind it, so this is the
-    // page's modal recovery state. An embedded terminal is only one panel in
-    // a larger app and must not claim that the rest of the app is inert.
-    surface.setAttribute("aria-modal", "true");
-  }
+  // showModal() makes Escape a close request, and the kernel has already cleared
+  // the root: nothing is behind this panel, so reload is the only recovery.
+  surface.addEventListener("cancel", (ev) => {
+    ev.preventDefault();
+  });
 
   const card = document.createElement("div");
   card.className = "wt-fatal-card";
@@ -201,9 +202,19 @@ function renderFatalStartupInto(
   surface.appendChild(card);
   root.replaceChildren(surface);
 
-  // The terminal input held focus before setup failed. Move that focus to the
-  // only recovery action; container mode remains non-modal because no trap or
-  // aria-modal claim prevents the user from leaving the terminal panel.
+  // Viewport: the terminal IS the page, so the top layer and an inert document
+  // are both accurate; container gets the bare `open` attribute, which is neither
+  // and is what an embedded panel wants. `isConnected` is showModal()'s own
+  // precondition and a detached root arrives here from a typed call, where a
+  // throw would bury the real startup cause under a second error out of the catch.
+  if (layoutMode === "viewport" && surface.isConnected) {
+    surface.showModal();
+  } else {
+    surface.open = true;
+  }
+
+  // The terminal input held focus before setup failed; move it to the only
+  // recovery action. showModal() lands there itself, the non-modal half does not.
   reloadButton.focus();
 }
 
@@ -1888,21 +1899,6 @@ function buildTerminal(
   };
 }
 
-/** Build the terminal UI inside `root`. Call exactly once.
- *
- *  Wraps buildTerminal so that a SYNCHRONOUS startup failure gets the same
- *  treatment an asynchronous one already got. Before this, the two halves of
- *  "the terminal did not start" were handled inconsistently: an async
- *  feature-setup rejection ran enterFatalStartup (overlay dismissed,
- *  onFatalError delivered, recovery surface rendered), while a synchronous throw
- *  propagated bare, leaving the consumer's loading overlay spinning forever over
- *  a page with no terminal and no explanation. Consumers were left hand-building
- *  their own surface to cover the gap, diverging from this one in shape and copy.
- *
- *  The error still propagates: a consumer with its own handling sees it exactly
- *  as before, only now against a page that is no longer stuck on a spinner. A
- *  handler returning `true` suppresses the built-in surface, same contract as the
- *  async phase. */
 /** Resolve the mount target. A selector is looked up here, INSIDE
  *  createTerminal's try, which is the whole point: a consumer that passed
  *  `document.getElementById("terminal")` had to null-check it first (tsc forces
@@ -1959,6 +1955,10 @@ function createFallbackHost(): HTMLElement {
   return host;
 }
 
+/** Build the terminal UI inside `target`. Call exactly once. Wraps buildTerminal so
+ *  a SYNCHRONOUS startup failure gets the same recovery surface an async one does
+ *  and still propagates; that surface is modal in viewport layout, so
+ *  `onFatalError` returning `true` is the path that leaves the page interactive. */
 export function createTerminal(
   target: HTMLElement | string,
   opts: CreateTerminalOptions = {},
