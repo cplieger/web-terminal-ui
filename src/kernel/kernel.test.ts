@@ -5,6 +5,7 @@
 // destroy, the input funnel composes transforms) behaves as specified.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { userEvent } from "vitest/browser";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type * as KernelModule from "./kernel.js";
 import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
@@ -677,24 +678,107 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     expect(disconnect).toHaveBeenCalledTimes(1);
     expect(root.querySelector(".term-output")).toBeNull();
     // The pre-JS overlay came down (nothing else would ever lower it), and the
-    // surface is modal: a full-page terminal has no usable UI behind it.
+    // surface is a REALLY modal dialog: a full-page terminal has no usable UI
+    // behind it, and :modal is the browser's own answer rather than an
+    // aria-modal attribute asserting what nothing enforced.
     expect(loading.classList.contains("fade")).toBe(true);
-    const fatal = root.querySelector(".wt-fatal");
+    const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
     expect(fatal).not.toBeNull();
     expect(fatal?.getAttribute("role")).toBe("alertdialog");
-    expect(fatal?.getAttribute("aria-modal")).toBe("true");
+    expect(fatal?.matches(":modal")).toBe(true);
+    // No authored aria-modal: showModal() carries modality into the
+    // accessibility tree, and an authored value can contradict the UA's state.
+    expect(fatal?.getAttribute("aria-modal")).toBeNull();
     expect(root.querySelector(".wt-fatal-reload")).not.toBeNull();
     // Boundary classes stay so the recovery surface keeps the design tokens.
     expect(root.classList.contains("wt-root")).toBe(true);
   });
 
-  it("stays non-modal in container layout (the host app is not inert)", async () => {
+  it("stays non-modal in container layout, so the host page keeps its focusables", async () => {
     const root = rootIn();
+    // A focusable OUTSIDE the terminal boundary: the embedded case's whole point
+    // is that the app around a broken panel still works.
+    const hostButton = document.createElement("button");
+    document.body.appendChild(hostButton);
     createTerminal(root, { features: () => [boom], layout: "container" });
     await tick();
-    const fatal = root.querySelector(".wt-fatal");
+    const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
     expect(fatal?.getAttribute("role")).toBe("alertdialog");
     expect(fatal?.getAttribute("aria-modal")).toBeNull();
+    // Open, and deliberately not modal: no top layer, no inerting.
+    expect(fatal?.open).toBe(true);
+    expect(fatal?.matches(":modal")).toBe(false);
+    // The `open` attribute moves no focus of its own — showModal() does that, and
+    // this half deliberately does not call it — so the panel's own focus call is
+    // the only thing that lands the keyboard on the one available action.
+    expect(document.activeElement).toBe(root.querySelector(".wt-fatal-reload"));
+    // And the host page can take it straight back, which is the non-enforcement
+    // an embedded panel wants.
+    hostButton.focus();
+    expect(document.activeElement).toBe(hostButton);
+  });
+
+  it("inerts the page behind the modal panel, so no host focusable is reachable", async () => {
+    const root = rootIn();
+    // Two host focusables, one either side of the terminal root in tab order.
+    const before = document.createElement("button");
+    document.body.insertBefore(before, root);
+    const after = document.createElement("button");
+    document.body.appendChild(after);
+    createTerminal(root, { features: () => [boom] });
+    await tick();
+    const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
+    const reload = root.querySelector<HTMLButtonElement>(".wt-fatal-reload");
+    expect(fatal?.matches(":modal")).toBe(true);
+    // The panel's only action holds the keyboard.
+    expect(document.activeElement).toBe(reload);
+    // Programmatic focus of an inert element moves nothing. This is the claim
+    // the old aria-modal attribute made and could not keep.
+    before.focus();
+    expect(document.activeElement).toBe(reload);
+    after.focus();
+    expect(document.activeElement).toBe(reload);
+    // And Tab out of the panel's sole tabbable never reaches either of them.
+    // Four presses because Blink alternates reload -> <body> -> reload, so a
+    // single press would leave the host buttons untried.
+    for (let i = 0; i < 4; i += 1) {
+      await userEvent.keyboard("{Tab}");
+      expect([before, after]).not.toContain(document.activeElement);
+    }
+  });
+
+  it("refuses the modal panel's Escape close request, which would leave a blank root", async () => {
+    // showModal() makes Escape a close request, and the kernel has already
+    // cleared the root — a closed panel is an empty page with no way back.
+    //
+    // Modal only, and the container half is deliberately absent rather than
+    // written as its own test: no single kernel change can redden it. A
+    // non-modal <dialog open> gets no close watcher, so Escape never reaches it;
+    // and if container mode ever called showModal(), this same handler would
+    // refuse that close request too. `open` stays true either way. The property
+    // that half was reaching for is `:modal === false`, pinned by the container
+    // test above, by the synchronous-throw one, and by fatal-panel.test.ts's
+    // container geometry.
+    const root = rootIn();
+    createTerminal(root, { features: () => [boom] });
+    await tick();
+    const modal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
+    expect(modal?.matches(":modal")).toBe(true);
+    await userEvent.keyboard("{Escape}");
+    expect(modal?.open).toBe(true);
+    expect(modal?.matches(":modal")).toBe(true);
+  });
+
+  it("renders the panel non-modally when the root is not in a document", async () => {
+    // showModal() throws InvalidStateError on a disconnected element, and a
+    // detached root is reachable from a typed call. Throwing here would replace
+    // the real startup cause with a second error out of the catch.
+    const root = document.createElement("div");
+    createTerminal(root, { features: () => [boom] });
+    await tick();
+    const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
+    expect(fatal?.open).toBe(true);
+    expect(fatal?.querySelector(".wt-fatal-reload")).not.toBeNull();
   });
 
   it("handles an async setup rejection identically", async () => {
@@ -762,6 +846,28 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     expect(root.classList.contains("wt-viewport")).toBe(false);
   });
 
+  it("destroy() after a viewport fatal releases the inerting it established", async () => {
+    // In viewport mode destroy() is also the release of a top-layer entry and of
+    // document-wide inerting. It is correct per spec — removing a node runs the
+    // dialog removing steps for every descendant, so removing the root suffices
+    // — and it is measured rather than reasoned about because the failure mode is
+    // the worst available here: a host document that stays inert forever, with no
+    // error and nothing on screen to explain it. The whole subject of this panel
+    // is replacing an unenforced claim with an enforced one, so the enforcement's
+    // teardown gets the same treatment as its setup.
+    const root = rootIn();
+    const hostButton = document.createElement("button");
+    document.body.appendChild(hostButton);
+    const term = createTerminal(root, { features: () => [boom] });
+    await tick();
+    // The page IS inert first, or the assertion after destroy() means nothing.
+    hostButton.focus();
+    expect(document.activeElement).not.toBe(hostButton);
+    term.destroy();
+    hostButton.focus();
+    expect(document.activeElement).toBe(hostButton);
+  });
+
   it("destroy() mid-setup still aborts quietly (no fatal surface)", async () => {
     const root = rootIn();
     let release: (() => void) | undefined;
@@ -814,10 +920,10 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
     // The pre-JS overlay came down. Before this phase was wired, nothing ever
     // lowered it on a synchronous throw: the page kept spinning forever.
     expect(loading.classList.contains("fade")).toBe(true);
-    const fatal = root.querySelector(".wt-fatal");
+    const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
     expect(fatal).not.toBeNull();
     expect(fatal?.getAttribute("role")).toBe("alertdialog");
-    expect(fatal?.getAttribute("aria-modal")).toBe("true");
+    expect(fatal?.matches(":modal")).toBe(true);
     expect(root.querySelector(".wt-fatal-title")?.textContent).toBe("Terminal failed to start");
     expect(root.querySelector(".wt-fatal-reload")).not.toBeNull();
   });
@@ -837,7 +943,9 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
       createTerminal(root, { features: () => twoOwners(), layout: "container" }),
     ).toThrow();
     expect(root.classList.contains("wt-container")).toBe(true);
-    expect(root.querySelector(".wt-fatal")?.hasAttribute("aria-modal")).toBe(false);
+    const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
+    expect(fatal?.open).toBe(true);
+    expect(fatal?.matches(":modal")).toBe(false);
   });
 
   it("delivers the failure as phase kernel-init and lets a handler take over", () => {

@@ -358,8 +358,19 @@ completed feature and core listener, clears the broken subtree, and shows the
 panel. If `createTerminal` itself throws (`phase: "kernel-init"`: an
 unresolvable mount selector, a preset that throws, an invalid feature list, a DOM
 invariant), it shows the same panel and then rethrows, so a caller with its own
-error handling still sees the error. Either way the panel is modal when the
-terminal owns the viewport and non-modal when it fills an embedded container.
+error handling still sees the error.
+
+The panel is a native `<dialog>`. In `viewport` layout it opens with
+`showModal()`, so the rest of your document is inert while it is up; in
+`container` layout it opens non-modally, so the application around an embedded
+terminal keeps working and keeps its focusables. Escape does not dismiss it in
+either mode: the terminal is already gone, so there would be nothing behind it
+and no way back. Reload is the recovery.
+
+One visible consequence in `viewport` layout: a modal dialog is in the browser's
+top layer, above every `z-index` in the document, so the panel now paints over
+your loading overlay instead of under it. It appears at once and the overlay's
+fade-out finishes behind it.
 
 **This is why `target` takes a selector and `features` takes a function.** Both
 are resolved INSIDE that boundary. Written the other way round
