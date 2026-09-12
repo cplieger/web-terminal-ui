@@ -149,6 +149,11 @@
      kernel focus handling + contextMenu feature). */
   user-select: text;
   -webkit-touch-callout: default;
+
+  /* Stated rather than inherited: the UA default over text is already an I-beam,
+     but the tracking rule below has to have something deterministic to override
+     (and to hand back to). */
+  cursor: text;
 }
 
 /* IME composition view: floating overlay positioned at the cursor
@@ -325,6 +330,18 @@
 :where(.wt-root) .term.term-reverse-video {
   --text: var(--bg-default);
   --bg: var(--text-default);
+}
+
+/* An application holds the mouse (DEC 1000/1002/1003) and the kernel toggles
+   .wt-mouse-app on the scroll container. A plain click is reported to that
+   application, so neither the I-beam nor the link's pointer is true any longer:
+   both promise something the click no longer does. Deliberately no
+   `user-select: none` here, because the engine hands a shifted gesture to the
+   browser, so shift+drag selecting and shift+click opening a link are the only
+   ways left to reach either and blanketing selection off would remove them. */
+:where(.wt-root) .term.wt-mouse-app .term-output,
+:where(.wt-root) .term.wt-mouse-app .term-link {
+  cursor: default;
 }
 
 :where(.wt-root) .term-blink {

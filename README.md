@@ -186,7 +186,27 @@ want one, for example Ctrl+L); `reattach()` attaches again to whatever the serve
 serves now, for a session that has ended (see "When a session ends"); and
 `destroy()` tears every feature down and releases the kernel.
 
-### Persisting scrollback across a discard
+### Mouse and focus
+
+A terminal application that turns mouse tracking on receives the clicks, drags
+and wheel gestures a user makes in the browser, as SGR reports. The pointer says
+so while that is happening: at rest the grid carries a text cursor, and while an
+application holds the mouse the grid and any links in it carry an arrow instead,
+because a click is reported to that application rather than selecting text or
+opening the link. Shift-drag still selects and shift-click still opens a link,
+which is the convention xterm set, so nothing becomes unreachable.
+
+Mouse input is best-effort, as it is in every terminal: a report says where the
+pointer is at that moment and carries nothing a receiver could use to notice it
+had gone stale, so a report made while the socket is down is dropped rather than
+delivered late against a screen that has since been repainted. Typed input keeps
+its delivery guarantee and is unaffected.
+
+Focus reporting is the server's answer rather than this UI's. The kernel tells
+the server whether its own terminal widget holds focus and the server decides
+what the application is told, so several devices attached to one session cannot
+contradict each other. A blur that a press causes and that the same gesture's
+click undoes is not reported, because the terminal did not lose focus.
 
 `persistScrollback` takes the storage, not a switch, because storage is a
 decision this library should not make for you. Chrome's page-lifecycle guidance

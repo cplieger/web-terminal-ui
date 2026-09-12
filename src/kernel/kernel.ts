@@ -13,12 +13,11 @@
 // still single-instance, so createTerminal is called once per page (tabs
 // multiplex sessions over the one kernel, section 22.5).
 //
-// Mouse tracking (engine `mouse` module) is intentionally NOT wired here yet:
-// the design adds it (section 22.3), but wiring it also brings DEC 1004 focus
-// emission, which must be suppressed under the keep-unfocused model (section
-// 7.2). Not wiring it keeps the client emitting no focus bytes (the safe
-// default the previous UI already had); adding mouse tracking with focus
-// suppression is a tracked follow-up.
+// The kernel owns the terminal widget's DOM, so it owns the widget's focus: it
+// REPORTS focus and blur to the transport (`connection.setClientFocus`) and
+// never writes DEC 1004 bytes itself. The server derives the answer for the
+// session from every attached client's report plus its own hold, which is the
+// only place the question can be answered once a second device attaches.
 
 import {
   render,
@@ -26,6 +25,7 @@ import {
   connection,
   keyboard,
   modes,
+  mouse,
   LineStore,
 } from "@cplieger/web-terminal-engine";
 import * as composition from "../composition.js";
@@ -400,9 +400,9 @@ function buildTerminal(
     // output never does (the scroll controller's follow/hold job is unchanged),
     // so scrolling up to read while output streams is preserved. A no-op on the
     // alt screen (no scrollback) and when already following. NOTE: every caller
-    // of sendBytes today is genuine user input (typed keys, paste, mobile
-    // toolbar); if mouse tracking is ever wired through ctx.send, its motion
-    // bytes must NOT come through here or the view would snap on every move.
+    // of sendBytes is genuine user input (typed keys, paste, mobile toolbar);
+    // mouse reports deliberately bypass this funnel and go out as ephemeral
+    // input, or the view would snap on every motion report.
     scroll.scrollToBottom();
     for (const obs of inputObservers) {
       obs(out);
@@ -575,6 +575,100 @@ function buildTerminal(
   });
   render.updateFontMetrics();
 
+  // A mouse report is BEST-EFFORT and never enters the reliable outbox: it
+  // carries no sequence number, so one retransmitted after a resume describes a
+  // screen since repainted, and `sendEphemeral` refuses rather than queues. Not
+  // sendBytes either: that funnel snaps the view to the bottom on every accepted
+  // byte, so a motion report would jump the viewport. The listeners belong on the
+  // scroll container (a click in its padding or over the reserved scrollbar
+  // gutter never reaches a row, and the wheel has to be cancellable there); the
+  // coordinate frame is the row container, whose box IS the grid.
+  const disposeMouse = mouse.init({
+    sendReport: (data) => connection.sendEphemeral(data),
+    cellSize: render.cellSize,
+    termElement: () => termWrap,
+    gridElement: () => outputEl,
+    // The RENDERED grid, not computeSize(): the row hit test anchors on its
+    // height, and this client's own measurement disagrees with the negotiated
+    // screen whenever a second device is attached or a local resize has not been
+    // answered yet, which would shift every reported row.
+    gridSize: render.gridSize,
+  });
+
+  // A press over the display-only output takes focus off the hidden textarea and
+  // the click handler below puts it back, so that blur/focus pair is an artifact
+  // of this input model, not a focus change the application should be told about.
+  // xterm.js never emits one because its textarea keeps focus through a click on
+  // the terminal. So a blur raised inside a press is withheld and the gesture's
+  // REAL end state is reported once it resolves: nothing when focus came back,
+  // one report when it did not (a live selection, a link and a bare touch tap all
+  // decline to restore it). Measured before this: 3600 focus reports in 90s of
+  // clicking, which reaches an application as FocusLost/FocusGained per click.
+  let pressHoldsFocus = false;
+  let focusResolve: ReturnType<typeof setTimeout> | null = null;
+
+  function reportFocusNow(): void {
+    connection.setClientFocus(
+      document.activeElement !== null && termWrap.contains(document.activeElement),
+    );
+  }
+
+  // Scheduled rather than read at pointerup: the focus restore happens in the
+  // `click` handler, which the browser dispatches after pointerup within the same
+  // task, so a task boundary is the first point where the end state is settled.
+  function endPressFocusGesture(): void {
+    if (focusResolve !== null) {
+      clearTimeout(focusResolve);
+    }
+    focusResolve = setTimeout(() => {
+      focusResolve = null;
+      pressHoldsFocus = false;
+      reportFocusNow();
+    }, 0);
+  }
+
+  // The keyboard target is the hidden textarea INSIDE termWrap, so the widget's
+  // own focus events bubble to here. What goes out is the widget's STATE, not
+  // DEC 1004 bytes: the server derives the answer from this report plus every
+  // other attached client's plus its own hold.
+  termWrap.addEventListener(
+    "focusin",
+    () => {
+      connection.setClientFocus(true);
+    },
+    { signal },
+  );
+  termWrap.addEventListener(
+    "focusout",
+    (ev) => {
+      if (ev.relatedTarget instanceof Node && termWrap.contains(ev.relatedTarget)) {
+        return; // focus moving WITHIN the terminal is not a blur
+      }
+      if (pressHoldsFocus) {
+        return; // this gesture's own doing; endPressFocusGesture reports the truth
+      }
+      connection.setClientFocus(false);
+    },
+    { signal },
+  );
+  // Seeded once, so a terminal mounted with its textarea already focused does not
+  // report blurred until the first real focusin.
+  reportFocusNow();
+
+  // The kernel is the toggler, and the class goes on the scroll container rather
+  // than on the rows: `.term-output` is replaced wholesale by the renderer, and
+  // `.term` is the element that survives every rebuild. What the shape MEANS is
+  // at the CSS rule it drives (css/02-terminal.css).
+  function updateMousePointer(): void {
+    termWrap.classList.toggle("wt-mouse-app", modes.getMouseMode() !== 0);
+  }
+
+  // Derived once here as well as from the two triggers below: the modes module is
+  // a singleton that outlives a terminal, so a re-created terminal on a page
+  // whose mirror already holds a tracking mode would otherwise show the resting
+  // pointer until the next frame.
+  updateMousePointer();
+
   composition.init({
     textarea: input,
     compositionView: compositionViewEl,
@@ -698,6 +792,7 @@ function buildTerminal(
         bus.emit("wire:title", { session: activeSession?.id ?? "", title: msg.title });
       } else if (msg.type === "modes") {
         render.updateReverseVideo();
+        updateMousePointer();
         bus.emit("wire:modes", msg);
       } else if (msg.type === "clipboard") {
         // Inbound OSC 52. With no clipboard feature subscribed this is a no-op
@@ -969,9 +1064,13 @@ function buildTerminal(
       pointerDownX = e.clientX;
       pointerDownY = e.clientY;
       pointerDownTime = e.timeStamp;
+      pressHoldsFocus = true;
     },
     { passive: true, signal },
   );
+  for (const end of ["pointerup", "pointercancel", "lostpointercapture"] as const) {
+    termWrap.addEventListener(end, endPressFocusGesture, { passive: true, signal });
+  }
   termWrap.addEventListener(
     "pointerup",
     (e) => {
@@ -1476,6 +1575,11 @@ function buildTerminal(
     // detach here and the onSwitch attach below.
     composition.cancelComposition();
     resetToPlaceholder(input);
+    // A held mouse gesture is latched input too, and the mouse module is per
+    // TERMINAL while sessions multiplex over it: a record kept across the switch
+    // would let the incoming session's first open synthesize a release for a
+    // press its application never saw.
+    mouse.disarmGesture();
     for (const { instance } of instances) {
       instance.onDetach?.();
     }
@@ -1483,6 +1587,9 @@ function buildTerminal(
     // Reconnect the terminal WS to this session using its per-tab resume
     // state; the renderer was already pointed at its store by the owner.
     connection.setSession(session.id);
+    // setSession restores the incoming session's mode mirror synchronously and
+    // delivers no modes frame, so nothing else re-derives the pointer here.
+    updateMousePointer();
     // The owned first connect has happened (session id is now on the WS URL);
     // wake-reconnect handlers may fire from here on.
     connectionInitiated = true;
@@ -1671,11 +1778,16 @@ function buildTerminal(
     // Reset the composition singleton: a failure during an IME cycle must not
     // leave module state or a deferred send alive for a later terminal mount.
     composition.teardown();
+    disposeMouse();
     connection.disconnect();
     connState.destroy();
     if (toastTimer !== null) {
       clearTimeout(toastTimer);
       toastTimer = null;
+    }
+    if (focusResolve !== null) {
+      clearTimeout(focusResolve);
+      focusResolve = null;
     }
     for (const off of subscriptions) {
       off();
