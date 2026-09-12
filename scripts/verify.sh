@@ -38,6 +38,11 @@ for f in "$ENGINE_DIR"/web/src/*.ts; do
 done
 # Minimal manifest so bundler resolution maps the bare specifier to src.
 cp "$ENGINE_DIR/web/package.json" "$PKG/package.json"
+# Vite pre-bundles node_modules deps and keys the cache on the manifest rather
+# than on file contents, so an overlay that ADDS an export is invisible until the
+# cache is dropped: the suite then fails on the new symbol while the overlaid
+# source plainly exports it.
+rm -rf node_modules/.vite
 
 printf '%s\n' "[2/4] tsc typecheck (source)"
 npx tsc -p tsconfig.json

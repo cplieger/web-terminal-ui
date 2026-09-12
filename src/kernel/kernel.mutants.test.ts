@@ -49,6 +49,8 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       updateFontMetrics: hoisted.updateFontMetrics,
       setPredictedCursor: vi.fn(),
       computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
+      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
+      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
       getCursorPx: hoisted.getCursorPx,
       getHighestIndex: vi.fn(() => -1),
       pendingRowCount: vi.fn(() => 0),
@@ -87,6 +89,8 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
       connect: hoisted.connect,
       sendBinary: hoisted.sendBinary,
       sendResize: vi.fn(),
+      sendEphemeral: vi.fn(() => true),
+      setClientFocus: vi.fn(),
       reconnectNow: hoisted.reconnectNow,
       disconnect: hoisted.disconnect,
       setSession: hoisted.setSession,
@@ -606,11 +610,16 @@ describe("where the keyboard lands", () => {
           .filter((c) => c[0] === type)
           .map((c) => (c[2] ?? {}) as AddEventListenerOptions);
 
-      for (const type of ["pointerdown", "pointerup"]) {
+      // Every registration, and no count: the property under test is passivity,
+      // and asserting it over all of them also catches a non-passive one added
+      // later, which pinning the arity at one did not.
+      for (const type of ["pointerdown", "pointerup", "pointercancel", "lostpointercapture"]) {
         const registrations = optionsFor(type);
-        expect(registrations).toHaveLength(1);
-        expect(registrations[0]?.passive).toBe(true);
-        expect(registrations[0]?.signal).toBeInstanceOf(AbortSignal);
+        expect(registrations.length).toBeGreaterThan(0);
+        for (const options of registrations) {
+          expect(options.passive).toBe(true);
+          expect(options.signal).toBeInstanceOf(AbortSignal);
+        }
       }
       handle.destroy();
     } finally {
