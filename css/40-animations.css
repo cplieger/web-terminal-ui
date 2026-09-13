@@ -45,9 +45,17 @@
 
 /* The chip's content dissolves as it becomes the drop slot, and comes back when the
    drag ends (30-tabs.css fades every child to nothing). One rule on the children,
-   not four per-part rules: the label, the status dot, the progress bar and the close
-   all leave together, because they leave for one reason. */
-:where(.wt-root.wt-animate) .wt-tab > * {
+   not a per-part rule each: the label, the status dot, the progress bar and the
+   close all leave together, because they leave for one reason.
+
+   The activity mark is the fifth child and is deliberately NOT one of them: it
+   animates on its own timing (30-tabs.css), a delayed fade that follows the
+   footprint snap. Both declarations are `transition` at equal specificity and this
+   file loads later, so dropping the :not() silently resets the mark's reveal at the
+   desktop chip while the two mobile chips, which are not .wt-tab children, keep it
+   — one element revealing two ways. chip-geometry.test.ts measures the resolved
+   values under .wt-animate at all three sites. */
+:where(.wt-root.wt-animate) .wt-tab > *:not(.wt-activity-mark) {
   transition: opacity var(--dur-micro) var(--ease-standard);
 }
 

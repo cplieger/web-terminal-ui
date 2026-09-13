@@ -964,6 +964,120 @@
   border-color: var(--status-failed);
 }
 
+/* ===== Secondary activity mark (a host's background-activity channel) =====
+   A SECOND per-tab mark, orthogonal to the activity dot beside it: the dot
+   reports the session's turn, this reports a background task that outlives one.
+   Three states (working / waiting / input) and it WITHDRAWS when there is none.
+
+   It is a rounded-SQUARE RING, never a filled disc and never a pictogram, and
+   that silhouette is the WCAG 1.4.1 channel: the round dot sits 8px away at all
+   three chip sites, and the two share a hue vocabulary (--status-input is input's
+   dot colour too), so shape is what separates them at 9px. Between the mark's OWN
+   three states the channel is BAND WIDTH, in a deliberate 2:1 ratio, because
+   waiting and input share one ink.
+
+   A literal 3px radius, not --radius-sm: the smallest token rung is 4px, which on
+   a 9px box reads as a circle and defeats the silhouette.
+
+   It costs ZERO layout while no state is set. The footprint cancel is a negative
+   inline-start margin of exactly the box plus the chip's own flex gap, so the
+   label's box does not move when the element is added to a chip that has nothing
+   to report; setting data-activity zeroes the margin and the label shifts right by
+   that same amount. The gap term is per-site (31-switcher.css sets --sp-2 for the
+   two mobile chips), so it must stay a var() reference — a literal breaks whichever
+   site it does not match. box-sizing: border-box is global under .wt-root, so a
+   band change never moves layout either. */
+:where(.wt-root) .wt-activity-mark {
+  --wt-mark-size: 9px;
+  --wt-mark-gap: var(--sp-1);
+  /* waiting and input both speak through this ink and separate by band alone;
+     working overrides it. */
+  --wt-mark-ink: var(--status-input);
+
+  width: var(--wt-mark-size);
+  height: var(--wt-mark-size);
+  flex: none;
+  position: relative;
+  border-radius: 3px;
+  /* Zero-width at rest, so the ring is drawn entirely by a state's band. The
+     colour rides --wt-mark-ink here rather than in each state, so a state sets
+     one variable and one width. */
+  border: 0 solid var(--wt-mark-ink);
+  background: transparent;
+  opacity: 0;
+  /* While collapsed the box overlaps the status dot, and a title-less span over
+     the dot would eat the dot's own hover tooltip. Restored with the state. */
+  pointer-events: none;
+  margin-inline-start: calc(-1 * (var(--wt-mark-size) + var(--wt-mark-gap)));
+  /* Two lists, because the two directions are not symmetric. This one is the EXIT:
+     the mark fades out first and the space closes behind it, so nothing is still on
+     screen while the row reclaims its width. The ENTRY is on the [data-activity]
+     rule below, and it is what the tuck exists for.
+
+     The space is carried by a LAYOUT property on purpose: no transform moves the
+     label, and the label being pushed IS the reveal. Bounded to one flex line and
+     one mark plus one gap, once per state change. */
+  transition:
+    opacity var(--dur-exit) var(--ease-exit),
+    margin-inline-start var(--dur-standard) var(--ease-standard) var(--dur-exit);
+}
+
+/* The ENTRY, the reverse of the tuck's list: the space opens, and the mark fades in
+   after it on a delay equal to that same duration, so a reader sees the label make
+   room and then the mark arrive in the room it made. */
+:where(.wt-root) .wt-activity-mark[data-activity] {
+  margin-inline-start: 0;
+  opacity: 1;
+  pointer-events: auto;
+  transition:
+    margin-inline-start var(--dur-standard) var(--ease-standard),
+    opacity var(--dur-enter) var(--ease-enter) var(--dur-standard);
+}
+
+/* Working: the heavier bare band, plus a breathing glow. Its own compositing
+   layer for the reason the status dot's rule records — a nested overlay layer
+   snaps to device pixels independently of a fractional parent position, which at
+   this size reads as an off-centre pulse. */
+:where(.wt-root) .wt-activity-mark[data-activity="working"] {
+  --wt-mark-ink: var(--status-working);
+
+  border-width: 2px;
+  transform: translateZ(0);
+}
+
+/* The breath: a pre-painted radial animating OPACITY only, never colours, so the
+   beat costs compositing rather than a repaint per frame for as long as a
+   background task runs (the battery reason the dot's glow overlay records). */
+:where(.wt-root) .wt-activity-mark[data-activity="working"]::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 4px;
+  background: radial-gradient(
+    closest-side,
+    color-mix(in oklch, var(--wt-mark-ink) 78%, #fff) 0 70%,
+    transparent 92%
+  );
+  opacity: 0;
+  animation: wt-activity-breath 1.2s ease-in-out infinite;
+  will-change: opacity;
+}
+
+/* Waiting: the thin band plus a static halo. Stopped and resumable, nobody being
+   asked — so no motion, and the lightest band of the three. */
+:where(.wt-root) .wt-activity-mark[data-activity="waiting"] {
+  border-width: 1px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--wt-mark-ink) 30%, transparent);
+}
+
+/* Input: the same ink and the same halo as waiting, at TWICE its band. The pair
+   is the only place two states share one ink, which is why the ratio is 2:1
+   rather than a hairline apart. */
+:where(.wt-root) .wt-activity-mark[data-activity="input"] {
+  border-width: 2px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--wt-mark-ink) 30%, transparent);
+}
+
 /* The disc's glow beat: base -> brighter -> base, then a rest until the next
    cycle — expressed as the opacity envelope of the pre-painted bright overlay
    (the ::before rule above), so the beat costs compositing, not repaints.
@@ -1019,6 +1133,21 @@
   }
 }
 
+/* The activity mark's breath, same envelope as the dot's glow: rest, one bright
+   swell, rest. Opacity only — a colour keyframe here would reintroduce the
+   per-frame repaint this shape exists to avoid. */
+@keyframes wt-activity-breath {
+  0%,
+  70%,
+  100% {
+    opacity: 0;
+  }
+
+  35% {
+    opacity: 1;
+  }
+}
+
 /* Reduced-motion: drop the animated states' motion (glow + ripple), keep color.
    All three degrade the same way, since they are one object with three hues. */
 @media (prefers-reduced-motion: reduce) {
@@ -1043,6 +1172,28 @@
   :where(.wt-root) .wt-status-dot[data-status="working"]::after,
   :where(.wt-root) .wt-status-dot[data-status="warning"]::after,
   :where(.wt-root) .wt-status-dot[data-status="failed"]::after {
+    content: none;
+  }
+
+  /* Both of the mark's transition lists carry a DELAY on their second property,
+     and 01-scope.css zeroes animation and transition DURATIONS inside .wt-root
+     while saying nothing about delay — so an un-zeroed delay parks the fade with
+     the space already open, or the close with the mark already gone. The state
+     selector is listed because its own `transition` shorthand outranks the base
+     rule's delay and would otherwise keep the entry's. */
+  :where(.wt-root) .wt-activity-mark,
+  :where(.wt-root) .wt-activity-mark[data-activity] {
+    transition-delay: 0s;
+  }
+
+  /* Working loses its breath, so it takes the HEAVIEST band instead: motion is
+     REPLACED by a channel rather than removed, and the three states then separate
+     by band alone (3px bare / 1px halo / 2px halo). */
+  :where(.wt-root) .wt-activity-mark[data-activity="working"] {
+    border-width: 3px;
+  }
+
+  :where(.wt-root) .wt-activity-mark[data-activity="working"]::before {
     content: none;
   }
 }

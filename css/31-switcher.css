@@ -194,6 +194,17 @@
   min-width: 0;
 }
 
+/* The secondary activity mark's footprint cancel is "the box plus the chip's own
+   flex gap" (30-tabs.css), and these two chips lay their parts out on --sp-2
+   where the desktop chip uses --sp-1 — so the collapsed mark would leave 4px of
+   layout behind at both mobile sites. This is the one per-site value; the rendered
+   geometry test in features/tabs/chip-geometry.test.ts measures all three sites,
+   which is what stops it drifting. */
+:where(.wt-root) .wt-switcher-current-inner .wt-activity-mark,
+:where(.wt-root) .wt-switcher-row-select .wt-activity-mark {
+  --wt-mark-gap: var(--sp-2);
+}
+
 /* Ink-centring geometry, identical to .wt-tab-label: a symmetric ink allowance
    the ellipsis clipping needs, plus a bottom margin of twice --label-ink-shift
    that lifts the CAP band (cap top to baseline, never cap-to-descender) to the row

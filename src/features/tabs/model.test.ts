@@ -12,11 +12,15 @@ import {
   MAX_PERSISTED_CUE_SEEN,
   PROGRESS_ABSENT,
   SessionAPIError,
+  activityPhrase,
   compareTabOrder,
   createSessionAPI,
   createTombstones,
+  foldedCueStatus,
   isCueStatus,
   isEndedStatus,
+  normalizeActivity,
+  normalizeActivityCount,
   normalizeProgress,
   orderedInsertIndex,
   parseCueSeen,
@@ -611,8 +615,157 @@ describe("the status vocabulary (the OSC 9 states)", () => {
   });
 
   it("puts the state into a tab's accessible name", () => {
-    expect(tabAccessibleName("agent", "crashed")).toBe("agent — process crashed");
-    expect(tabAccessibleName("78% · agent", "working")).toBe("78% · agent — working");
+    expect(tabAccessibleName({ label: "agent", status: "crashed" })).toBe(
+      "agent — process crashed",
+    );
+    expect(tabAccessibleName({ label: "78% · agent", status: "working" })).toBe(
+      "78% · agent — working",
+    );
+  });
+});
+
+describe("the secondary activity vocabulary", () => {
+  it("normalizes every member of the closed set to itself", () => {
+    expect(normalizeActivity("working")).toBe("working");
+    expect(normalizeActivity("waiting")).toBe("waiting");
+    expect(normalizeActivity("input")).toBe("input");
+  });
+
+  it("reads anything outside that set as NO mark", () => {
+    // An unrecognised state must fail toward absent: a lit mark this build cannot
+    // name is worse than no mark, and a newer server may send one.
+    expect(normalizeActivity("WORKING")).toBe("");
+    expect(normalizeActivity("done")).toBe("");
+    expect(normalizeActivity("")).toBe("");
+    expect(normalizeActivity(null)).toBe("");
+    expect(normalizeActivity(undefined)).toBe("");
+    expect(normalizeActivity(7)).toBe("");
+    expect(normalizeActivity({})).toBe("");
+  });
+
+  it("takes only a non-negative integer as a count", () => {
+    expect(normalizeActivityCount(3)).toBe(3);
+    expect(normalizeActivityCount(0)).toBe(0);
+    expect(normalizeActivityCount(-1)).toBe(0);
+    expect(normalizeActivityCount(2.5)).toBe(0);
+    expect(normalizeActivityCount("3")).toBe(0);
+    expect(normalizeActivityCount(undefined)).toBe(0);
+    expect(normalizeActivityCount(Number.NaN)).toBe(0);
+    expect(normalizeActivityCount(Number.POSITIVE_INFINITY)).toBe(0);
+  });
+
+  it("words each state once, singular and plural", () => {
+    expect(activityPhrase("working", 1)).toBe("1 background task running");
+    expect(activityPhrase("working", 3)).toBe("3 background tasks running");
+    expect(activityPhrase("waiting", 1)).toBe("1 background task paused");
+    expect(activityPhrase("waiting", 2)).toBe("2 background tasks paused");
+    expect(activityPhrase("input", 1)).toBe("1 background task waiting for you");
+    expect(activityPhrase("input", 4)).toBe("4 background tasks waiting for you");
+  });
+
+  it("reads a count of 0 beside a live state as one task", () => {
+    // The engine documents count >= 1 whenever the state is non-empty, so a 0 is a
+    // host that does not count — and "0 background tasks running" would be absurd.
+    expect(activityPhrase("working", 0)).toBe("1 background task running");
+  });
+
+  it("has no wording at all for no mark", () => {
+    expect(activityPhrase("", 2)).toBe("");
+    expect(activityPhrase("queued", 2)).toBe("");
+  });
+});
+
+describe("a live background task blanks a SETTLED cue and nothing else", () => {
+  it("blanks a settled cue for every mark state a live task can hold", () => {
+    // The mark's three states all mean the task outlived the turn, so all three
+    // suppress: `waiting` is stopped-and-resumable rather than finished, and
+    // `input` is the task itself asking, which the run's own surface answers.
+    for (const activity of ["working", "waiting", "input"]) {
+      expect(foldedCueStatus("done", activity), `done + ${activity}`).toBe("");
+    }
+  });
+
+  it("keeps a cue the viewer is being pointed at, whatever the task is doing", () => {
+    // `input` is the session's OWN unanswered question: it IS the thing the cue
+    // exists to point at, so no background task may stand in front of it.
+    expect(foldedCueStatus("input", "working")).toBe("input");
+    // `crashed` and `exited` mean the PROCESS is gone. The viewer has to be told,
+    // and a task belonging to a dead session is dead too.
+    expect(foldedCueStatus("crashed", "working")).toBe("crashed");
+    expect(foldedCueStatus("exited", "working")).toBe("exited");
+    // `failed` is an error the program declared. It does not become less urgent
+    // because a background task is still running, so it is delivered at once.
+    for (const activity of ["working", "waiting", "input"]) {
+      expect(foldedCueStatus("failed", activity), `failed + ${activity}`).toBe("failed");
+    }
+  });
+
+  it("returns the status untouched when no task is running", () => {
+    // The whole population, so a rule that blanked on the wrong axis cannot hide
+    // in a state this table omits.
+    for (const status of [
+      "done",
+      "failed",
+      "input",
+      "crashed",
+      "exited",
+      "working",
+      "warning",
+      "idle",
+    ]) {
+      expect(foldedCueStatus(status, ""), status).toBe(status);
+    }
+  });
+
+  it("reads an unrecognised mark state as no task at all", () => {
+    // normalizeActivity's fail-toward-absent rule reaches here: a state a newer
+    // server invented must not silently suppress a cue this build can name.
+    expect(foldedCueStatus("done", "queued")).toBe("done");
+    expect(foldedCueStatus("done", "WORKING")).toBe("done");
+  });
+
+  it("never answers idle for a blanked cue", () => {
+    // "" is NO INFORMATION and `idle` is a real non-cue state that FORGETS the
+    // acknowledgement, so the sentinel may not drift onto a status value: a caller
+    // testing `=== ""` would stop suppressing and one testing isCueStatus would
+    // drop the viewer's dismissal.
+    expect(foldedCueStatus("done", "working")).not.toBe("idle");
+    expect(isCueStatus(foldedCueStatus("done", "working"))).toBe(false);
+  });
+});
+
+describe("a tab's accessible name carries both marks", () => {
+  it("appends the activity phrase after the state", () => {
+    expect(
+      tabAccessibleName({ label: "agent", status: "done", activity: "input", activityCount: 1 }),
+    ).toBe("agent — turn finished (1 background task waiting for you)");
+  });
+
+  it("carries the percentage AND the activity together", () => {
+    // The two are independent channels: a determinate turn can be running while a
+    // background task waits, and a reader needs both.
+    expect(
+      tabAccessibleName({
+        label: "agent",
+        status: "working",
+        progress: 78,
+        activity: "working",
+        activityCount: 2,
+      }),
+    ).toBe("agent — working, 78% (2 background tasks running)");
+  });
+
+  it("announces the state alone when neither optional field is set", () => {
+    expect(tabAccessibleName({ label: "agent", status: "working" })).toBe("agent — working");
+    expect(
+      tabAccessibleName({ label: "agent", status: "working", activity: "", activityCount: 0 }),
+    ).toBe("agent — working");
+  });
+
+  it("drops an unknown activity state from the name", () => {
+    expect(
+      tabAccessibleName({ label: "agent", status: "idle", activity: "queued", activityCount: 9 }),
+    ).toBe("agent — idle");
   });
 });
 
@@ -639,11 +792,17 @@ describe("the OSC 9;4 percentage", () => {
   it("announces a percentage in the accessible name and never as visible text", () => {
     // The number reaches a screen reader, which cannot see the 2px bar, and
     // reaches nothing that costs label width. No terminal draws it as text.
-    expect(tabAccessibleName("agent", "working", 78)).toBe("agent — working, 78%");
-    expect(tabAccessibleName("agent", "working", 0)).toBe("agent — working, 0%");
+    expect(tabAccessibleName({ label: "agent", status: "working", progress: 78 })).toBe(
+      "agent — working, 78%",
+    );
+    expect(tabAccessibleName({ label: "agent", status: "working", progress: 0 })).toBe(
+      "agent — working, 0%",
+    );
     // Absent, or omitted entirely, announces the state alone.
-    expect(tabAccessibleName("agent", "working", PROGRESS_ABSENT)).toBe("agent — working");
-    expect(tabAccessibleName("agent", "working")).toBe("agent — working");
+    expect(
+      tabAccessibleName({ label: "agent", status: "working", progress: PROGRESS_ABSENT }),
+    ).toBe("agent — working");
+    expect(tabAccessibleName({ label: "agent", status: "working" })).toBe("agent — working");
   });
 
   it("shows a percentage only under a status the progress channel owns", () => {

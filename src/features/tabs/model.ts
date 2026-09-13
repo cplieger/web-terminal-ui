@@ -20,8 +20,19 @@ export type { SessionInfo };
  *  (SessionStatus.progressValue). Both status sources flow through one code path
  *  this way, and the optionality is meaningful: the polling fallback lists
  *  SessionInfo with no percentage at all, which means "no information" and must
- *  not be read as "the percentage was cleared". */
-export type StatusRecord = SessionInfo & { readonly progressValue?: number };
+ *  not be read as "the percentage was cleared".
+ *
+ *  `activity`/`activityCount` are declared here as a FORWARD declaration: the
+ *  published engine's SessionInfo does not carry them yet. Drop both from this
+ *  intersection once it does, so the wire shape has one home again — if the
+ *  intersection then narrows anything, the engine's declaration is the wrong
+ *  one. Both are `string`/`number` rather than unions for the same reason
+ *  `status` is: the stream is parsed, not validated. */
+export type StatusRecord = SessionInfo & {
+  readonly progressValue?: number;
+  readonly activity?: string;
+  readonly activityCount?: number;
+};
 
 // The status vocabulary, module-private on purpose: every consumer asks one of
 // the predicates below (isEndedStatus / statusRevealsDot / isCueStatus /
@@ -161,6 +172,63 @@ export function renderedProgress(status: string, progress: number): number {
   return statusOwnsProgress(status) ? progress : PROGRESS_ABSENT;
 }
 
+// The secondary-activity vocabulary: a host-reported background activity that
+// OUTLIVES the turn, orthogonal to the status above. Module-private for the same
+// reason the status vocabulary is — every consumer asks a predicate, so a state's
+// MEANING has one home.
+//
+// A background task is running.
+const ACTIVITY_WORKING = "working";
+// Stopped and resumable; nobody is being asked for anything.
+const ACTIVITY_WAITING = "waiting";
+// A background task is blocked on the user.
+const ACTIVITY_INPUT = "input";
+
+/** normalizeActivity cleans the wire value into the closed set, or "" for no
+ *  mark. Anything outside it — an unknown state from a newer server, a
+ *  non-string, absent — is "": an unrecognised state must fail toward NO mark
+ *  rather than toward a lit one whose meaning this build cannot name. */
+export function normalizeActivity(value: unknown): string {
+  if (value === ACTIVITY_WORKING || value === ACTIVITY_WAITING || value === ACTIVITY_INPUT) {
+    return value;
+  }
+  return "";
+}
+
+/** normalizeActivityCount cleans the count off the wire: a non-integer, a
+ *  negative or an absent value is 0. The engine documents count >= 1 whenever
+ *  the state is non-empty, so 0 beside a live state is a server that does not
+ *  count, which activityPhrase reads as one. */
+export function normalizeActivityCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return 0;
+  }
+  return value;
+}
+
+/** activityPhrase is the human wording for the mark, used for BOTH its hover
+ *  tooltip and the suffix in a tab's accessible name — one definition, so what a
+ *  sighted user reads on hover and what a screen reader announces cannot
+ *  disagree (the statusPhrase rule). "" for no mark.
+ *
+ *  It cannot say "workflow": the secondary channel is generic, so the wording has
+ *  to be true for whatever a host puts on it. */
+export function activityPhrase(state: string, count: number): string {
+  const normalized = normalizeActivity(state);
+  if (normalized === "") {
+    return "";
+  }
+  const n = Math.max(1, normalizeActivityCount(count));
+  const subject = `${String(n)} background task${n === 1 ? "" : "s"}`;
+  if (normalized === ACTIVITY_WORKING) {
+    return `${subject} running`;
+  }
+  if (normalized === ACTIVITY_WAITING) {
+    return `${subject} paused`;
+  }
+  return `${subject} waiting for you`;
+}
+
 /** tabAccessibleName is a tab's announced name: its rendered label plus the
  *  session's state, and the percentage when one is showing.
  *
@@ -173,16 +241,23 @@ export function renderedProgress(status: string, progress: number): number {
  *
  *  Pass PROGRESS_ABSENT for progress to announce the state alone. Callers hand in
  *  renderedProgress's output, so a percentage the tab is not showing is not
- *  announced either. */
-export function tabAccessibleName(
-  renderedLabel: string,
-  status: string,
-  progress: number = PROGRESS_ABSENT,
-): string {
-  const state = statusPhrase(status);
-  return progress < 0
-    ? `${renderedLabel} — ${state}`
-    : `${renderedLabel} — ${state}, ${String(progress)}%`;
+ *  announced either.
+ *
+ *  A RECORD rather than positional arguments: `label` and `status` are adjacent
+ *  same-typed strings, so a transposition compiles. */
+export function tabAccessibleName(v: {
+  readonly label: string;
+  readonly status: string;
+  readonly progress?: number;
+  readonly activity?: string;
+  readonly activityCount?: number;
+}): string {
+  const state = statusPhrase(v.status);
+  const progress = v.progress ?? PROGRESS_ABSENT;
+  const head =
+    progress < 0 ? `${v.label} — ${state}` : `${v.label} — ${state}, ${String(progress)}%`;
+  const activity = activityPhrase(v.activity ?? "", v.activityCount ?? 0);
+  return activity === "" ? head : `${head} (${activity})`;
 }
 
 // localStorage key for the last active session id, so a page reload reopens the
@@ -249,6 +324,37 @@ export function cueIconName(status: CueStatus): "input" | "done" | "alert" {
     return status;
   }
   return "alert";
+}
+
+/** The cue statuses that mean the session's own turn is OVER WITHOUT INCIDENT, and
+ *  therefore the only ones a live background task may blank.
+ *
+ *  Narrow on purpose, and `done` is the whole set. Every other cue status is
+ *  something the viewer has to be told AT ONCE, so none of them may wait on a task:
+ *  `crashed` and `exited` mean the PROCESS is gone (and a task belonging to a dead
+ *  session is dead too), `input` IS what the viewer is being pointed at whatever
+ *  else the session is doing, and `failed` is an error the program declared, which
+ *  does not become less urgent because something else is still running. On this
+ *  engine's path `failed` is OSC 9;4 state 2 rather than a turn verdict, so it is
+ *  deliberately NOT treated the way vibekit's settle probe treats its own `failed`
+ *  (see web-terminal-engine.md). */
+const SETTLED_CUES: ReadonlySet<string> = new Set<CueStatus>(["done"]);
+
+/** foldedCueStatus is the status the CUE surfaces see for a session: its own
+ *  status, unless a settled turn's background task is still running, in which
+ *  case "". Nothing about the status DOT changes — the strip keeps rendering the
+ *  turn's real state; only the cue's view of it is blanked.
+ *
+ *  "" and NOT "idle", and the difference is load-bearing: "" means NO
+ *  INFORMATION, so a caller must leave the wt-cue-seen map alone, where "idle" is
+ *  a real non-cue state that FORGETS the acknowledgement. Blanking with "idle"
+ *  would drop the dismissal and re-raise the cue from scratch the moment the task
+ *  ended, even for a session the viewer had already visited. */
+export function foldedCueStatus(status: string, activity: string): string {
+  if (!SETTLED_CUES.has(status) || normalizeActivity(activity) === "") {
+    return status;
+  }
+  return "";
 }
 
 /** isUnseenCue reports whether a session's CURRENT status is a cue this viewer
@@ -460,6 +566,16 @@ export interface Tab {
    *  question (renderedProgress), and the prefix it produces is never stored on
    *  any title field. */
   progress: number;
+  /** The chip's secondary activity mark (the rounded-square ring beside the
+   *  status dot). Present on every chip, and costing no layout until a state
+   *  arrives. */
+  activityEl: HTMLElement;
+  /** The host's secondary activity state for this session, normalised to the
+   *  closed set ("" for none). Independent of `status` and of `reports`: a
+   *  background task can be running while the turn that launched it is finished. */
+  activity: string;
+  /** How many sources produced that state, 0 when the server does not count. */
+  activityCount: number;
   aria: TabHandle;
   /** This tab's saved reading position: the absolute LINE at the viewport top
    *  plus its on-screen offset and the follow state, as captureViewMemory()

@@ -10,7 +10,7 @@
 // The status vocabulary itself (which statuses reveal a dot, and how each one is
 // worded for a human) lives in the DOM-free model, so the painters here and the
 // accessible names index.ts builds read one definition.
-import { statusPhrase, statusRevealsDot } from "./model.js";
+import { activityPhrase, normalizeActivity, statusPhrase, statusRevealsDot } from "./model.js";
 
 // --- Reorder preview -------------------------------------------------------
 // Every chip in this strip is the same width (see .wt-tab in 30-tabs.css: a
@@ -121,6 +121,13 @@ const SWITCH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8
 // class (.wt-progress-bar) styles it everywhere and every chip site gets it for
 // free. It starts `hidden` — a session with no percentage must render NO bar
 // (paintProgress).
+//
+// The secondary activity mark (.wt-activity-mark) rides here for the same reason
+// and takes no per-site class either. It carries NO `hidden` attribute, unlike
+// the bar: `hidden` is display:none, and an element out of layout cannot animate
+// into it. Absence is the absence of `data-activity`, which the CSS answers by
+// cancelling the mark's own footprint (see 30-tabs.css), so a chip with no
+// secondary activity measures exactly as it did before this element existed.
 export function chipContent(v: { dot: string; label: string; close: string; closeAttr?: string }): {
   dotLabel: string;
   close: string;
@@ -128,6 +135,7 @@ export function chipContent(v: { dot: string; label: string; close: string; clos
   return {
     dotLabel:
       `<span class="${v.dot} wt-status-dot" aria-hidden="true"></span>` +
+      `<span class="wt-activity-mark" aria-hidden="true"></span>` +
       `<span class="${v.label}"></span>` +
       `<span class="wt-progress-bar" aria-hidden="true" hidden></span>`,
     close: `<button type="button" class="${v.close}" aria-label="Close terminal"${v.closeAttr ?? ""}>${CLOSE_SVG}</button>`,
@@ -193,6 +201,27 @@ export function paintStatusDot(el: HTMLElement, status: string, reports: boolean
   el.dataset["status"] = value;
   el.classList.toggle("wt-reports", reports || statusRevealsDot(value));
   el.title = statusPhrase(value);
+}
+
+/** paintActivityMark applies the secondary mark's two bits: data-activity drives
+ *  its appearance (working / waiting / input via CSS) and `title` gives it a
+ *  hover tooltip, worded by activityPhrase so hover text and announced text
+ *  cannot drift. No state REMOVES the attribute, which is what collapses the
+ *  mark's footprint to zero.
+ *
+ *  The reveal is the mark's OWN state, deliberately not the status dot's
+ *  reportsActivity gate: a background run is a fact about the session that is
+ *  independent of whether its program ever spoke OSC 9, which is the whole point
+ *  of a second mark. */
+export function paintActivityMark(el: HTMLElement, state: string, count: number): void {
+  const phrase = activityPhrase(state, count);
+  if (phrase === "") {
+    delete el.dataset["activity"];
+    el.removeAttribute("title");
+    return;
+  }
+  el.dataset["activity"] = normalizeActivity(state);
+  el.title = phrase;
 }
 
 /** paintProgress renders one chip's determinate progress bar from a percentage.
