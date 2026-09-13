@@ -20,18 +20,9 @@ export type { SessionInfo };
  *  (SessionStatus.progressValue). Both status sources flow through one code path
  *  this way, and the optionality is meaningful: the polling fallback lists
  *  SessionInfo with no percentage at all, which means "no information" and must
- *  not be read as "the percentage was cleared".
- *
- *  `activity`/`activityCount` are declared here as a FORWARD declaration: the
- *  published engine's SessionInfo does not carry them yet. Drop both from this
- *  intersection once it does, so the wire shape has one home again — if the
- *  intersection then narrows anything, the engine's declaration is the wrong
- *  one. Both are `string`/`number` rather than unions for the same reason
- *  `status` is: the stream is parsed, not validated. */
+ *  not be read as "the percentage was cleared". */
 export type StatusRecord = SessionInfo & {
   readonly progressValue?: number;
-  readonly activity?: string;
-  readonly activityCount?: number;
 };
 
 // The status vocabulary, module-private on purpose: every consumer asks one of
