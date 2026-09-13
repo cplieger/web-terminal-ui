@@ -153,9 +153,25 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
   nowhere: no terminal emulator puts a percentage next to a tab label, and a chip
   that shrinks toward a 100px floor has no width to spare. It is likewise never
   written to the browser document title, since one page title cannot represent
-  several sessions. An OSC 9 notification is posted as a browser
-  notification when the user is not already looking at that terminal (permission
-  is requested on a user gesture; a denial degrades silently to the tab dots).
+  several sessions.
+
+  Beside that dot, every chip carries a second mark for a host-reported
+  background activity that outlives a turn (a workflow run, in the
+  `web-terminal-kiro` case). It is a rounded-square ring rather than a disc, so
+  it does not read as another status dot, and band width carries its three
+  states: a 2px band with a breathing glow while a background task is running, a
+  1px band with a halo while one is paused and resumable, and a 2px band with
+  that same halo while one is blocked on the user. The state and the count are
+  announced in the tab's accessible name and repeated as the mark's hover
+  tooltip. The mark is independent of the dot's reveal gate, so a tab can show
+  one and not the other, and it collapses to no width when there is nothing to
+  report: a chip with no background activity measures exactly as it did before
+  the mark existed. It draws from `--status-working` and `--status-input`, so
+  theming the activity-dot palette themes it too and no extra token is needed.
+
+  An OSC 9 notification is posted as a browser notification when the user is not
+  already looking at that terminal (permission is requested on a user gesture; a
+  denial degrades silently to the tab dots).
   Clicking one switches to the session that raised it: the Notifications API's
   own click default already focuses the page, and the handler supplies the
   in-page half. These are non-persistent notifications, so per the API the

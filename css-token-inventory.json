@@ -51,6 +51,9 @@
     "--wt-loading-bg",
     "--wt-loading-sweep-duration",
     "--wt-loading-sweep-easing",
+    "--wt-mark-gap",
+    "--wt-mark-ink",
+    "--wt-mark-size",
     "--wt-switcher-h"
   ],
   "referenced": [
@@ -104,6 +107,9 @@
     "--wt-loading-bg",
     "--wt-loading-sweep-duration",
     "--wt-loading-sweep-easing",
+    "--wt-mark-gap",
+    "--wt-mark-ink",
+    "--wt-mark-size",
     "--wt-switcher-h",
     "--wt-tabbar-h"
   ]

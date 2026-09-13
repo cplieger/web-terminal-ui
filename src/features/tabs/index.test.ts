@@ -2613,6 +2613,190 @@ describe("tabs OSC 9 status chrome", () => {
   });
 });
 
+// The SECOND per-tab mark: a host-reported background activity that outlives the
+// turn. It rides chipContent, so all three chip sites get it from one builder, and
+// it is orthogonal to the status dot in both directions — which is the whole reason
+// it exists and the property most at risk from a later edit.
+describe("tabs secondary activity mark", () => {
+  /** Build a terminal with a fake status monitor and wait for both tabs. */
+  async function withMonitor(): Promise<{
+    root: HTMLElement;
+    monitor: ReturnType<typeof fakeMonitor>;
+  }> {
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = createTerminal(root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    return { root, monitor };
+  }
+  /** A status event carrying the secondary-activity pair. The published engine's
+   *  SessionStatus does not declare it yet, so the widening here is the test-side
+   *  half of the forward declaration on StatusRecord (features/tabs/model.ts). */
+  const event = (s: SessionStatus & { activity?: string; activityCount?: number }): SessionStatus =>
+    s;
+  const mark = (root: HTMLElement, i: number): HTMLElement | null =>
+    root.querySelectorAll<HTMLElement>(".wt-tab .wt-activity-mark")[i] ?? null;
+  const tabDotOf = (root: HTMLElement, i: number): HTMLElement | null =>
+    root.querySelectorAll<HTMLElement>(".wt-tab .wt-tab-dot")[i] ?? null;
+
+  it("paints the state and its tooltip on the desktop chip", async () => {
+    const { root, monitor } = await withMonitor();
+    monitor.emit(
+      event({
+        id: "s1",
+        status: "idle",
+        title: "one",
+        createdAt: "1",
+        activity: "working",
+        activityCount: 2,
+      }),
+    );
+
+    expect(mark(root, 0)?.dataset["activity"]).toBe("working");
+    // The mark is aria-hidden decoration like the dot, so the tooltip is how a
+    // sighted user reads it; it is worded by the same function as the announced
+    // name, so the two cannot drift.
+    expect(mark(root, 0)?.title).toBe("2 background tasks running");
+    // ...and only the tab the event named.
+    expect(mark(root, 1)?.dataset["activity"]).toBeUndefined();
+  });
+
+  it("paints the mobile bar row and an expanded list row from the same state", async () => {
+    const { root, monitor } = await withMonitor();
+    // s1 is the active tab (the bar row), s2 is the one the expanded list holds.
+    monitor.emit(
+      event({
+        id: "s1",
+        status: "idle",
+        title: "one",
+        createdAt: "1",
+        activity: "input",
+        activityCount: 1,
+      }),
+    );
+    monitor.emit(
+      event({
+        id: "s2",
+        status: "idle",
+        title: "two",
+        createdAt: "2",
+        activity: "waiting",
+        activityCount: 3,
+      }),
+    );
+
+    const barMark = root.querySelector<HTMLElement>(".wt-switcher-current .wt-activity-mark");
+    expect(barMark?.dataset["activity"]).toBe("input");
+    expect(barMark?.title).toBe("1 background task waiting for you");
+
+    root.querySelector<HTMLElement>(".wt-switcher-current")?.click();
+    const rowMark = root.querySelector<HTMLElement>(".wt-switcher-row .wt-activity-mark");
+    expect(rowMark?.dataset["activity"]).toBe("waiting");
+    expect(rowMark?.title).toBe("3 background tasks paused");
+  });
+
+  it("withdraws the mark when the run ends (an explicit empty state)", async () => {
+    const { root, monitor } = await withMonitor();
+    monitor.emit(
+      event({ id: "s1", status: "idle", title: "one", createdAt: "1", activity: "working" }),
+    );
+    expect(mark(root, 0)?.dataset["activity"]).toBe("working");
+
+    monitor.emit(event({ id: "s1", status: "idle", title: "one", createdAt: "1", activity: "" }));
+    // Removing the attribute is what collapses the footprint again, so the empty
+    // state must leave NO attribute rather than an empty one.
+    expect(mark(root, 0)?.hasAttribute("data-activity")).toBe(false);
+    expect(mark(root, 0)?.hasAttribute("title")).toBe(false);
+  });
+
+  it("leaves a live mark alone when the field is ABSENT", async () => {
+    const { root, monitor } = await withMonitor();
+    monitor.emit(
+      event({
+        id: "s1",
+        status: "idle",
+        title: "one",
+        createdAt: "1",
+        activity: "working",
+        activityCount: 2,
+      }),
+    );
+
+    // The polling fallback lists SessionInfo, and a pre-release server sends
+    // neither field, so absence means "no information" and must not read as a
+    // withdrawal — the same rule progressValue and order already follow.
+    monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1" });
+    expect(mark(root, 0)?.dataset["activity"]).toBe("working");
+    expect(mark(root, 0)?.title).toBe("2 background tasks running");
+  });
+
+  it("renders no mark for a state this build does not recognise", async () => {
+    const { root, monitor } = await withMonitor();
+    monitor.emit(
+      event({
+        id: "s1",
+        status: "idle",
+        title: "one",
+        createdAt: "1",
+        activity: "queued",
+        activityCount: 1,
+      }),
+    );
+
+    // A newer server's unknown state fails toward ABSENT: a lit mark whose meaning
+    // this build cannot name is worse than no mark.
+    expect(mark(root, 0)?.hasAttribute("data-activity")).toBe(false);
+  });
+
+  it("announces the activity alongside the status and the percentage", async () => {
+    const { root, monitor } = await withMonitor();
+    const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[0];
+    monitor.emit(
+      event({
+        id: "s1",
+        status: "working",
+        title: "one",
+        createdAt: "1",
+        progressValue: 30,
+        activity: "input",
+        activityCount: 1,
+      }),
+    );
+
+    // Both channels reach a reader who cannot see either mark, in one name.
+    expect(chip?.getAttribute("aria-label")).toBe(
+      "one — working, 30% (1 background task waiting for you)",
+    );
+  });
+
+  it("shows the mark on a finished tab whose session never reported activity", async () => {
+    const { root, monitor } = await withMonitor();
+    monitor.emit(
+      event({
+        id: "s1",
+        status: "done",
+        title: "one",
+        createdAt: "1",
+        reportsActivity: false,
+        activity: "working",
+        activityCount: 1,
+      }),
+    );
+
+    // The independence proof, and the entire point of a SECOND mark: run_workflow
+    // returns before the run does, so the launching turn's dot goes green while the
+    // run continues. The mark's reveal is its own state, so routing it through the
+    // dot's reportsActivity gate — or through the dot's status — would hide exactly
+    // the case it exists for.
+    expect(tabDotOf(root, 0)?.dataset["status"]).toBe("done");
+    expect(tabDotOf(root, 0)?.classList.contains("wt-reports")).toBe(false);
+    expect(mark(root, 0)?.dataset["activity"]).toBe("working");
+  });
+});
+
 // The OSC 9 Form B notification, wired through the real feature. The policy
 // itself is unit-tested in notify.test.ts; these pin that the feature feeds it
 // the right session/visibility view and the right gesture.

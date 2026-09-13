@@ -754,3 +754,152 @@ describe("the switcher's aggregate cue dot survives every cue-worthy status", ()
     }
   });
 });
+
+// The secondary activity mark is CSS-only in every respect a reader cares about:
+// the TS half sets one attribute, and everything the mark IS — its silhouette, the
+// band that carries its state, and the fact that it costs no layout while absent —
+// lives in these rules. features/tabs loads no stylesheet, so nothing else in this
+// package can see any of it; chip-geometry.test.ts measures the rendered footprint
+// at all three chip sites, and this is the grep-level guard on the decisions that
+// have no geometry to measure.
+describe("secondary activity mark (the host's background-activity channel)", () => {
+  const base = /^:where\(\.wt-root\) \.wt-activity-mark \{([^}]*)\}/m.exec(tabs);
+  const anyState = /^:where\(\.wt-root\) \.wt-activity-mark\[data-activity\] \{([^}]*)\}/m.exec(
+    tabs,
+  );
+  const stateRule = (state: string): string => {
+    const rule = new RegExp(
+      `^:where\\(\\.wt-root\\) \\.wt-activity-mark\\[data-activity="${state}"\\] \\{([^}]*)\\}`,
+      "m",
+    ).exec(tabs);
+    expect(rule, `the ${state} rule exists in 30-tabs.css`).not.toBeNull();
+    return rule![1]!;
+  };
+  /** A rule's border-width in px. */
+  const band = (body: string): number => {
+    const m = /border-width:\s*([\d.]+)px/.exec(body);
+    expect(m, "the rule declares a band width").not.toBeNull();
+    return Number.parseFloat(m![1]!);
+  };
+
+  it("costs ZERO layout while no state is set, at whatever gap its site uses", () => {
+    // The footprint cancel is the whole "absent costs nothing" contract, and it
+    // must be written as the arithmetic: a literal is right at one chip site and
+    // wrong at the other two, which have a different flex gap (31-switcher.css).
+    expect(base, ":where(.wt-root) .wt-activity-mark rule exists in 30-tabs.css").not.toBeNull();
+    const body = base![1]!;
+    const margin = /margin-inline-start:\s*([^;]*);/.exec(body);
+    expect(margin, "the base rule cancels its own footprint").not.toBeNull();
+    expect(margin![1]!, "cancels the box").toContain("var(--wt-mark-size)");
+    expect(margin![1]!, "AND the chip's own gap").toContain("var(--wt-mark-gap)");
+    expect(margin![1]!, "as a negative margin").toContain("-1 *");
+    // ...and the element must stay IN layout: `display: none` (which is what the
+    // `hidden` attribute would do) takes the box out, and a box out of layout
+    // cannot fade in.
+    expect(/display:\s*none/.test(body), "the mark is never display:none").toBe(false);
+    expect(body, "invisible until a state arrives").toContain("opacity: 0");
+    expect(anyState, "a [data-activity] rule reveals it").not.toBeNull();
+    expect(anyState![1]!, "the space opens").toContain("margin-inline-start: 0");
+    expect(anyState![1]!, "and the mark fades in").toContain("opacity: 1");
+  });
+
+  it("is a rounded SQUARE ring, which is what separates it from the round dot", () => {
+    // Shape is the WCAG 1.4.1 channel against the adjacent activity dot: the two
+    // share --status-input, so hue cannot be the discriminator. A radius at or
+    // above the smallest token rung (4px) reads as a circle on a 9px box, and a
+    // background would make it a disc rather than a ring.
+    const body = base![1]!;
+    const radius = /border-radius:\s*([\d.]+)px/.exec(body);
+    expect(radius, "the mark declares a literal radius").not.toBeNull();
+    expect(Number.parseFloat(radius![1]!)).toBeLessThan(4);
+    expect(body).toContain("background: transparent");
+    expect(body).toContain("border: 0 solid var(--wt-mark-ink)");
+  });
+
+  it("carries its three states on BAND WIDTH, in the 2:1 ratio the shared ink needs", () => {
+    // waiting and input are the pair that shares one ink, so the ratio between
+    // their bands is the only thing telling them apart; working is separated from
+    // both by hue as well.
+    expect(band(stateRule("working"))).toBe(2);
+    expect(band(stateRule("waiting"))).toBe(1);
+    expect(band(stateRule("input"))).toBe(2);
+  });
+
+  it("gives working its own ink and leaves waiting and input on the shared one", () => {
+    expect(base![1]!, "the shared ink is the default").toContain(
+      "--wt-mark-ink: var(--status-input)",
+    );
+    expect(stateRule("working")).toContain("--wt-mark-ink: var(--status-working)");
+    for (const state of ["waiting", "input"]) {
+      // No override, so both resolve the base ink — which is what makes the band
+      // ratio load-bearing rather than decorative.
+      expect(/--wt-mark-ink:/.test(stateRule(state)), `${state} keeps the shared ink`).toBe(false);
+      expect(stateRule(state), `${state} halos from that ink`).toContain("var(--wt-mark-ink)");
+    }
+    // Both halos are the same weight, from whichever ink the state resolved.
+    const halo = "box-shadow: 0 0 0 2px color-mix(in srgb, var(--wt-mark-ink) 30%, transparent)";
+    expect(stateRule("waiting")).toContain(halo);
+    expect(stateRule("input")).toContain(halo);
+  });
+
+  it("animates working's breath by OPACITY only, and defines the keyframes it names", () => {
+    const overlay = /\.wt-activity-mark\[data-activity="working"\]::before \{([\s\S]*?)\n\}/.exec(
+      tabs,
+    );
+    expect(overlay, "the working ::before overlay exists").not.toBeNull();
+    const named = /animation:\s*([\w-]+)/.exec(overlay![1]!);
+    expect(named, "the overlay names an animation").not.toBeNull();
+    expect(overlay![1]!, "pre-painted, so the beat costs no repaint").toContain("radial-gradient");
+    const beat = new RegExp(`@keyframes\\s+${named![1]!}(?![\\w-])\\s*\\{([\\s\\S]*?)\\n\\}`).exec(
+      tabs,
+    );
+    expect(beat, `@keyframes ${named![1]!} is defined under exactly that name`).not.toBeNull();
+    expect(beat![1]!).toContain("opacity");
+    expect(beat![1]!, "never a paint property").not.toContain("background");
+    expect(beat![1]!, "never a paint property").not.toContain("border");
+  });
+
+  it("replaces working's motion with the heaviest band under reduced motion", () => {
+    const reduced = /@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*?)\n\}/.exec(tabs);
+    expect(reduced, "the reduced-motion block exists in 30-tabs.css").not.toBeNull();
+    const body = reduced![1]!;
+    // 01-scope.css zeroes animation and transition DURATIONS inside .wt-root and
+    // says nothing about delay, so both of the mark's delayed lists need their own
+    // zeroing here or one of the two directions sits parked half-played. The state
+    // selector must be listed too: its `transition` shorthand outranks the base
+    // rule's delay.
+    const local =
+      /\.wt-activity-mark,\s*:where\(\.wt-root\) \.wt-activity-mark\[data-activity\] \{([^}]*)\}/.exec(
+        body,
+      );
+    expect(local, "both of the mark's reveal directions are zeroed").not.toBeNull();
+    expect(local![1]!).toContain("transition-delay: 0s");
+    // Motion REPLACED by a channel, not removed: the glow goes and working takes
+    // the heaviest band, so the three states still separate by band alone.
+    const working = /\.wt-activity-mark\[data-activity="working"\] \{([^}]*)\}/.exec(body);
+    expect(working, "working degrades to a static band").not.toBeNull();
+    expect(band(working![1]!)).toBe(3);
+    const overlay = /\.wt-activity-mark\[data-activity="working"\]::before \{([^}]*)\}/.exec(body);
+    expect(overlay, "the breath overlay is removed outright").not.toBeNull();
+    expect(overlay![1]!).toContain("content: none");
+  });
+
+  it("gives the two mobile chip sites the gap their own flex row uses", () => {
+    // The ONE per-site value. Both selectors, because the mobile bar row and an
+    // expanded list row are separate chips laid out on --sp-2 where the desktop
+    // chip uses --sp-1; a missing one leaves 4px of layout behind at that site.
+    for (const selector of [".wt-switcher-current-inner", ".wt-switcher-row-select"]) {
+      const escaped = selector.replace(".", "\\.");
+      expect(
+        new RegExp(`${escaped} \\.wt-activity-mark`).test(switcher),
+        `31-switcher.css scopes the mark's gap for ${selector}`,
+      ).toBe(true);
+    }
+    const rule =
+      /\.wt-switcher-current-inner \.wt-activity-mark,\s*:where\(\.wt-root\) \.wt-switcher-row-select \.wt-activity-mark \{([^}]*)\}/.exec(
+        switcher,
+      );
+    expect(rule, "both mobile selectors share one gap rule").not.toBeNull();
+    expect(rule![1]!).toContain("--wt-mark-gap: var(--sp-2)");
+  });
+});

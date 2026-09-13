@@ -29,10 +29,13 @@ import {
   compareTabOrder,
   createSessionAPI,
   createTombstones,
+  foldedCueStatus,
   hasPinnedName,
   isCueStatus,
   isEndedStatus,
   isUnseenCue,
+  normalizeActivity,
+  normalizeActivityCount,
   normalizeProgress,
   orderedInsertIndex,
   parseCueSeen,
@@ -54,6 +57,7 @@ import {
   TAB_HTML,
   kbButtonHTML,
   newButtonHTML,
+  paintActivityMark,
   paintProgress,
   paintStatusDot,
   pick,
@@ -498,6 +502,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // every expanded list row carries a .wt-progress-bar of its own, so an
       // unscoped pick would be ambiguous the moment the list is populated.
       const swProgress = pick(switcher, ".wt-switcher-current .wt-progress-bar");
+      // The active row's secondary activity mark, scoped for the same reason.
+      const swActivity = pick(switcher, ".wt-switcher-current .wt-activity-mark");
       const swClose = pick(switcher, ".wt-switcher-current-close");
       // The active-tab elements that translate together during a horizontal
       // swipe: the content (dot + label) and the close (x). Moving both keeps the
@@ -652,12 +658,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // is one: there is no state of its own to get out of step, so no path can
       // leave it stale, and it is cheap enough to run on every tick (a loop over a
       // handful of tabs, then sinks that no-op when nothing changed). The dot is
-      // the store — statusOf reads each tab's status back off it — so this reads
-      // exactly what the user is looking at.
+      // the store — cueStatusOf reads each tab's status back off it — so this and
+      // the raise in applyStatus fold the same value.
       function paintAttention(): void {
         attention.apply(
           summarize(
-            tabList.map((t) => ({ id: t.id, status: statusOf(t) })),
+            tabList.map((t) => ({ id: t.id, status: cueStatusOf(t) })),
             cueSeen,
           ),
         );
@@ -928,7 +934,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // is a 2px line with no text, so without this a screen-reader user
           // cannot tell a working tab from a crashed one, or hear how far along
           // a determinate one is.
-          t.aria.setLabel(tabAccessibleName(display, statusOf(t), shownProgress(t)));
+          t.aria.setLabel(
+            tabAccessibleName({
+              label: display,
+              status: statusOf(t),
+              progress: shownProgress(t),
+              activity: t.activity,
+              activityCount: t.activityCount,
+            }),
+          );
         }
       }
 
@@ -937,6 +951,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
        *  on every chip site). */
       function statusOf(t: Tab): string {
         return t.dot.dataset["status"] ?? "idle";
+      }
+
+      /** cueStatusOf folds a tab for the cue surfaces (foldedCueStatus). Off the
+       *  DOT rather than the wire status, so a server's empty status arrives here
+       *  as "idle" and cannot be mistaken for the blanked-cue sentinel. */
+      function cueStatusOf(t: Tab): string {
+        return foldedCueStatus(statusOf(t), t.activity);
       }
 
       /** shownProgress is a tab's percentage as it may currently be DISPLAYED:
@@ -1041,6 +1062,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         swLabel.textContent = active ? active.display : "";
         paintStatusDot(swDot, active ? statusOf(active) : "idle", active?.reports ?? false);
         paintProgress(swProgress, active ? shownProgress(active) : PROGRESS_ABSENT);
+        paintActivityMark(swActivity, active?.activity ?? "", active?.activityCount ?? 0);
         // The aggregate background-notification cue rides the dedicated switch
         // button's dot (paintSwitchDot), not the active surface (it did not fit
         // there).
@@ -1066,6 +1088,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       function updateRow(row: HTMLElement, t: Tab): void {
         paintStatusDot(pick(row, ".wt-switcher-row-dot"), statusOf(t), t.reports);
         paintProgress(pick(row, ".wt-progress-bar"), shownProgress(t));
+        paintActivityMark(pick(row, ".wt-activity-mark"), t.activity, t.activityCount);
         pick(row, ".wt-switcher-row-label").textContent = t.display;
       }
       // renderSwitcherList reconciles the expanded list to a row per OTHER tab
@@ -1444,9 +1467,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const el = fromHTML(TAB_HTML);
         const label = el.querySelector<HTMLElement>(".wt-tab-label");
         const dot = el.querySelector<HTMLElement>(".wt-tab-dot");
+        const activityEl = el.querySelector<HTMLElement>(".wt-activity-mark");
         const progressEl = el.querySelector<HTMLElement>(".wt-progress-bar");
         const close = el.querySelector<HTMLButtonElement>(".wt-tab-close");
-        if (!label || !dot || !progressEl || !close) {
+        if (!label || !dot || !activityEl || !progressEl || !close) {
           throw new Error("web-terminal-ui: tab chrome missing parts");
         }
         paintStatusDot(dot, info.status, reportsOf(info.reportsActivity));
@@ -1482,21 +1506,31 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           el,
           label,
           dot,
+          activityEl,
           progressEl,
           // A percentage exists only on the status STREAM, so a tab adopted from
           // the REST list starts with none; the first status event fills it in.
           progress: normalizeProgress(info.progressValue),
+          activity: normalizeActivity(info.activity),
+          activityCount: normalizeActivityCount(info.activityCount),
           aria,
           view: null,
           reports: reportsOf(info.reportsActivity),
         };
         paintProgress(progressEl, renderedProgress(info.status, tab.progress));
+        paintActivityMark(activityEl, tab.activity, tab.activityCount);
         // Set an initial label immediately (relabelAll refines it with de-dup
         // once the tab is in tabList and syncChrome runs).
         tab.display = baseLabel(tab).text;
         label.textContent = tab.display;
         aria.setLabel(
-          tabAccessibleName(tab.display, info.status, renderedProgress(info.status, tab.progress)),
+          tabAccessibleName({
+            label: tab.display,
+            status: info.status,
+            progress: renderedProgress(info.status, tab.progress),
+            activity: tab.activity,
+            activityCount: tab.activityCount,
+          }),
         );
         el.addEventListener("click", (e) => {
           if ((e.target as HTMLElement).closest(".wt-tab-close")) {
@@ -3307,6 +3341,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           t.progress = normalizeProgress(rec.progressValue);
         }
         paintProgress(t.progressEl, shownProgress(t));
+        // The host's secondary activity, read with the same PRESENT-only guard and
+        // for the same reason: the polling fallback lists SessionInfo, and a
+        // pre-release server carries neither field at all, so reading absence as
+        // "no background task" would blank a live mark on every tick. An empty
+        // string IS the withdrawal, and it arrives explicitly.
+        if (rec.activity !== undefined) {
+          t.activity = normalizeActivity(rec.activity);
+        }
+        if (rec.activityCount !== undefined) {
+          t.activityCount = normalizeActivityCount(rec.activityCount);
+        }
+        paintActivityMark(t.activityEl, t.activity, t.activityCount);
         // A session that reports activity is a session whose program speaks OSC 9,
         // so it is also one that may post a notification: arm the permission
         // request for the next user gesture (see notify.ts).
@@ -3327,9 +3373,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // dismissal stick across those is cueSeen — a latch this viewer already
         // acknowledged raises nothing, while a status that moved on drops the
         // acknowledgement so the next latch is a fresh cue.
-        if (!isCueStatus(rec.status)) {
-          forgetCueSeen(rec.id);
-        } else if (rec.id === activeId && pageVisible()) {
+        //
+        // Two inputs, one per question, and the ORDER keeps them apart. The
+        // acknowledgement asks whether this reader has SEEN the tab's real state:
+        // RAW status, first, and only for a cue — a non-cue one has nothing to
+        // acknowledge and has to reach the forget below. The raise and the forget
+        // ask whether anything should be ANNOUNCED: folded. Off the fold the
+        // acknowledgement misses a watched turn until its task ends; off the raw
+        // status the forget makes the "" sentinel pointless.
+        const raw = statusOf(t);
+        const cue = cueStatusOf(t);
+        if (rec.id === activeId && pageVisible() && isCueStatus(raw)) {
           // The user is looking at this terminal as it latches, so there is
           // nothing to notify — and nothing to re-raise once they move away.
           //
@@ -3340,9 +3394,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // it is precisely the case the out-of-page surfaces exist for, so a
           // latch arriving on a HIDDEN page now raises them and is acknowledged
           // when the user comes back (see onPageVisible).
-          markCueSeen(rec.id, rec.status);
-        } else if (isUnseenCue(rec.status, rec.id, cueSeen)) {
-          switchNotify = rec.status;
+          markCueSeen(rec.id, raw);
+        } else if (cue === "") {
+          // A blanked cue is NO INFORMATION, not a state, so nothing is raised and
+          // the acknowledgement map is left alone: forgetting here would re-raise
+          // the cue from scratch the moment the background task ended.
+        } else if (!isCueStatus(cue)) {
+          forgetCueSeen(rec.id);
+        } else if (isUnseenCue(cue, rec.id, cueSeen)) {
+          switchNotify = cue;
           switchNotifyId = rec.id;
           paintSwitchDot();
         }
