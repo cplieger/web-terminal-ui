@@ -115,7 +115,11 @@ interface StoredEntry {
  * neither could be observed: 15 of the file's 19 surviving mutants were those
  * two guards and their bodies.
  */
-function readStoredEntry(entry: NonNullable<unknown>): StoredEntry | null {
+// Spelled `{}` rather than `NonNullable<unknown>`: the two are the same type, and
+// only the second is a type OPERATION, which `no-generated-empty-object-type`
+// (typescript-eslint 8.70+) reports even where resolving to `{}` is the point.
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- "any non-nullish value" is the intended type; the paragraph above says why there is no object test here
+function readStoredEntry(entry: {}): StoredEntry | null {
   const rec = entry as Record<string, unknown>;
   const savedAt = rec["savedAt"];
   // Finite, not merely a number: the age comparison below is a subtraction, and
