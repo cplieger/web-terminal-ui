@@ -152,6 +152,7 @@
   font-size: 0.8125rem;
   cursor: pointer;
   white-space: nowrap;
+  -webkit-user-select: none;
   user-select: none;
   /* Kills the 300ms double-tap-to-zoom delay, which is what makes a double-TAP
      usable as the touch rename entry: on iPadOS a long-press on this chip starts
@@ -224,81 +225,22 @@
   background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 22%);
 }
 
-/* The label flexes to fill the fixed-width tab and truncates with an ellipsis
-   (min-width: 0 lets a flex item shrink below its content width), and it owns the
-   ink-centring geometry the two switcher labels in 31-switcher.css share verbatim.
-
-   Centre the INK, not the line box. A font's metrics box reaches far higher above
-   the baseline than below it (the bundled font: 0.995em over, 0.250em under),
-   while the ink of a mixed-case title runs ~0.734em over (cap height) to ~0.203em
-   under (descender). Flex centring centres the BOX, which leaves the visible text
-   --label-ink-shift low — reading as baseline-aligned with the activity dot's
-   bottom edge instead of level with its centre. Two declarations, one job, and a
-   third that must NOT be added:
-
-   The band being centred is cap top to BASELINE. Descender ink is deliberately
-   outside it: including it reserves empty room below the letters, and the label
-   then reads HIGH — measured on this chip at 13px, the title's cap band sat
-   1.32px above the chip's centre while the dot and the close glyph beside it sat
-   at 0.00px. Same edges as `text-box-edge: cap alphabetic`. Descenders overhang
-   the band, which is what the padding below is for.
-
-   - padding-block is the ink allowance, not spacing. `overflow: hidden` (which
-     the ellipsis requires) clips at the padding box, and the line box clears the
-     tallest ink by only 0.6px, so an unpadded label shaves the top off every
-     acute accent and caron. 0.125em per side buys 2.2px of clearance at 13px, and
-     being symmetric it does not move the centred text.
-   - margin-block hangs TWICE the shift below the box. Flex centring centres the
-     MARGIN box, so a bottom-heavy margin lifts the border box by half of it --
-     exactly one shift -- and unlike padding it does not enlarge the clipping box.
-     The shift can be NEGATIVE (a top-heavy margin, pushing the box down) at sizes
-     where the engine's rounding already overshoots; that is a normal outcome of
-     the measurement, not a sign the arithmetic is inverted.
-   - line-height stays at `normal`, deliberately. Setting it looks like the
-     responsible thing to do and it is the trap: `normal` is the ONE value whose
-     half-leading is zero by definition, which is what makes the baseline sit at
-     exactly the engine's ascent below the box top. Any other value leaves
-     (line-height - font box) / 2 to be halved and rounded, and Chromium floors
-     it -- measured with an explicit 1.25 the 14px switcher labels came out a
-     FULL pixel high (line box 17.5 under an 18px font box, so half-leading
-     -0.25 floored to -1) while the 13px strip label was fine, which is exactly
-     the kind of works-where-I-looked bug this rule exists to end.
-
-   --label-ink-shift is MEASURED, not declared. The tabs feature writes a pixel
-   value per site from the line box the running engine produced for this font at
-   this size (src/features/tabs/ink-centre.ts); the em value in 00-tokens.css is
-   only what the first paint uses, and it is 0 because the cap-band correction is
-   within 0.4px of nothing on every engine measured. Four earlier fixes were
-   constants, and the reason none held is that engines round the font's ascent and
-   descent to whole CSS pixels before laying out the line box, so the required
-   shift is a sawtooth in font size, not a ratio: on the cap band it runs from
-   about -0.021em (Blink 151 at 13px, a 17px box) to +0.0279em (Gecko at 14px,
-   where the box is 17px against Blink's 18px), changing sign along the way,
-   because 0.25em x 13 = 3.25 and 0.25em x 14 = 3.5 round to different whole
-   pixels. The three engines
-   also report slightly different ink extents for one font file (cap 0.7344 /
-   0.7350 / 0.7300em in WebKit, Blink and Gecko), and iOS resolves metrics through
-   CoreText where Linux WebKit uses FreeType — which is why the 13px strip
-   measured centred in every local check and still read high on an
-   iPad. Nothing here is tunable by eye; if the centring looks wrong, run
-   scripts/verify-chip-geometry.mjs and fix what it measures.
-
-   What this deliberately does NOT use is `text-box: trim-both`, which three of
-   the four previous attempts were built on. It ships in Blink and WebKit only
-   (Firefox 151 still reports false for it), so it can only be applied behind an
-   @supports gate, and a gate means two engines render two different geometries of
-   which only the one the author is looking at ever gets tuned. Trimming to
-   `cap alphabetic` and giving the descender back as asymmetric padding IS
-   size-independent and holds to 0.05px in both engines that implement it — but
-   ungated it swings to 0.39px in Firefox, and a measured shift needs no gate and
-   no second code path to beat it. */
+/* Centres the label's INK (cap top to baseline), not its line box; the shift is
+   measured per site by features/tabs/ink-centre.ts, which owns why. Not
+   `text-box: trim-both` (Firefox lacks it; a gate is two geometries, one
+   untuned), and `line-height` stays `normal`: Chromium floors any other
+   half-leading (1.25 put 14px labels a pixel high). */
 :where(.wt-root) .wt-tab-label {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  /* The ink allowance `overflow: hidden` needs (the line box clears an accent by
+     ~0.6px); symmetric, so it moves nothing. */
   padding-block: 0.125em;
+  /* Flex centres the MARGIN box, so twice the shift below lifts the border box
+     by one shift without growing the clip. A negative shift is a normal result. */
   margin-block: 0 calc(2 * var(--label-ink-shift));
 }
 
@@ -553,6 +495,7 @@
      even though the property is non-inherited per spec (the same deviation the
      touch model documents for .term-output). Without this, caret placement and
      text selection break inside the field in Safari — i.e. on the iPad. */
+  -webkit-user-select: text;
   user-select: text;
   /* The chip is cursor: pointer; a text field must not inherit that. */
   cursor: text;

@@ -142,34 +142,10 @@
      rides on that fallback. */
   --font-ui: "Monaspace Neon NF", ui-monospace, monospace;
   --font-mono: "Monaspace Neon NF", monospace;
-  /* How far a chip label's INK sits below its line box's centre, so flex
-     centring can be corrected by exactly that much (see .wt-tab-label in
-     30-tabs.css). The band is the CAP band — cap top to baseline, the visible
-     mass of a label — not cap-to-descender, which reserves empty descender room
-     below the letters and reads high (measured: 1.32px above the chip's centre
-     at 13px, while the dot and close glyph beside it sat at 0.00px).
-
-     This value is only the PRE-MEASUREMENT DEFAULT — what the first paint uses
-     before the tabs feature replaces it, per site, with a pixel value measured
-     in the live engine (src/features/tabs/ink-centre.ts). It is not the answer,
-     because no single value can be: engines round the font's ascent and descent
-     to whole CSS pixels before building the line box, so the ideal shift is a
-     sawtooth in font size rather than a ratio, and on the cap band it does not
-     even keep one sign. Measured against the bundled font it runs from about
-     -0.021em (Blink 151 at 13px, a 17px box) to +0.028em (Gecko at 14px, where
-     the box is 17px against Blink's 18px), and platforms disagree inside one
-     engine too (iOS reads metrics through CoreText, Linux WebKit through
-     FreeType) — which is why four hardcoded constants each held only where they
-     were tuned.
-
-     ZERO is the default because the whole range is within ~0.03em of it: flex
-     centring of the font box is already within 0.4px of cap-band centring, so
-     the first paint starts uncorrected and the measurement lands within a frame.
-     That is also the best behaviour if the measurement never runs at all (no
-     canvas, a display:none probe): 0.4px out rather than the 1.3px a
-     descender-inclusive constant was. Do not tune it by eye — a wrong default is
-     invisible the moment the measured value arrives, so eye-tuning it optimises
-     nothing and pins the wrong number in place. */
+  /* Pre-measurement default for the chip labels' ink centring; the tabs feature
+     writes a measured px value per site (src/features/tabs/ink-centre.ts owns
+     why). Zero: flex centring already lands within 0.4px of the cap band, and is
+     the best answer when the measurement cannot run. Do not tune it by eye. */
   --label-ink-shift: 0em;
   --dur-micro: 0.1s;
   --dur-standard: 0.2s;
