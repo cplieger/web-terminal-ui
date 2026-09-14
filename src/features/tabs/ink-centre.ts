@@ -1,41 +1,11 @@
-// Optical centring for the three chip labels (desktop strip, mobile switcher
-// chip, overview rows), measured in the engine instead of predicted from the
-// font's tables.
-//
-// Flex centring centres a label's LINE BOX. A font's metrics box reaches much
-// further above the baseline than below (the bundled Monaspace Neon NF: 0.995em
-// over, 0.250em under), so the visible text sits low inside the box it is
-// centred by, and the correction is the gap between the box's centre and the
-// text's own.
-//
-// WHICH BAND is the text's own is the load-bearing decision, and the first
-// version of this got it wrong. It centred cap-top-to-DESCENDER-bottom, which
-// reserves descender room below the letters and reads high: measured on the real
-// chip in Blink, the title's cap band sat 1.320px above the chip's centre while
-// the status dot and the close glyph beside it sat at exactly 0.000px, and a
-// title is judged against those two neighbours. So the band is cap-top to
-// BASELINE — the visible mass of a UI label, and the same pair of edges CSS
-// spells `text-box-edge: cap alphabetic`. Descenders overhang it deliberately;
-// the label's `padding-block` (30-tabs.css) is the allowance that keeps them
-// clear of `overflow: hidden`, so nothing is clipped by the choice.
-//
-// The correction is NOT a font-relative constant, which is what four earlier
-// fixes assumed. Engines round the font's ascent and descent to whole CSS pixels
-// before building the line box, so the ideal shift jumps whenever a size crosses
-// a rounding boundary: 0.25em x 13 = 3.25 rounds to 3 (a 16px box) while
-// 0.25em x 14 = 3.5 rounds to 4 (an 18px box), and the shift moves with it.
-// Engines disagree with each other too (Gecko makes that same 14px box 17px, not
-// 18px), and so do platforms within one engine: iOS resolves metrics through
-// CoreText, Linux WebKit through FreeType, which is why the strip read correct
-// in every local check and high on an iPad. Measured across 11-20px the cap-band
-// shift sawtooths between about -0.010em and +0.028em — small, but still wider
-// than the 0.33px error that was reported as a defect, so it stays measured.
-//
-// So nothing here predicts. Each measurement asks the engine for the line box
-// and baseline it actually produced, asks the font for its actual cap ink, and
-// writes the difference to --label-ink-shift as pixels. The CSS keeps an em
-// default for the pre-measurement paint (see 00-tokens.css); this only ever
-// narrows the error.
+// Optical centring for the three chip labels, measured in the engine rather than
+// predicted from the font's tables. Flex centring centres the LINE BOX, and a
+// font's box reaches further above the baseline than below it, so the text sits
+// low; the correction is the gap from the box's centre to the CAP band's (cap
+// top to baseline, the `text-box-edge: cap alphabetic` edges; a band including
+// descender ink reads high beside the dot and close glyph). Measured, not a
+// constant, because engines round ascent and descent to whole CSS pixels before
+// building the line box, and round differently per engine and platform.
 import { fromHTML } from "../dom.js";
 
 /** Ink extents are measured at this size and scaled back to em: WebKit and Blink

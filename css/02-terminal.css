@@ -44,13 +44,13 @@
      (WebKit bug 240917), which the switcher-bar gesture relies on. */
   touch-action: pan-x pan-y;
   font-family: var(--font-mono);
+  /* Bold and italic are real faces (page.css); a synthesized stand-in must
+     never be drawn in their place. */
+  font-synthesis: none;
   font-size: 14px;
-  /* The cell height. It is PAIRED with the bundled font's overridden vertical
-     metrics (page.css): a cell's background is painted by an inline span, whose
-     box comes from the font's ascent + descent, so those must stay >= this value
-     or every row boundary shows an unpainted stripe. Changing either number
-     alone reopens that gap. The engine reads this as its cell height
-     (render.ts updateFontMetrics) and sizes the PTY from it. */
+  /* The cell height. The engine reads it (render.ts updateFontMetrics) and sizes
+     the PTY from it. The row background owes it nothing: see the run padding
+     below. */
   line-height: 17px;
   padding: 4px;
   background: var(--bg);
@@ -82,6 +82,14 @@
   content: "\00a0";
 }
 
+/* The cell background is THIS padding, not the font: an inline run paints its
+   font's content area (16px of the 17px row), and shipping Safari has no
+   ascent-override to widen it (webkit.org/b/219735, fixed in trunk 2026-08). */
+:where(.wt-root) .term-row span,
+:where(.wt-root) .term-row a {
+  padding-block: 1px;
+}
+
 /* "earlier output trimmed" marker (vterm renderer inserts .term-trim-marker
    as the first row when history older than the buffer holds was evicted —
    client-side cap or a server-reported resume gap). A quiet, centered,
@@ -91,6 +99,7 @@
   font-size: 0.6875rem;
   text-align: center;
   padding: 2px 0;
+  -webkit-user-select: none;
   user-select: none;
   font-family: var(--font-ui);
 }
@@ -141,12 +150,12 @@
      explicitly and must never let an ancestor override them. `user-select`
      is spec'd as non-inherited but WebKit/Chromium treat it as inherited,
      so a stray `user-select: none` on html/body/.term would silently kill
-     selection here; keep it `text` (modern Safari honors the unprefixed
-     form, so no `-webkit-` pair is needed). `-webkit-touch-callout: default`
+     selection here; keep it `text`. `-webkit-touch-callout: default`
      keeps the iOS callout (a page-level `none` suppresses it) and has no
      standard equivalent. No JS may `preventDefault` a touch/pointer/
      contextmenu over this element or the native selection dies (see the
      kernel focus handling + contextMenu feature). */
+  -webkit-user-select: text;
   user-select: text;
   -webkit-touch-callout: default;
 
