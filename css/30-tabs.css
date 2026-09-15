@@ -1008,27 +1008,45 @@
    what a reader sees is the hole morphing between a square and the circle inscribed
    in it — the ring survives the peak.
 
-   The divisor is the arithmetic rather than a literal, for the reason the footprint
-   cancel above is: the size is a variable and the band is now one too, so a literal
-   would be right until either moved. Ported from vibekit's `.tab-run-dot`
-   (`12-tabs.css`, "THE GLOW BEAT"), which is the same mark solving the same problem
-   and had the mask from the start.
+   EVERY NUMBER HERE IS A RELATION, and the port that copied vibekit's LITERALS is
+   what left this rule running with nothing visible to show. Two of them were
+   arithmetic for an 8px mark with a 2px band: `inset: -1px` put the overlay on that
+   mark's own border box, and the core stop `70%` is where the core reaches the
+   hole's CORNER there — sqrt(2) * (size / 2 - band) / (size / 2) = 70.71%. At 9px
+   and 2px the same relation is 78.57%, so the copied 70% ended the solid core at
+   2.45px while the mask opens only at 2.5px: core and visible mask did not
+   intersect at all, the beat lit nothing the mask kept, and 4 pixels of a 9x9 mark
+   moved between trough and peak against vibekit's 20 (measured at dpr 1, both
+   marks, sRGB). Written as relations they survive any size: the inset IS the band,
+   the core stop IS the hole's corner radius, the mask's hole IS its inradius. So
+   port vibekit's `.tab-run-dot` (`12-tabs.css`, "THE GLOW BEAT") — the same mark
+   solving the same problem, with the mask from the start — by its relations, never
+   by its numbers. sqrt(2) is spelled to four decimals because the synced stylelint
+   sets `number-max-precision: 4` outside colour functions.
 
    NOTHING HERE EXTENDS PAST THE MARK. `box-sizing: border-box` (01-scope.css) puts
    the padding box — an absolutely positioned child's containing block — INSIDE the
-   band, so on a 9px mark with a 2px band that box is 5x5 and `inset: -1px` resolves
-   to 7x7, still inside the border box. Read it as "fill the mark", not as "overhang
-   it": the same declaration on a mark with no band would reach outside, where a
-   feathered edge's visible radius moves with the beat and renders differently at
-   every pixel density. */
+   band, so `inset: calc(-1 * var(--wt-mark-band))` grows the overlay back out to
+   exactly the mark's own border box and no further. Read it as "fill the mark", not
+   as "overhang it": a larger inset would reach outside, where a feathered edge's
+   visible radius moves with the beat and renders differently at every pixel
+   density. `border-radius: 50%` is the same discipline on the last literal, and it
+   is inert BY CONSTRUCTION rather than by measurement, which is why no assertion
+   pins it: for side S and radius r the clip's 45° boundary is (S/2 - r) * sqrt(2) + r,
+   monotonically decreasing in r, so the inscribed circle is the WORST case for
+   reaching the hole's corners — and it still clears them for any band at or above
+   S/2 * (1 - 1/sqrt(2)), 1.32px here against 2px. Do not assert it, and do not drop
+   it either: it is what keeps a literal radius out of a rule whose whole defect was
+   literals. */
 :where(.wt-root) .wt-activity-mark[data-activity="working"]::before {
   content: "";
   position: absolute;
-  inset: -1px;
-  border-radius: 4px;
+  inset: calc(-1 * var(--wt-mark-band));
+  border-radius: 50%;
   background: radial-gradient(
     closest-side,
-    color-mix(in oklch, var(--wt-mark-ink) 78%, #fff) 0 70%,
+    color-mix(in oklch, var(--wt-mark-ink) 78%, #fff) 0
+      calc(1.4142 * (var(--wt-mark-size) / 2 - var(--wt-mark-band))),
     transparent 92%
   );
   opacity: 0;
