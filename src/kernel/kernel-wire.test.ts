@@ -138,8 +138,11 @@ beforeEach(async () => {
   document.body.replaceChildren();
   // The settled shape, stated rather than inherited: a load that has already
   // resolved, so the kernel's font gate opens on the first microtask after mount
-  // instead of depending on what the host environment happens to provide.
-  restoreFonts = shadowFonts({ load: () => Promise.resolve([]) });
+  // instead of depending on what the host environment happens to provide. With a
+  // settled `ready` beside it, because a real FontFaceSet has one and the gate's
+  // timed-out arm reads it — including for a mount whose deadline outlives its own
+  // test, which is every mount in this file.
+  restoreFonts = shadowFonts({ load: () => Promise.resolve([]), ready: Promise.resolve() });
   ({ createTerminal } = await import("./kernel.js"));
 });
 
@@ -239,11 +242,67 @@ function stubFonts(): () => void {
     };
   });
   Object.defineProperty(document, "fonts", {
-    value: { load: () => pending },
+    // `ready` settles WITH the load, as a real FontFaceSet's does: it is pending for
+    // as long as the initial load is, and the gate's timed-out arm reads it.
+    value: { load: () => pending, ready: pending.then(() => undefined) },
     configurable: true,
     writable: true,
   });
   return settle;
+}
+
+/** Replace the settled default with a load that REJECTS over a `ready` this test
+ *  controls — the shape a host serving only SOME of the gate's families produces,
+ *  since one load() over a comma-separated stack rejects as a unit. Returns the
+ *  resolver for `ready`; calling it settles the font set the way the initial load
+ *  finishing does, failed faces included, and NOT calling it is the never-settling
+ *  `ready` a held-open response produces. */
+function stubFontsRejecting(): () => void {
+  let settleSet = (): void => undefined;
+  const ready = new Promise<void>((resolve) => {
+    settleSet = () => {
+      resolve();
+    };
+  });
+  Object.defineProperty(document, "fonts", {
+    value: { load: () => Promise.reject(new Error("network")), ready },
+    configurable: true,
+    writable: true,
+  });
+  return settleSet;
+}
+
+/** Replace the settled default with a request that STALLS: neither the load nor
+ *  `ready` ever settles, which is what a response held open produces when nothing
+ *  else rejects. Nothing to return — the point of this shape is that no signal ever
+ *  arrives, so only the deadline can open the gate. */
+function stubFontsStalled(): void {
+  Object.defineProperty(document, "fonts", {
+    value: {
+      load: () => new Promise<FontFace[]>(() => undefined),
+      ready: new Promise<void>(() => undefined),
+    },
+    configurable: true,
+    writable: true,
+  });
+}
+
+/** Replace the settled default with a load that RESOLVES over a `ready` this test
+ *  controls: the healthy path, which has already measured the real metrics by the
+ *  time the font set finishes. Returns the resolver for `ready`. */
+function stubFontsLoaded(): () => void {
+  let settleSet = (): void => undefined;
+  const ready = new Promise<void>((resolve) => {
+    settleSet = () => {
+      resolve();
+    };
+  });
+  Object.defineProperty(document, "fonts", {
+    value: { load: () => Promise.resolve([]), ready },
+    configurable: true,
+    writable: true,
+  });
+  return settleSet;
 }
 
 /** A minimal but VALID screen frame. */
@@ -503,7 +562,9 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
     // still has to become usable — at the fallback font's metrics.
     const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     Object.defineProperty(document, "fonts", {
-      value: { load: () => Promise.reject(new Error("network")) },
+      // `ready` because the rejection arm falls through to it; a real FontFaceSet
+      // always has one, and the shape a test installs has to have it too.
+      value: { load: () => Promise.reject(new Error("network")), ready: Promise.resolve() },
       configurable: true,
       writable: true,
     });
@@ -517,6 +578,59 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
     expect(loading.classList.contains("fade")).toBe(true);
     expect(warned).toHaveBeenCalled();
     warned.mockRestore();
+  });
+
+  it("lifts it at the block period when the load rejects and `ready` NEVER settles", async () => {
+    // document.fonts.ready has no deadline: a host whose overlay URL fails while
+    // the required family's response is held open leaves it pending for as long as
+    // that request lives. Unbounded, the gate never opens, so the overlay covers a
+    // terminal that reports no size at all — while the engine, past its own
+    // font-display block period, is already painting the fallback the gate is
+    // holding out against.
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // The returned resolver is deliberately never called: THIS is the never-settling
+    // `ready`, where the sibling case above settles it.
+    stubFontsRejecting();
+    vi.useFakeTimers();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    mount({ features: () => [], loading });
+    await vi.advanceTimersByTimeAsync(0);
+
+    wire().onMessage(screenFrame());
+
+    // The frame has landed and the fonts have not, so the overlay stays up for the
+    // whole budget rather than lifting on the rejection.
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(loading.classList.contains("fade")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(loading.classList.contains("fade")).toBe(true);
+    expect(warned).toHaveBeenCalled();
+    warned.mockRestore();
+  });
+
+  it("lifts it at the block period when the request STALLS and nothing rejects", async () => {
+    // The other half of the same bound, and the half a deadline armed on the
+    // rejection cannot reach: with one URL's response held open and no family
+    // rejecting, `load` itself never settles, so nothing warns and nothing arrives.
+    // Unbounded, the overlay covers a terminal that reports no size at all.
+    stubFontsStalled();
+    vi.useFakeTimers();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    mount({ features: () => [], loading });
+    await vi.advanceTimersByTimeAsync(0);
+
+    wire().onMessage(screenFrame());
+
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(loading.classList.contains("fade")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(loading.classList.contains("fade")).toBe(true);
   });
 
   it("marks the page loaded exactly once, so a repaint cannot re-run the lifecycle", async () => {
@@ -682,6 +796,76 @@ describe("the resize announce, and the two things it waits for", () => {
     await viewportSettled();
 
     expect(wire().initialSize?.()).toBeNull();
+  });
+
+  it("keeps reporting NO size after the load REJECTS, until the font set itself settles", async () => {
+    // One document.fonts.load over a comma-separated stack rejects as a UNIT, so a
+    // host missing ONE of the gate's families rejects the whole load — and settling
+    // the gate in that handler announces cols computed from the fallback's cell
+    // width for every family, including the ones that were served. The rejection
+    // arm therefore waits for document.fonts.ready, which settles the initial load
+    // including a failed face.
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const settleFontSet = stubFontsRejecting();
+    mount({ features: () => [] });
+    await viewportSettled();
+
+    // Null for the FONTS' reason, not the viewport's: the same call answers a size
+    // below without a further wait.
+    expect(wire().initialSize?.()).toBeNull();
+
+    settleFontSet();
+    await tick();
+
+    expect(wire().initialSize?.()).toEqual({ cols: 80, rows: 24 });
+    warned.mockRestore();
+  });
+
+  it("announces AGAIN when a font lands after the bound already opened the gate", async () => {
+    // The bound trades "never sized" for "sized on fallback metrics", and the swap
+    // period is infinite: a companion arriving after it changes the cell width with
+    // fontsLoaded already true, and nothing else re-measures until the next viewport
+    // transition — so the announced column count would stay wrong for the rest of
+    // this geometry.
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const settleFontSet = stubFontsRejecting();
+    vi.useFakeTimers();
+    mount({ features: () => [] });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // A size at all means the DEADLINE opened the gate: the load has rejected and
+    // the font set is still pending, so nothing else could have.
+    await settleUntil(() => wire().initialSize?.() != null, 12);
+    sendResize.mockClear();
+    updateFontMetrics.mockClear();
+
+    // Nothing between the bound and the bytes announces anything.
+    await vi.advanceTimersByTimeAsync(1400);
+    expect(sendResize).not.toHaveBeenCalled();
+
+    settleFontSet();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sendResize).toHaveBeenCalledTimes(1);
+    // Re-measured, not replayed: the cell metrics are the whole reason to announce.
+    expect(updateFontMetrics).toHaveBeenCalled();
+    warned.mockRestore();
+  });
+
+  it("does NOT announce again when the font set settles after a healthy gate", async () => {
+    // The corrective announce above belongs to the timed-out arm alone. Here the gate
+    // opened on the fonts themselves, so it has already measured the metrics `ready`
+    // would report, and a second announce would cost the server a resize for nothing.
+    const settleFontSet = stubFontsLoaded();
+    mount({ features: () => [] });
+    await viewportSettled();
+    expect(wire().initialSize?.()).toEqual({ cols: 80, rows: 24 });
+    sendResize.mockClear();
+
+    settleFontSet();
+    await tick();
+
+    expect(sendResize).not.toHaveBeenCalled();
   });
 
   it("reports no size while a viewport transition is in flight, and one once it settles", async () => {

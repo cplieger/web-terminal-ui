@@ -54,7 +54,23 @@ import type {
 const { mapKeyboardEvent, bracketTextForPaste, prepareTextForTerminal } = keyboard;
 
 const DEFAULT_WS_PATH = "/ws";
+// The family that carries the CELL METRICS, alone: deliberately not --font-mono's
+// list, which leads with the tiling overlay. WebKit resolves load() over a list as
+// soon as the FIRST family whose descriptor covers the sample has loaded
+// (CSSFontFaceSet::matchingFacesExcludingPreinstalledFonts, `if (found) break;`),
+// so naming the overlay would settle the gate on its 11 KB while the companion is
+// still loading — and the overlay copies the companion's metrics and carries no
+// "M", the glyph render.ts measures, so waiting on it defends no number anyway.
 const DEFAULT_FONT_READY = '14px "Monaspace Neon NF"';
+// The deadline on the WHOLE gate below, because neither document.fonts.load nor
+// document.fonts.ready carries one: a response held open leaves both pending for
+// as long as that request lives, and a gate that never settles reports no size at
+// all. The budget is the block period the faces themselves buy with font-display:
+// block (css/page.css declares it on every one; 3s is what CSS Fonts 4 recommends
+// for `block`) — how long an engine withholds glyphs before it paints the
+// fallback. Once it has, the cell on screen IS the fallback cell, so a longer wait
+// defends metrics nobody is looking at.
+const FONT_READY_TIMEOUT_MS = 3000;
 
 const TOAST_MS = 3000;
 // A touch that focuses the input (opens the soft keyboard) must be a genuine
@@ -1383,13 +1399,49 @@ function buildTerminal(
     });
   };
   try {
-    void document.fonts
-      .load(fontReady)
-      .then(onFontSettled)
-      .catch((err: unknown) => {
+    // false once the fonts have landed, true when the deadline opened the gate
+    // without them. The race covers the whole wait, not just the rejection arm: a
+    // request that stalls with nothing rejecting leaves load() ITSELF pending, so a
+    // deadline armed on the rejection would bound one of the ways a font can hang.
+    const landed: Promise<boolean> = document.fonts.load(fontReady).then(
+      () => false,
+      (err: unknown) => {
         console.warn(`web-terminal-ui: web font ${fontReady} failed to load`, err);
-        onFontSettled();
+        // One load() over a comma-separated stack rejects as a UNIT, so settling
+        // here would let an unavailable OPTIONAL family abandon the gate for the
+        // REQUIRED one and announce a size measured on fallback metrics. `ready`
+        // settles the initial load INCLUDING a failed one (the same property
+        // features/tabs/ink-centre.ts relies on), so the families that ARE served
+        // still land their bytes before the first resize is measured.
+        return document.fonts.ready.then(() => false);
+      },
+    );
+    const deadline = new Promise<boolean>((resolve) => {
+      window.setTimeout(() => {
+        resolve(true);
+      }, FONT_READY_TIMEOUT_MS);
+    });
+    // Whichever settles first opens the gate exactly once; the loser is ignored.
+    void Promise.race([landed, deadline]).then((timedOut) => {
+      onFontSettled();
+      if (!timedOut) {
+        return;
+      }
+      // The gate opened on fallback metrics, and the swap period is infinite: bytes
+      // that land after this change the cell width with fontsLoaded already true,
+      // and nothing re-measures until the next viewport transition. So one
+      // corrective announce, through the path the viewport settle uses.
+      // sendResize deduplicates, so a font that never lands costs nothing.
+      void document.fonts.ready.then(() => {
+        // The bytes can arrive arbitrarily late, so this is the one arm of the gate
+        // that outlives its terminal; destroy() wins, as it does for a feature's
+        // un-cancelled async.
+        if (isDestroyed() || measurableSize() === null) {
+          return;
+        }
+        connection.sendResize();
       });
+    }, onFontSettled);
   } catch (err) {
     console.warn(`web-terminal-ui: invalid fontReady ${fontReady}`, err);
     onFontSettled();
