@@ -1,7 +1,11 @@
-// presetTouch: the touch-first composition (single + the on-screen key
-// toolbar). Its own entry module so a touch consumer's delivered import graph
-// excludes the tabs/activity/animations modules entirely (vibekit's embedded
-// panel imports exactly this).
+/**
+ * presetTouch: the touch-first composition (single + the on-screen key
+ * toolbar). Its own entry module so a touch consumer's delivered import graph
+ * excludes the tabs/activity/animations modules entirely (an embedded panel
+ * imports exactly this).
+ *
+ * @module
+ */
 
 import type { TerminalFeature } from "../kernel/types.js";
 import { mobileToolbar } from "../features/mobile-toolbar.js";

@@ -1,8 +1,12 @@
-// presetSingle: the single-pane desktop composition. Its own entry module so a
-// consumer importing "@cplieger/web-terminal-ui/presets/single" pulls in ONLY
-// this feature graph — none of the toolbar/tabs modules (the ./presets barrel
-// statically reaches everything; these per-preset entries are the
-// graph-minimal imports).
+/**
+ * presetSingle: the single-pane desktop composition. Its own entry module so a
+ * consumer importing "@cplieger/web-terminal-ui/presets/single" pulls in ONLY
+ * this feature graph — none of the toolbar/tabs modules (the ./presets barrel
+ * statically reaches everything; these per-preset entries are the
+ * graph-minimal imports).
+ *
+ * @module
+ */
 
 import type { TerminalFeature } from "../kernel/types.js";
 import { clipboard } from "../features/clipboard.js";

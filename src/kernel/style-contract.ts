@@ -1,36 +1,38 @@
-// The names that cross this package's boundary as STRINGS, published as data.
-//
-// Two surfaces of this library are addressed by name rather than by type, so no
-// compiler on either side of the boundary checks them:
-//
-//   - `theme` is `Readonly<Record<string, string>>`. The kernel copies every key
-//     onto the terminal root verbatim, so a consumer that names a token this
-//     library renamed or retired gets a live declaration nothing reads: no
-//     error, no warning, just the library's own defaults where the consumer's
-//     brand was meant to be.
-//   - The loading overlay is the CONSUMER's element (it must paint before this
-//     module loads), styled by `css/page.css` purely because the markup opts in
-//     by class. Those classes are usually hardcoded in a static HTML file no
-//     compiler reads at all.
-//
-// Both were previously prose — a doc comment on the option, a sentence in the
-// README — which a consumer could only agree with by remembering. Published as
-// data they can be ASSERTED against instead: web-terminal-kiro's app.test.ts
-// checks its theme keys and its overlay markup against these exports the same
-// way it already checks its bootstrap watchdog's wording against
-// STARTUP_FAILURE_COPY. Same reason, same shape: this file imports nothing and
-// touches no DOM, so a test or a Node build script can read it without loading
-// the kernel.
-//
-// These lists are HAND-WRITTEN on purpose. They are the public contract — a
-// decision about what this library promises to support — not a fact derived
-// from the stylesheets. What IS derived from the stylesheets is the
-// verification that the promise holds: `src/css-contract.node.test.ts` generates the
-// declared/referenced token inventory from the CSS itself and fails if any
-// token named here is not both DECLARED and READ by a rule. A token that is
-// declared but never read is the silent-no-op case above, reached from the
-// library's side instead of the consumer's, and no hand-maintained list can
-// catch it.
+/**
+ * The names that cross this package's boundary as STRINGS, published as data.
+ *
+ * Two surfaces of this library are addressed by name rather than by type, so no
+ * compiler on either side of the boundary checks them:
+ *
+ *   - `theme` is `Readonly<Record<string, string>>`. The kernel copies every key
+ *     onto the terminal root verbatim, so a consumer that names a token this
+ *     library renamed or retired gets a live declaration nothing reads: no
+ *     error, no warning, just the library's own defaults where the consumer's
+ *     brand was meant to be.
+ *   - The loading overlay is the CONSUMER's element (it must paint before this
+ *     module loads), styled by `css/page.css` purely because the markup opts in
+ *     by class. Those classes are usually hardcoded in a static HTML file no
+ *     compiler reads at all.
+ *
+ * Both are published as data, so they can be ASSERTED against: a consumer can
+ * check its own theme keys and its own overlay markup against these exports in
+ * its own test, the same way it can check its bootstrap watchdog's wording
+ * against `STARTUP_FAILURE_COPY` on the `./startup-copy` entrypoint. This file
+ * imports nothing and touches no DOM, so a test or a Node build script can read
+ * it without loading the kernel.
+ *
+ * These lists are HAND-WRITTEN on purpose. They are the public contract — a
+ * decision about what this library promises to support — not a fact derived
+ * from the stylesheets. What IS derived from the stylesheets is the
+ * verification that the promise holds: an internal test generates the
+ * declared/referenced token inventory from the CSS itself and fails if any
+ * token named here is not both DECLARED and READ by a rule. A token that is
+ * declared but never read is the silent-no-op case above, reached from the
+ * library's side instead of the consumer's, and no hand-maintained list can
+ * catch it.
+ *
+ * @module
+ */
 
 /** CSS custom properties a consumer may set through `CreateTerminalOptions.theme`.
  *

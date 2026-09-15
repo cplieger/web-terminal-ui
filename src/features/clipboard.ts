@@ -1,10 +1,23 @@
-// clipboard feature: copy/paste helpers, the desktop Ctrl+Shift+C/V shortcuts,
-// and OSC 52 mirroring (design section 22.4). Exposes a typed API so contextMenu
-// can offer Copy/Paste through it (ctx.use). With this feature absent, inbound
-// OSC 52 has no subscriber and is intentionally a no-op.
+/**
+ * clipboard feature: copy/paste helpers, the desktop Ctrl+Shift+C/V shortcuts,
+ * and OSC 52 mirroring. Exposes a typed API so contextMenu
+ * can offer Copy/Paste through it (ctx.use). With this feature absent, inbound
+ * OSC 52 has no subscriber and is intentionally a no-op.
+ *
+ * @module
+ */
 
 import type { TerminalFeature } from "../kernel/types.js";
 
+/** The value a peer feature reads through `ctx.use(clipboard())` — contextMenu's
+ *  Copy and Paste items are this API behind a button.
+ *
+ *  Both members are fire-and-forget: the underlying Clipboard API calls are async
+ *  and their outcome is reported to the user as a toast rather than returned, so a
+ *  caller cannot await or branch on success. Both require a secure context
+ *  (`navigator.clipboard` is absent on a plain-HTTP non-loopback host, a supported
+ *  web-terminal-server deployment), where they toast "Clipboard unavailable" and
+ *  do nothing. */
 export interface ClipboardApi {
   /** Write text to the system clipboard (surfaces a toast on success/failure). */
   copy(text: string): void;
@@ -12,6 +25,15 @@ export interface ClipboardApi {
   paste(): void;
 }
 
+/** Build the clipboard feature.
+ *
+ *  It claims three things for the lifetime of the terminal: a kernel keydown
+ *  intercept (Ctrl+Shift+C copies the browser selection, Ctrl+Shift+V pastes, and
+ *  a plain Ctrl+V is consumed WITHOUT preventDefault so the browser's own paste
+ *  event reaches the hidden textarea instead of being mapped to `\x16`), the
+ *  `wire:clipboard` event that mirrors an application's OSC 52 copy to the system
+ *  clipboard, and a document `copy` listener that toasts "Copied" for a selection
+ *  inside the terminal surface only. Teardown releases all three. */
 export function clipboard(): TerminalFeature<ClipboardApi> {
   return {
     name: "clipboard",

@@ -1,8 +1,12 @@
-// scrollToBottom feature: a scroll-to-bottom control in the thumb-zone region,
-// shown only while the user has scrolled up (design section 22.4). The
-// scroll-state signal comes from the kernel's scroll:state event (the kernel
-// owns scroll.init); this feature just renders the affordance and drives
-// scroll.scrollToBottom.
+/**
+ * scrollToBottom feature: a scroll-to-bottom control in the thumb-zone region,
+ * shown only while the user has scrolled up. The
+ * scroll-state signal comes from the kernel's scroll:state event (the kernel
+ * owns scroll.init); this feature just renders the affordance and drives
+ * scroll.scrollToBottom.
+ *
+ * @module
+ */
 
 import type { TerminalFeature } from "../kernel/types.js";
 import { fromHTML, holdFocusOnPress } from "./dom.js";
@@ -12,6 +16,16 @@ const BUTTON_HTML = `
   <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" d="M7 13l5 5 5-5M7 6l5 5 5-5"/></svg>
 </button>`;
 
+/** Build the scrollToBottom feature. Exposes no API — the button is the whole
+ *  surface, and a peer that wants the same effect calls `ctx.scroll.scrollToBottom`
+ *  directly.
+ *
+ *  Its job is resuming FOLLOW, not just moving the viewport, which is why it also
+ *  acts when the reader is already at the bottom but holding (an ED3 clamp leaves
+ *  exactly that state). The jump is smooth unless the user asked for reduced
+ *  motion, and it is idempotent, so binding both `pointerdown` (touch presses feel
+ *  immediate) and `click` (keyboard activation) is safe. Teardown unsubscribes and
+ *  removes the button. */
 export function scrollToBottom(): TerminalFeature {
   return {
     name: "scrollToBottom",

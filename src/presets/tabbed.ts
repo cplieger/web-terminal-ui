@@ -1,7 +1,11 @@
-// presetTabbed (and the shared tabbed composition builder): the full
-// multi-session UI. Requires a server that speaks the session API
-// (`/api/sessions`, `/ws?session=`, and the status SSE `/api/sessions/events`),
-// such as `web-terminal-server` or `web-terminal-kiro`.
+/**
+ * presetTabbed (and the shared tabbed composition builder): the full
+ * multi-session UI. Requires a server that speaks the session API
+ * (`/api/sessions`, `/ws?session=`, and the status SSE `/api/sessions/events`),
+ * such as `web-terminal-server` or `web-terminal-kiro`.
+ *
+ * @module
+ */
 
 import type { TerminalFeature } from "../kernel/types.js";
 import { mobileToolbar } from "../features/mobile-toolbar.js";
@@ -18,7 +22,7 @@ export interface TabbedPresetOptions {
   /** Swap the page's icon links to a status variant while a background session
    *  wants the user. Off by default, and enabling it is a promise that the
    *  variant assets are served — see TabsOptions.attentionIcons for the naming
-   *  contract and .kiro/scripts/gen-attention-icons.py, which writes them. */
+   *  contract those files must satisfy. */
   attentionIcons?: boolean;
 }
 
@@ -33,10 +37,9 @@ export interface TabbedPresetOptions {
  *  via ctx.use. Shared by presetTabbed and presetAgentTabbed (agent-tabbed.ts),
  *  which now differ only in presumed activity reporting (presumeReports).
  *
- *  Titles are no longer a preset concern. The ENGINE resolves a session's name —
- *  its pinned name, an input-derived name when the host asked for one
- *  (terminal.WithInputTitle), the program's OSC window title, or its own
- *  foreground-process/cwd inference — and both presets render what it reports. A
+ *  Titles are not a preset concern. The ENGINE resolves a session's name — its
+ *  pinned name, a title its host pushed, the program's OSC window title, or its
+ *  own foreground-process/cwd inference — and both presets render what it reports. A
  *  browser that re-derived any of that could only disagree with the server and
  *  with every other client attached to the same session. */
 export function buildTabbed(

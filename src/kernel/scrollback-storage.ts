@@ -54,6 +54,18 @@ const DEFAULT_PREFIX = "wt.scrollback.";
  */
 const DEFAULT_MAX_BYTES = 512 * 1024;
 
+/** Options for `localScrollbackStorage`.
+ *
+ *  Four of the five are the kernel's policy rather than this store's: `maxAgeMs`,
+ *  `lines` and `saveIntervalMs` are passed straight through on the returned
+ *  `ScrollbackPersistence`, so the store's own sweep and the kernel's load-time age
+ *  check cannot disagree about a number a caller set once. `maxBytes` is this
+ *  store's alone, since only it can enumerate what it owns.
+ *
+ *  Every value is validated as a positive integer and an invalid one falls back to
+ *  the default rather than being clamped. Sizing `maxBytes` is a decision ABOUT THE
+ *  HOST APPLICATION, not about the terminal: this competes for the origin's
+ *  `localStorage` quota with everything else the page stores. */
 export interface LocalScrollbackStorageOptions {
   /** Key prefix (default `"wt.scrollback."`). */
   prefix?: string;
