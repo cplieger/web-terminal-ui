@@ -168,6 +168,17 @@
      the best answer when the measurement cannot run. Do not tune it by eye. */
   --label-ink-shift: 0em;
   --dur-micro: 0.1s;
+  /* The activity vocabulary's one beat period, read by all three animated tab
+     cues — the working dot's glow, its travelling ripple, and the secondary
+     activity mark's breath (30-tabs.css). A token rather than three literals
+     because the three are phase-locked BY sharing it: the ripple launches off the
+     disc as the glow peaks, and the mark beside them reports on the same clock, so
+     retuning one alone desynchronises cues a reader sees side by side. It was a
+     comment saying "change both or neither" until 2026-09, which is the same rule
+     with nothing enforcing it.
+     Shared with vibekit's `--dot-beat-dur` (01-tokens.css) for the reason the
+     --status-* inks are: one signal across the two apps, beat included. */
+  --dot-beat-dur: 1.2s;
   --dur-standard: 0.2s;
   --dur-enter: 0.25s;
   --dur-exit: 0.15s;

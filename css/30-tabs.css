@@ -815,7 +815,7 @@
     transparent 92%
   );
   opacity: 0;
-  animation: wt-working-glow 1.2s ease-in-out infinite;
+  animation: wt-working-glow var(--dot-beat-dur) ease-in-out infinite;
   will-change: opacity;
 }
 
@@ -850,7 +850,7 @@
     var(--dot-color) 76%,
     transparent 100%
   );
-  animation: wt-working-ripple 1.2s linear infinite;
+  animation: wt-working-ripple var(--dot-beat-dur) linear infinite;
 }
 
 /* Agent done / ready: solid disc (--status-done), no motion. The default green
@@ -983,14 +983,44 @@
    this size reads as an off-centre pulse. */
 :where(.wt-root) .wt-activity-mark[data-activity="working"] {
   --wt-mark-ink: var(--status-working);
+  /* The band, named because the MASK below has to know it: the overlay's hole is
+     the mark's inradius less this. Paired with the declaration it describes so the
+     two cannot drift apart on width. */
+  --wt-mark-band: 2px;
 
-  border-width: 2px;
+  border-width: var(--wt-mark-band);
   transform: translateZ(0);
 }
 
 /* The breath: a pre-painted radial animating OPACITY only, never colours, so the
    beat costs compositing rather than a repaint per frame for as long as a
-   background task runs (the battery reason the dot's glow overlay records). */
+   background task runs (the battery reason the dot's glow overlay records).
+
+   PLUS A MASK, which is the one thing a ring needs and a disc does not, and whose
+   absence was a real defect rather than a missing nicety. Over a solid disc the
+   overlay's bright core has almost no headroom above its own backdrop; over a
+   ring's transparent HOLE it has all of it, so an unmasked core FILLED the hole at
+   the peak and the mark rendered as a solid rounded square. That is the one thing
+   this element may never be: the mark and the activity dot 8px away share their ink
+   at zero hue distance, so the ring-against-disc silhouette is the entire WCAG
+   1.4.1 channel between them, and a fill collapses it for the brightest third of
+   every cycle. Masked, the beat lights the BAND and the hole's four corners, so
+   what a reader sees is the hole morphing between a square and the circle inscribed
+   in it — the ring survives the peak.
+
+   The divisor is the arithmetic rather than a literal, for the reason the footprint
+   cancel above is: the size is a variable and the band is now one too, so a literal
+   would be right until either moved. Ported from vibekit's `.tab-run-dot`
+   (`12-tabs.css`, "THE GLOW BEAT"), which is the same mark solving the same problem
+   and had the mask from the start.
+
+   NOTHING HERE EXTENDS PAST THE MARK. `box-sizing: border-box` (01-scope.css) puts
+   the padding box — an absolutely positioned child's containing block — INSIDE the
+   band, so on a 9px mark with a 2px band that box is 5x5 and `inset: -1px` resolves
+   to 7x7, still inside the border box. Read it as "fill the mark", not as "overhang
+   it": the same declaration on a mark with no band would reach outside, where a
+   feathered edge's visible radius moves with the beat and renders differently at
+   every pixel density. */
 :where(.wt-root) .wt-activity-mark[data-activity="working"]::before {
   content: "";
   position: absolute;
@@ -1002,8 +1032,13 @@
     transparent 92%
   );
   opacity: 0;
-  animation: wt-activity-breath 1.2s ease-in-out infinite;
+  animation: wt-activity-breath var(--dot-beat-dur) ease-in-out infinite;
   will-change: opacity;
+  mask: radial-gradient(
+    closest-side,
+    transparent 0 calc(var(--wt-mark-size) / 2 - var(--wt-mark-band)),
+    #000 calc(var(--wt-mark-size) / 2 - var(--wt-mark-band))
+  );
 }
 
 /* Waiting: the thin band plus a static halo. Stopped and resumable, nobody being
@@ -1054,8 +1089,10 @@
      usable weight through the travel. The ramp-in is short enough to read as
      instant while stopping the emission from popping in.
 
-   The disc's own glow shares this 1.2s period so the two cues stay phase-locked;
-   change both or neither. */
+   The disc's own glow shares this period so the two cues stay phase-locked, and
+   since 2026-09 that is STRUCTURAL rather than a request: all three animated cues
+   read `--dot-beat-dur` (00-tokens.css), so there is no longer a pair of literals
+   to change both of. */
 @keyframes wt-working-ripple {
   0% {
     transform: scale(1);
@@ -1076,9 +1113,16 @@
   }
 }
 
-/* The activity mark's breath, same envelope as the dot's glow: rest, one bright
-   swell, rest. Opacity only — a colour keyframe here would reintroduce the
-   per-frame repaint this shape exists to avoid. */
+/* The activity mark's breath: rest, one swell, rest. Opacity only — a colour
+   keyframe here would reintroduce the per-frame repaint this shape exists to avoid.
+
+   The dot's glow ENVELOPE, at a lower CEILING, and the ceiling is where the two
+   deliberately part. 0.55 rather than 1 is vibekit's number for the same mark
+   (`12-tabs.css`), and it is what keeps a strip of busy tabs reading as one pulse
+   instead of a row of flashes — the dot can afford 1 because its overlay lifts a
+   solid disc of its own hue and has almost no headroom above its own backdrop,
+   while this one is masked onto a 2px band over the page and has all of it. Used by
+   the mark alone, so the value moves nothing else. */
 @keyframes wt-activity-breath {
   0%,
   70%,
@@ -1087,7 +1131,7 @@
   }
 
   35% {
-    opacity: 1;
+    opacity: 0.55;
   }
 }
 
@@ -1131,9 +1175,13 @@
 
   /* Working loses its breath, so it takes the HEAVIEST band instead: motion is
      REPLACED by a channel rather than removed, and the three states then separate
-     by band alone (3px bare / 1px halo / 2px halo). */
+     by band alone (3px bare / 1px halo / 2px halo).
+
+     Re-pointing --wt-mark-band rather than declaring `border-width` keeps the number
+     in the one place the state's own rule reads it from, the mask's divisor included
+     — which is moot here only because the overlay is gone one rule below. */
   :where(.wt-root) .wt-activity-mark[data-activity="working"] {
-    border-width: 3px;
+    --wt-mark-band: 3px;
   }
 
   :where(.wt-root) .wt-activity-mark[data-activity="working"]::before {

@@ -904,6 +904,34 @@ describe("the switcher's aggregate cue dot survives every cue-worthy status", ()
 // package can see any of it; chip-geometry.test.ts measures the rendered footprint
 // at all three chip sites, and this is the grep-level guard on the decisions that
 // have no geometry to measure.
+// The activity vocabulary's three animated cues are phase-locked BY sharing one
+// period: the ripple launches off the disc as the glow peaks, and the secondary
+// activity mark beside them reports on the same clock. Three literals kept that
+// agreement by a comment ASKING for it ("change both or neither"), which is a rule
+// with nothing enforcing it; one token makes it structural, and this is the guard.
+describe("the activity vocabulary's beat period is ONE token", () => {
+  const NAMES = ["wt-working-glow", "wt-working-ripple", "wt-activity-breath"] as const;
+
+  it("declares the period, so the var() its animations name resolves to something", () => {
+    // Load-bearing rather than pedantic: `var(--x)` with no declaration behind it is
+    // valid CSS text that invalidates the WHOLE animation shorthand, so a missing
+    // token runs no animation at all — a cue that has STOPPED, not one at the wrong
+    // speed, which is the harder failure to notice.
+    expect(tokens, "00-tokens.css declares the beat period").toMatch(
+      /--dot-beat-dur:\s*[\d.]+m?s;/,
+    );
+  });
+
+  it("reads that token from every animated cue, leaving no literal behind", () => {
+    for (const name of NAMES) {
+      const decl = new RegExp(`animation:\\s*${name}\\s+([^;]+);`).exec(tabs);
+      expect(decl, `${name} declares an animation in 30-tabs.css`).not.toBeNull();
+      expect(decl![1]!, `${name} reads the shared period`).toContain("var(--dot-beat-dur)");
+      expect(/\d+(?:\.\d+)?m?s/.test(decl![1]!), `${name} names no literal duration`).toBe(false);
+    }
+  });
+});
+
 describe("secondary activity mark (the host's background-activity channel)", () => {
   const base = /^:where\(\.wt-root\) \.wt-activity-mark \{([^}]*)\}/m.exec(tabs);
   const anyState = /^:where\(\.wt-root\) \.wt-activity-mark\[data-activity\] \{([^}]*)\}/m.exec(
@@ -917,9 +945,11 @@ describe("secondary activity mark (the host's background-activity channel)", () 
     expect(rule, `the ${state} rule exists in 30-tabs.css`).not.toBeNull();
     return rule![1]!;
   };
-  /** A rule's border-width in px. */
+  /** A rule's band width in px, however that rule spells it: `border-width`
+   *  directly, or the `--wt-mark-band` variable the working state routes it through
+   *  so the breath's mask divisor reads the same number the band does. */
   const band = (body: string): number => {
-    const m = /border-width:\s*([\d.]+)px/.exec(body);
+    const m = /(?:border-width|--wt-mark-band):\s*([\d.]+)px/.exec(body);
     expect(m, "the rule declares a band width").not.toBeNull();
     return Number.parseFloat(m![1]!);
   };
@@ -999,6 +1029,40 @@ describe("secondary activity mark (the host's background-activity channel)", () 
     expect(beat![1]!).toContain("opacity");
     expect(beat![1]!, "never a paint property").not.toContain("background");
     expect(beat![1]!, "never a paint property").not.toContain("border");
+  });
+
+  it("masks the breath off the ring's hole, so its peak never reads as a disc", () => {
+    // The ring-against-disc silhouette IS the WCAG 1.4.1 channel against the activity
+    // dot 8px away, because the two share an ink at zero hue distance. The rounded-
+    // SQUARE test above asserts `background: transparent` on the ELEMENT, and that is
+    // only half the question: the overlay is a second way to fill this mark, and
+    // unmasked its opaque core covered the hole for the brightest third of every
+    // cycle — so the mark rendered as a solid square and the channel collapsed. That
+    // blind spot is why the defect shipped, so this case is the other half.
+    const overlay = /\.wt-activity-mark\[data-activity="working"\]::before \{([\s\S]*?)\n\}/.exec(
+      tabs,
+    );
+    expect(overlay, "the working ::before overlay exists").not.toBeNull();
+    const mask = /mask:\s*radial-gradient\(([\s\S]*?)\);/.exec(overlay![1]!);
+    expect(mask, "the overlay masks its own centre").not.toBeNull();
+    // The divisor is the ARITHMETIC rather than a literal: both terms are variables
+    // (the second one named for exactly this reader), so a literal would be correct
+    // until either moved.
+    expect(mask![1]!, "the hole is hidden from 0 outward").toContain("transparent 0 calc(");
+    expect(mask![1]!, "derived from the mark's own size").toContain("var(--wt-mark-size)");
+    expect(mask![1]!, "less the band the state declares").toContain("var(--wt-mark-band)");
+  });
+
+  it("keeps the breath's ceiling below the dot's, so a busy strip is one pulse", () => {
+    // 0.55 is vibekit's number for the same mark (12-tabs.css). The dot can afford 1
+    // because its overlay lifts a solid disc of its own hue and has almost no headroom
+    // above its own backdrop; this one is masked onto a 2px band over the page and has
+    // all of it, so the same ceiling reads as a flash rather than a breath.
+    const beat = /@keyframes\s+wt-activity-breath(?![\w-])\s*\{([\s\S]*?)\n\}/.exec(tabs);
+    expect(beat, "@keyframes wt-activity-breath is defined").not.toBeNull();
+    const peak = /opacity:\s*([\d.]+)\s*;?\s*\}\s*$/.exec(beat![1]!.trimEnd());
+    expect(peak, "the envelope declares a peak").not.toBeNull();
+    expect(Number.parseFloat(peak![1]!)).toBeLessThan(1);
   });
 
   it("replaces working's motion with the heaviest band under reduced motion", () => {
