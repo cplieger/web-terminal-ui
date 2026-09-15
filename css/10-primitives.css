@@ -35,6 +35,7 @@
   font: inherit;
   cursor: pointer;
   touch-action: manipulation;
+  -webkit-user-select: none;
   user-select: none;
 }
 

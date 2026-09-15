@@ -111,6 +111,7 @@
     font-weight: 500;
     cursor: pointer;
     touch-action: manipulation;
+    -webkit-user-select: none;
     user-select: none;
     display: flex;
     align-items: center;
