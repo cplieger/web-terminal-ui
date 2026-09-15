@@ -1,10 +1,14 @@
-// mobileToolbar feature: the on-screen key toolbar (Tab/Esc/arrows/Enter + a
-// collapse toggle and sticky-Ctrl) in the thumb-zone region (design section
-// 22.4). The engine's toolbar.bindMobileToolbar wires the buttons (DECCKM-aware
-// arrows, sticky-Ctrl state; engine >= v3, where the widget moved out of the
-// keyboard module); this feature builds the toolbar chrome, routes its
-// output through the kernel funnel, and registers sticky-Ctrl as an input
-// transform so a typed character is rewritten to its Ctrl byte when armed.
+/**
+ * mobileToolbar feature: the on-screen key toolbar (Tab/Esc/arrows/Enter + a
+ * collapse toggle and sticky-Ctrl) in the thumb-zone region.
+ * The engine's toolbar.bindMobileToolbar wires the buttons (DECCKM-aware
+ * arrows, sticky-Ctrl state; engine >= v3, where the widget moved out of the
+ * keyboard module); this feature builds the toolbar chrome, routes its
+ * output through the kernel funnel, and registers sticky-Ctrl as an input
+ * transform so a typed character is rewritten to its Ctrl byte when armed.
+ *
+ * @module
+ */
 
 import { toolbar } from "@cplieger/web-terminal-engine";
 import type { TerminalFeature } from "../kernel/types.js";
@@ -52,6 +56,19 @@ const TOOLBAR_HTML = `
   <button type="button" id="kb-right" class="kb-key kb-r2c4" aria-label="Right"><svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg></button>
 </div>`;
 
+/** Build the mobileToolbar feature.
+ *
+ *  The chrome is always built; whether it is VISIBLE is a CSS decision — the keys
+ *  and the toggle are `display: none` and only a coarse pointer restores them
+ *  (`css/23-toolbar.css`) — so a desktop consumer including this feature pays the
+ *  DOM and sees nothing. Order it before `tabs` when `externalToggle` is set, since
+ *  tabs reads the returned API through `ctx.use` to drive the grid from the tab
+ *  bar's keyboard button.
+ *
+ *  Sticky-Ctrl is registered as a kernel INPUT TRANSFORM rather than handled in
+ *  the toolbar's own click path, so it rewrites a character typed on the soft
+ *  keyboard as well as one produced by these buttons. Teardown removes the
+ *  toolbar, drops the transform, and clears every subscriber. */
 export function mobileToolbar(opts: MobileToolbarOptions = {}): TerminalFeature<MobileToolbarApi> {
   return {
     name: "mobileToolbar",

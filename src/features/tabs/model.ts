@@ -309,7 +309,8 @@ export function worseCue(a: CueStatus | "", b: CueStatus | ""): CueStatus | "" {
 
 /** The icon variant a cue paints, which is NOT one per status: `crashed` and
  *  `failed` both render --status-failed, so they share one asset. An app ships
- *  one icon per name returned here (see .kiro/scripts/gen-attention-icons.py). */
+ *  one icon per name returned here (see TabsOptions.attentionIcons for the
+ *  naming contract those files must satisfy). */
 export function cueIconName(status: CueStatus): "input" | "done" | "alert" {
   if (status === "input" || status === "done") {
     return status;
@@ -532,8 +533,8 @@ export interface Tab {
    *  session (the boot double-create bug). */
   born: number;
   /** The title the SERVER resolved for this session: its pinned name, else the
-   *  input-derived name, else the program's OSC 0/2 window title, else a
-   *  client-pushed label, else the engine's own foreground-process/cwd inference.
+   *  program's OSC 0/2 window title, else a title the host pushed through
+   *  SetSessionTitle, else the engine's own foreground-process/cwd inference.
    *  Possibly empty only against an engine that has none of those. The displayed
    *  label adds a numbered fallback and de-duplication (see relabelAll in
    *  index.ts). */
@@ -603,9 +604,9 @@ export interface Tab {
  *  there is one, otherwise the title the SERVER resolved.
  *
  *  Only two rungs, because the engine now owns every automatic source and folds
- *  them into `title` in precedence order (pinned, input-derived, the program's OSC
- *  window title, a client-pushed label, then its own foreground-process/cwd
- *  inference). A client that re-implemented that ladder could only disagree with
+ *  them into `title` in precedence order (pinned, the program's OSC window title,
+ *  a title the host pushed through SetSessionTitle, then its own
+ *  foreground-process/cwd inference). A client that re-implemented that ladder could only disagree with
  *  the server and with every other client.
  *
  *  The pin is still checked here, even though the server also folds it into

@@ -1,13 +1,32 @@
-// predictiveEcho feature: Mosh-style local echo (design section 22.4). Wires the
-// predict.ts mini-VT to the kernel input funnel: it advances a predicted cursor
-// on accepted input (an input observer) and owns the col-0 backspace brake (an
-// input transform that drops a lone DEL at the true origin, since the predicted
-// cursor is the authoritative position for that decision). It re-pushes the
-// predicted-cursor overlay on prediction changes and after each render flush.
+/**
+ * predictiveEcho feature: Mosh-style local echo. Wires the
+ * predict.ts mini-VT to the kernel input funnel: it advances a predicted cursor
+ * on accepted input (an input observer) and owns the col-0 backspace brake (an
+ * input transform that drops a lone DEL at the true origin, since the predicted
+ * cursor is the authoritative position for that decision). It re-pushes the
+ * predicted-cursor overlay on prediction changes and after each render flush.
+ *
+ * @module
+ */
 
 import * as predict from "../predict.js";
 import type { TerminalFeature } from "../kernel/types.js";
 
+/** Build the predictiveEcho feature. Exposes no API — its output is the engine
+ *  renderer's predicted-cursor overlay.
+ *
+ *  The prediction state is MODULE-scoped (`../predict.js`), not per instance, so two
+ *  terminals in one page that both include this feature would drive one predicted
+ *  cursor between them. That is within the kernel's existing "call createTerminal
+ *  exactly once" contract, but it is the reason this feature cannot be made
+ *  per-instance by composing it twice.
+ *
+ *  Predictions are advisory: `predict` suspends itself on any byte it cannot
+ *  model, because a wrong prediction is worse than a missing one. The feature
+ *  resets it on a server restart and on a tab switch (`onDetach`), so the outgoing
+ *  session's ghost cursor never paints over the incoming session's screen; the
+ *  next server frame re-arms it. Teardown drops every listener, hides the overlay,
+ *  and clears the prediction. */
 export function predictiveEcho(): TerminalFeature {
   return {
     name: "predictiveEcho",

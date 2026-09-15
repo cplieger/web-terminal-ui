@@ -1,12 +1,16 @@
-// tabs feature: multiple independent terminals over the one kernel (design
-// sections 5, 6, 12, 22.5). It owns the session set (GET/POST/DELETE
-// /api/sessions), a per-tab LineStore switching cache, the reconnect-on-switch
-// swap, and the tab chrome on both form factors: the desktop top-bar strip and
-// the mobile bottom-switcher + modal overview sheet. The kernel drives one
-// active session; switching re-points the renderer at the next tab's cached
-// store (ctx.render.bind) and asks the kernel to reconnect the terminal WS to it
-// (ctx.notifySwitch), so the last-known screen paints instantly and the
-// background delta arrives after.
+/**
+ * tabs feature: multiple independent terminals over the one kernel.
+ * It owns the session set (GET/POST/DELETE
+ * /api/sessions), a per-tab LineStore switching cache, the reconnect-on-switch
+ * swap, and the tab chrome on both form factors: the desktop top-bar strip and
+ * the mobile bottom-switcher + modal overview sheet. The kernel drives one
+ * active session; switching re-points the renderer at the next tab's cached
+ * store (ctx.render.bind) and asks the kernel to reconnect the terminal WS to it
+ * (ctx.notifySwitch), so the last-known screen paints instantly and the
+ * background delta arrives after.
+ *
+ * @module
+ */
 
 import { modes } from "@cplieger/web-terminal-engine";
 import type { SessionRef, TerminalContext, TerminalFeature } from "../../kernel/types.js";
@@ -102,6 +106,20 @@ const TAB_DRAG_TYPE = "application/x-web-terminal-tab";
 // the shared point-anchored positioner (menu-position.ts), shared with the
 // terminal context menu (formerly two hand-synced copies of the same math).
 
+/** The value a peer feature or a host reads through `ctx.use(tabs(...))`: the
+ *  session set as commands, plus a snapshot of the strip.
+ *
+ *  `create` and `close` are server round trips, and NEITHER rejects: a refusal is
+ *  reported to the user as a toast and the promise resolves anyway, so awaiting one
+ *  tells you the attempt finished and not that it succeeded (read `list` for that).
+ *  Both are safe to call more than once per gesture — `create` shares an in-flight
+ *  create, so the duplicate activation an iPad trackpad delivers opens one terminal
+ *  rather than two. `switchTo` is local and synchronous, and ignores an unknown id.
+ *
+ *  `list` is a snapshot, not a live view — it does not update, so re-read it rather
+ *  than holding onto the array, and treat it as display data: the tab a user is
+ *  looking at is this feature's own state and mutating it goes through the members
+ *  above. */
 export interface TabsApi {
   /** Spawn a fresh session and switch to it. Calls made while a create is in
    *  flight share that create, so one gesture opens exactly one terminal. */
@@ -114,6 +132,14 @@ export interface TabsApi {
   list(): readonly { id: string; title: string; active: boolean }[];
 }
 
+/** Options for the tabs feature.
+ *
+ *  The two feature-valued members (`activityMonitor`, `keyboardToggle`) must be the
+ *  SAME values the composition includes and must be ordered before tabs in the
+ *  feature list, since `ctx.use` only resolves a peer the kernel has already set
+ *  up. Both are optional and their absence degrades rather than fails: no monitor
+ *  means polling instead of the status SSE, no toolbar means no keyboard button in
+ *  the mobile bar. `buildTabbed` in presets/tabbed.ts is the worked example. */
 export interface TabsOptions {
   /** REST base for the session API (default "/api/sessions"). */
   apiBase?: string;
@@ -149,10 +175,10 @@ export interface TabsOptions {
    *  `link[rel=icon]` whose filename starts with `favicon`, three variants must
    *  be served alongside it with `-input`, `-done` and `-alert` inserted after
    *  that token (`/favicon.svg` needs `/favicon-input.svg`; `/favicon-32x32.png`
-   *  needs `/favicon-input-32x32.png`). Generate them with
-   *  `.kiro/scripts/gen-attention-icons.py`, which writes exactly those names, and
-   *  assert their presence in the APP's own tests — the library cannot check a
-   *  file it does not ship, and a missing variant is a blank tab icon.
+   *  needs `/favicon-input-32x32.png`). Generate them with whatever tooling you
+   *  like as long as it writes exactly those names, and assert their presence in
+   *  the APP's own tests — the library cannot check a file it does not ship, and
+   *  a missing variant is a blank tab icon.
    *
    *  Not every platform honours it: Safari caches the first icon it fetched and
    *  ignores later changes, and an installed app has no tab icon at all. The
@@ -321,6 +347,20 @@ function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
   }
 }
 
+/** Build the tabs feature.
+ *
+ *  Requires a server that speaks the session API — `GET`/`POST`/`DELETE` on
+ *  `/api/sessions`, `?session=<id>` on the WebSocket, and ideally the status SSE.
+ *  It registers itself as the kernel's `sessionOwner`, so it and not the kernel
+ *  resolves the session the first connect attaches to. At most one feature may claim
+ *  that role, and `createTerminal` throws before any DOM work when two do.
+ *
+ *  The arrangement of the strip is SERVER state (the `order` field), while the
+ *  active tab and the dismissed notification cues are per-viewer and live in
+ *  `localStorage` — so a phone reordering tabs moves them on the desktop, and
+ *  switching tabs on one does not move the other. Teardown removes all chrome,
+ *  releases the per-tab caches, and leaves the sessions themselves running on the
+ *  server; closing a tab is what kills a process. */
 export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
   const presumeReports = opts.presumeReports ?? false;
@@ -3544,9 +3584,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // --- Event wiring ---
-      // No input observer. The ENGINE derives a session's name from the input
-      // stream when its host asked for that (terminal.WithInputTitle), so no preset
-      // does per-keystroke title work in the browser, and the name is identical for
+      // No input observer. The ENGINE owns a session's name, so no preset does
+      // per-keystroke title work in the browser, and the name is identical for
       // every client attached to the session — including one that attaches later.
       // Observe (never consume) keydowns to detect a physical keyboard: a
       // hardware-only key latches sawHardwareKey, which upgrades focus-on-switch

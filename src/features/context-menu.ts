@@ -1,51 +1,55 @@
-// contextMenu feature: the Copy / Select All / Paste menu for the terminal
-// surface (design section 22.4), rendered into the overlay region. Copy and Paste
-// need the clipboard feature (ctx.use), and Paste routes through the kernel's
-// sanitizing funnel. Escape-to-close goes through the kernel keydown intercept;
-// outside-click is a document gesture.
-//
-// WHY THIS MENU EXISTS
-// The terminal output is real DOM text, so the browser already does the hard
-// part: drag-select with a mouse, long-press word-select plus the OS copy callout
-// on touch. What no platform can offer is PASTE — the keyboard target is a 1x1
-// pointer-events:none textarea, so there is no editable surface under the pointer
-// for a native paste item to attach to. This menu is the paste path. It carries
-// Copy and Select All because a menu appearing where the platform's would have
-// appeared should not be missing them.
-//
-// THE MODEL: one owner per gesture, and nothing decided mid-gesture.
-//
-//   Mouse / pen — `contextmenu` is an already-classified request for a menu:
-//   preventDefault and open at the pointer. No timers, no heuristics, no
-//   platform branches.
-//
-//   Touch — the platform owns the press while the finger is down. We run no hold
-//   timer against it, open nothing before it finishes, and never cancel its
-//   gesture on WebKit. We classify ONCE, on `touchend`, when every fact is
-//   settled: a single-finger, stationary press held past the tap ceiling
-//   (kernel/gesture.ts, shared with the kernel's tap-to-focus so the two cannot
-//   both claim one press) that selected nothing and did not start on a link is a
-//   press the platform declined — so it is ours, and it is the paste path. A
-//   press that produced a selection belongs to the OS callout; a press on a link
-//   belongs to the platform's link preview; a shorter press is the kernel's tap.
-//
-// WHY AT RELEASE RATHER THAN DURING THE HOLD
-// Opening from a ~550ms hold timer put this feature in a race it cannot win: the
-// timer has to beat the platform's own long-press threshold and then GUESS
-// whether a selection is still coming (iOS 26 registers a word selection well
-// after 550ms). Four mechanisms existed only to referee that guess — a hit test
-// for glyphs under the finger, a selectionchange watch to retract a menu that
-// opened too early, a device sniff, and per-platform contextmenu branching,
-// because WebKit reads preventDefault on a touch contextmenu as "cancel every
-// remaining default of this gesture", the not-yet-registered selection included.
-// Deciding at release deletes all four: the outcome is observed, not predicted.
-//
-// It also fixes the symptom that prompted the rewrite. A touch long-press emits a
-// trailing click on release, and the swallow window that covers that click was
-// armed when the menu OPENED — ~550ms into the press, expiring 350ms later — so
-// holding a beat longer meant the release click landed as an outside click and
-// dismissed the menu the instant the finger lifted. Opened BY the release, the
-// window can only ever start at the release edge.
+/**
+ * contextMenu feature: the Copy / Select All / Paste menu for the terminal
+ * surface, rendered into the overlay region. Copy and Paste
+ * need the clipboard feature (ctx.use), and Paste routes through the kernel's
+ * sanitizing funnel. Escape-to-close goes through the kernel keydown intercept;
+ * outside-click is a document gesture.
+ *
+ * WHY THIS MENU EXISTS
+ * The terminal output is real DOM text, so the browser already does the hard
+ * part: drag-select with a mouse, long-press word-select plus the OS copy callout
+ * on touch. What no platform can offer is PASTE — the keyboard target is a 1x1
+ * pointer-events:none textarea, so there is no editable surface under the pointer
+ * for a native paste item to attach to. This menu is the paste path. It carries
+ * Copy and Select All because a menu appearing where the platform's would have
+ * appeared should not be missing them.
+ *
+ * THE MODEL: one owner per gesture, and nothing decided mid-gesture.
+ *
+ *   Mouse / pen — `contextmenu` is an already-classified request for a menu:
+ *   preventDefault and open at the pointer. No timers, no heuristics, no
+ *   platform branches.
+ *
+ *   Touch — the platform owns the press while the finger is down. We run no hold
+ *   timer against it, open nothing before it finishes, and never cancel its
+ *   gesture on WebKit. We classify ONCE, on `touchend`, when every fact is
+ *   settled: a single-finger, stationary press held past the tap ceiling
+ *   (kernel/gesture.ts, shared with the kernel's tap-to-focus so the two cannot
+ *   both claim one press) that selected nothing and did not start on a link is a
+ *   press the platform declined — so it is ours, and it is the paste path. A
+ *   press that produced a selection belongs to the OS callout; a press on a link
+ *   belongs to the platform's link preview; a shorter press is the kernel's tap.
+ *
+ * WHY AT RELEASE RATHER THAN DURING THE HOLD
+ * Opening from a ~550ms hold timer put this feature in a race it cannot win: the
+ * timer has to beat the platform's own long-press threshold and then GUESS
+ * whether a selection is still coming (iOS 26 registers a word selection well
+ * after 550ms). Four mechanisms existed only to referee that guess — a hit test
+ * for glyphs under the finger, a selectionchange watch to retract a menu that
+ * opened too early, a device sniff, and per-platform contextmenu branching,
+ * because WebKit reads preventDefault on a touch contextmenu as "cancel every
+ * remaining default of this gesture", the not-yet-registered selection included.
+ * Deciding at release deletes all four: the outcome is observed, not predicted.
+ *
+ * It also fixes the symptom that prompted the rewrite. A touch long-press emits a
+ * trailing click on release, and the swallow window that covers that click was
+ * armed when the menu OPENED — ~550ms into the press, expiring 350ms later — so
+ * holding a beat longer meant the release click landed as an outside click and
+ * dismissed the menu the instant the finger lifted. Opened BY the release, the
+ * window can only ever start at the release edge.
+ *
+ * @module
+ */
 
 import type { TerminalFeature } from "../kernel/types.js";
 import { TAP_MAX_MS, TAP_MOVEMENT_PX, isLinkTarget } from "../kernel/gesture.js";
@@ -56,6 +60,12 @@ import { createClickSwallow, placeMenuAt } from "./menu-position.js";
 // swallow all live in the shared point-anchored menu module (menu-position.ts),
 // shared with the tab menu.
 
+/** Options for the contextMenu feature.
+ *
+ *  Pass the SAME clipboard feature value the composition includes, not a second
+ *  `clipboard()` call: `ctx.use` resolves a value to the instance the kernel set
+ *  up, so a value that is not in the feature list resolves to nothing and the
+ *  menu silently loses Copy and Paste. `presetSingle` shows the shape. */
 export interface ContextMenuOptions {
   /** The clipboard feature value, so the menu can offer Copy/Paste through its
    *  API (ctx.use). Omitted: the menu shows only Select All. */
@@ -109,6 +119,16 @@ function selectionText(): string {
  *  so the selection test alone would not keep us out of its way. */
 const onLink = isLinkTarget;
 
+/** Build the contextMenu feature. Exposes no API — the menu is opened by the
+ *  gestures described above, never programmatically by a peer.
+ *
+ *  Hand it the clipboard value the composition also includes (see
+ *  ContextMenuOptions) or it degrades to a Select All-only menu; its own position in
+ *  the feature list is otherwise free, since nothing reads it through `ctx.use`. Its
+ *  items act on the browser selection inside the terminal surface and on the
+ *  kernel's paste funnel, so it holds no session state and survives a tab switch
+ *  unchanged. Teardown removes the menu element and releases the keydown intercept
+ *  along with every surface and document listener. */
 export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
   return {
     name: "contextMenu",

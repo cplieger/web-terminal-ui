@@ -1214,17 +1214,17 @@ describe("tabs feature", () => {
     expect(root.querySelector(".wt-tab-label")?.textContent).toBe("two");
   });
 
-  // Title RESOLUTION now lives entirely in the engine: the input-derived name and
-  // its eligibility filter and session-scoped latch are Go code
-  // (terminal/inputtitle.go), and the precedence between pinned / derived / OSC /
-  // client-pushed / process-inferred is resolved server-side into one `title`
-  // field. Seven tests here used to cover the browser's own version of that; the
-  // server is the source of truth for a session's name, because a browser can only
-  // ever derive from ITS OWN keyboard and so disagreed with every other client.
+  // Title RESOLUTION lives entirely in the engine: the precedence between the
+  // pinned name, the program's OSC 0/2 window title, a title the host pushed
+  // through SetSessionTitle and the engine's own foreground-process/cwd inference
+  // is resolved server-side into one `title` field. Seven tests here used to cover
+  // a browser-side version of that; the server is the source of truth for a
+  // session's name, because a browser reading only its own state disagreed with
+  // every other client.
   //
   // What the UI still owes is rendering what the server resolved — including a
-  // name that arrives MID-SESSION, which is exactly what a server-side deriver
-  // produces and what no earlier test covered.
+  // name that arrives MID-SESSION, which is what a host pushing a title produces
+  // and what no earlier test covered.
   it("renders the title the server resolved, including one that arrives later", async () => {
     const monitor = fakeMonitor();
     listBody = [{ id: "s1", title: "", createdAt: "1", status: "idle" }];

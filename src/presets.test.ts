@@ -148,7 +148,7 @@ describe("presetTouch composition", () => {
 });
 
 describe("presets: composition contracts", () => {
-  it("presetTabbed and presetAgentTabbed share the same feature set (they differ only in the title source: presetAgentTabbed sets preferInputTitle)", async () => {
+  it("presetTabbed and presetAgentTabbed share the same feature set (they differ only in presumed activity reporting: presetAgentTabbed sets presumeReports)", async () => {
     const { presetTabbed, presetAgentTabbed } = await import("./presets.js");
     expect(presetTabbed().map((f) => f.name)).toEqual(presetAgentTabbed().map((f) => f.name));
   });

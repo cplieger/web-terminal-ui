@@ -1,19 +1,21 @@
-// The copy of the "terminal did not start" recovery surface, as DATA.
-//
-// Why this is a module of its own rather than string literals inside the
-// renderer: a full-page consumer needs the same words in a place no module can
-// reach. Its HTML carries an inline bootstrap watchdog whose entire job is to
-// report "the JS bundle never ran" -- a rung below `import`, by definition, or
-// it could not detect its own failure case. That watchdog cannot import these
-// strings at runtime, so a consumer's BUILD substitutes them into its HTML
-// instead, and the words survive as one declaration rather than three
-// hand-agreed copies (the pattern this replaced had web-terminal-kiro's app
-// code, its inline watchdog, and this library all restating them, kept in step
-// by comments asking the next reader to remember).
-//
-// This file therefore imports nothing and touches no DOM, so a Node build script
-// can read it without loading the kernel. It is exported at the package root and
-// at the "./startup-copy" subpath for exactly that use.
+/**
+ * The copy of the "terminal did not start" recovery surface, as DATA.
+ *
+ * Why this is a module of its own rather than string literals inside the
+ * renderer: a full-page consumer needs the same words in a place no module can
+ * reach. Its HTML carries an inline bootstrap watchdog whose entire job is to
+ * report "the JS bundle never ran" -- a rung below `import`, by definition, or
+ * it could not detect its own failure case. That watchdog cannot import these
+ * strings at runtime, so a consumer's BUILD substitutes them into its HTML
+ * instead, and the words survive as one declaration rather than three
+ * hand-agreed copies.
+ *
+ * This file therefore imports nothing and touches no DOM, so a Node build script
+ * can read it without loading the kernel. It is exported at the package root and
+ * at the "./startup-copy" subpath for exactly that use.
+ *
+ * @module
+ */
 
 /** The words the recovery surface shows, whichever startup rung failed.
  *

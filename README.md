@@ -139,16 +139,17 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
 - `presetTabbed()`: the generic tabbed UI, `presetTouch()` plus tabs, the
   activity monitor, and animations. Each tab's title is OSC-first: it follows
   the process window title (OSC 0/2) when the program sets one and keeps it
-  updated, otherwise the last command submitted. The per-tab activity dot
+  updated, otherwise a name the server infers from the foreground process or the
+  working directory. The per-tab activity dot
   reveals itself only when a session reports OSC 9;4 progress, so a plain shell
   keeps clean, label-only tabs. Requires a server that speaks the session API
-  (`/api/sessions` and `/ws?session=`), such as `web-terminal-server`.
+  (`/api/sessions`, `/ws?session=`, and the status SSE `/api/sessions/events`),
+  such as `web-terminal-server`.
 - `presetAgentTabbed()`: the same feature set as `presetTabbed()`, tuned for an
-  agent shell such as `web-terminal-kiro`. With `preferInputTitle`, each tab's
-  label follows the latest submitted line (persisted server-side and recovered
-  on reload) and the program's OSC 0/2 title is ignored. With `presumeReports`,
-  the idle activity dot shows from tab creation instead of waiting for the
-  session's first OSC 9;4 signal. Its status dots come from the same activity
+  agent shell such as `web-terminal-kiro`, and differing from `presetTabbed()`
+  only in presumed activity reporting. With `presumeReports`, the idle activity
+  dot shows from tab creation instead of waiting for the session's first
+  OSC 9;4 signal. Its status dots come from the same activity
   monitor and cover eight states: the three animated OSC 9;4 progress states
   (working, warning, error), the frozen ringed needs-input dot, two static discs
   (a green finished turn, a red crashed process), and two hollow ones (idle and a
