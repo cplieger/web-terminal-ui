@@ -29,6 +29,10 @@ const animations = readFileSync(path.join(cssDir, "40-animations.css"), "utf8");
 // The one non-CSS source read here: the strip's height is measured in TS and
 // consumed in CSS, so the pairing spans the two.
 const tabsFeature = readFileSync(path.join(packageDir, "src/features/tabs/index.ts"), "utf8");
+// Same shape, one pairing further: which of --font-mono's families the font-ready
+// gate names is a decision split across a CSS token and a TS literal, and nothing
+// but text can hold the two together.
+const kernelSource = readFileSync(path.join(packageDir, "src/kernel/kernel.ts"), "utf8");
 
 describe("engine-toggled class contract", () => {
   it("styles DECSCNM reverse video (.term-reverse-video) as a default-pair swap", () => {
@@ -107,8 +111,9 @@ describe("cell-background contract", () => {
   });
 
   it("declares no metric override on any bundled face", () => {
-    // Four faces: regular, bold, italic, bold-italic.
-    expect(fontFaces).toHaveLength(4);
+    // Eight faces: four companion (regular, bold, italic, bold-italic) and four
+    // overlay (the same descriptor sets over one file).
+    expect(fontFaces).toHaveLength(8);
     for (const [i, body] of fontFaces.entries()) {
       expect(/ascent-override/.test(body), `face ${i} declares no ascent-override`).toBe(false);
       expect(/descent-override/.test(body), `face ${i} declares no descent-override`).toBe(false);
@@ -120,6 +125,144 @@ describe("cell-background contract", () => {
       /font-synthesis:\s*none/.test(termRule![1]!),
       ".term declares font-synthesis: none",
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The tiling overlay: "Web Terminal Glyphs" is a cell-exact box-drawing /
+// blocks / braille / powerline face with no letters, no digits and no space,
+// declared FIRST in --font-mono so those codepoints come from it and everything
+// else falls through to the companion. Nothing else in this package can see any
+// of that — the font file is served by the host, the stack is a CSS token, and
+// the ready gate is a string literal in the kernel — so these text-level
+// assertions are this repo's whole half of the cell contract.
+describe("tiling-overlay contract (the cell-glyph font)", () => {
+  const OVERLAY = "Web Terminal Glyphs";
+  const COMPANION = "Monaspace Neon NF";
+  const OVERLAY_SRC = 'url("/vendor/fonts/WebTerminalGlyphs.woff2") format("woff2")';
+
+  /** One descriptor's value out of an @font-face body, unit and quotes intact. */
+  const descriptor = (body: string, prop: string): string | null => {
+    const m = new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+)`).exec(body);
+    return m ? m[1]!.trim() : null;
+  };
+
+  /** Every @font-face rule in page.css, reduced to the descriptors pinned here. */
+  const faces = [...page.matchAll(/@font-face\s*\{([\s\S]*?)\n\}/g)].map((m) => {
+    const body = m[1]!;
+    return {
+      family: (descriptor(body, "font-family") ?? "").replaceAll('"', ""),
+      src: descriptor(body, "src") ?? "",
+      weight: descriptor(body, "font-weight") ?? "",
+      style: descriptor(body, "font-style") ?? "",
+      display: descriptor(body, "font-display") ?? "",
+      range: descriptor(body, "unicode-range"),
+    };
+  });
+  const overlayFaces = faces.filter((f) => f.family === OVERLAY);
+
+  /** A custom property's declared value, read off the token sheet. */
+  const token = (name: string): string => {
+    const m = new RegExp(`${name}:\\s*([^;]+);`).exec(tokens);
+    expect(m, `${name} is declared in 00-tokens.css`).not.toBeNull();
+    return m![1]!.trim();
+  };
+  /** The quoted family names in a font stack, in stack order. */
+  const quotedFamilies = (stack: string): string[] =>
+    [...stack.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+
+  const fontReady = /DEFAULT_FONT_READY\s*=\s*'([^']+)'/.exec(kernelSource);
+
+  it("stacks --font-mono overlay-first, companion second, platform keyword last", () => {
+    // ORDER is the assertion, not membership. Gecko takes the line box from the
+    // first family, and the overlay's metrics are copied from the companion for
+    // exactly that reason; the overlay also has to out-rank the companion on the
+    // codepoints they share, or its cell-exact glyph never gets drawn.
+    const stack = token("--font-mono");
+    expect(quotedFamilies(stack)).toEqual([OVERLAY, COMPANION]);
+    expect(
+      stack.split(",").at(-1)!.trim(),
+      "and an unresolvable stack still lands on the platform monospace",
+    ).toBe("monospace");
+  });
+
+  it("keeps the overlay OUT of --font-ui", () => {
+    // Deliberately a NEGATIVE assertion, and the only guard on it. The chrome
+    // draws labels and never a tiling codepoint, so the overlay would be a family
+    // the browser consults and never draws from; 00-tokens.css owns the rest of
+    // why the chrome's stack stays at one family.
+    expect(quotedFamilies(token("--font-ui"))).toEqual([COMPANION]);
+  });
+
+  it("declares four faces per family, the overlay covering all four descriptor sets", () => {
+    expect(overlayFaces, `four ${OVERLAY} faces`).toHaveLength(4);
+    expect(
+      faces.filter((f) => f.family === COMPANION),
+      `four ${COMPANION} faces`,
+    ).toHaveLength(4);
+    // The released overlay is ONE upright 400 face, so a single rule would leave
+    // font-synthesis free to slant or embolden a box-drawing corner on a bold or
+    // italic run. Declaring all four exact pairs is what forecloses that. Compared
+    // as a sorted multiset: a missing pair and a duplicated one both fail.
+    expect(overlayFaces.map((f) => `${f.weight} ${f.style}`).sort()).toEqual([
+      "400 italic",
+      "400 normal",
+      "700 italic",
+      "700 normal",
+    ]);
+  });
+
+  it("points every overlay face at the one file, with no local() fallback", () => {
+    // One asset under four rules, so the bytes download once and a bold row finds
+    // them already cached.
+    for (const [i, face] of overlayFaces.entries()) {
+      expect(face.src, `overlay face ${i} loads the single woff2`).toBe(OVERLAY_SRC);
+    }
+  });
+
+  it("declares no unicode-range on any overlay face", () => {
+    // Load-bearing absence, not an oversight: the font's own cmap already IS its
+    // range (1,098 tiling codepoints), so a letter falls through to the companion
+    // by ordinary family fallback and a range here would only narrow that fallback
+    // to a list somebody has to maintain against the next release of the font.
+    for (const [i, face] of overlayFaces.entries()) {
+      expect(face.range, `overlay face ${i} declares no unicode-range`).toBeNull();
+    }
+  });
+
+  it("blocks on every overlay face, as the companion does", () => {
+    // swap would paint the fallback's own non-tiling ░▒▓│ for a frame first, which
+    // is the exact defect this font exists to remove.
+    for (const [i, face] of overlayFaces.entries()) {
+      expect(face.display, `overlay face ${i} blocks`).toBe("block");
+    }
+  });
+
+  it("gates the first resize on the metric-bearing companion, and NOT on the overlay", () => {
+    // Deliberately not --font-mono's family list, and both directions are defects.
+    // The companion missing is a first PTY size measured before the cell metrics
+    // land. The overlay PRESENT is the same defect on WebKit, which resolves load()
+    // as soon as the first family whose descriptor covers the sample has loaded
+    // (CSSFontFaceSet::matchingFacesExcludingPreinstalledFonts): the range-less
+    // overlay is that family, so the gate opens on its 11 KB while the companion is
+    // still loading. Omitting it defends nothing — its metrics are copied from the
+    // companion and it carries no "M", which is the glyph the width probe measures.
+    expect(fontReady, "DEFAULT_FONT_READY is a single-quoted literal in kernel.ts").not.toBeNull();
+    expect(quotedFamilies(fontReady![1]!), "the gate names the companion alone").toEqual([
+      COMPANION,
+    ]);
+  });
+
+  it("probes the gate at the cell's own font-size", () => {
+    // The probe measures a face at a size; measured at any other size it is not
+    // the cell the glyphs are drawn for.
+    const probed = /^(\d+(?:\.\d+)?)px\b/.exec(fontReady![1]!);
+    expect(probed, "DEFAULT_FONT_READY opens with a px size").not.toBeNull();
+    const cell = /:where\(\.wt-root\)\s*\.term\s*\{[\s\S]*?font-size:\s*(\d+(?:\.\d+)?)px/.exec(
+      terminal,
+    );
+    expect(cell, ".term declares a px font-size").not.toBeNull();
+    expect(probed![1]!).toBe(cell![1]!);
   });
 });
 

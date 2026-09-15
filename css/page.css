@@ -236,7 +236,33 @@ body {
    monospace stack.
 
    No face carries ascent-override or descent-override: the terminal's cell
-   background is the run padding in 02-terminal.css, never these metrics. */
+   background is the run padding in 02-terminal.css, never these metrics.
+
+   The tiling overlay, "Web Terminal Glyphs", is the second family below, and it
+   is ONE file declared under FOUR descriptor sets. The released face is a single
+   upright 400 weight, so a lone rule would leave the engine free to synthesise a
+   stand-in for a bold or italic run. What the four sets (400/700 x normal/italic)
+   against the same URL foreclose is the EMBOLDENED stand-in, in Blink and in
+   Gecko both: a bold run resolves a real face where the same asset under one rule
+   is thickened. They do NOT foreclose the OBLIQUE one in Blink, which honours the
+   italic descriptor for face SELECTION and slants the run anyway; the only thing
+   keeping an italic box-drawing corner upright there is font-synthesis: none on
+   .term (02-terminal.css). Both mechanisms are load-bearing and neither is the
+   whole guarantee. All four rules point at one file, so the bytes download once.
+
+   No overlay face declares unicode-range, and that absence is deliberate: the
+   font's own cmap IS its range (1,098 tiling codepoints, no letters, no digits,
+   no space), so a letter falls through to Monaspace by ordinary family fallback,
+   and a range here would only narrow that fallback to a list somebody has to
+   maintain against the next release of the font.
+
+   The overlay is listed FIRST in --font-mono and never in --font-ui
+   (00-tokens.css owns why). A full-page host must serve
+   WebTerminalGlyphs.woff2 beside the Monaspace faces, along with that font's
+   LICENSE and NOTICE: it is a separate Apache-2.0 work, and §4 binds whoever
+   ships the bytes. This package ships none, it only names the URL — so a host
+   that has not caught up errors the face out and renders exactly as it did
+   before, with the tiling ranges coming from Monaspace and the system font. */
 @font-face {
   font-family: "Monaspace Neon NF";
   src: url("/vendor/fonts/MonaspaceNeonNF-Regular.woff2") format("woff2");
@@ -264,6 +290,38 @@ body {
 @font-face {
   font-family: "Monaspace Neon NF";
   src: url("/vendor/fonts/MonaspaceNeonNF-BoldItalic.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Web Terminal Glyphs";
+  src: url("/vendor/fonts/WebTerminalGlyphs.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Web Terminal Glyphs";
+  src: url("/vendor/fonts/WebTerminalGlyphs.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Web Terminal Glyphs";
+  src: url("/vendor/fonts/WebTerminalGlyphs.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Web Terminal Glyphs";
+  src: url("/vendor/fonts/WebTerminalGlyphs.woff2") format("woff2");
   font-weight: 700;
   font-style: italic;
   font-display: block;

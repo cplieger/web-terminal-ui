@@ -45,7 +45,9 @@
   touch-action: pan-x pan-y;
   font-family: var(--font-mono);
   /* Bold and italic are real faces (page.css); a synthesized stand-in must
-     never be drawn in their place. */
+     never be drawn in their place. Not redundant with those declarations: Blink
+     obliques an italic run over the tiling overlay despite its exact italic face,
+     so this line is the only thing keeping box drawing upright there. */
   font-synthesis: none;
   font-size: 14px;
   /* The cell height. The engine reads it (render.ts updateFontMetrics) and sizes

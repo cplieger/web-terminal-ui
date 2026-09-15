@@ -141,7 +141,27 @@
      strip (MANIFEST.touch excludes 30-tabs.css), so nothing metric-dependent
      rides on that fallback. */
   --font-ui: "Monaspace Neon NF", ui-monospace, monospace;
-  --font-mono: "Monaspace Neon NF", monospace;
+  /* The terminal display is an OVERLAY over a companion: "Web Terminal Glyphs"
+     is a tiling-only face (box drawing, blocks, braille, powerline — 1,098
+     codepoints, no letters, no digits, not even a space), so the browser takes
+     those cells from it and everything else from Monaspace by ordinary family
+     fallback. It leads deliberately, so its cell-exact glyphs win where the
+     companion also has a codepoint; carrying no text glyphs, it cannot move the
+     companion's metrics or its look. page.css declares the four faces and owns
+     the rest of the reasoning.
+
+     --font-ui above does NOT get the overlay, and that is a scope choice rather
+     than an omission: the chrome renders labels and never a tiling codepoint, so
+     the overlay would be a family the browser consults on every glyph and never
+     draws from. It would not cost a label geometry to add it — the overlay's
+     vertical metrics are copied from the companion (the upstream font's
+     dist/cell.json, 1890/-400/200 with USE_TYPO_METRICS set on both), so the
+     line box is the same either way. The reason to keep the chrome's stack at one
+     family is least mechanism, and --label-ink-shift below is why that matters:
+     it is written from the line box the engine actually built
+     (src/features/tabs/ink-centre.ts), so anything that DOES move the chrome's
+     metrics lands straight in the chip labels. */
+  --font-mono: "Web Terminal Glyphs", "Monaspace Neon NF", monospace;
   /* Pre-measurement default for the chip labels' ink centring; the tabs feature
      writes a measured px value per site (src/features/tabs/ink-centre.ts owns
      why). Zero: flex centring already lands within 0.4px of the cap band, and is
