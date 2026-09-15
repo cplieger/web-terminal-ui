@@ -372,6 +372,82 @@ describe("the activity mark's footprint", () => {
   });
 });
 
+/** A computed gradient's stop positions, in px. A percentage stop is resolved
+ *  against the gradient line — for `closest-side` on a square box that is half its
+ *  width — so a length stop and a percentage stop become comparable and the
+ *  assertions below are about the RELATION rather than the syntax the rule happens
+ *  to use. Colour functions are collapsed first: their numbers are not stops. */
+function gradientStopsPx(image: string, radiusPx: number): number[] {
+  return [...image.replace(/[\w-]+\([^()]*\)/g, "C").matchAll(/(-?[\d.]+)(px|%)/g)].map((m) => {
+    const n = Number.parseFloat(m[1] ?? "NaN");
+    return m[2] === "px" ? n : (n / 100) * radiusPx;
+  });
+}
+
+// The working state's breath overlay, measured as GEOMETRY. That the beat is
+// declared, reads the shared period and has a peak is text, and
+// css-contract.node.test.ts owns all three; whether it has anything to SHOW is a
+// rendered question, and a text assertion structurally cannot see it. This exists
+// because 7.3.1 shipped the beat running, correctly keyframed and correctly masked
+// with its bright core ending 0.05px INSIDE the mask's opaque edge — the two never
+// intersected, and 4 pixels of a 9x9 mark moved between trough and peak against
+// the reference's 20. Every number here is derived from --wt-mark-size and
+// --wt-mark-band read off the element, because the defect WAS two hard-coded
+// numbers that stopped agreeing with them.
+describe("the working mark's breath overlay", () => {
+  it.each(SITES)("derives $name's overlay geometry from the mark's own box", (site) => {
+    mount(true);
+    const mark = markOf(site);
+    mark.dataset["activity"] = "working";
+    const own = getComputedStyle(mark);
+    const size = Number.parseFloat(own.getPropertyValue("--wt-mark-size"));
+    const band = Number.parseFloat(own.getPropertyValue("--wt-mark-band"));
+    const cs = getComputedStyle(mark, "::before");
+
+    // The premises, because a pseudo-element has no box to notice the absence of:
+    // the reduced-motion block sets `content: none` and re-points the band, either
+    // of which would leave the three relations below comparing NaN and passing.
+    expect(cs.content, `${site.name} overlay is painted`).toBe('""');
+    expect(size, `${site.name} resolves --wt-mark-size`).toBeGreaterThan(0);
+    expect(band, `${site.name} resolves --wt-mark-band`).toBeGreaterThan(0);
+
+    // 1. The overlay IS the mark's border box. box-sizing puts a positioned
+    //    child's containing block INSIDE the band, so filling the mark is the
+    //    inset stating the band; a literal is right at one size only.
+    const overlay = Number.parseFloat(cs.width);
+    expect.soft(overlay, `${site.name} overlay width fills the mark`).toBe(size);
+    expect.soft(Number.parseFloat(cs.height), `${site.name} overlay height`).toBe(size);
+
+    // 2. The solid core reaches the hole's CORNER radius, which is the whole
+    //    visible effect: the corners light up and the hole reads as morphing
+    //    between a square and its inscribed circle. Stop short of it and the core
+    //    lands entirely under the mask's transparent middle.
+    const core = gradientStopsPx(cs.backgroundImage, overlay / 2)[1];
+    expect
+      .soft(core, `${site.name} core stop reaches the hole's corner (${cs.backgroundImage})`)
+      .toBeGreaterThanOrEqual(Math.SQRT2 * (size / 2 - band) - 0.001);
+
+    // 2b. AND THE CORNER IS REACHABLE AT ALL. Case 2 reads the stop the rule
+    //     declares, and the rule declares that same expression, so the two move
+    //     together and neither can see the corner being clipped away by the
+    //     overlay's own `border-radius: 50%` circle at size/2. That needs a band of
+    //     at least size/2 * (1 - 1/sqrt(2)) — 1.32px on a 9px mark, against 2px.
+    //     Re-point this state's band to the 1px `waiting` uses and the corner moves
+    //     outside the clip, amplitude drops, and case 2 stays green.
+    expect
+      .soft(Math.SQRT2 * (size / 2 - band), `${site.name} the hole's corner is inside the overlay`)
+      .toBeLessThanOrEqual(size / 2);
+
+    // 3. The mask's hole is the ring's INRADIUS — the half that was already right,
+    //    pinned because it is what keeps the beat off the hole itself, and a fill
+    //    there collapses the ring-vs-disc silhouette this mark shares with the dot.
+    const hole = gradientStopsPx(cs.maskImage, overlay / 2)[1];
+    expect
+      .soft(hole, `${site.name} mask hole is the inradius (${cs.maskImage})`)
+      .toBeCloseTo(size / 2 - band, 3);
+  });
+});
+
 // Whether the mark's reveal transition APPLIES is a cascade question, and only a
 // rendered bundle answers it: css/40-animations.css declares `transition` on every
 // .wt-tab child for the drag dissolve, at equal specificity and later in the
