@@ -1,4 +1,5 @@
 {
   "ignoreDependencies": ["html-validate"],
-  "entry": ["scripts/*.mjs"]
+  "entry": ["scripts/*.mjs"],
+  "rules": { "cycles": "error" }
 }
