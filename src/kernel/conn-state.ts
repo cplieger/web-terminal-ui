@@ -1,16 +1,6 @@
-// Connection-state machine (kernel-owned, design section 22.3). The state, the
-// never-connects give-up, and the loading lifecycle are kernel; the visible
-// banner is the connectionBanner feature, which renders whatever state this
-// emits. This is the DOM-free half of the old status.ts (its banner/toast
-// rendering became the connectionBanner feature and the kernel toast surface).
-//
-// State machine:
-//   open         -> no banner.
-//   connecting   -> "Reconnecting..." (initial connect, before first open).
-//   reconnecting -> "Reconnecting..." (after a close, during retry);
-//                   escalates to offline after >3 consecutive failures.
-//   offline      -> "Offline".
-//   restarted    -> "Server restarted - recent input may have been lost".
+// The DOM-free connection-state machine: the state, the never-connects give-up
+// and the loading gate. The connectionBanner feature renders whatever it emits;
+// "reconnecting" escalates to "offline" after more than 3 consecutive failures.
 
 import type { ConnState } from "./types.js";
 
@@ -41,6 +31,9 @@ export interface ConnStateMachine {
   /** The engine refused an explicitly incompatible wire revision. This
    *  terminal state bypasses the loading gate and persists until open(). */
   incompatible(): void;
+  /** The pane holds no session: nothing is connecting and nothing is retrying.
+   *  Left by open() on the next attach. */
+  idle(): void;
   /** First screen frame rendered: the loading overlay is done, so the banner
    *  may show reconnect state from here on. */
   setLoaded(): void;
@@ -139,6 +132,14 @@ export function createConnState(opts: {
       // part of the failure ladder and must remain visible without a timer.
       consecutiveFailures = 0;
       setState("incompatible", 0);
+    },
+    idle(): void {
+      consecutiveFailures = 0;
+      if (restartedTimer !== null) {
+        clearTimeout(restartedTimer);
+        restartedTimer = null;
+      }
+      setState("idle", 0);
     },
     setLoaded(): void {
       loaded = true;

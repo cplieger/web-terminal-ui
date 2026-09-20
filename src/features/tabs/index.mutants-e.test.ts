@@ -14,9 +14,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "../../kernel/kernel.js";
-import type * as TabsModule from "./index.js";
-import type { TerminalFeature } from "../../kernel/types.js";
+import { tabs } from "./index.js";
+import { mountTerminal } from "../../test-helpers/mount.js";
+import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // Plain constants, so reading them through a separate module instance than the
@@ -36,6 +36,7 @@ function fakeMonitor(): {
   const subs = new Set<(s: SessionStatus) => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
+    scope: "shell",
     setup() {
       return {
         api: {
@@ -75,6 +76,7 @@ function fakeKeyboardToggle(armedAtSetup = false): {
   let armed = armedAtSetup;
   const feature: TerminalFeature<MobileToolbarApi> = {
     name: "mobileToolbar",
+    scope: "shell",
     setup() {
       return {
         api: {
@@ -169,9 +171,7 @@ function setVisibility(state: "visible" | "hidden"): void {
   Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
 }
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let tabs: (typeof TabsModule)["tabs"];
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+let term: TerminalHandle | undefined;
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -184,6 +184,16 @@ let list: unknown[];
 
 const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
+  if (String(url).endsWith("/layout")) {
+    return Promise.resolve(
+      method === "PUT"
+        ? jsonResponse(null, 204)
+        : jsonResponse(
+            { left: null, right: null, handle: 0.5, selected: "left", open: false },
+            200,
+          ),
+    );
+  }
   if (method === "POST") {
     return Promise.resolve(
       jsonResponse({ id: "s-new", title: "fresh", createdAt: "9", status: "idle" }, 201),
@@ -192,12 +202,10 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   if (method === "DELETE" || method === "PUT") {
     return Promise.resolve(jsonResponse(null, 204));
   }
-  void url;
   return Promise.resolve(jsonResponse(list, 200));
 });
 
-beforeEach(async () => {
-  vi.resetModules();
+beforeEach(() => {
   fetchMock.mockClear();
   list = [
     { id: "s1", title: "one", createdAt: "1", status: "idle" },
@@ -207,8 +215,6 @@ beforeEach(async () => {
   document.body.replaceChildren();
   document.title = "Host page";
   localStorage.clear();
-  ({ createTerminal } = await import("../../kernel/kernel.js"));
-  ({ tabs } = await import("./index.js"));
 });
 
 afterEach(() => {
@@ -229,7 +235,7 @@ async function until(pred: () => boolean, tries = 40): Promise<void> {
 async function mount(opts: Parameters<typeof tabs>[0] = {}): Promise<HTMLElement> {
   const root = document.createElement("div");
   document.body.appendChild(root);
-  term = createTerminal(root, { features: () => [tabs(opts)] });
+  term = await mountTerminal(root, { features: () => [tabs(opts)] });
   await until(() => root.querySelectorAll(".wt-tab").length === list.length);
   return root;
 }
@@ -241,7 +247,7 @@ async function mountWithMonitor(
   const monitor = fakeMonitor();
   const root = document.createElement("div");
   document.body.appendChild(root);
-  term = createTerminal(root, {
+  term = await mountTerminal(root, {
     features: () => [monitor.feature, tabs({ ...opts, activityMonitor: monitor.feature })],
   });
   await until(() => root.querySelectorAll(".wt-tab").length === list.length);
@@ -366,6 +372,33 @@ describe("tabs: the strip's measured height and reserved row", () => {
     expect(resize(swBar)).toBe(1);
     expect(varRoot(root).style.getPropertyValue("--wt-reserve-bottom")).toBe("0px");
   });
+
+  it("releases the label-centring font listener when setup fails after taking it", async () => {
+    // A throw at the switcher observation leaves the feature outside the
+    // terminal's instance list, so its teardown never runs; what it acquired
+    // before the throw is released only through the cleanup scope.
+    const observe = ResizeObserver.prototype.observe;
+    vi.spyOn(ResizeObserver.prototype, "observe").mockImplementation(function (
+      this: ResizeObserver,
+      target: Element,
+    ) {
+      if (target.classList.contains("wt-switcher-bar")) {
+        throw new Error("injected");
+      }
+      observe.call(this, target);
+    });
+    const added = vi.spyOn(document.fonts, "addEventListener");
+    const removed = vi.spyOn(document.fonts, "removeEventListener");
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = await mountTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelector(".wt-fatal") !== null);
+
+    const taken = added.mock.calls.filter((c) => c[0] === "loadingdone").map((c) => c[1]);
+    expect(taken).toHaveLength(1);
+    const given = removed.mock.calls.filter((c) => c[0] === "loadingdone").map((c) => c[1]);
+    expect(given).toEqual(taken);
+  });
 });
 
 // --- The roles that make the chrome navigable ---
@@ -429,7 +462,7 @@ describe("tabs: the switcher bar's buttons hold focus on press", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [
         kbt.feature,
         monitor.feature,
@@ -469,7 +502,7 @@ describe("tabs: the keyboard buttons mirror a pending Ctrl", () => {
     const kbt = fakeKeyboardToggle(armedAtSetup);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -606,33 +639,6 @@ describe("tabs: returning to the page acknowledges what the user can now see", (
     document.dispatchEvent(new Event("visibilitychange"));
     expect(document.title).toBe("(1) Host page");
     expect(localStorage.getItem(CUE_SEEN_KEY)).toBeNull();
-  });
-});
-
-// --- The page going away and coming back ---
-
-describe("tabs: the page's own icon and title on the way out", () => {
-  it("repaints the cue only for a page that actually came back", async () => {
-    // pagehide hands the icon and title back because a browser remembers ONE icon
-    // per URL. The matching pageshow only has something to restore when the page
-    // was BFCACHED: a plain load fires pageshow too, and repainting there would
-    // write a cue onto a page whose fold has not run yet.
-    const { monitor } = await mountWithMonitor();
-    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
-    expect(document.title).toBe("(1) Host page");
-
-    window.dispatchEvent(new Event("pagehide"));
-    expect(document.title).toBe("Host page");
-
-    const fresh = new Event("pageshow");
-    Object.defineProperty(fresh, "persisted", { value: false });
-    window.dispatchEvent(fresh);
-    expect(document.title).toBe("Host page");
-
-    const restored = new Event("pageshow");
-    Object.defineProperty(restored, "persisted", { value: true });
-    window.dispatchEvent(restored);
-    expect(document.title).toBe("(1) Host page");
   });
 });
 

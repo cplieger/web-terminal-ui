@@ -13,12 +13,11 @@
 // the error envelope are parsed by the production parser.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type * as KernelModule from "../../kernel/kernel.js";
-import type * as TabsModule from "./index.js";
+import { tabs } from "./index.js";
+import { mountTerminal } from "../../test-helpers/mount.js";
+import type { TerminalHandle } from "../../kernel/types.js";
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let tabs: (typeof TabsModule)["tabs"];
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+let term: TerminalHandle | undefined;
 
 // The loop's own constants, restated here as the numbers the SERVER sees rather
 // than imported: the module does not export them, and a test that reached into
@@ -52,8 +51,18 @@ let posts = 0;
 // Armed by a test that wants the page torn down mid-wait.
 let destroyOnPost = 0;
 
-const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
+const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
+  if (String(url).endsWith("/layout")) {
+    return Promise.resolve(
+      method === "PUT"
+        ? jsonResponse(null, 204)
+        : jsonResponse(
+            { left: null, right: null, handle: 0.5, selected: "left", open: false },
+            200,
+          ),
+    );
+  }
   if (method !== "POST") {
     return Promise.resolve(jsonResponse([], 200)); // no live sessions: the bootstrap must create
   }
@@ -89,8 +98,7 @@ const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
   );
 });
 
-beforeEach(async () => {
-  vi.resetModules();
+beforeEach(() => {
   fetchMock.mockClear();
   posts = 0;
   destroyOnPost = 0;
@@ -100,8 +108,6 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
   localStorage.clear();
-  ({ createTerminal } = await import("../../kernel/kernel.js"));
-  ({ tabs } = await import("./index.js"));
 });
 
 afterEach(() => {
@@ -125,12 +131,12 @@ async function settle(): Promise<void> {
   }
 }
 
-function mount(loading?: HTMLElement): HTMLElement {
+async function mount(loading?: HTMLElement): Promise<HTMLElement> {
   const root = document.createElement("div");
   document.body.appendChild(root);
   // Spread rather than pass `loading: undefined`: the kernel's options are
   // exactOptionalPropertyTypes, so an absent overlay is an ABSENT key.
-  term = createTerminal(root, { features: () => [tabs()], ...(loading ? { loading } : {}) });
+  term = await mountTerminal(root, { features: () => [tabs()], ...(loading ? { loading } : {}) });
   return root;
 }
 
@@ -146,7 +152,7 @@ describe("session-create retry: the elapsed-time bound", () => {
       { status: 503, message: "installing tools", retryAfter: "0", at: 10 },
       { status: 503, message: "installing tools", retryAfter: "0", at: MAX_TOTAL_MS },
     ];
-    const root = mount();
+    const root = await mount();
 
     await until(() => toastText(root).startsWith("Couldn't open a terminal"), 120);
     await settle();
@@ -164,7 +170,7 @@ describe("session-create retry: the elapsed-time bound", () => {
       { status: 503, retryAfter: "0", at: MAX_TOTAL_MS - 1 },
       { status: 201, at: MAX_TOTAL_MS },
     ];
-    const root = mount();
+    const root = await mount();
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(root.querySelectorAll(".wt-tab").length).toBe(1);
@@ -177,7 +183,7 @@ describe("session-create retry: the elapsed-time bound", () => {
     // A 429 is a rate limit and a 500 is a broken server; neither is "come back
     // shortly", so both end the wait on the first answer.
     script = [{ status: 429, message: "slow down", retryAfter: "0" }];
-    const root = mount();
+    const root = await mount();
 
     await until(() => toastText(root).startsWith("Couldn't open a terminal"), 120);
     await settle();
@@ -200,7 +206,7 @@ describe("session-create retry: what the user is told", () => {
       { status: 503, message: "second reason", retryAfter: "0", at: 40000 },
       { status: 201, at: 40010 },
     ];
-    const root = mount();
+    const root = await mount();
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(posts).toBe(3);
@@ -214,7 +220,7 @@ describe("session-create retry: what the user is told", () => {
       { status: 503, message: "installing tools", retryAfter: "0", at: 10 },
       { status: 201, at: 20 },
     ];
-    const root = mount();
+    const root = await mount();
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     // The announcer clears the region and re-sets it on a short timer, so the
@@ -233,7 +239,7 @@ describe("session-create retry: what the user is told", () => {
       { status: 503, message: "second reason", retryAfter: "0", at: 10 + REANNOUNCE_MS },
       { status: 201, at: 20 + REANNOUNCE_MS },
     ];
-    const root = mount();
+    const root = await mount();
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(posts).toBe(3);
@@ -250,7 +256,7 @@ describe("session-create retry: what the user is told", () => {
       { status: 503, message: "second reason", retryAfter: "0", at: 0 },
       { status: 201, at: 0 },
     ];
-    const root = mount();
+    const root = await mount();
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(posts).toBe(3);
@@ -266,7 +272,7 @@ describe("session-create retry: what the user is told", () => {
     ];
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    const root = mount(loading);
+    const root = await mount(loading);
 
     await until(() => (loading.textContent ?? "").includes("installing tools"), 120);
     expect(loading.querySelector(".wt-loading-text")?.textContent).toBe(
@@ -297,7 +303,7 @@ describe("session-create retry: what the user is told", () => {
     });
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    const root = mount(loading);
+    const root = await mount(loading);
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(loading.querySelector(".wt-loading-text")?.textContent).toBe(
@@ -312,7 +318,7 @@ describe("session-create retry: the delay itself", () => {
     // window the second attempt must NOT have happened: a loop that treated the
     // missing hint as "no delay" would hammer the server it was asked to spare.
     script = [{ status: 503, message: "no hint", at: 10 }];
-    mount();
+    await mount();
 
     await until(() => posts >= 1, 120);
     await settle();
@@ -327,7 +333,7 @@ describe("session-create retry: teardown", () => {
     // would ever close it.
     script = [{ status: 503, message: "installing tools", retryAfter: "0", at: 10 }];
     destroyOnPost = 1;
-    mount();
+    await mount();
 
     await until(() => posts >= 1, 120);
     await settle();

@@ -1,14 +1,11 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { predictiveEcho } from "./predictive-echo.js";
-import * as predict from "../predict.js";
 import type { TerminalContext, FeatureInstance } from "../kernel/types.js";
 
 function fakeCtx(size = { cols: 80, rows: 30 }): {
   ctx: TerminalContext;
   setPredictedCursor: ReturnType<typeof vi.fn>;
-  offTransform: ReturnType<typeof vi.fn>;
-  offObserver: ReturnType<typeof vi.fn>;
-  offEvent: Map<string, ReturnType<typeof vi.fn>>;
+  deferred: (() => void)[];
   transform: (b: Uint8Array) => Uint8Array;
   observe: (b: Uint8Array) => void;
   emit: (e: string, p: unknown) => void;
@@ -16,24 +13,23 @@ function fakeCtx(size = { cols: 80, rows: 30 }): {
   let transformFn: ((b: Uint8Array) => Uint8Array) | undefined;
   let observerFn: ((b: Uint8Array) => void) | undefined;
   const handlers = new Map<string, (p: unknown) => void>();
-  const offEvent = new Map<string, ReturnType<typeof vi.fn>>();
+  const deferred: (() => void)[] = [];
   const setPredictedCursor = vi.fn();
-  const offTransform = vi.fn();
-  const offObserver = vi.fn();
   const ctx = {
     registerInputTransform: (fn: (b: Uint8Array) => Uint8Array) => {
       transformFn = fn;
-      return offTransform;
+      return vi.fn();
     },
     registerInputObserver: (fn: (b: Uint8Array) => void) => {
       observerFn = fn;
-      return offObserver;
+      return vi.fn();
     },
     on: (e: string, fn: (p: unknown) => void) => {
       handlers.set(e, fn);
-      const off = vi.fn();
-      offEvent.set(e, off);
-      return off;
+      return vi.fn();
+    },
+    defer: (release: () => void) => {
+      deferred.push(release);
     },
     render: { setPredictedCursor },
     session: { size: () => size },
@@ -41,9 +37,7 @@ function fakeCtx(size = { cols: 80, rows: 30 }): {
   return {
     ctx,
     setPredictedCursor,
-    offTransform,
-    offObserver,
-    offEvent,
+    deferred,
     transform: (b) => transformFn?.(b) ?? b,
     observe: (b) => observerFn?.(b),
     emit: (e, p) => handlers.get(e)?.(p),
@@ -57,10 +51,6 @@ function arm(f: ReturnType<typeof fakeCtx>, row: number, col: number): void {
 }
 
 const DEL = 0x7f;
-
-beforeEach(() => {
-  predict.reset();
-});
 
 describe("predictiveEcho: col-0 backspace brake (input transform)", () => {
   it("drops a lone DEL at the true origin (0,0) while prediction is active", () => {
@@ -134,7 +124,7 @@ describe("predictiveEcho: prediction wiring", () => {
     arm(f, 0, 3); // the last column: the next character wraps
     f.observe(new Uint8Array([0x41]));
     f.observe(new Uint8Array([0x42]));
-    expect(predict.get()).toEqual({ row: 1, col: 1, active: true });
+    expect(f.setPredictedCursor).toHaveBeenLastCalledWith(1, 1, true);
   });
 
   it("advances the predicted cursor for observed printable input", () => {
@@ -143,8 +133,22 @@ describe("predictiveEcho: prediction wiring", () => {
     arm(f, 0, 0);
     f.setPredictedCursor.mockClear();
     f.observe(new Uint8Array([0x41]));
-    expect(predict.get()).toEqual({ row: 0, col: 1, active: true });
     expect(f.setPredictedCursor).toHaveBeenLastCalledWith(0, 1, true);
+  });
+
+  it("drives one predicted cursor per pane, so typing in one pane leaves the other's alone", () => {
+    const left = fakeCtx();
+    const right = fakeCtx();
+    predictiveEcho().setup(left.ctx);
+    predictiveEcho().setup(right.ctx);
+    arm(left, 0, 0);
+    arm(right, 4, 4);
+    right.setPredictedCursor.mockClear();
+    left.observe(new Uint8Array([0x41, 0x42]));
+    expect(left.setPredictedCursor).toHaveBeenLastCalledWith(0, 2, true);
+    expect(right.setPredictedCursor).not.toHaveBeenCalled();
+    right.emit("render:cursor", undefined);
+    expect(right.setPredictedCursor).toHaveBeenLastCalledWith(4, 4, true);
   });
 
   it("onDetach resets prediction so a switched-away session's ghost cursor is dropped", () => {
@@ -153,32 +157,38 @@ describe("predictiveEcho: prediction wiring", () => {
     arm(f, 0, 5);
     f.setPredictedCursor.mockClear();
     inst.onDetach?.();
-    expect(predict.get()).toEqual({ row: 0, col: 0, active: false });
     expect(f.setPredictedCursor).toHaveBeenLastCalledWith(0, 0, false);
+    // A DEL at what is now (0,0) with prediction inactive passes through: the
+    // brake reads the reset predictor.
+    expect(Array.from(f.transform(new Uint8Array([DEL])))).toEqual([DEL]);
   });
 
   it("resets on connection:state 'restarted' but not on a benign state", () => {
     const f = fakeCtx();
     predictiveEcho().setup(f.ctx);
     arm(f, 0, 5);
+    f.setPredictedCursor.mockClear();
     f.emit("connection:state", "offline");
-    expect(predict.get()).toEqual({ row: 0, col: 5, active: true });
+    expect(f.setPredictedCursor).not.toHaveBeenCalled();
     f.emit("connection:state", "restarted");
-    expect(predict.get()).toEqual({ row: 0, col: 0, active: false });
+    expect(f.setPredictedCursor).toHaveBeenLastCalledWith(0, 0, false);
   });
 
-  it("teardown unsubscribes every registration and hides the overlay", () => {
+  it("teardown hides the overlay and the deferred release silences the predictor", () => {
     const f = fakeCtx();
     const inst = predictiveEcho().setup(f.ctx) as FeatureInstance;
     arm(f, 0, 5);
     f.setPredictedCursor.mockClear();
     inst.teardown();
-    expect(f.offTransform).toHaveBeenCalledTimes(1);
-    expect(f.offObserver).toHaveBeenCalledTimes(1);
-    expect(f.offEvent.get("render:cursor")).toHaveBeenCalledTimes(1);
-    expect(f.offEvent.get("wire:screen")).toHaveBeenCalledTimes(1);
-    expect(f.offEvent.get("connection:state")).toHaveBeenCalledTimes(1);
-    expect(predict.get()).toEqual({ row: 0, col: 0, active: false });
     expect(f.setPredictedCursor).toHaveBeenLastCalledWith(0, 0, false);
+    // The cleanup scope the kernel drains after teardown holds the predictor's
+    // dispose; once it has run, a late frame reaches no subscriber.
+    expect(f.deferred).toHaveLength(1);
+    for (const release of f.deferred) {
+      release();
+    }
+    f.setPredictedCursor.mockClear();
+    arm(f, 2, 2);
+    expect(f.setPredictedCursor).not.toHaveBeenCalled();
   });
 });

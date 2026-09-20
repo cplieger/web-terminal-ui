@@ -1,13 +1,11 @@
-// The mouse-reporting seam: the kernel installs the engine's `mouse` module, and
-// it owns the pointer shape that tells the user who a click belongs to.
+// The mouse-reporting seam: the engine's mouse controller reports over the
+// pane's transport, and the kernel owns the pointer shape that tells the user
+// who a click belongs to.
 //
-// The engine's `mouse` and `modes` modules are REAL here and only `mouse.init` is
-// wrapped, to capture the handler the kernel hands it. Both halves need that. A
-// mocked encoder could not show that a modes frame plus a real mousedown puts real
-// SGR bytes on the transport, which is the whole defect this seam had; and
-// `mouse.ts` imports `modes.js` directly, so the barrel's namespace is not a seam
-// a mock could stand in for: the mouse mode has to be set on the real singleton,
-// exactly as the transport sets it before forwarding the frame.
+// The engine's mouse controller and mode state are REAL here, over the fake's
+// renderer and connection spies: a mocked encoder could not show that a modes
+// frame plus a real mousedown puts real SGR bytes on the transport, which is the
+// whole defect this seam had.
 //
 // The stylesheet is loaded because the pointer shape is a CSS fact: the kernel
 // toggles one class and the cascade decides three cursors from it (the grid, a
@@ -15,7 +13,7 @@
 // would assert the declarations exist, not that they win.
 import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "./kernel.js";
+import { mountTerminal } from "../test-helpers/mount.js";
 import type {
   CreateTerminalOptions,
   SessionRef,
@@ -33,89 +31,25 @@ declare global {
   }
 }
 
-type MouseHandler = Parameters<typeof Engine.mouse.init>[0];
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("../test-helpers/fake-engine.js");
+  return createEngineFake({ realMouse: true });
+});
 
-const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
-const sendBinary = vi.fn<(bytes: Uint8Array) => boolean>(() => true);
-const sendEphemeral = vi.fn<(data: string) => boolean>(() => true);
-const setClientFocus = vi.fn<(focused: boolean) => void>();
-const scrollToBottom = vi.fn();
-const setSession = vi.fn();
-const cellSize = vi.fn(() => ({ width: 8, height: 17 }));
+vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
+  const actual = await importActual<typeof Engine>();
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
+});
+
+const { sendBinary, sendEphemeral, setClientFocus } = fake.connection;
+const { scrollToBottom } = fake.scroll;
 // Deliberately DIFFERENT row counts: computeSize is what this client would fit,
 // gridSize is what is rendered, and the two disagree whenever another attached
 // client resized the session or a local resize is still unanswered. The row hit
 // test anchors on the number it is given, so a kernel wired to the wrong one
 // reports a different row for every press below.
-const computeSize = vi.fn(() => ({ cols: 80, rows: 30 }));
-const gridSize = vi.fn(() => ({ cols: 80, rows: 24 }));
-/** Every handler the kernel handed the engine's mouse module. */
-const mouseHandlers: MouseHandler[] = [];
-
-vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
-  const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    render: {
-      init: vi.fn(),
-      updateFontMetrics: vi.fn(),
-      setPredictedCursor: vi.fn(),
-      computeSize,
-      cellSize,
-      gridSize,
-      getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 17 })),
-      getHighestIndex: vi.fn(() => -1),
-      pendingRowCount: vi.fn(() => 0),
-      noteResumeBounds: vi.fn(),
-      handleScreen: vi.fn(),
-      handleScroll: vi.fn(),
-      updateReverseVideo: vi.fn(),
-      resetScrollback: vi.fn(),
-      resetScreen: vi.fn(),
-      browseCacheSize: vi.fn(() => 0),
-      lastBrowseActivityMs: vi.fn(() => 0),
-      dropBrowseCache: vi.fn(),
-      maybeFetchHistory: vi.fn(),
-      handleScrollPosition: vi.fn(),
-      replayMaxForResume: vi.fn(() => 1500),
-      handleHistoryReply: vi.fn(),
-      applyResumeTransition: vi.fn(),
-      noteSolicited: vi.fn(),
-      clearSolicited: vi.fn(),
-      bind: vi.fn(),
-      boundStore: vi.fn(),
-    },
-    scroll: {
-      init: vi.fn(),
-      scrollToBottom,
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-      stickToBottom: vi.fn(),
-    },
-    connection: {
-      init: connectionInit,
-      connect: vi.fn(),
-      sendBinary,
-      sendEphemeral,
-      setClientFocus,
-      sendResize: vi.fn(),
-      reconnectNow: vi.fn(),
-      disconnect: vi.fn(),
-      setSession,
-      forgetSession: vi.fn(),
-      currentSessionId: vi.fn(() => "session-under-test"),
-    },
-    mouse: {
-      ...actual.mouse,
-      init: (h: MouseHandler) => {
-        mouseHandlers.push(h);
-        return actual.mouse.init(h);
-      },
-    },
-  };
-});
+fake.renderer.computeSize.mockImplementation(() => ({ cols: 80, rows: 30 }));
 
 const MANIFESTS = import.meta.glob("../../css/MANIFEST*", {
   query: "?raw",
@@ -154,9 +88,6 @@ const BUNDLE = ((): string => {
 })();
 
 let styles: HTMLStyleElement;
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let modes: typeof Engine.modes;
-let mouse: typeof Engine.mouse;
 /** Undoes the `document.fonts` shadow installed in beforeEach. */
 let restoreFonts: () => void = () => undefined;
 
@@ -191,9 +122,8 @@ afterAll(() => {
   styles.remove();
 });
 
-const mounted: TerminalHandle[] = [];
-
 interface Terminal {
+  readonly term: TerminalHandle;
   readonly termWrap: HTMLElement;
   readonly outputEl: HTMLElement;
   readonly input: HTMLTextAreaElement;
@@ -212,13 +142,13 @@ function pick(root: ParentNode, selector: string): HTMLElement {
  *  RENDERED grid the mocked gridSize announces. Stated rather than inherited,
  *  because an empty `.term-output` is zero-height, so every reported row would be
  *  a clamp. */
-function mountTerminal(
+async function mountGrid(
   features: TerminalFeature<unknown>[] = [],
   over: Partial<CreateTerminalOptions> = {},
-): Terminal {
+): Promise<Terminal> {
   const root = document.createElement("div");
   document.body.appendChild(root);
-  mounted.push(createTerminal(root, { features: () => features, ...over }));
+  const term = await mountTerminal(root, { features: () => features, ...over });
   const outputEl = pick(root, ".term-output");
   Object.assign(outputEl.style, {
     position: "absolute",
@@ -228,30 +158,23 @@ function mountTerminal(
     height: "408px",
   });
   return {
+    term,
     termWrap: pick(root, ".term"),
     outputEl,
     input: pick(root, ".term-input") as HTMLTextAreaElement,
   };
 }
 
-beforeEach(async () => {
-  vi.resetModules();
-  mouseHandlers.length = 0;
+beforeEach(() => {
+  fake.reset();
+  // computeSize is re-declared here because vitest resets every spy's
+  // implementation to its construction default before each test.
+  fake.renderer.computeSize.mockImplementation(() => ({ cols: 80, rows: 30 }));
   document.body.replaceChildren();
   restoreFonts = shadowFonts();
-  const engine = await import("@cplieger/web-terminal-engine");
-  modes = engine.modes;
-  mouse = engine.mouse;
-  // The mode mirror is a module singleton that outlives a mount, so every test
-  // starts from the VT power-on state rather than the previous test's.
-  modes.applySnapshot(engine.modes.POWER_ON_MODES);
-  ({ createTerminal } = await import("./kernel.js"));
 });
 
 afterEach(() => {
-  while (mounted.length > 0) {
-    mounted.pop()?.destroy();
-  }
   restoreFonts();
   restoreFonts = () => undefined;
 });
@@ -272,26 +195,10 @@ function modesFrame(over: Partial<Engine.ModesMessage> = {}): Engine.ModesMessag
   };
 }
 
-/** Delivers a modes frame the way the transport does: the mode mirror is applied
- *  FIRST, then the frame is forwarded to the consumer (connection.ts). A test that
- *  forwards without applying would drive the kernel against stale modes. */
+/** Delivers a modes frame the way the transport does: the mode state is applied
+ *  FIRST, then the frame is forwarded to the kernel. */
 function deliverModes(frame: Engine.ModesMessage): void {
-  modes.applySnapshot({
-    bracketedPaste: frame.bracketedPaste,
-    applicationCursor: frame.applicationCursor,
-    mouseSGR: frame.mouseSGR,
-    focusReporting: frame.focusReporting,
-    mouseMode: frame.mouseMode,
-    applicationKeypad: frame.applicationKeypad,
-    reverseVideo: frame.reverseVideo,
-    mousePixels: frame.mousePixels,
-    keyboardFlags: frame.keyboardFlags,
-  });
-  const callbacks = connectionInit.mock.calls[0]?.[0];
-  if (callbacks === undefined) {
-    throw new Error("the kernel never called connection.init");
-  }
-  callbacks.onMessage(frame);
+  fake.callbacks().onMessage(frame);
 }
 
 /**
@@ -301,11 +208,7 @@ function deliverModes(frame: Engine.ModesMessage): void {
  * server's capabilities, so the kernel waits for it (driveResumeAck below).
  */
 function driveOpen(): void {
-  const callbacks = connectionInit.mock.calls[0]?.[0];
-  if (callbacks === undefined) {
-    throw new Error("the kernel never called connection.init");
-  }
-  callbacks.onOpen?.();
+  fake.callbacks().onOpen();
 }
 
 /**
@@ -313,11 +216,7 @@ function driveOpen(): void {
  * `received: 0` is a fresh ledger; nothing here depends on the byte counts.
  */
 function driveResumeAck(): void {
-  const callbacks = connectionInit.mock.calls[0]?.[0];
-  if (callbacks === undefined) {
-    throw new Error("the kernel never called connection.init");
-  }
-  callbacks.onMessage({ type: "resumeAck", received: 0 });
+  fake.callbacks().onMessage({ type: "resumeAck", received: 0 });
 }
 
 /** A left press at a point inside the grid built by mountTerminal. */
@@ -351,45 +250,10 @@ function addLink(outputEl: HTMLElement): HTMLAnchorElement {
 }
 
 describe("mouse module installation", () => {
-  it("installs the engine's mouse module once, with no focus-suppression option", () => {
-    mountTerminal();
-
-    expect(mouseHandlers).toHaveLength(1);
-    // `suppressFocusReports` described a property of the SERVER from the client,
-    // and nothing on the wire told the two apart. The server now derives the DEC
-    // 1004 answer from every attached client's reported focus, so the option has
-    // no question left to answer and its absence is the contract.
-    expect("suppressFocusReports" in mouseHandlers[0]!).toBe(false);
-  });
-
-  it("attaches to the scroll container and hit-tests against the row container", () => {
-    // Two elements for two jobs: a click in the scroller's padding or over its
-    // reserved scrollbar gutter never reaches a row, while the row container's box
-    // is the grid (the scroller's is not: it carries the padding and the gutter).
-    const { termWrap, outputEl } = mountTerminal();
-    const handler = mouseHandlers[0]!;
-
-    expect(handler.termElement()).toBe(termWrap);
-    expect(handler.gridElement?.()).toBe(outputEl);
-  });
-
-  it("wires the measured cell and the RENDERED grid, so a report cannot be silent", () => {
-    // A cellSize that answers a non-positive dimension makes pixelToCell return
-    // null for every event, which is indistinguishable from mouse tracking being
-    // off. The grid is the one on screen rather than the one this client measured:
-    // the row arithmetic anchors on its height, so the measured 30 rows would
-    // shift every reported row by 6.
-    mountTerminal();
-    const handler = mouseHandlers[0]!;
-
-    expect(handler.cellSize()).toEqual({ width: 8, height: 17 });
-    expect(handler.gridSize?.()).toEqual({ cols: 80, rows: 24 });
-  });
-
-  it("detaches on destroy, so a re-mount cannot report through the old element", () => {
-    const { outputEl } = mountTerminal();
+  it("detaches on destroy, so a re-mount cannot report through the old element", async () => {
+    const { outputEl, term } = await mountGrid();
     deliverModes(modesFrame({ mouseMode: 1003, mouseSGR: true }));
-    mounted.pop()?.destroy();
+    term.destroy();
     sendEphemeral.mockClear();
 
     pressAt(outputEl, 76, 80);
@@ -399,8 +263,8 @@ describe("mouse module installation", () => {
 });
 
 describe("mouse reports on the wire", () => {
-  it("puts a press on the transport as an SGR 1006 report", () => {
-    const { outputEl } = mountTerminal();
+  it("puts a press on the transport as an SGR 1006 report", async () => {
+    const { outputEl } = await mountGrid();
     deliverModes(modesFrame({ mouseMode: 1003, mouseSGR: true }));
     sendEphemeral.mockClear();
 
@@ -412,10 +276,10 @@ describe("mouse reports on the wire", () => {
     expect(sent()).toEqual(["\x1b[<0;10;5M"]);
   });
 
-  it("does not snap the view to the bottom for a report", () => {
+  it("does not snap the view to the bottom for a report", async () => {
     // The kernel's own send funnel re-engages follow on every accepted byte, which
     // would jump the viewport on every motion report. Mouse bytes bypass it.
-    const { outputEl } = mountTerminal();
+    const { outputEl } = await mountGrid();
     deliverModes(modesFrame({ mouseMode: 1003, mouseSGR: true }));
     scrollToBottom.mockClear();
 
@@ -424,8 +288,8 @@ describe("mouse reports on the wire", () => {
     expect(scrollToBottom).not.toHaveBeenCalled();
   });
 
-  it("sends nothing while no application holds the mouse", () => {
-    const { outputEl } = mountTerminal();
+  it("sends nothing while no application holds the mouse", async () => {
+    const { outputEl } = await mountGrid();
     deliverModes(modesFrame({ mouseMode: 0, mouseSGR: true }));
     sendEphemeral.mockClear();
 
@@ -434,8 +298,8 @@ describe("mouse reports on the wire", () => {
     expect(sent()).toEqual([]);
   });
 
-  it("leaves a shifted press to the browser, so text is still selectable", () => {
-    const { outputEl } = mountTerminal();
+  it("leaves a shifted press to the browser, so text is still selectable", async () => {
+    const { outputEl } = await mountGrid();
     deliverModes(modesFrame({ mouseMode: 1003, mouseSGR: true }));
     sendEphemeral.mockClear();
 
@@ -444,12 +308,12 @@ describe("mouse reports on the wire", () => {
     expect(sent()).toEqual([]);
   });
 
-  it("reports the widget's focus to the transport, and writes no DEC 1004 bytes", () => {
+  it("reports the widget's focus to the transport, and writes no DEC 1004 bytes", async () => {
     // CSI I / CSI O assert the TERMINAL's focus, and the server is the party that
     // knows it: it holds every attached client's report plus its own hold. So the
     // kernel reports its widget's state and the server decides what the
     // application is told.
-    const { termWrap } = mountTerminal();
+    const { termWrap } = await mountGrid();
     deliverModes(modesFrame({ mouseMode: 1003, mouseSGR: true, focusReporting: true }));
     setClientFocus.mockClear();
     sendBinary.mockClear();
@@ -463,22 +327,22 @@ describe("mouse reports on the wire", () => {
     expect(sent()).toEqual([]);
   });
 
-  it("seeds the widget's focus before the first focus event", () => {
+  it("seeds the widget's focus before the first focus event", async () => {
     // A terminal mounted with its textarea already focused would otherwise report
     // blurred until the user clicked away, so an application enabling DEC 1004 on
     // startup would be told the opposite of the truth.
-    mountTerminal();
+    await mountGrid();
 
     expect(setClientFocus).toHaveBeenCalled();
     expect(setClientFocus.mock.calls[0]).toEqual([false]);
   });
 
-  it("treats focus moving WITHIN the terminal as no blur at all", () => {
+  it("treats focus moving WITHIN the terminal as no blur at all", async () => {
     // The hidden textarea lives inside the scroll container, so a focus move
     // between the terminal's own elements bubbles a focusout here. Reporting it
     // would tell the application the terminal lost focus while the user is typing
     // into it.
-    const { termWrap, input } = mountTerminal();
+    const { termWrap, input } = await mountGrid();
     setClientFocus.mockClear();
 
     termWrap.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: input }));
@@ -492,7 +356,7 @@ describe("mouse reports on the wire", () => {
     // application FocusLost then FocusGained for every click (measured at 3600
     // reports in 90s of clicking). The terminal never lost focus; xterm.js emits
     // nothing here because its textarea keeps focus through the click.
-    const { termWrap, outputEl, input } = mountTerminal();
+    const { termWrap, outputEl, input } = await mountGrid();
     deliverModes(modesFrame({ focusReporting: true }));
     input.focus();
     setClientFocus.mockClear();
@@ -516,7 +380,7 @@ describe("mouse reports on the wire", () => {
     // handler declines to restore focus while a selection exists (focusing the
     // textarea would collapse it), so the terminal really is blurred and the
     // application has to be told.
-    const { termWrap, input } = mountTerminal();
+    const { termWrap, input } = await mountGrid();
     deliverModes(modesFrame({ focusReporting: true }));
     input.focus();
     setClientFocus.mockClear();
@@ -530,7 +394,7 @@ describe("mouse reports on the wire", () => {
     expect(setClientFocus.mock.calls).toEqual([[false]]);
   });
 
-  it("cancels an in-flight gesture when the socket comes back", () => {
+  it("cancels an in-flight gesture when the socket comes back", async () => {
     // A press whose release never reached the server leaves the application
     // holding a button down for the rest of the session. The engine reports the
     // PRESENT state once the resumeAck has declared the server's capabilities, so
@@ -538,7 +402,7 @@ describe("mouse reports on the wire", () => {
     // press reported. The open alone is deliberately not enough: the ephemeral
     // channel is not known yet there, so the release would ride the reliable
     // outbox and become the one replayable mouse report.
-    const { outputEl } = mountTerminal();
+    const { outputEl } = await mountGrid();
     deliverModes(modesFrame({ mouseMode: 1002, mouseSGR: true }));
     outputEl.dispatchEvent(
       new MouseEvent("mousedown", {
@@ -572,12 +436,12 @@ describe("mouse reports on the wire", () => {
     driveResumeAck();
     expect(sent()).toEqual([]);
 
-    mouse.resyncGesture();
+    fake.engine().mouse.resyncGesture();
 
     expect(sent()).toEqual(["\x1b[<0;10;5m"]);
   });
 
-  it("disarms a held gesture on a session switch, so the incoming open reports nothing", () => {
+  it("disarms a held gesture on a session switch, so the incoming open reports nothing", async () => {
     // `mouse.init` runs once per terminal while sessions multiplex over the socket,
     // so a record kept across the switch would make the incoming session's open
     // synthesize a release for a press its application never saw. Tracking is
@@ -591,7 +455,7 @@ describe("mouse reports on the wire", () => {
         return { teardown: () => undefined };
       },
     };
-    const { outputEl } = mountTerminal([owner]);
+    const { outputEl } = await mountGrid([owner]);
     if (ctx === undefined) {
       throw new Error("the owner feature never ran");
     }
@@ -619,15 +483,15 @@ describe("mouse reports on the wire", () => {
     sendEphemeral.mockClear();
 
     ctx.notifySwitch({ id: "session-2" });
-    mouse.resyncGesture();
+    fake.engine().mouse.resyncGesture();
 
     expect(sent()).toEqual([]);
   });
 
-  it("keeps the keyboard on the hidden textarea after a reported press", () => {
+  it("keeps the keyboard on the hidden textarea after a reported press", async () => {
     // The engine cancels the mousedown default, which also suppresses the
     // browser's own focus move. The click that follows is what restores it.
-    const { outputEl, input } = mountTerminal();
+    const { outputEl, input } = await mountGrid();
     deliverModes(modesFrame({ mouseMode: 1003, mouseSGR: true }));
     input.blur();
     expect(document.activeElement).not.toBe(input);
@@ -640,19 +504,19 @@ describe("mouse reports on the wire", () => {
 });
 
 describe("pointer shape", () => {
-  it("rests on an I-beam over the grid, and a pointer over a link", () => {
-    const { outputEl } = mountTerminal();
+  it("rests on an I-beam over the grid, and a pointer over a link", async () => {
+    const { outputEl } = await mountGrid();
     const link = addLink(outputEl);
 
     expect(getComputedStyle(outputEl).cursor).toBe("text");
     expect(getComputedStyle(link).cursor).toBe("pointer");
   });
 
-  it("swaps both to an arrow while an application holds the mouse", () => {
+  it("swaps both to an arrow while an application holds the mouse", async () => {
     // The arrow is the honest affordance: a plain click goes to the application,
     // so the I-beam promises a selection it does not make and the link's pointer
     // promises a navigation that does not happen.
-    const { outputEl } = mountTerminal();
+    const { outputEl } = await mountGrid();
     const link = addLink(outputEl);
 
     deliverModes(modesFrame({ mouseMode: 1003, mouseSGR: true }));
@@ -661,8 +525,8 @@ describe("pointer shape", () => {
     expect(getComputedStyle(link).cursor).toBe("default");
   });
 
-  it("restores both when the application releases the mouse", () => {
-    const { outputEl } = mountTerminal();
+  it("restores both when the application releases the mouse", async () => {
+    const { outputEl } = await mountGrid();
     const link = addLink(outputEl);
     deliverModes(modesFrame({ mouseMode: 1003, mouseSGR: true }));
 
@@ -672,28 +536,17 @@ describe("pointer shape", () => {
     expect(getComputedStyle(link).cursor).toBe("pointer");
   });
 
-  it("keeps the grid selectable while an application holds the mouse", () => {
+  it("keeps the grid selectable while an application holds the mouse", async () => {
     // Shift+drag is the only way to copy text from under a TUI that owns the
     // mouse, so the tracking rule must not blanket selection off.
-    const { outputEl } = mountTerminal();
+    const { outputEl } = await mountGrid();
 
     deliverModes(modesFrame({ mouseMode: 1003, mouseSGR: true }));
 
     expect(getComputedStyle(outputEl).userSelect).toBe("text");
   });
 
-  it("derives the shape at mount, from a mode the singleton already holds", () => {
-    // The modes module outlives a terminal, so a destroy-and-recreate on the same
-    // page mounts against whatever mirror the previous one left. Waiting for the
-    // next frame shows an I-beam over a grid an application already owns.
-    modes.applySnapshot({ ...modes.snapshot(), mouseMode: 1003, mouseSGR: true });
-
-    const { outputEl } = mountTerminal();
-
-    expect(getComputedStyle(outputEl).cursor).toBe("default");
-  });
-
-  it("re-derives the shape on a session switch, which carries no modes frame", () => {
+  it("re-derives the shape on a session switch, which carries no modes frame", async () => {
     // connection.setSession restores the incoming session's mode mirror
     // synchronously and delivers nothing, so a shape driven off frames alone would
     // keep the outgoing tab's pointer.
@@ -706,12 +559,12 @@ describe("pointer shape", () => {
         return { teardown: () => undefined };
       },
     };
-    const { outputEl } = mountTerminal([owner]);
+    const { outputEl } = await mountGrid([owner]);
     if (ctx === undefined) {
       throw new Error("the owner feature never ran");
     }
     // What setSession does for a session that already had tracking on.
-    modes.applySnapshot({ ...modes.snapshot(), mouseMode: 1003, mouseSGR: true });
+    fake.modes().applySnapshot({ ...fake.modes().snapshot(), mouseMode: 1003, mouseSGR: true });
     expect(getComputedStyle(outputEl).cursor).toBe("text");
 
     const session: SessionRef = { id: "session-2" };

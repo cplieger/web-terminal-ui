@@ -7,75 +7,32 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "../kernel/kernel.js";
-import type * as CtxMenuModule from "./context-menu.js";
+import { contextMenu } from "./context-menu.js";
+import { mountTerminal } from "../test-helpers/mount.js";
 import type {
-  FeatureInstance,
   TerminalContext,
   TerminalFeature,
+  TerminalHandle,
   Unsubscribe,
 } from "../kernel/types.js";
 import type { ClipboardApi } from "./clipboard.js";
 
 // Hoisted so a test can read what reached the PTY: the Escape rule is "close the
 // menu WITHOUT also sending ESC", and the second half is only visible here.
-const sendBinary = vi.hoisted(() => vi.fn<(buf: Uint8Array) => boolean>(() => true));
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("../test-helpers/fake-engine.js");
+  return createEngineFake();
+});
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    render: {
-      init: vi.fn(),
-      updateFontMetrics: vi.fn(),
-      setPredictedCursor: vi.fn(),
-      computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
-      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-      getHighestIndex: vi.fn(() => -1),
-      pendingRowCount: vi.fn(() => 0),
-      noteResumeBounds: vi.fn(),
-      handleScreen: vi.fn(),
-      handleScroll: vi.fn(),
-      updateReverseVideo: vi.fn(),
-      resetScrollback: vi.fn(),
-      resetScreen: vi.fn(),
-      bind: vi.fn(),
-      boundStore: vi.fn(),
-    },
-    scroll: {
-      // Reached through viewport.ts's settle handler, which a real browser fires on
-      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
-      // real one delivers its first observation asynchronously, so every mount opens a
-      // transition that settles ~350ms later and pins to the bottom. Absent from the
-      // double, that settle throws out of a timer as an unhandled error.
-      stickToBottom: vi.fn(),
-      init: vi.fn(),
-      scrollToBottom: vi.fn(),
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-    },
-    connection: {
-      init: vi.fn(),
-      connect: vi.fn(),
-      sendBinary,
-      sendResize: vi.fn(),
-      sendEphemeral: vi.fn(() => true),
-      setClientFocus: vi.fn(),
-      reconnectNow: vi.fn(),
-      disconnect: vi.fn(),
-      setSession: vi.fn(),
-      forgetSession: vi.fn(),
-    },
-  };
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let contextMenu: (typeof CtxMenuModule)["contextMenu"];
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+const { sendBinary } = fake.connection;
+
+let term: TerminalHandle | undefined;
 
 const pasteSpy = vi.fn();
 const copySpy = vi.fn();
@@ -139,14 +96,9 @@ function stubSelection(text: string): { mockRestore: () => void } {
   } as unknown as Selection);
 }
 
-beforeEach(async () => {
-  vi.resetModules();
-  pasteSpy.mockClear();
-  copySpy.mockClear();
-  sendBinary.mockClear();
+beforeEach(() => {
+  fake.reset();
   document.body.replaceChildren();
-  ({ createTerminal } = await import("../kernel/kernel.js"));
-  ({ contextMenu } = await import("./context-menu.js"));
 });
 afterEach(() => {
   term?.destroy();
@@ -164,7 +116,7 @@ function rootIn(): HTMLElement {
 async function mount(withClipboard = true): Promise<{ root: HTMLElement; surface: HTMLElement }> {
   const root = rootIn();
   const clip = fakeClipboard();
-  term = createTerminal(root, {
+  term = await mountTerminal(root, {
     features: () => (withClipboard ? [clip, contextMenu({ clipboard: clip })] : [contextMenu()]),
   });
   await tick(); // features set up in the background
@@ -900,7 +852,9 @@ function recordListeners(
 interface Harness {
   readonly surface: HTMLElement;
   readonly slot: HTMLElement;
-  readonly inst: FeatureInstance;
+  /** What the terminal does on destroy: the instance's `teardown()`, then every
+   *  release the feature handed to `ctx.defer` or took through `ctx`, newest first. */
+  teardown(): void;
   readonly added: Registration[];
   readonly removed: Registration[];
   readonly keydowns: Set<(ev: KeyboardEvent) => boolean>;
@@ -928,13 +882,21 @@ async function harnessed(withClipboard = true): Promise<Harness> {
   recordListeners(document, "document", added, removed);
 
   const keydowns = new Set<(ev: KeyboardEvent) => boolean>();
+  const scope: Unsubscribe[] = [];
   const clipFeature = fakeClipboard();
   const ctx = {
     surface: () => surface,
     region: () => slot,
     registerKeydown: (fn: (ev: KeyboardEvent) => boolean): Unsubscribe => {
       keydowns.add(fn);
-      return () => keydowns.delete(fn);
+      const off = (): void => {
+        keydowns.delete(fn);
+      };
+      scope.push(off);
+      return off;
+    },
+    defer: (release: Unsubscribe): void => {
+      scope.push(release);
     },
     use: () => ({ copy: copySpy, paste: pasteSpy }),
   } as unknown as TerminalContext;
@@ -943,7 +905,12 @@ async function harnessed(withClipboard = true): Promise<Harness> {
   return {
     surface,
     slot,
-    inst,
+    teardown() {
+      inst.teardown();
+      while (scope.length > 0) {
+        scope.pop()?.();
+      }
+    },
     added,
     removed,
     keydowns,
@@ -977,7 +944,7 @@ describe("contextMenu — how its gestures are registered", () => {
       expect(reg?.options, `${type} must be registered passive`).toEqual({ passive: true });
     }
 
-    h.inst.teardown();
+    h.teardown();
   });
 
   it("keeps `contextmenu` cancellable, because suppressing the platform menu is a preventDefault", async () => {
@@ -991,7 +958,7 @@ describe("contextMenu — how its gestures are registered", () => {
     expect(reg?.options).toBeUndefined();
     expect(h.rightClick().defaultPrevented).toBe(true);
 
-    h.inst.teardown();
+    h.teardown();
   });
 });
 
@@ -1003,7 +970,7 @@ describe("contextMenu — teardown", () => {
     const h = await harnessed();
     expect(h.added.length).toBeGreaterThan(0);
 
-    h.inst.teardown();
+    h.teardown();
 
     const leaked = h.added.filter(
       (a) => !h.removed.some((r) => r.on === a.on && r.type === a.type && r.fn === a.fn),
@@ -1016,7 +983,7 @@ describe("contextMenu — teardown", () => {
     h.rightClick();
     expect(h.menu()).not.toBeNull();
 
-    h.inst.teardown();
+    h.teardown();
 
     expect(h.menu()).toBeNull();
     expect(h.slot.childElementCount).toBe(0);
@@ -1031,7 +998,7 @@ describe("contextMenu — teardown", () => {
     h.rightClick();
     expect(h.keydowns.size).toBe(1);
 
-    h.inst.teardown();
+    h.teardown();
 
     expect(h.keydowns.size).toBe(0);
   });
@@ -1040,7 +1007,7 @@ describe("contextMenu — teardown", () => {
     // The behavioural half of the listener comparison above: after teardown the
     // menu must not reopen, from a right-click or from a long-press.
     const h = await harnessed();
-    h.inst.teardown();
+    h.teardown();
 
     h.rightClick();
     expect(h.menu()).toBeNull();
@@ -1062,7 +1029,7 @@ describe("contextMenu — an environment with no navigator", () => {
     h.rightClick();
 
     expect(h.menu()?.classList.contains("visible")).toBe(true);
-    h.inst.teardown();
+    h.teardown();
   });
 
   it("treats an unknown device as non-Apple, so the platform's own touch menu is still suppressed", async () => {
@@ -1077,7 +1044,7 @@ describe("contextMenu — an environment with no navigator", () => {
     h.surface.dispatchEvent(pd);
 
     expect(h.rightClick().defaultPrevented).toBe(true);
-    h.inst.teardown();
+    h.teardown();
   });
 });
 
@@ -1094,7 +1061,7 @@ describe("contextMenu — a click on the menu itself is not a click-away", () =>
     menu?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     expect(menu?.classList.contains("visible")).toBe(true);
-    h.inst.teardown();
+    h.teardown();
   });
 });
 

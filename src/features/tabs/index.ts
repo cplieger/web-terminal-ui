@@ -1,28 +1,18 @@
-/**
- * tabs feature: multiple independent terminals over the one kernel.
- * It owns the session set (GET/POST/DELETE
- * /api/sessions), a per-tab LineStore switching cache, the reconnect-on-switch
- * swap, and the tab chrome on both form factors: the desktop top-bar strip and
- * the mobile bottom-switcher + modal overview sheet. The kernel drives one
- * active session; switching re-points the renderer at the next tab's cached
- * store (ctx.render.bind) and asks the kernel to reconnect the terminal WS to it
- * (ctx.notifySwitch), so the last-known screen paints instantly and the
- * background delta arrives after.
- *
- * @module
- */
+// tabs: multiple terminals over one pane. It owns the session set, a per-tab
+// LineStore switching cache, the reconnect-on-switch swap, and the tab chrome on
+// both form factors (the desktop strip and the mobile switcher). A switch
+// re-points the renderer at the next tab's cached store before the reconnect, so
+// the last-known screen paints instantly and the delta arrives after.
 
-import { modes } from "@cplieger/web-terminal-engine";
-import type { SessionRef, TerminalContext, TerminalFeature } from "../../kernel/types.js";
+import type { TerminalContext, TerminalFeature } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { fromHTML, holdFocusOnPress } from "../dom.js";
 import { createClickSwallow, placeMenuAt } from "../menu-position.js";
 import { centreChipLabels } from "./ink-centre.js";
 import { SWITCH_ANIMATIONS, SWITCH_CLASSES } from "./switch-anim.js";
-import type { CueStatus, SessionInfo, StatusRecord, Tab } from "./model.js";
+import type { CueStatus, PaneLayout, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
-  ACTIVE_TAB_KEY,
   CUE_SEEN_KEY,
   MAX_PERSISTED_CUE_SEEN,
   MAX_PINNED_NAME,
@@ -33,6 +23,7 @@ import {
   compareTabOrder,
   createSessionAPI,
   createTombstones,
+  cueIconName,
   foldedCueStatus,
   hasPinnedName,
   isCueStatus,
@@ -47,10 +38,9 @@ import {
   sanitizePinnedName,
   serializeCueSeen,
   statusPhrase,
+  summarizeCues,
   tabAccessibleName,
 } from "./model.js";
-import { NO_ATTENTION, browserAttentionEnv, createAttention, summarize } from "./attention.js";
-import { browserNotifierEnv, createNotifier } from "./notify.js";
 import {
   REORDER_MOVE_EPS_PX,
   REORDER_REST_MS,
@@ -82,44 +72,19 @@ import {
 } from "./switcher.js";
 
 const DEFAULT_API_BASE = "/api/sessions";
-// The mobile bottom-switcher (a single full-width active-tab chip + swipe) is
-// used ONLY on a narrow coarse-pointer device (a phone — in EITHER
-// orientation: a landscape phone is wide but short, and the kernel's narrow
-// fact covers both). A big touchscreen (an iPad) and every fine-pointer device
-// (a desktop, or an iPad with a trackpad / Magic Keyboard) get the multi-tab
-// top strip instead — the switcher's single-giant-tab layout wastes a big
-// screen (an iPad was getting the phone UI). The narrow half of that fact is
-// the kernel's .wt-narrow root class / ctx.layout().narrow (kernel-owned
-// breakpoint constants, root-size driven); CSS pairs it with
-// (pointer: coarse) where touch matters.
-// Default cadence for the no-activityMonitor polling fallback.
+// The mobile switcher is used only on a narrow coarse-pointer device, in EITHER
+// orientation; a big touchscreen and every fine-pointer device get the strip.
 const DEFAULT_POLL_MS = 4000;
-// The drag data type carrying a reordered tab's session id. A PRIVATE type, not
-// text/plain, deliberately: WebKit resolves dropped plain text as a URL and
-// NAVIGATES to it when no handler cancels the drop, so a bare session id read as
-// a relative path — dropping a tab on iPadOS loaded /<session-id> instead of
-// reordering. A custom type also keeps the id out of the system pasteboard when
-// the drag leaves the browser, which is what MDN's recommended-drag-types
-// guidance prescribes for data specific to one application.
+// A PRIVATE drag type, not text/plain: WebKit resolves dropped plain text as a
+// URL and NAVIGATES to it when no handler cancels the drop, so a bare session id
+// loaded /<session-id> on iPadOS. It also keeps the id out of the pasteboard.
 const TAB_DRAG_TYPE = "application/x-web-terminal-tab";
-// Tab context-menu viewport clamping + the flip-above-the-pointer gap live in
-// the shared point-anchored positioner (menu-position.ts), shared with the
-// terminal context menu (formerly two hand-synced copies of the same math).
 
-/** The value a peer feature or a host reads through `ctx.use(tabs(...))`: the
- *  session set as commands, plus a snapshot of the strip.
- *
- *  `create` and `close` are server round trips, and NEITHER rejects: a refusal is
- *  reported to the user as a toast and the promise resolves anyway, so awaiting one
- *  tells you the attempt finished and not that it succeeded (read `list` for that).
- *  Both are safe to call more than once per gesture — `create` shares an in-flight
- *  create, so the duplicate activation an iPad trackpad delivers opens one terminal
- *  rather than two. `switchTo` is local and synchronous, and ignores an unknown id.
- *
- *  `list` is a snapshot, not a live view — it does not update, so re-read it rather
- *  than holding onto the array, and treat it as display data: the tab a user is
- *  looking at is this feature's own state and mutating it goes through the members
- *  above. */
+/** The value a peer or a host reads through `ctx.use(tabs(...))`. `create` and
+ *  `close` are server round trips and NEITHER rejects: a refusal is toasted and
+ *  the promise resolves anyway, so read `list` for the outcome. `create` shares
+ *  an in-flight create, so a duplicate activation opens one terminal. `list` is a
+ *  snapshot of display data, not a live view. */
 export interface TabsApi {
   /** Spawn a fresh session and switch to it. Calls made while a create is in
    *  flight share that create, so one gesture opens exactly one terminal. */
@@ -132,124 +97,58 @@ export interface TabsApi {
   list(): readonly { id: string; title: string; active: boolean }[];
 }
 
-/** Options for the tabs feature.
- *
- *  The two feature-valued members (`activityMonitor`, `keyboardToggle`) must be the
- *  SAME values the composition includes and must be ordered before tabs in the
- *  feature list, since `ctx.use` only resolves a peer the kernel has already set
- *  up. Both are optional and their absence degrades rather than fails: no monitor
- *  means polling instead of the status SSE, no toolbar means no keyboard button in
- *  the mobile bar. `buildTabbed` in presets/tabbed.ts is the worked example. */
+/** Options for the tabs feature. The two feature-valued members must be the SAME
+ *  values the composition includes, ordered before tabs (`ctx.use` only resolves
+ *  a peer already set up) and marked `scope: "shell"`, since a pane feature's api
+ *  is not visible at the shell. Both degrade rather than fail when absent. */
 export interface TabsOptions {
   /** REST base for the session API (default "/api/sessions"). */
   apiBase?: string;
-  /** The activityMonitor feature value, so tabs renders live status dots and
-   *  drops exited/removed tabs (ctx.use). Without it, dots stay neutral and tabs
-   *  falls back to polling the session list (see pollMs). */
+  /** The activityMonitor feature value, for live status dots and dropping
+   *  exited tabs. Without it, tabs polls the session list (see pollMs). */
   activityMonitor?: TerminalFeature<ActivityMonitorApi>;
-  /** Poll interval in ms for the no-activityMonitor fallback: without the status
-   *  SSE, tabs re-lists GET /api/sessions on this cadence to refresh dots and
-   *  titles and drop reaped tabs (section 22.5). Ignored when activityMonitor is
-   *  present. Default 4000. */
+  /** Poll interval in ms for the no-activityMonitor fallback (default 4000). */
   pollMs?: number;
-  /** The mobileToolbar feature value, so the mobile switcher bar renders a
-   *  keyboard button that opens the key grid (ctx.use at tap time). Without it
-   *  the bar shows no keyboard button (e.g. a desktop-only consumer). The
-   *  toolbar should be built with { externalToggle: true } so its own top-right
-   *  toggle is hidden and the grid opens above the bar. */
+  /** The mobileToolbar feature value, built with { externalToggle: true }, so
+   *  the mobile switcher bar renders a keyboard button that opens the key grid. */
   keyboardToggle?: TerminalFeature<MobileToolbarApi>;
-  /** Presume every session reports activity (an agent shell, where the program
-   *  always emits OSC 9;4 progress): each tab's dot is visible as idle from
-   *  creation instead of popping in seconds later when the agent has booted
-   *  far enough to first report — the server's sticky reportsActivity flag
-   *  then merely confirms. Default false (evidence-driven reveal: a plain
-   *  shell keeps clean, label-only tabs). presetAgentTabbed enables this. */
+  /** Presume every session reports activity (an agent shell): each tab's dot is
+   *  visible as idle from creation instead of popping in when the agent first
+   *  reports. Default false, so a plain shell keeps clean, label-only tabs. */
   presumeReports?: boolean;
   /** Swap the page's icon links to a status variant while a background session
-   *  holds an unacknowledged cue, so the browser tab icon carries the same colour
-   *  its chip's dot does. Default false, because it needs asset files the library
-   *  cannot ship: the dot's colour comes from the app's own `--status-*` theme, so
-   *  the variants are per-app artifacts.
-   *
-   *  Enabling it is a promise that those files exist. For every
-   *  `link[rel=icon]` whose filename starts with `favicon`, three variants must
-   *  be served alongside it with `-input`, `-done` and `-alert` inserted after
-   *  that token (`/favicon.svg` needs `/favicon-input.svg`; `/favicon-32x32.png`
-   *  needs `/favicon-input-32x32.png`). Generate them with whatever tooling you
-   *  like as long as it writes exactly those names, and assert their presence in
-   *  the APP's own tests — the library cannot check a file it does not ship, and
-   *  a missing variant is a blank tab icon.
-   *
-   *  Not every platform honours it: Safari caches the first icon it fetched and
-   *  ignores later changes, and an installed app has no tab icon at all. The
-   *  title count is not gated on this, so those cases lose nothing.
-   *
-   *  The links are restored on `pagehide` as well as on teardown, because a
-   *  browser remembers one icon per URL and renders it for the bookmark, the
-   *  history row and the new-tab tile. Best-effort there, since the write races
-   *  the unload. Deliberately not on `freeze`: a frozen background tab is still in
-   *  the strip rendering its icon, which is the case this exists for. */
+   *  holds an unacknowledged cue. Default false, because it needs assets the
+   *  library cannot ship: for every `link[rel=icon]` whose filename starts with
+   *  `favicon`, variants with `-input`, `-done` and `-alert` inserted after that
+   *  token must be served (`/favicon-32x32.png` needs `/favicon-input-32x32.png`),
+   *  and a missing one is a blank tab icon. Safari ignores later icon changes; the
+   *  title count is not gated on this, so nothing is lost there. */
   attentionIcons?: boolean;
 }
 
-// looksLikeHardwareKey reports whether a keydown could only have come from a
-// PHYSICAL keyboard on a touch device. There is no web API that directly says "a
-// hardware keyboard is attached" (navigator.keyboard is layout/lock only and
-// unsupported on iOS Safari; navigator.virtualKeyboard is Chromium-only), so we
-// infer it: the iOS on-screen keyboard has no modifier keys and no
-// arrows/Escape/Tab/nav/function keys, so any of these means real hardware. Used
-// to latch a "physical keyboard present" flag that also covers a keyboard-only
-// Smart Keyboard Folio (which, unlike a Magic Keyboard, adds no trackpad and so
-// does not match `any-pointer: fine`).
-/** Session creation can be legitimately and TEMPORARILY refused, which is not the
- *  same event as a broken server. web-terminal-kiro answers 503 with
- *  `Retry-After: 5` and a body message while its tool engine installs the
- *  manifest's tools on first boot, a window its own HEALTHCHECK budgets 20
- *  minutes for. That state used to reach the user as the same fixed "Couldn't
- *  open a terminal" toast as a 500, with no retry: the page looked broken while
- *  the server was deliberately waiting, and `/api/health` reported healthy at the
- *  same time, so the two channels contradicted each other.
- *
- *  So honour what the server published: retry on its own schedule, and repeat its
- *  own explanation rather than inventing library wording for a host-specific
- *  condition. Only 503 retries; a 429 rate limit, a 4xx, or a 500 still fails
- *  fast, because those are not "come back shortly".
- *
- *  The bound is ELAPSED TIME, not an attempt count. An attempt cap interacts
- *  badly with the server's hint: at web-terminal-kiro's `Retry-After: 5` a dozen
- *  attempts is only a minute, while the window this exists for can run twenty
- *  (toolbelt's boot job is bounded at 30 minutes, which is why that app's
- *  HEALTHCHECK carries --start-period=20m), so the retry would give up long
- *  before the server was ready and the whole fix would miss its case. Waiting is
- *  cheap here because every iteration sleeps at least the server's hint, so this
- *  is never a hot loop. The user is re-told periodically rather than once,
- *  because a page that silently retries for twenty minutes is its own kind of
- *  broken. */
+/** Session creation can be TEMPORARILY refused: a host answers 503 with
+ *  `Retry-After` and a body message while it installs tools on first boot, a
+ *  window that can run twenty minutes. Only 503 retries, on the server's own
+ *  schedule and repeating its own explanation. The bound is ELAPSED TIME, not an
+ *  attempt count, which at `Retry-After: 5` would give up in a minute; every
+ *  iteration sleeps at least the hint, so this is never a hot loop, and the user
+ *  is re-told periodically. */
 const CREATE_RETRY_MAX_TOTAL_MS = 1200000;
 const CREATE_RETRY_FALLBACK_MS = 5000;
 const CREATE_RETRY_REANNOUNCE_MS = 60000;
 
-/** How long the catching-up cue may wait for the render backlog to drain before
- *  retiring itself. A backlog that never drains (the server stops mid-replay, the
- *  socket drops) must not leave a "Catching up" badge on screen forever, and the
- *  reconnect that follows will arm a fresh one. */
+/** A backlog that never drains (the socket drops mid-replay) must not leave a
+ *  "Catching up" badge on screen forever. */
 const CATCHUP_MAX_MS = 30000;
-/** How long the render queue must stay empty before the restore counts as
- *  finished. The queue empties BETWEEN the server's replay chunks, so a bare
- *  "queue is empty" test declares victory several times per restore; this
- *  hysteresis is what turns it into one honest completion signal. */
+/** The render queue empties BETWEEN the server's replay chunks, so a bare "queue
+ *  is empty" test declares victory several times per restore. */
 const CATCHUP_SETTLE_MS = 250;
-/** Backlog that arms the cue, in queued rows. The renderer builds at most 300
- *  rows per frame, so a backlog above this needs multiple frames and is worth
- *  telling the user about; ordinary streaming queues a handful of rows per frame
- *  and must never arm it (nor pay for the completion poll). */
+/** The renderer builds at most 300 rows per frame, so a backlog above this needs
+ *  multiple frames; ordinary streaming must never arm the cue. */
 const CATCHUP_MIN_BACKLOG = 400;
 
-/** readCueSeen loads the acknowledged background-tab cues, or an empty map when
- *  there is none to trust. Storage itself can throw (Safari private mode, a
- *  disabled third-party context, an embedder's iframe) and an unreadable map is
- *  never fatal: the dot simply lights again, exactly as it behaved before
- *  acknowledgements were remembered. */
+/** The acknowledged background-tab cues, or an empty map when storage throws or
+ *  holds nothing trustworthy: the dot simply lights again. */
 function readCueSeen(): Map<string, CueStatus> {
   try {
     return parseCueSeen(localStorage.getItem(CUE_SEEN_KEY));
@@ -274,11 +173,8 @@ async function createSessionHonouringRetry(
   isTornDown: () => boolean,
 ): Promise<SessionInfo> {
   const startedAt = Date.now();
-  // The elapsed reading of the last announcement, or null when nothing has been
-  // announced yet. NOT a 0 sentinel: elapsed is legitimately 0 when the server
-  // refuses inside the first millisecond (a host on the same machine), and a 0
-  // sentinel read that as "never spoken" and re-announced on the next refusal —
-  // the one thing the throttle below exists to prevent.
+  // Null, NOT a 0 sentinel: elapsed is legitimately 0 when a host on the same
+  // machine refuses inside the first millisecond.
   let lastAnnouncedAt: number | null = null;
   for (;;) {
     try {
@@ -292,28 +188,16 @@ async function createSessionHonouringRetry(
       ) {
         throw err;
       }
-      // First refusal always speaks; after that only every
-      // CREATE_RETRY_REANNOUNCE_MS, so a multi-minute wait is neither silent nor
-      // a toast storm.
-      //
-      // The suffix says the page is WAITING, not recovering from a failure. It
-      // used to say "retrying", which read as an error loop when the server had
-      // only said "not yet" -- and the first announcement fires before any retry
-      // has happened at all, so a user two seconds into a boot was told
-      // "retrying" about a request that had been made exactly once.
+      // "waiting", not "retrying": the server only said "not yet", and the first
+      // announcement fires before any retry has happened.
       if (lastAnnouncedAt === null || elapsed - lastAnnouncedAt >= CREATE_RETRY_REANNOUNCE_MS) {
         lastAnnouncedAt = elapsed;
         const reason = err.serverMessage ?? "Server is not ready yet";
         ctx.toast(`${reason}; waiting…`, 8000);
         ctx.announce(`${reason}; waiting…`);
       }
-      // Separate from the throttled pair above, and unthrottled: this writes the
-      // reason onto the loading OVERLAY, which is the only surface a user can
-      // actually see before the first frame -- the toast and the banner both live
-      // inside .wt-root and paint under it. It replaces text in place rather than
-      // stacking notifications, so there is no storm to throttle, and repeating
-      // the same string is idempotent. This is what turns the black screen of a
-      // twenty-minute tools install into a screen that says why it is waiting.
+      // Unthrottled: the overlay is the only surface visible before the first
+      // frame, and it replaces text in place.
       ctx.loadingReason(`${err.serverMessage ?? "Server is not ready yet"}; waiting…`);
       await new Promise((resolve) => {
         window.setTimeout(resolve, err.retryAfterMs ?? CREATE_RETRY_FALLBACK_MS);
@@ -348,64 +232,38 @@ function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
 }
 
 /** Build the tabs feature.
- *
- *  Requires a server that speaks the session API — `GET`/`POST`/`DELETE` on
- *  `/api/sessions`, `?session=<id>` on the WebSocket, and ideally the status SSE.
- *  It registers itself as the kernel's `sessionOwner`, so it and not the kernel
- *  resolves the session the first connect attaches to. At most one feature may claim
- *  that role, and `createTerminal` throws before any DOM work when two do.
- *
- *  The arrangement of the strip is SERVER state (the `order` field), while the
- *  active tab and the dismissed notification cues are per-viewer and live in
- *  `localStorage` — so a phone reordering tabs moves them on the desktop, and
- *  switching tabs on one does not move the other. Teardown removes all chrome,
- *  releases the per-tab caches, and leaves the sessions themselves running on the
- *  server; closing a tab is what kills a process. */
+ *  Requires a server that speaks the session API (`GET`/`POST`/`DELETE` on
+ *  `/api/sessions`, `?session=<id>` on the WebSocket, ideally the status SSE).
+ *  It registers as the terminal's `paneLayoutOwner`, so it decides which session
+ *  the first connect attaches to; two owners fail at `kernel-init`. The strip's
+ *  order and the pane layout are SERVER state every viewer shares; the dismissed
+ *  cues are per-viewer in `localStorage`. Teardown removes the chrome and leaves
+ *  the sessions running; closing a tab is what kills a process. */
 export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
   const presumeReports = opts.presumeReports ?? false;
-  // reportsOf floors the server's per-session reportsActivity flag with the
-  // consumer's presumption (see TabsOptions.presumeReports): an agent shell
-  // shows the idle dot from tab creation instead of waiting out the agent's
-  // boot-to-first-OSC-9;4 window.
   const reportsOf = (reports?: boolean): boolean => presumeReports || (reports ?? false);
-  // The session REST client (model.ts): every call timeout-bounded, list
-  // shape-guarded, title persistence fire-and-forget.
   const api = createSessionAPI(apiBase);
 
-  // tabs owns session selection. The static sessionOwner registration tells
-  // the kernel not to open a bare /ws at startup (which a SessionManager would
-  // 404 for lack of ?session=); the kernel instead awaits
-  // resolveInitialSession() once setup completes and performs the first switch
-  // itself. The registration must exist on the feature VALUE (read before
-  // setup), while the bootstrap needs setup-scoped state — so it delegates to
-  // a closure setup() wires. resolveImpl is nulled on teardown.
-  let resolveImpl: (() => Promise<SessionRef | null>) | null = null;
-  // Set on teardown so an in-flight create RETRY (which sleeps between attempts,
-  // potentially across a multi-minute install window) cannot resurrect a session
-  // for a feature that is already gone.
+  // The registration must exist on the feature VALUE, read before setup, while
+  // the bootstrap needs setup-scoped state; setup() wires the closure.
+  let resolveImpl: (() => Promise<boolean>) | null = null;
+  // An in-flight create RETRY sleeps between attempts and must not resurrect a
+  // session for a feature that is already gone.
   let tornDown = false;
   return {
     name: "tabs",
-    sessionOwner: {
-      resolveInitialSession: () => (resolveImpl ? resolveImpl() : Promise.resolve(null)),
+    scope: "shell",
+    paneLayoutOwner: {
+      resolveInitialLayout: () => (resolveImpl ? resolveImpl() : Promise.resolve(false)),
     },
-    // Synchronous setup: the chrome mounts immediately; the async session
-    // bootstrap that used to live here is the kernel-driven resolver above.
     setup(ctx: TerminalContext) {
       const tablist = ctx.tablist();
       const monitor = opts.activityMonitor ? ctx.use(opts.activityMonitor) : undefined;
 
-      // The keyboard buttons wired to the key grid — the mobile switcher's and
-      // the desktop strip's — built + wired by the ONE makeKbButton factory;
-      // closeKeyGrid and the sticky-Ctrl armed reflect update every one.
+      // Every keyboard button (the switcher's and the strip's) reflects the grid's
+      // open state and the sticky-Ctrl armed state.
       const kbButtons: HTMLElement[] = [];
-      // makeNewButton / makeKbButton are the shared control factories (goals 2 &
-      // 3): one "+" and one keyboard-button implementation, each built + wired
-      // once and reused for the desktop strip and the mobile switcher. The "+"
-      // spawns a terminal; the keyboard button toggles the key grid (via the
-      // keyboardToggle feature, read lazily so feature ordering does not matter)
-      // and reflects its open state on every keyboard button.
       function makeNewButton(cls: string): HTMLElement {
         const btn = fromHTML(newButtonHTML(cls));
         // Keeps the keyboard on the terminal and paints its own press state;
@@ -450,21 +308,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // --- Desktop tab strip (top-bar region) ---
-      // Two layers: the bar itself never scrolls; an inner scroller
-      // (.wt-tab-scroll, the tablist) holds ONLY the tabs. The "+" and the
-      // keyboard button sit OUTSIDE the scroller as fixed bar items in the
-      // order [scroller | + | kb], so an overflowing tab list can never push
-      // or scroll either control away. The scroller shrink-wraps its content
-      // (CSS flex: 0 1 auto), so while the tabs fit the "+" trails the last
-      // tab exactly as if it were in the list, while the kb button (a wide
-      // touchscreen; hidden on a fine pointer) stays pinned at the bar's FAR
-      // right edge via margin-left: auto whatever the tab count. Once the
-      // tabs overflow, the scroller caps at the remaining bar width and the
-      // "+" packs right, up against the kb. Both controls are built + wired
-      // by the same shared factories as the mobile switcher's; the kb button
-      // is CSS-gated to a wide touchscreen and un-hidden below only when a
-      // keyboardToggle is wired. addTabChrome appends each tab to the
-      // scroller's end.
+      // The bar never scrolls; the inner scroller holds ONLY the tabs, and the
+      // "+" and keyboard buttons sit outside it as fixed bar items, so an
+      // overflowing tab list can never push or scroll either control away.
       const slot = ctx.region("top-bar", "tabs");
       const bar = document.createElement("div");
       bar.className = "wt-tab-bar";
@@ -477,22 +323,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       bar.appendChild(newBtn);
       const deskKb = makeKbButton("wt-tab-kb wt-btn");
       bar.appendChild(deskKb);
-      // A vertical mouse wheel anywhere over the strip scrolls the tab list
-      // horizontally — the strip has no vertical dimension to spend the delta
-      // on, and this is the affordance browser tab bars train. Bound on the
-      // BAR so the empty strip area and the fixed controls translate too.
-      // Horizontal-dominant deltas (a trackpad pan) keep native handling, and
-      // a wheel over a non-overflowing strip falls through untouched. The
-      // listener is non-passive because a translated tick must preventDefault
-      // so an embedding page (wt-container mode) does not also scroll.
+      // A vertical wheel over the strip scrolls the tab list horizontally, the
+      // affordance browser tab bars train. Non-passive because a translated tick
+      // must preventDefault so an embedding page does not also scroll.
       bar.addEventListener(
         "wheel",
         (e) => {
           if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) {
-            return; // horizontal-dominant: native scroll already handles it
+            return;
           }
           if (scroller.scrollWidth <= scroller.clientWidth) {
-            return; // nothing to scroll: let the page have the wheel
+            return;
           }
           e.preventDefault();
           // deltaMode: 0 = pixels, 1 = lines (Firefox wheel), 2 = pages.
@@ -507,25 +348,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         { passive: false },
       );
 
-      // Pull the terminal surface up off the docked BOTTOM strip on desktop so
-      // the bar does not overlap the last rows. The surface is absolute
-      // inset:0, so a bottom offset (gated to a fine pointer / non-narrow root
-      // in CSS, since the strip is hidden on the narrow-coarse phone where the
-      // mobile switcher applies its own inset) clears it. A ResizeObserver
-      // keeps the offset in step with the real strip height rather than a
-      // hard-coded guess. The measured height is published on the terminal
-      // ROOT (not the surface): the scroll-to-bottom button sits in a sibling
-      // region, not inside .term, so a property set on .term would not inherit
-      // to it and it would fall back to the 44px guess and overlap the strip.
-      // Both .term and the button inherit it from .wt-root — and the host page
-      // never sees it.
+      // The measured strip height is published on the shell ROOT, not the surface:
+      // the scroll-to-bottom button sits in a sibling region, so a property set on
+      // .term would not reach it and it would overlap the strip.
       const surface = ctx.surface();
       surface.classList.add("wt-with-tabbar");
-      const varRoot = surface.parentElement ?? surface;
+      const varRoot = ctx.shell.root;
       const barResize = new ResizeObserver(() => {
         varRoot.style.setProperty("--wt-tabbar-h", `${String(bar.offsetHeight)}px`);
       });
       barResize.observe(bar);
+      ctx.defer(() => {
+        barResize.disconnect();
+      });
 
       // --- Mobile bottom bar (bottom-switcher region) ---
       const switcher = fromHTML(SWITCHER_HTML);
@@ -614,39 +449,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           paintAttention();
         }
       }
-      // OSC 9 Form B notifications: the one signal the specs say to surface
-      // OUTSIDE the page ("post a notification"), so a finished turn can reach a
-      // user who is looking at another app. All the policy — the suppression
-      // rule, the gesture-gated permission request, the silent tab-only
-      // degradation — lives in notify.ts; this feature only feeds it events and
-      // gestures.
-      const notifier = createNotifier(browserNotifierEnv());
-      // The out-of-page surfaces for the SAME unseen-cue set the switch dot
-      // shows: the document-title count, the installed app's icon badge, and the
-      // tab icon. Constructed here so every capability decision is made once,
-      // and fed only through paintAttention below.
-      const attention = createAttention(
-        browserAttentionEnv((text) => {
-          ctx.titlePrefix(text);
-        }, opts.attentionIcons === true),
-      );
-      // pageVisible is the "can the user see this page at all" test, and
-      // visibilityState is the only reliable one: document.hasFocus() is false for
-      // a visible-but-unfocused window, where the terminal IS on screen. Same
-      // signal notify.ts reads, for the same decision.
+      // The out-of-page surfaces render the SAME unseen-cue set the switch dot
+      // shows, fed only through paintAttention below.
+      const attention = ctx.shell.attention({ icons: opts.attentionIcons === true });
+      // visibilityState, not document.hasFocus(), which is false for a
+      // visible-but-unfocused window where the terminal IS on screen.
       function pageVisible(): boolean {
         return document.visibilityState !== "hidden";
       }
 
-      // onPageVisible is the DEFERRED half of the active-tab acknowledgement in
-      // applyStatus: a cue that latched while the page was hidden was deliberately
-      // not acknowledged then, so it could raise the out-of-page surfaces, and this
-      // acknowledges it the moment the user can actually see the terminal.
-      //
-      // Scoped to the ACTIVE tab only. A wholesale clear on becoming visible is the
-      // obvious shortcut and it is wrong: the tab the user returns to is not
-      // necessarily the one that was waiting, and blanking a background tab's cue
-      // it never saw is how a viewer loses the thing it came back for.
+      // The DEFERRED half of the active-tab acknowledgement: a cue that latched on
+      // a hidden page raised the out-of-page surfaces and is acknowledged when the
+      // user can see the terminal. The ACTIVE tab only: blanking a background
+      // tab's cue the viewer never saw loses the thing they came back for.
       function onPageVisible(): void {
         if (!pageVisible() || activeId === null) {
           return;
@@ -657,56 +472,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
       document.addEventListener("visibilitychange", onPageVisible);
+      ctx.defer(() => {
+        document.removeEventListener("visibilitychange", onPageVisible);
+      });
 
-      // onPageGone hands the page's own icon back before the page GOES AWAY,
-      // which is a different question from the page being hidden and needs a
-      // different event. A browser remembers ONE icon per URL and renders it for
-      // the bookmark, the history row and the new-tab tile, so a tab closed while
-      // a cue was lit leaves a status variant standing in for the app until the
-      // page is next loaded.
-      //
-      // `pagehide`, and deliberately NOT `freeze`. freeze fires for a background
-      // tab the browser is conserving resources on (Android after five minutes in
-      // the background; desktop for a collapsed tab group and, since Chrome 133, a
-      // CPU-heavy tab under Energy Saver), and that tab is STILL in the strip
-      // rendering its icon — restoring there would blank the cue in exactly the
-      // case the cue exists for. pagehide fires on unload, tab close and bfcache
-      // entry, where no strip entry is left to render.
-      //
-      // Through apply() rather than the icon sink directly, because the sinks are
-      // change-gated on the last applied value: writing behind that memo would
-      // leave it believing the variant is still up, and a page restored from the
-      // bfcache would then never repaint it. Which is what onPageBack is for — a
-      // bfcache restore re-runs the fold, so the cue returns for a page that did
-      // not actually go away. Best-effort on a real unload, where the icon write
-      // races the teardown, and a no-op when nothing was lit.
-      function onPageGone(): void {
-        attention.apply(NO_ATTENTION);
-      }
-      function onPageBack(event: PageTransitionEvent): void {
-        if (event.persisted) {
-          paintAttention();
-        }
-      }
-      window.addEventListener("pagehide", onPageGone);
-      window.addEventListener("pageshow", onPageBack);
-
-      // paintAttention re-derives the whole attention state from the tab list and
-      // this viewer's acknowledgements, and hands it to the surfaces.
-      //
-      // A FOLD rather than incremental bookkeeping, for the reason applyServerOrder
-      // is one: there is no state of its own to get out of step, so no path can
-      // leave it stale, and it is cheap enough to run on every tick (a loop over a
-      // handful of tabs, then sinks that no-op when nothing changed). The dot is
-      // the store — cueStatusOf reads each tab's status back off it — so this and
-      // the raise in applyStatus fold the same value.
+      // A FOLD over the tab list rather than incremental bookkeeping: no state of
+      // its own can go stale, and the shell no-ops when nothing changed.
       function paintAttention(): void {
-        attention.apply(
-          summarize(
-            tabList.map((t) => ({ id: t.id, status: cueStatusOf(t) })),
-            cueSeen,
-          ),
+        const { count, worst } = summarizeCues(
+          tabList.map((t) => ({ id: t.id, status: cueStatusOf(t) })),
+          cueSeen,
         );
+        attention.report({ count, icon: worst === "" ? null : cueIconName(worst) });
       }
       function paintSwitchDot(): void {
         // Reuse the per-tab status-dot colours (single source, css/05-tabs.css
@@ -745,7 +522,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // The keyboard buttons open the key grid; show them only when a toolbar is
       // wired to drive. Read the toolbar's API lazily at tap time (ctx.use), so
       // feature ordering does not matter.
-      let offArmed: (() => void) | undefined;
       if (opts.keyboardToggle) {
         // Un-hide every keyboard button; the mobile one then shows in the
         // switcher bar, the desktop one is CSS-gated to a wide touchscreen.
@@ -766,21 +542,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             }
           };
           reflectArmed(kbApi.isCtrlArmed());
-          offArmed = kbApi.onCtrlArmedChange(reflectArmed);
+          ctx.defer(kbApi.onCtrlArmedChange(reflectArmed));
         }
       }
       // Measured optical centring for every chip label in both layouts: writes
       // --label-ink-shift onto the strip and the switcher from the line box THIS
       // engine produced for THIS font at THIS size, rather than the em constant
       // in 00-tokens.css that can only be right at one size (see ink-centre.ts).
-      const stopInkCentring = centreChipLabels(varRoot, { strip: bar, switcher });
+      ctx.defer(centreChipLabels(varRoot, { strip: bar, switcher }));
 
       // Mark the root so the CSS lifts the bottom-anchored chrome (banner, toast,
       // scroll-to-bottom, key grid) above the switcher bar on a coarse pointer.
-      const root = ctx.surface().parentElement;
-      root?.classList.add("wt-tabbed");
-      // Reserve the collapsed bar row's height so terminal content stops above it
-      // (mobile item 2): viewport.ts adds --wt-reserve-bottom to the surface's
+      const root = ctx.shell.root;
+      root.classList.add("wt-tabbed");
+      // Reserve the collapsed bar row's height so terminal content stops above
+      // it: viewport.ts adds --wt-reserve-bottom to the surface's
       // bottom inset (it reads the var off the surface, which inherits it from
       // the root). Measure the bar row (not the expandable list, which just
       // overlays content). innerHeight - rect.top captures the row plus the
@@ -794,6 +570,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         window.visualViewport?.dispatchEvent(new Event("resize"));
       });
       swReserve.observe(swBar);
+      ctx.defer(() => {
+        swReserve.disconnect();
+      });
 
       // Activity dots are revealed PER TAB, not chrome-wide: each dot stays
       // hidden (CSS: .wt-status-dot { display: none }) until its session reports
@@ -805,9 +584,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // the same reportsActivity flag.
 
       // Catching-up cue: a switched-into tab's cached screen is stale until its
-      // resume delta lands, so it must not read as live (sections 12/13). Shown
-      // only if the delta has not arrived shortly after a switch; cleared on the
-      // first screen frame.
+      // resume delta lands, so it must not read as live. Shown only if the delta
+      // has not arrived shortly after a switch; cleared on the first screen frame.
       const catchup = document.createElement("div");
       catchup.className = "wt-catchup";
       catchup.setAttribute("role", "status");
@@ -818,6 +596,35 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let catchupPoll: number | null = null;
       let catchupEmptySince = 0;
       let catchupDeadline = 0;
+
+      // Fire-and-forget frames and timers, cancelled together at teardown so no
+      // callback writes to a chip or a row this feature no longer owns.
+      const frames = new Set<number>();
+      const timers = new Set<ReturnType<typeof setTimeout>>();
+      function frame(cb: () => void): void {
+        const id = requestAnimationFrame(() => {
+          frames.delete(id);
+          cb();
+        });
+        frames.add(id);
+      }
+      function after(ms: number, cb: () => void): void {
+        const id = setTimeout(() => {
+          timers.delete(id);
+          cb();
+        }, ms);
+        timers.add(id);
+      }
+      ctx.defer(() => {
+        for (const id of frames) {
+          cancelAnimationFrame(id);
+        }
+        for (const id of timers) {
+          clearTimeout(id);
+        }
+        frames.clear();
+        timers.clear();
+      });
 
       // --- Desktop right-click tab context menu (overlay region) ---
       // Replaces the old bar "Close all" button with a richer per-tab menu. Built
@@ -844,6 +651,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // same elements from their old slots to their new ones (the rotation).
       const rowEls = new Map<string, HTMLElement>();
       let activeId: string | null = null;
+      // The coalesced layout write (scheduleLayoutWrite): one PUT per macrotask.
+      let layoutWrite: ReturnType<typeof setTimeout> | null = null;
+      let warnedLayout = false;
       let draggingEl: HTMLElement | null = null;
       // --- Desktop reorder preview state (mechanism below, near dragTargetBefore) ---
       // The chips currently carrying an inline displacement from the commit slide.
@@ -884,64 +694,30 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let creatingTab = false;
       let collapseClearTimer: ReturnType<typeof setTimeout> | null = null;
       let hintShown = false;
-      // Whether to focus the input on a tab switch. On a device with a physical
-      // keyboard this is what you want (switch, then type immediately); on a
-      // keyboard-less touchscreen it must NOT happen, or every switch pops the
-      // virtual keyboard. No web API reports a hardware keyboard directly, so we
-      // combine two proxies: (1) a fine pointer (a Magic Keyboard carries a
-      // trackpad, so an iPad with one matches, as does every desktop; a bare
-      // phone / keyboard-less tablet does not) — read live, since a keyboard can
-      // be attached/detached; and (2) sawHardwareKey, latched once we observe a
-      // keydown only a hardware keyboard emits (covers a trackpad-less keyboard
-      // folio). See looksLikeHardwareKey and the keydown observer below.
+      // No web API reports a hardware keyboard, so two proxies: a fine pointer
+      // (read live, since a keyboard folio with a trackpad can be detached) and a
+      // keydown only a hardware keyboard emits (a trackpad-less folio).
       let sawHardwareKey = false;
       const hasFinePointer = (): boolean =>
         typeof window.matchMedia === "function" && window.matchMedia("(any-pointer: fine)").matches;
       const physicalKeyboardLikely = (): boolean => sawHardwareKey || hasFinePointer();
-      // Motion opt-out (checked live: the OS setting can change). Gates the
-      // interactive swipe/rotation animations, mirroring the CSS .wt-animate gate.
       const prefersReduce = (): boolean =>
         window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-      // relabelAll recomputes every tab's display label with de-duplication:
-      // when two tabs resolve to the same base label (e.g. two shells with the
-      // same window title, or two tabs whose last submitted line was identical),
-      // the second and later get a " (k)" suffix in creation order, so the strip
-      // never shows two identical labels.
-      //
-      // The OSC 9;4 percentage prefix ("78% · one") is applied HERE, at render
-      // time, and stored nowhere: `display` stays the plain de-duplicated label,
-      // so de-duplication compares real names, the rename field opens on the real
-      // name, `list()` reports the real name, and clearing the progress needs no
-      // cleanup — the next paint simply stops adding it.
+      // Recomputes every display label with de-duplication. The percentage prefix
+      // is applied at render time and stored nowhere, so de-duplication and the
+      // rename field see real names and clearing it needs no cleanup.
       function relabelAll(): void {
-        // De-duplicate identical labels with a "(k)" suffix, numbered by the session's
-        // AGE — never by its position in the strip.
-        //
-        // The suffix used to be assigned by encounter order while walking tabList, which
-        // made it a property of the SLOT: two tabs both called "workspace" always read
-        // "workspace" then "workspace (2)" whichever way round they sat, so the label
-        // text stayed put while the sessions moved underneath it. Dragging one of them
-        // changed nothing on screen, and the reorder — which had worked correctly all
-        // along, server included — was invisible. It also meant dragging tab A could
-        // renumber tab B, which is the clearest sign the number belonged to the wrong
-        // thing.
-        //
-        // A label answers "which session is this", so it has to be a property of the
-        // session: stable while other tabs move, and travelling with its own tab. Age is
-        // that key. createdAt (the server's, tie-broken by id) rather than the local
-        // `born` counter, so every device and every reload agrees on which "workspace"
-        // is (2) — `born` is adoption order, which races.
-        //
-        // Numbering is recomputed over the LIVE group each time, so it stays contiguous:
-        // closing "(2)" of three renumbers the survivor rather than leaving a hole. That
-        // is a renumber with a visible cause the user just performed, which is the one
-        // kind that reads as sensible.
+        // The "(k)" suffix is numbered by the session's AGE, never by its slot:
+        // numbered by encounter order, the labels stayed put while the sessions
+        // moved underneath them, so a reorder was invisible. Server createdAt
+        // rather than the local `born` counter, so every device agrees which
+        // "workspace" is (2). Recomputed over the LIVE group, so closing "(2)" of
+        // three renumbers the survivor.
         const groups = new Map<string, Tab[]>();
         for (const t of tabList) {
           const { text, fallback } = baseLabel(t);
-          // Fallback labels are not real names: several untitled tabs all read
-          // "New tab" with no numbering, which is the pre-existing behaviour.
+          // Several untitled tabs all read "New tab" with no numbering.
           if (fallback) {
             continue;
           }
@@ -1033,27 +809,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return active !== null && (bar.contains(active) || switcher.contains(active));
       }
 
-      // focusAfterSwitch applies the tab-switch focus rule. Two independent
-      // reasons to hand the keyboard to the terminal input:
-      //
-      //  - A physical keyboard is (likely) present, so a switch should leave you
-      //    able to type at once, with no extra tap (the iPad + Magic Keyboard
-      //    ask). Skipped on a keyboard-less touchscreen, or every switch would
-      //    pop the virtual keyboard (#7).
-      //  - The press that drove this switch took the keyboard OFF the terminal —
-      //    it focused the chip (or the x, or a switcher row) it pressed, and the
-      //    keyboard is still parked there. Handing it back is not NEW focus, so
-      //    it pops no soft keyboard: it restores what the press displaced. Both
-      //    halves are required for exactly that reason — a switch with no press
-      //    behind it (a remote adopt, ensureActive), or a press on a device where
-      //    the input was not focused to begin with, must not summon a keyboard.
-      //    Leaving the keyboard parked on a chip is not neutral either: the
-      //    strip's own keydown handling reads arrows as "switch tab" and Delete
-      //    as "close tab", so every keystroke meant for the terminal is eaten.
-      //
-      // Never while a rename field is open: it owns the keyboard until it closes,
-      // and a switch (the leading click of a double-click, a remote-driven
-      // ensureActive) would otherwise yank the caret out of the field.
+      // The keyboard goes to the terminal input when a physical keyboard is likely
+      // (on a keyboard-less touchscreen every switch would pop the soft keyboard)
+      // or when the press behind this switch parked it on the chrome, where the
+      // strip's own keydown handling would eat every keystroke; restoring what the
+      // press displaced pops no keyboard. Never while a rename field is open.
       function focusAfterSwitch(): void {
         if (editingId !== null) {
           return;
@@ -1063,22 +823,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // paintActive updates the desktop strip's active state. When the ACTIVE
-      // TAB CHANGES (tracked via lastRevealedActive — not on every chrome
-      // sync, so a user browsing a scrolled strip is never yanked back by an
-      // unrelated repaint), the newly active chip is brought into view in the
-      // overflowed scroller; inline: "nearest" is a no-op when it is already
-      // visible. The typeof guard covers an environment without scrollIntoView.
+      // The active chip is revealed in the scroller only when the ACTIVE TAB
+      // CHANGES, so a user browsing a scrolled strip is never yanked back by an
+      // unrelated repaint.
       let lastRevealedActive = "";
       function paintActive(): void {
         for (const t of tabList) {
           const on = t.id === activeId;
           t.el.classList.toggle("wt-tab-active", on);
-          // setSelected re-adds aria-selected and the roving tabindex, which would
-          // undo setEditing(true) on the chip hosting the rename field — and
-          // syncChrome runs on every status event, so that happens within a tick.
-          // The chip regains its semantics from endEdit's setEditing(false), which
-          // reads the CURRENT selected state.
+          // setSelected would undo setEditing(true) on the chip hosting the rename
+          // field within a tick; endEdit restores the semantics from the CURRENT
+          // state.
           if (t.id !== editingId) {
             t.aria.setSelected(on);
           }
@@ -1095,7 +850,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // syncMobile updates the bottom bar: active label + dot, and the aggregate
       // needs-input cue. The cue rides the active surface: a background tab
       // blocked on input is glanceable, and tapping/swiping opens the list to
-      // resolve it (section 12).
+      // resolve it.
       function syncMobile(): void {
         const idx = tabList.findIndex((t) => t.id === activeId);
         const active = idx >= 0 ? tabList[idx] : undefined;
@@ -1180,17 +935,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             animateRowIn(row); // grow + fade in (the tray height follows)
           }
         }
-        // Publish the measured content height so the expanded list animates its
-        // max-height between 0 and the REAL content height (--wt-list-h in
-        // 06-mobile.css), not a fixed 50dvh far larger than the content — which
-        // made the open finish early and the close start late (box height =
-        // min(content, max-height), so the transition's stretch past the content
-        // moved nothing: the asymmetric, choppy toggle). scrollHeight is the full
-        // content height regardless of the collapsed max-height:0 clip, so this
-        // is valid whether measured while collapsed (on open, before the expanded
-        // class) or already open (a tab added/closed). Capped at 50dvh (then
-        // overflow-y:auto scrolls). This works without interpolate-size (iOS
-        // Safari lacks it), unlike a height:auto transition.
+        // The list animates its max-height to the REAL content height, not a fixed
+        // 50dvh: the stretch past the content moved nothing, so the open finished
+        // early and the close started late. scrollHeight is the full height under
+        // the collapsed max-height:0 clip, and this needs no interpolate-size,
+        // which iOS Safari lacks.
         const visH = window.visualViewport?.height ?? window.innerHeight;
         switcher.style.setProperty(
           "--wt-list-h",
@@ -1198,31 +947,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         );
       }
 
-      // clearRows empties the list and drops the reused-row cache (after a
-      // collapse), so the next expand rebuilds fresh rather than reusing rows
-      // that might carry a stale reel transform.
+      // Drops the reused-row cache too, so the next expand cannot reuse a row
+      // carrying a stale reel transform.
       function clearRows(): void {
         endReelNow();
         swList.replaceChildren();
         rowEls.clear();
       }
 
-      // The circular-queue rotation, as a true reel: when a swipe switches the
-      // active tab while the list is expanded, every surviving row slides one
-      // slot (the rows visibly rotate past a fixed frame), the row that becomes
-      // active exits the leading edge, and the row that was active enters the
-      // trailing edge. It is a FLIP over reused row elements: prepareReel (run
-      // BEFORE syncChrome reconciles the list) snapshots the current row pixel
-      // positions and lifts the leaving row out of the flow as an absolute ghost
-      // so the reconcile can't reshuffle the survivors; the returned closure
-      // (run AFTER the reconcile) inverts every row to its old spot and releases
-      // it to the new one, and slides the ghost out. Pixel positions make it
-      // correct regardless of the row gap, list padding, or separator border.
+      // The expanded list rotates as a reel on a swipe: a FLIP over reused rows.
+      // prepareReel (BEFORE the reconcile) snapshots row positions and lifts the
+      // leaving row out of the flow as an absolute ghost so the reconcile cannot
+      // reshuffle the survivors; the returned closure (AFTER it) inverts every
+      // row to its old spot and releases it. Pixel positions, so the row gap and
+      // separators cannot make it wrong.
       const REEL_MS = 300;
       let reelTimer: ReturnType<typeof setTimeout> | null = null;
       let reelGhost: HTMLElement | null = null;
-      // endReelNow settles any in-flight reel immediately: drop the ghost, clear
-      // the row transforms, and hand overflow/position back to the stylesheet.
       function endReelNow(): void {
         if (reelTimer !== null) {
           clearTimeout(reelTimer);
@@ -1292,23 +1033,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           ghost.style.transition = "none";
           ghost.style.transform = "translateY(0)";
           ghost.style.opacity = "1";
-          // Commit the from-state (transforms + opacities) with a forced reflow
-          // BEFORE the to-state, so BOTH the transform and the opacity transitions
-          // fire from it. The prior code used a bare rAF (letting the browser
-          // collapse from->to into one recalc) and reverted the entering row's
-          // opacity to "" (no explicit end value), so the fade never animated
-          // (the reported "no fade in / fade out"). The modern display/visibility
-          // transition (transition-behavior: allow-discrete + @starting-style,
-          // Baseline 2024) does NOT apply here: these rows are reused and moved by
-          // a JS transform FLIP, not toggled via display:none, so the reliable
-          // path is a real reflow plus an explicit opacity transition.
-          swList.getBoundingClientRect(); // read forces the reflow (commit the from-state)
-          // Couple opacity to the SAME easing + duration as the transform so a
-          // row's fade tracks its DISTANCE from its target slot (each reel row
-          // travels one pitch): a row is transparent a pitch away (at the clipped
-          // edge) and only fully opaque once it settles. Entering rows fade IN as
-          // they rotate in, the leaving row fades OUT as it exits: no hard cutoff
-          // at the list edges and no permanent edge mask.
+          // A forced reflow commits the from-state BEFORE the to-state, or the
+          // browser collapses the two into one recalc and nothing animates. The
+          // end opacity is explicit for the same reason; a bare "" never faded.
+          // @starting-style does not apply: these rows are moved by a JS FLIP, not
+          // toggled through display.
+          swList.getBoundingClientRect();
+          // Opacity shares the transform's easing so a row's fade tracks its
+          // DISTANCE from its slot: transparent a pitch away, opaque once settled.
           const trans =
             "transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.25s cubic-bezier(0.2, 0, 0, 1)";
           for (const el of rowEls.values()) {
@@ -1328,12 +1060,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         relabelAll();
         paintActive();
         syncMobile();
-        // The dedicated switch button only earns its place once there are ≥2
-        // tabs (a single tab has nothing to switch to; expandSwitcher no-ops
-        // there). .wt-switcher-multi drives its collapse-when-single / animate-in
-        // -when-a-second-opens motion in CSS (the active chip shrinks to make
-        // room in lockstep, via the flex layout); aria-hidden + tabindex keep the
-        // collapsed button out of the a11y tree and tab order.
+        // A single tab has nothing to switch to; aria-hidden and tabindex keep the
+        // collapsed button out of the a11y tree and the tab order.
         const multiTab = tabList.length >= 2;
         switcher.classList.toggle("wt-switcher-multi", multiTab);
         swSwitch.setAttribute("aria-hidden", multiTab ? "false" : "true");
@@ -1343,50 +1071,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         maybeSwipeHint();
         applyServerOrder();
-        // Hung off syncChrome for the reason applyServerOrder is: it is the one
-        // function every list mutation already ends with (reorder, create, adopt,
-        // close, reconcile), so no path can forget the out-of-page surfaces. The
-        // fold is idempotent and the sinks no-op when unchanged, so running it
-        // this often costs a comparison.
+        // Every list mutation ends in syncChrome, so no path can forget the
+        // out-of-page surfaces; the fold is idempotent and the sinks no-op.
         paintAttention();
       }
 
-      // The percentage is deliberately NOT written into the browser document
-      // title. ConEmu's spec names the taskbar/title as a display site, and a
-      // page's document title is the nearest analogue — but a page has exactly
-      // ONE title while this UI multiplexes many sessions, so any rule for
-      // choosing whose percentage it shows is arbitrary. Even restricted to the
-      // active tab it churns a surface that doubles as the browser-tab label and
-      // the bookmark name, and it invites reading one session's progress as the
-      // window's. The per-chip prefix carries the same information without the
-      // conflict, because each chip shows its own session. Do not add it back.
-      //
-      // What DOES go there is the unseen-cue COUNT (see paintAttention), and it
-      // is not a softening of this rule: a count names no session, so it needs no
-      // arbitrary choice, and it changes only when a cue is raised or acknowledged
-      // rather than on every progress tick. A per-session value in that prefix
-      // would be this same mistake in a new place.
+      // The percentage is deliberately NOT written into the document title: a page
+      // has ONE title over many sessions, so any rule for whose percentage it shows
+      // is arbitrary, and it churns the browser-tab label and bookmark name. The
+      // unseen-cue COUNT is not a softening of this rule: it names no session.
 
-      // applyServerOrder re-sorts the strip into the order the SERVER holds, and
-      // is the read half of tab-order sync: a drag on another device arrives as a
-      // new `order` on that session's status event, and this is what turns it into
-      // a moved chip here.
-      //
-      // It hangs off syncChrome — the one function every list mutation already
-      // ends with (reorder, create, adopt, close, reconcile) — so no path can
-      // forget it. Three properties make that safe to run that often:
-      //
-      //  - It is a no-op when the strip already matches, decided by one pass over
-      //    the list, so the status tick pays a comparison and nothing else.
-      //  - It is skipped mid-drag. The pointer owns the strip then, and the DOM
-      //    holds a preview that is deliberately not yet in tabList; re-sorting
-      //    under the user's finger would fight the gesture.
-      //  - It sorts by the same total order adoption inserts by (compareTabOrder),
-      //    so the two cannot disagree about where a tab belongs.
-      //
-      // A locally-committed reorder is already applied optimistically, and the
-      // server echoes that same arrangement back, so the echo lands here as a
-      // no-op rather than as a second visible move.
+      // The read half of tab-order sync, hung off syncChrome so no path can forget
+      // it. Safe that often because it is a no-op when the strip already matches,
+      // skipped mid-drag (the DOM then holds a preview not yet in tabList), and
+      // sorted by the same order adoption inserts by.
       function applyServerOrder(): void {
         if (draggingEl !== null) {
           return;
@@ -1523,9 +1221,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // strip, where the animation never fires.
         if (started) {
           el.classList.add("wt-tab-enter");
-          setTimeout(() => {
+          after(300, () => {
             el.classList.remove("wt-tab-enter");
-          }, 300);
+          });
         }
 
         const tab: Tab = {
@@ -1725,16 +1423,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       function switchTo(id: string, dir?: "next" | "prev"): void {
         if (id === activeId) {
-          // Already active, so there is no switch to perform — but the FOCUS rule
-          // still owes an answer, because the press that delivered this click has
-          // already moved the keyboard onto the chip. Two pointer paths land here:
-          // clicking the tab that is already active, and the SECOND activation of
-          // one press on another tab (see create() for the evidence that this
-          // device delivers those). The first activation switches and focuses the
-          // terminal; the second one's mousedown re-focuses the chip and then fell
-          // out here with the keyboard stranded on it — the reported "the
-          // invisible input loses focus when I click another tab", and the same
-          // hole a plain mouse click on the active tab hit on every platform.
+          // The press that delivered this click has already moved the keyboard onto
+          // the chip, so the FOCUS rule still owes an answer or the input stays
+          // stranded (a click on the active tab, or the second activation of one
+          // press).
           focusAfterSwitch();
           return;
         }
@@ -1742,10 +1434,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!next) {
           return;
         }
-        // Derive a slide direction from the index delta when the caller did not
-        // give one (a desktop tab click, a sheet select): moving to a later tab
-        // slides the incoming content in from the right, an earlier tab from the
-        // left, so desktop switches feel like the mobile swipe.
+        // A later tab slides in from the right, an earlier one from the left, so a
+        // desktop switch feels like the mobile swipe.
         let slide = dir;
         if (slide === undefined && activeId !== null) {
           const from = tabList.findIndex((t) => t.id === activeId);
@@ -1754,24 +1444,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             slide = to > from ? "next" : "prev";
           }
         }
-        // Detach the current tab: save its reading position (keep its cache).
-        // Read through the engine's view seam, never surface.scrollTop — the
-        // renderer owns the mapping from scroll position to absolute line, and a
-        // LINE is what survives the rebuild and the background output this tab's
-        // session may produce before we come back (engine
-        // docs/scroll-position-fidelity.md §3.1).
+        // A LINE, never surface.scrollTop: the line survives the rebuild and the
+        // background output this tab's session produces before we come back.
         const cur = tabList.find((t) => t.id === activeId);
         if (cur) {
           cur.view = ctx.render.captureViewMemory();
         }
-        // Decide whether to animate the expanded list as a rotation: only a
-        // swipe to an adjacent tab while the list is open. prepareReel snapshots
-        // the rows BEFORE the reconcile below; the returned closure FLIPs them
-        // into their new slots after it.
+        // The expanded list rotates only for a swipe to an adjacent tab, wrap
+        // between first and last included. prepareReel snapshots the rows BEFORE
+        // the reconcile; the returned closure FLIPs them after it.
         const fromIdx = tabList.findIndex((t) => t.id === activeId);
         const toIdx = tabList.findIndex((t) => t.id === next.id);
-        // A one-step move: adjacent, OR a wrap between the first and last tab
-        // (index gap n-1), since the list rotates infinitely.
         const stepGap = Math.abs(toIdx - fromIdx);
         let playReel: (() => void) | undefined;
         if (
@@ -1783,44 +1466,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ) {
           playReel = prepareReel(slide, next);
         }
-        // Attach the next tab: point the renderer at its cached store and
-        // rebuild viewport-first, so the last-known screen paints with no
-        // round-trip. Then let the kernel reconnect the WS to it (resume delta).
-        //
-        // The view goes in WITH the bind, which is what makes the swap atomic.
-        // The engine's follow flag is GLOBAL (one per kernel), so the first
-        // flush after a bind is gated on whatever state the tab we LEFT was in:
-        // binding a following tab right after being scrolled up in another left
-        // the controller holding, the post-flush stickToBottom() no-op'd, and the
-        // cached screen rendered above the viewport — a black gap until a touch
-        // scrolled it and re-engaged follow (the "content pops down when I
-        // wiggle it" symptom). bind adopts the incoming follow state
-        // synchronously, before the wipe, and re-asserts the incoming reading
-        // POSITION across the rebuild's frames until the line it names has
-        // actually been built. That second half is why this is no longer a
-        // fire-and-forget rAF: a single deferred write landed while only ~301 of
-        // up to 5000 rows existed, so the browser clamped it away and nothing
-        // retried (engine docs/scroll-position-fidelity.md §1.1, §3.3, §3.4).
+        // The view goes in WITH the bind, which makes the swap atomic: the pane's
+        // follow flag is one per renderer, so a bind without it gated the first
+        // flush on the state of the tab we LEFT and the cached screen rendered
+        // above the viewport until a touch re-engaged follow.
         activeId = next.id;
-        // Arriving on the tab that raised the switch-button cue resolves it
-        // (a swipe through the tabs must dismiss the dot, not only opening the
-        // list). Its current latch is acknowledged whether or not it was the
-        // cue's subject: the terminal is now on screen, so a reload must not
-        // notify about a state the user just looked at.
+        // The terminal is now on screen, so a reload must not notify about a state
+        // the user just looked at.
         acknowledgeSwitchNotify(next.id);
         markCueSeen(next.id, next.dot.dataset["status"] ?? "");
-        try {
-          localStorage.setItem(ACTIVE_TAB_KEY, next.id);
-        } catch {
-          /* storage unavailable (private mode / disabled) — non-fatal */
-        }
         ctx.render.bind(next.store, { view: next.view });
         ctx.notifySwitch({ id: next.id });
-        // Arm on a switch only when the user is actually about to wait: either
-        // the bind queued a backlog worth several frames, or the incoming tab has
-        // no cached content at all (a first visit, so its whole screen is coming
-        // over the network). A revisited tab with a warm store paints from cache
-        // in one frame and must not flash a cue at every switch.
+        scheduleLayoutWrite();
+        // Only when the user is about to wait: a revisited tab with a warm store
+        // paints from cache in one frame and must not flash a cue at every switch.
         if (
           ctx.render.pendingRowCount() > CATCHUP_MIN_BACKLOG ||
           ctx.render.getHighestIndex() < 0
@@ -1838,30 +1497,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         focusAfterSwitch();
       }
 
-      // armCatchup shows the "catching up" cue while the surface still has a
-      // large backlog of rows to build, and clearCatchup hides it and stops the
-      // completion poll.
-      //
-      // What it measures is the RENDER backlog (render.pendingRowCount): rows the
-      // store already holds that have not been built into DOM yet. That is the
-      // thing the user is actually waiting on, whatever produced it — a resume
-      // replay after a wake, the rebuild after a tab switch, or a program that
-      // printed a few thousand lines at once.
-      //
-      // Two earlier conditions were tried and are wrong, so do not go back to
-      // them. Clearing on the first screen frame fires long before a large
-      // restore has landed (the frame that carries the live window arrives
-      // first). Comparing the store's highest index against the resumeAck's
-      // `committed` fails for the same reason and more sharply: the window frame
-      // delivers the HIGHEST indices, so highest reaches the target while every
-      // history line below it is still in flight. Measured on a 4000-line phone
-      // restore: the cue cleared immediately and stayed clear for the whole fill.
-      // catchupWarranted: the surface still owes the user content. Either rows are
-      // queued for building (a resume replay, a switch rebuild, a large burst), or
-      // the tab holds nothing at all, which means its screen is still on the
-      // network. The second half matters as much as the first: without it, the
-      // case the cue is most needed for — switching into a tab that has never been
-      // viewed — has an empty queue and would never show it.
+      // The "catching up" cue measures the RENDER backlog, which is what the user
+      // waits on whatever produced it. Not the first screen frame and not the
+      // resumeAck's `committed`: the window frame delivers the HIGHEST indices
+      // first, so both cleared a 4000-line restore at once. The second half covers
+      // a never-viewed tab, whose queue is empty while its screen is on the network.
       const catchupWarranted = (): boolean =>
         ctx.render.pendingRowCount() > 0 || ctx.render.getHighestIndex() < 0;
 
@@ -1869,12 +1509,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (catchupTimer === null && !catchup.classList.contains("visible")) {
           catchupTimer = setTimeout(() => {
             catchupTimer = null;
-            // Re-check before showing. The delay is anti-flicker, so it has to
-            // ask again at the end of it: a burst that arms the cue and then
-            // drains inside the delay has nothing to report, and showing it
-            // anyway guaranteed a visible flash on every large-but-fast burst
-            // (the clear path needs CATCHUP_SETTLE_MS of quiet, so the flash
-            // outlived the backlog it described).
+            // A burst that drains inside the anti-flicker delay has nothing to
+            // report, and the clear path needs CATCHUP_SETTLE_MS of quiet.
             if (catchupWarranted()) {
               catchup.classList.add("visible");
             }
@@ -1886,9 +1522,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           pollCatchup();
         }
       }
-      // pollCatchup runs on rAF because completion is a RENDER condition and the
-      // renderer has no event for "queue drained". It stops itself, so the loop
-      // only exists while the cue does.
+      // On rAF because the renderer has no event for "queue drained".
       function pollCatchup(): void {
         catchupPoll = requestAnimationFrame(() => {
           catchupPoll = null;
@@ -1919,63 +1553,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         catchupEmptySince = 0;
         catchup.classList.remove("visible");
       }
-      // flashSwitch plays the switch animation the animations feature keys off
-      // (a no-op when animations are absent or reduced-motion is set). With a
-      // direction the incoming content slides in from that side (the swipe
-      // feel); without one it is a plain cross-fade. The rAF re-adds the class a
-      // frame after clearing it so a rapid re-switch restarts the animation.
-      //
-      // The class comes off on the animation's OWN end, with the timer kept as
-      // the net. Two numbers had to agree and did not: the CSS duration is
-      // --dur-standard (0.2s) and this timer is 360ms, so the class outlived the
-      // animation by ~144ms (the add is deferred one rAF), which on a tab above
-      // ~3000 rows lands in the middle of the rebuild's drain. Reading the event
-      // makes the timer a fallback instead of the primary signal.
-      //
-      // The timer CANNOT be dropped, and three cases are why:
-      //  - an interrupted animation fires no animationend, and animationcancel is
-      //    not reliably delivered in Blink. A rapid re-switch is exactly that
-      //    case, and it is the case the rAF above exists to serve.
-      //  - the animations feature is optional and removes .wt-animate under
-      //    reduced motion, so no animation runs and no event ever fires.
-      //  - a consumer stylesheet could drop the rules entirely.
-      //
-      // The listener filters on the ONE animation name this switch expects AND on
-      // the class still being present. Three notes, because each was argued:
-      //  - The name must be the expected one, not any of the three. An animation
-      //    that COMPLETED just as a re-switch landed has its event already queued;
-      //    the old listener is gone by dispatch time, so the NEW listener receives
-      //    it, and a listener accepting all three names would let switch N's
-      //    completion end switch N+1's animation a frame in.
-      //  - The class check closes the window BEFORE the animation starts. The
-      //    listener is attached in this task and the class lands a frame later, so
-      //    for one frame a matching `animationend` from anywhere in the subtree
-      //    would cancel the pending class-add and skip the animation outright. An
-      //    animationend cannot precede its own animation, so requiring the class is
-      //    free.
-      //  - No generation counter, and no target check. A generation was tried and
-      //    removed: `endSwitchAnim` removes the listener synchronously before the
-      //    next one is added, so a stale listener cannot receive an event and the
-      //    counter could never fire (its red check could not be made to fail). A
-      //    target check would couple this feature to the kernel's `.term-output`
-      //    markup, which it does not own; the residual risk is a consumer applying
-      //    one of these three library-private keyframe names to another element
-      //    inside the surface, and the class check already reduces that to "ends a
-      //    running switch animation early" rather than "skips it".
+      // The switch class comes off on the animation's OWN end; the timer is the
+      // net, and it cannot be dropped: an interrupted animation fires no
+      // animationend (animationcancel is unreliable in Blink), reduced motion
+      // removes .wt-animate so no event ever fires, and a consumer stylesheet may
+      // drop the rules. The listener filters on the ONE expected animation name
+      // (switch N's queued completion would otherwise end switch N+1's animation)
+      // AND on the class being present (the class lands a frame after the listener).
       const SWITCH_ANIM_NET_MS = 360;
       let switchAnimTimer: ReturnType<typeof setTimeout> | null = null;
       let switchAnimFrame: number | null = null;
       let switchAnimOff: (() => void) | null = null;
 
-      // Drop the classes and every pending mechanism from the previous switch.
-      // All three are torn down together: a stray timer or listener from switch N
-      // would otherwise strip the class switch N+1 has just added, and a surviving
-      // rAF would ADD the previous direction's class alongside the new one. That
-      // last one predates this change, and its consequence is not "two animations
-      // at once" — the cascade picks one winner for the `animation` property, and
-      // the winner is whichever of the three rules comes LAST in the stylesheet
-      // (`wt-switching-prev`), regardless of which switch the user actually made. So
-      // a forward switch could animate backwards.
+      // All three torn down together: a surviving rAF would ADD the previous
+      // direction's class beside the new one, and the cascade's winner is the LAST
+      // rule in the stylesheet, so a forward switch could animate backwards.
       function endSwitchAnim(surface: HTMLElement): void {
         surface.classList.remove(...SWITCH_CLASSES);
         if (switchAnimTimer !== null) {
@@ -2076,72 +1668,24 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // --- Desktop reorder preview: sweep, rest, slide ------------------------
-      //
-      // The old reorder moved the dragged chip on EVERY dragover, so the strip
-      // rearranged itself continuously under the pointer and — every chip being
-      // the same width — nothing on screen said which slot a release would land
-      // in. The chip you were dragging looked like the slot it left, the slot it
-      // was over, and the slot it would end up in.
-      //
-      // The preview answers a MOVING pointer and a STOPPED one differently, and the
-      // dragged chip stays in the flow throughout as the slot it will land in
-      // (`.wt-tab-dragging`, which 30-tabs.css renders as an empty dashed outline
-      // rather than a dimmed copy of the tab — the solid copy is the drag image
-      // under the pointer, and one of the two had to stop pretending to be the tab):
-      //
-      //  - SWEEPING across the strip rearranges NOTHING. Crossing five tabs used to
-      //    move all five, which is the whole complaint.
-      //  - COMING TO REST opens the slot (trackRest -> commitSlot): one DOM move,
-      //    the displaced chips slide from their old positions to their new ones, and
-      //    the slot fades in at its new home.
-      //
-      // Rest is DETECTED, not waited out: REORDER_REST_MS is re-armed by movement, so
-      // it expires a rest window after the last MOVEMENT rather than a fixed time
-      // after a decision. Two shapes were tried and removed before this one, and both
-      // failures are worth keeping: a fixed one-second HOLD (wrong shape for a direct
-      // manipulation — it delayed the one case that should be instant, and grew a
-      // progress bar to explain the wait, which is the tell that the wait should not
-      // have been there), and a sweep-time LEAN of the chips a commit would displace
-      // (it read as a second, competing preview and its distance from the real move
-      // was too small to tell them apart).
-      //
-      // A release never waits either: `drop` commits whatever slot is pending
-      // (the drop handler commits the slot under the pointer), so dropping mid-sweep
-      // still lands the tab exactly where it was headed.
-      //
-      // dropTargetBefore returns the first tab whose horizontal midpoint is past
-      // x (the element the dragged tab should sit before), or null to drop at the
-      // end of the tab list. syncOrderFromDom rebuilds tabList to match the
-      // strip's DOM order after a drag, so position indicators, the switcher, and
-      // close-to-the-right/left all follow the visible order.
-      //
-      // It hit-tests LAYOUT geometry (offsetLeft/offsetWidth), never
-      // getBoundingClientRect. That is not an optimisation, it is what makes an
-      // animated reorder hit-testable at all: a rect read while a chip is mid-slide
-      // returns the INTERPOLATED position, so the preview's own motion feeds
-      // back into the decision that produced it and the strip oscillates between two
-      // slots for as long as the pointer sits near a boundary. Layout offsets are the
-      // chip's position in the FLOW, which a transform does not affect at all.
-      //
-      // An earlier draft instead cached rects measured "at rest" and re-measured after
-      // each commit. Two things killed it: the cache had to be invalidated on anything
-      // that reflowed the strip (a window or embed resize changes every chip's midpoint
-      // without changing the chip SET, which was the only thing the cache checked), and
-      // it could capture a transform anyway, because a chip adopted mid-drag arrives
-      // mid `.wt-tab-enter` scale. Reading layout needs no cache and cannot go stale.
-      //
-      // Coordinates: chips share the scroller's offsetParent (the scroller is not
-      // positioned, so it is not one), which makes `el.offsetLeft - scroller.offsetLeft`
-      // the chip's offset inside the scroller — and the scroller has no border for that
-      // subtraction to skip. Layout offsets ignore scrolling, so clientX is converted
-      // into the same space by adding scrollLeft back, which is what lets a scrolled
-      // strip hit-test correctly.
+      // A MOVING pointer rearranges nothing and a STOPPED one opens the slot; the
+      // dragged chip stays in the flow as the slot it will land in, drawn as a
+      // dashed outline because the solid copy is the drag image under the pointer.
+      // Rest is detected from movement, not waited out (a fixed hold delayed the
+      // one case that should be instant), and a drop commits the slot under the
+      // pointer at once.
+
+      // The first tab whose midpoint is past x, or null for the end. Hit-tests
+      // LAYOUT geometry, never a rect: a rect read mid-slide is the INTERPOLATED
+      // position, so the preview's own motion fed back into the decision and the
+      // strip oscillated near a boundary. Layout offsets ignore scrolling, so
+      // clientX is converted by adding scrollLeft back.
       function dropTargetBefore(clientX: number): HTMLElement | null {
         const x = clientX - scroller.getBoundingClientRect().left + scroller.scrollLeft;
         const base = scroller.offsetLeft;
         for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab")) {
           if (el === draggingEl) {
-            continue; // the slot does not displace itself
+            continue;
           }
           if (x < el.offsetLeft - base + el.offsetWidth / 2) {
             return el;
@@ -2150,19 +1694,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return null;
       }
 
-      // applyShift writes one displacement per chip and remembers which chips are
-      // carrying one. `trans` is REORDER_SHIFT_TRANS to animate to the new value,
-      // or "none" to plant a from-state the next write animates out of.
-      //
-      // It writes the individual `translate` property, NOT `transform`, and that is
-      // load-bearing rather than stylistic. Declarations from a running CSS ANIMATION
-      // out-rank normal author declarations, inline style included, so a chip in the
-      // middle of `wt-slot-in` (`transform: scale(0.97)`) or `wt-tab-in`
-      // (`transform: scale(0.82)`) would silently ignore an inline `transform` and
-      // refuse to move: an Escape landing inside the slot fade would snap the dragged
-      // chip home while its siblings slid. `translate` is a separate property that
-      // composes with `transform` instead of fighting it, so the two animations can own
-      // one chip at the same time.
+      // `translate`, NOT `transform`: a running CSS ANIMATION out-ranks inline
+      // style, so a chip mid `wt-slot-in` or `wt-tab-in` (both `transform: scale`)
+      // would ignore an inline transform and refuse to move. `translate` composes
+      // with it instead, so the two can own one chip at the same time.
       function applyShift(px: ReadonlyMap<HTMLElement, number>, trans: string): void {
         if (shiftTimer !== null) {
           clearTimeout(shiftTimer);
@@ -2174,10 +1709,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           shifted.add(el);
         }
       }
-      // endShift hands every displaced chip back to the stylesheet. Both stages
-      // write the same two inline properties, so this one function ends whichever
-      // ran last — called before a fresh measurement, by the settle timer after a
-      // slide, when the drag ends, and on teardown. Idempotent.
+      // Hands every displaced chip back to the stylesheet. Idempotent.
       function endShift(): void {
         if (shiftTimer !== null) {
           clearTimeout(shiftTimer);
@@ -2190,25 +1722,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         shifted.clear();
       }
 
-      // trackRest is the whole gate, called on every dragover over the strip.
-      //
-      // Sweeping and settling are DIFFERENT actions and get different answers. A
-      // travelling pointer rearranges nothing at all; the moment it comes to REST the
-      // slot opens.
-      //
-      // Rest is detected from TWO signals, and separating them is what lets the slot
-      // open promptly without a fast sweep committing every slot it crosses:
-      //
-      //  - a `dragover` at an unchanged position is POSITIVE evidence of a stop, so it
-      //    commits after a short REORDER_STILL_MS confirmation. This is the signal that
-      //    normally decides, and the reason the delay is short.
-      //  - the absence of events is only a FALLBACK (armRestNet), for a browser that
-      //    stops delivering dragover entirely. That one has to out-wait the drag loop's
-      //    350ms cadence, so it is long — and it is rarely what decides.
-      //
-      // One quiet window had to serve both jobs before this, which is why it could not be
-      // shortened: the timer deciding responsiveness was the same one that had to survive
-      // the cadence.
+      // A travelling pointer rearranges nothing; the slot opens when it comes to
+      // REST. A dragover at an unchanged position is POSITIVE evidence of a stop
+      // and commits after the short REORDER_STILL_MS; the absence of events is only
+      // a fallback that must out-wait the drag loop's 350 ms cadence.
       function trackRest(clientX: number): void {
         const dragged = draggingEl;
         if (!dragged) {
@@ -2220,32 +1737,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (moved) {
           restMovedAt = now;
         }
-        // The candidate is recomputed from THIS event, every time, and the commit below
-        // uses that value rather than anything stored. That is the fix for a real
-        // unreliability, so it must not be refactored back into a pending-target field:
-        //
-        // There used to be a `restBefore` holding the pending slot, and both the
-        // already-there branch and the leave-the-strip paths nulled it. So a drag that
-        // passed through "already there" on its way somewhere else lost the pending
-        // state, and the stillness branch below — which then early-returned because no
-        // timer was armed — committed NOTHING when the pointer stopped. The tab stayed on
-        // its previous slot until the user jiggled the mouse to re-arm, which is exactly
-        // the reported "it does not let go of the old drop spot". It hit leftward drags
-        // hardest, because after each commit the dragged chip sits immediately left of
-        // where the pointer is heading, so `nextElementSibling` matches constantly.
+        // Recomputed from THIS event, never a stored pending target: a stored one
+        // was nulled by the already-there branch on the way past, so a stop after it
+        // committed NOTHING until the mouse was jiggled.
         const before = dropTargetBefore(clientX);
-        // Already the slot it would land in, so there is nothing to commit. Only the net
-        // is dropped; there is no pending target left to lose.
         if (before === dragged.nextElementSibling) {
           endRestNet();
           return;
         }
-        // A dragover at an UNCHANGED position is positive evidence that the pointer has
-        // stopped, which is a far stronger signal than the absence of events — and it is
-        // what lets the slot open promptly instead of out-waiting the drag loop's 350ms
-        // cadence. The elapsed check filters the coincidence where one event of a sweep
-        // lands within REORDER_MOVE_EPS_PX of the previous (a reversal, or a frame whose
-        // motion was almost all vertical); a real stop clears it on the next event.
+        // The elapsed check filters one event of a sweep landing within the epsilon
+        // of the previous (a reversal, or a mostly vertical frame).
         if (!moved && now - restMovedAt >= REORDER_STILL_MS) {
           endRestNet();
           commitSlot(before);
@@ -2253,12 +1754,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         armRestNet(before);
       }
-      // armRestNet is the no-events fallback: if dragover stops arriving altogether, no
-      // stationary event will ever confirm the stop, so this commits anyway. It carries
-      // its own target for the same reason trackRest recomputes one — a net whose target
-      // lived in shared mutable state was how the old pending slot got lost. Sized to
-      // out-wait the cadence (see REORDER_REST_MS) because it is the one timer a fast
-      // sweep could otherwise expire between two of its own events.
+      // The no-events fallback for a browser that stops delivering dragover; it
+      // carries its own target for the reason trackRest recomputes one.
       function armRestNet(before: HTMLElement | null): void {
         endRestNet();
         restTimer = setTimeout(() => {
@@ -2273,45 +1770,28 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // flipTo runs a rearranging mutation and animates its result: every chip that
-      // ends up somewhere new slides there from where it was. One function for both
-      // directions of the preview — committing a slot, and reverting the whole
-      // gesture — because "the strip rearranged, show the rearrangement" is one job,
-      // and a revert that snapped while a commit slid would read as two different
-      // features.
-      //
-      // `hold` is the one chip that must NOT slide. On a commit that is the dragged
-      // chip: it is the slot, the pointer is already carrying a solid copy of it,
-      // and a hole travelling across the strip alongside that copy is two things
-      // moving at once. On a revert nothing is held — the drag image is gone by
-      // then, so the chip has to travel home itself.
+      // FLIP a rearranging mutation so every chip that ends up somewhere new slides
+      // there. `hold` is the one chip that must NOT slide: on a commit the dragged
+      // chip, since the pointer already carries a solid copy of it.
       function flipTo(mutate: () => void, hold: HTMLElement | null): void {
-        // Reduced motion: perform the rearrangement and animate none of it. The gate
-        // belongs HERE and not only in the CSS, because these transitions are written
-        // inline and no stylesheet gate can reach them; the switcher's release reel
-        // guards its own call site the same way. Read live, so toggling the OS setting
-        // mid-drag takes effect on the very next commit.
+        // The gate belongs HERE and not only in the CSS: these transitions are
+        // written inline, and no stylesheet gate can reach them.
         if (prefersReduce()) {
           endShift();
           mutate();
           return;
         }
-        // FIRST — where each chip is right now, MID-SLIDE INCLUDED, so a second commit
-        // continues from wherever the first one got to instead of jumping back through
-        // rest first. The switcher's release reel captures its live swipe preview the
-        // same way, and for the same reason. Rects, not layout offsets: this is VISUAL
-        // position, which is what the animation interpolates (hit-testing wants the
-        // opposite, see dropTargetBefore).
+        // Where each chip is right now, MID-SLIDE INCLUDED, so a second commit
+        // continues from wherever the first got to. Rects, because this is VISUAL
+        // position; hit-testing wants layout offsets instead.
         const first = new Map<HTMLElement, number>();
         for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab")) {
           if (el !== hold) {
             first.set(el, el.getBoundingClientRect().left);
           }
         }
-        endShift(); // back to the resting layout before the DOM moves
+        endShift();
         mutate();
-        // LAST — the new resting layout. No style is written between the reads below,
-        // so they are all served from one layout pass.
         const invert = new Map<HTMLElement, number>();
         for (const [el, was] of first) {
           const dx = el.isConnected ? was - el.getBoundingClientRect().left : 0;
@@ -2320,12 +1800,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
         }
         if (invert.size === 0) {
-          return; // nothing moved on screen (every box measured zero)
+          return;
         }
         applyShift(invert, "none");
-        // The read forces the reflow that COMMITS the from-state. Without it the
-        // browser is free to collapse the from- and to-writes into one recalc and
-        // no transition runs at all — the exact trap the reel documents.
+        // The read forces the reflow that COMMITS the from-state; without it the two
+        // writes collapse into one recalc and no transition runs.
         scroller.getBoundingClientRect();
         const rest = new Map<HTMLElement, number>();
         for (const el of invert.keys()) {
@@ -2335,38 +1814,22 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         shiftTimer = setTimeout(endShift, REORDER_SETTLE_MS);
       }
 
-      // commitSlot performs the reorder the hold earned: one DOM move, the slide
-      // that shows it, and the slot fading in at its new home.
-      //
-      // It moves the DOM and NOT tabList. That split is what makes the preview a
-      // preview: tabList stays the arrangement the gesture started from for the
-      // whole drag, and only a drop writes it (syncOrderFromDom). Two things fall
-      // out of it for free — a cancel is just "re-project tabList" (revertPreview),
-      // and a syncChrome arriving mid-drag from an unrelated source (a status tick,
-      // an OSC title) renders the committed order rather than flickering through
-      // whatever the pointer is hovering.
-      //
-      // The caller nulls `restTimer` BEFORE calling in (both the rest timer and
-      // flushRest do), so `cancelRest` is already a no-op by the time control arrives
-      // here: an early return must leave nothing behind that only cancelRest would
-      // Nothing exists pre-commit for it to have cleared, and a slide already in flight
-      // is owned by its own settle timer.
+      // Moves the DOM and NOT tabList, which is what makes the preview a preview:
+      // only a drop writes tabList, so a cancel is a re-projection and a syncChrome
+      // arriving mid-drag renders the committed order.
       function commitSlot(before: HTMLElement | null): void {
         const dragged = draggingEl;
         if (!dragged?.isConnected) {
-          return; // the dragged session was closed elsewhere mid-gesture
+          return;
         }
-        // The pending slot was chosen a rest window ago, and a session closed in another
-        // window (an SSE push, or the poll reconcile) removes chips through dropTab while
-        // this gesture is still open — so the reference node may be gone by now, and
-        // insertBefore throws NotFoundError on a reference that is no longer a
-        // child, which would abandon the drop mid-way and leave DOM order and tabList
-        // disagreeing. null stays legal: it means "past the last chip".
+        // A session closed elsewhere removes chips while the gesture is open, and
+        // insertBefore throws on a reference that is no longer a child. null stays
+        // legal: past the last chip.
         if (before !== null && before.parentNode !== scroller) {
           return;
         }
         if (before === dragged || before === dragged.nextElementSibling) {
-          return; // already in that slot
+          return;
         }
         flipTo(() => {
           scroller.insertBefore(dragged, before);
@@ -2375,21 +1838,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         announceTarget(dragged);
       }
 
-      // revertPreview puts the strip back the way the gesture found it, and is what
-      // makes Escape mean cancel.
-      //
-      // The old reorder had no revert path at all: dragover moved the chip on every
-      // event and dragend committed whatever the strip happened to be showing, so an
-      // abandoned drag left the tabs rearranged and the only way back was to drag
-      // them again. Reverting needs no saved snapshot, because tabList IS the
-      // snapshot — nothing but a drop writes to it — so the original arrangement is
-      // recovered by re-projecting it, the same projection moveTab uses.
+      // Put the strip back the way the gesture found it. No saved snapshot is
+      // needed: nothing but a drop writes tabList, so it IS the snapshot.
       function revertPreview(): void {
         const chips = [...scroller.querySelectorAll<HTMLElement>(".wt-tab")];
         const untouched =
           chips.length === tabList.length && chips.every((el, i) => tabList[i]?.el === el);
         if (untouched) {
-          return; // no slot ever committed; there is nothing to put back
+          return;
         }
         flipTo(() => {
           for (const t of tabList) {
@@ -2399,12 +1855,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ctx.announce("Move cancelled");
       }
 
-      // flashSlot restarts the slot's fade at its new home. Removing and re-adding
-      // the class is the restart (re-adding a class an element already carries
-      // restarts nothing), and the read between them is what flushes the removal to
-      // style so the two writes are not collapsed into one. It owns that read rather
-      // than depending on a caller's, so a commit can call it either side of the
-      // FLIP's own reflow.
+      // Re-adding a class an element already carries restarts nothing, and the
+      // layout read between the two writes is what keeps them from collapsing.
       function flashSlot(el: HTMLElement): void {
         endSlotFade();
         el.classList.remove("wt-tab-slotted");
@@ -2425,16 +1877,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         slotFadeEl = null;
       }
 
-      // The two things a reorder can say, and they are deliberately different
-      // sentences. commitSlot moves the DOM but NOT tabList, so a committed slot is a
-      // PREVIEW that Escape can still undo: announcing it as "Moved X to position 3"
-      // told a screen-reader user that a reversible hover state was a finished action,
-      // three times over on a drag that dwelt in three places, sometimes followed by
-      // "Move cancelled" contradicting all of it. So the preview announces a TARGET and
-      // only the drop announces a move.
-      //
-      // The position is read from the DOM because the DOM is what the preview moved;
-      // tabList still holds the order the gesture started from.
+      // A committed slot is a PREVIEW Escape can still undo, so it announces a
+      // TARGET and only the drop announces a move; announcing "Moved" three times
+      // and then "Move cancelled" told a screen-reader user a hover was an action.
+      // The position is read from the DOM, which is what the preview moved.
       function slotPosition(el: HTMLElement): number {
         return [...scroller.querySelectorAll<HTMLElement>(".wt-tab")].indexOf(el) + 1;
       }
@@ -2444,9 +1890,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           ctx.announce(`Drop position ${String(at)}`);
         }
       }
-      // announceMoved is the completed move, on drop. The drag path announced nothing
-      // at all before this, while the menu's moveTab announced every move — the same
-      // reorder, one of them silent to anyone who cannot see the strip rearrange.
       function announceMoved(el: HTMLElement): void {
         const tab = tabList.find((t) => t.el === el);
         const at = slotPosition(el);
@@ -2455,36 +1898,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // endReorderPreview ends the GESTURE's state: the pending rest and the slot's
-      // fade.
-      //
-      // It deliberately does NOT stop a slide that is already playing. A slide is an
-      // animation with its own settle timer, and cutting it here is exactly what
-      // would make a revert snap home instead of run — dragend fires immediately
-      // after the revert starts. dragstart and teardown add an explicit endShift()
-      // for the two cases where nothing may be left in flight: a fresh gesture must
-      // start from rest, and a torn-down feature may leave no inline style on an
-      // element it no longer owns.
+      // Ends the GESTURE's state but NOT a slide already playing: dragend fires
+      // right after a revert starts, and cutting the slide here would make the
+      // revert snap home instead of run. dragstart and teardown call endShift().
       function endReorderPreview(): void {
         endRestNet();
         restX = null;
         endSlotFade();
       }
 
-      // abortReorderFor is the one path that cannot wait for dragend, called by every
-      // site that REMOVES a chip while a drag may be open (dropTab and the bulk-close
-      // sweep). Two removals matter, for different reasons:
-      //
-      //  - the pending reference chip: commitSlot would hand a detached node to
-      //    insertBefore. It guards that too, but withdrawing the pending slot here means
-      //    a fresh dragover arms against a chip that still exists rather than waiting out
-      //    a rest window against one that does not.
-      //  - the DRAGGED chip: the gesture is over and there is no source left to deliver
-      //    a dragend. A browser is not obliged to fire one for a removed source, and
-      //    without this the feature would keep `draggingEl` set to a detached node for
-      //    the rest of its life — which the document-level guard reads as "a tab drag is
-      //    in progress" and so would preventDefault every unrelated file or text drop on
-      //    the page from then on.
+      // For every site that REMOVES a chip while a drag may be open. A browser is
+      // not obliged to fire dragend for a removed source, and a `draggingEl` left
+      // pointing at a detached node would make the document-level guard
+      // preventDefault every unrelated file or text drop from then on.
       function abortReorderFor(removed: HTMLElement): void {
         if (removed !== draggingEl) {
           return;
@@ -2515,33 +1941,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // publishOrder sends the strip's arrangement to the server, which is the
-      // write half of tab-order sync: the order belongs to the session SET, so a
-      // drag here has to reach the other devices watching the same server.
-      //
-      // Called only from the two paths that COMMIT a reorder (a finished drag, and
-      // Move left/right), never from the drag preview, which repaints the DOM many
-      // times per gesture. The local strip is already showing the new arrangement,
-      // so this is optimistic; the server echoes the same order back and
-      // applyServerOrder then has nothing to do.
-      //
-      // Best-effort by design, with one exception. A 409 means the server's
-      // session set is not the one just sent — this client has not yet seen a
-      // session created or closed elsewhere — and the answer is to take the
-      // server's word: reconcileOnce adopts what it missed, and the arrangement
-      // that survives is the server's. Re-sending would be a fight this client
-      // cannot win, since its list is the stale one. Any other failure leaves the
-      // strip as the user arranged it for this page and lets the next reorder try
-      // again; a toast for a cosmetic write the user can simply repeat would be
-      // noise, and the arrangement is not lost data.
-      //
-      // It renumbers the tabs BEFORE sending, and that is not bookkeeping: every
-      // tab still carries the position the server gave it, so the applyServerOrder
-      // pass inside the caller's syncChrome would sort the strip straight back and
-      // the tab would snap to where it started. Adopting the new positions locally
-      // is the optimistic half of the write — the server echoes these same numbers
-      // and the echo then lands as a no-op. Against a server with no order route
-      // the numbers simply stay local, which is the old per-page behaviour.
+      // The write half of tab-order sync, called only from the paths that COMMIT
+      // a reorder. It renumbers BEFORE sending: every tab still carries the
+      // server's old position, and the caller's applyServerOrder pass would sort
+      // the strip straight back. A 409 means this client's list is stale, so the
+      // server's word is taken; any other failure leaves the arrangement local.
       function publishOrder(): void {
         if (tabList.length === 0) {
           return;
@@ -2550,7 +1954,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           tab.order = i;
         });
         if (!started) {
-          return; // the bootstrap is still placing tabs; nothing to publish yet
+          return;
         }
         const ids = tabList.map((t) => t.id);
         void api.setOrder(ids).catch((err: unknown) => {
@@ -2561,17 +1965,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // --- Drag preview (the ghost) ---
-      // WebKit renders NO automatic drag image for an element whose ancestor
-      // carries a filter or transform (webkit.org/b/22787) — and the strip's own
-      // backdrop-filter is exactly such an ancestor, so on iPadOS the preview
-      // came out as broken white geometry instead of the chip (desktop Chrome,
-      // which snapshots the element regardless, always looked right). An EXPLICIT
-      // drag image fixes it: a clone parked directly under .wt-root, outside the
-      // bar's filtered subtree yet still inside the styling boundary so the
-      // scoped .wt-tab rules paint it. It is laid exactly over the real chip, so
-      // it is indistinguishable from it in the unlikely event it ever paints, and
-      // dropped on the next frame — the browser has already snapshotted it by
-      // then (the snapshot is taken when the dragstart handler returns).
+      // WebKit renders NO automatic drag image under an ancestor with a filter or
+      // transform (webkit.org/b/22787), and the strip's backdrop-filter is one, so
+      // the preview came out as broken white geometry on iPadOS. The clone is
+      // parked under .wt-root, outside the filtered subtree but inside the styling
+      // boundary, laid exactly over the chip, and dropped on the next frame, by
+      // which time the browser has snapshotted it.
       let dragGhost: HTMLElement | null = null;
       function clearDragGhost(): void {
         dragGhost?.remove();
@@ -2598,20 +1997,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // relative to the event TARGET, which is the label or the close button
         // when the drag starts on one of them.
         e.dataTransfer?.setDragImage(ghost, e.clientX - rect.left, e.clientY - rect.top);
-        requestAnimationFrame(clearDragGhost);
+        frame(clearDragGhost);
       }
 
-      // moveTab shifts a tab one slot left or right in tabList and re-appends
-      // every tab element in list order so the DOM matches.
-      // It is the single-pointer / non-drag alternative to the drag-and-drop
-      // reorder (WCAG 2.5.7), surfaced as Move left / Move right in the tab
-      // context menu.
+      // The non-drag alternative to the drag-and-drop reorder (WCAG 2.5.7).
       function moveTab(id: string, delta: -1 | 1): void {
-        // Reordering re-appends every chip, and reparenting the focused field blurs
-        // it — so an open edit would be committed as a side effect of moving some
-        // OTHER tab, via a blur the user never performed. Resolve it here instead,
-        // so the outcome is chosen rather than emergent: a blur that arrives as a
-        // side effect of reparenting is not a decision anyone made.
+        // Re-appending every chip reparents a focused field, which blurs it, so an
+        // open edit would be committed by a blur the user never performed.
         resolveEdit("blur", false);
         const from = tabList.findIndex((t) => t.id === id);
         const to = from + delta;
@@ -2631,64 +2023,40 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ctx.announce(`Moved ${tab.display} to position ${String(to + 1)}`);
       }
 
-      // adoptSession adds a tab for a session that exists server-side but has no
-      // local tab yet, e.g. one created in another browser (the server pushes it
-      // over the status SSE, and the poll fallback lists it). This keeps every
-      // client's tab set converged on the server, so mobile and desktop never
-      // desync. The caller runs syncChrome.
+      // Add a tab for a session that exists server-side but has no local tab yet
+      // (one created in another browser), so every client's tab set converges on
+      // the server. The caller runs syncChrome.
       function adoptSession(info: SessionInfo): void {
         if (tabList.find((t) => t.id === info.id)) {
           return;
         }
         if (tombstones.active(info.id)) {
-          return; // just closed here; ignore a stale listing until the server reaps it
+          return;
         }
         const tab = addTabChrome(info);
-        // Place the tab where the SERVER's shared order says it goes, not where it
-        // happened to arrive: the status-stream snapshot and the bootstrap's
-        // GET /api/sessions race each other, so arrival order is neither source's
-        // order and is not stable between loads. Against a server that keeps no
-        // order the same call falls back to age, which is creation order. See
-        // compareTabOrder.
+        // Placed by the SERVER's order, not by arrival: the stream's snapshot and
+        // the bootstrap's list race, so arrival order is not stable between loads.
         const at = orderedInsertIndex(tabList, info);
         tabList.splice(at, 0, tab);
-        // addTabChrome appended the chip to the scroller's end; move it to match
-        // the list when the arrangement put it earlier, so the DOM, the switcher
-        // rows, and the position announcements all read the same order.
+        // addTabChrome appended the chip at the end; the DOM must read in list order.
         const after = tabList[at + 1];
         if (after) {
           scroller.insertBefore(tab.el, after.el);
         }
       }
 
-      // Activate the first tab when nothing is active. The bootstrap normally
-      // activates a tab, but if the initial apiList AND apiCreate both fail at
-      // load its `if (startTab)` activation is skipped, leaving activeId null
-      // and connectionInitiated false -- so the kernel never opens the terminal
-      // WS and its wake handlers no-op. When the server recovers, the status
-      // stream / poll adopt the existing sessions below; without this they would
-      // render inert (blank, never connecting) until the user taps a tab. This
-      // is the sibling of the '+'-retry recovery the bootstrap already handles.
-      // A live tab outranks an ENDED one (its dot status is fed by the same
-      // SSE/poll that adopted it); a corpse is only auto-activated when nothing
-      // else exists. "Ended" covers both ways a process goes (exited and
-      // crashed) — a crashed session is exactly as unable to produce output as a
-      // cleanly exited one, so activating it would wedge the page the same way.
+      // The runtime repair for a bootstrap whose list AND create both failed: the
+      // sessions the stream later adopts would otherwise render inert until the
+      // user taps a tab. A live tab outranks an ENDED one, which would wedge the
+      // page the same way.
       function ensureActive(): void {
         if (activeId !== null) {
           return;
         }
-        // ...but only once the bootstrap has adopted its list. Before that the
-        // view is PARTIAL, and deterministically so: tabs subscribes to the status
-        // stream during setup, before resolveInitialSession issues its
-        // GET /api/sessions, so the SSE snapshot's one-event-per-session arrives
-        // first and this ran on a strip holding only whichever session the server
-        // sent first. Activating it both picked a tab on incomplete information and
-        // silently disabled the saved-tab restore: the bootstrap ladder's first act
-        // is to return early when activeId is already set, so localStorage was
-        // never read and every reload landed on the oldest tab. Boot activation
-        // belongs to that ladder alone, which is the only site with the whole list
-        // AND the saved id; this stays the runtime repair it was written to be.
+        // Before the bootstrap adopts its list the view is PARTIAL: the SSE
+        // snapshot arrives first, one event per session, and activating on it
+        // both picked a tab on incomplete information and pre-empted the saved
+        // restore, which returns early once a tab is active.
         if (!started) {
           return;
         }
@@ -2698,19 +2066,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // create is the coalesced door: while one create is in flight, every caller
-      // asking for another gets THAT one, so a single gesture can only ever open
-      // one terminal. Spawning a session is expensive and non-idempotent, and one
-      // press does not reliably arrive as one activation — the web-terminal-kiro
-      // server logged two POST /api/sessions 0-3ms apart (three times in one
-      // afternoon, both answered 201) for single "+" taps from an iPad + Magic
-      // Keyboard, so the user got two terminals and had to close one. Sharing the
-      // in-flight promise needs no threshold to make that decision, unlike a
-      // click-level debounce: a duplicate activation lands while the POST is still
-      // open and collapses into it, while a deliberate second tap (the POST
-      // resolves in milliseconds) still opens a second terminal. It also stops "+"
-      // mashing from queueing sessions across the server's 503 install window,
-      // where createSessionHonouringRetry legitimately waits minutes.
+      // One press does not reliably arrive as one activation (two POSTs 0-3 ms
+      // apart from a single "+" tap were measured), and sharing the in-flight
+      // promise needs no threshold: a duplicate lands while the POST is open and
+      // collapses into it, while a deliberate second tap still opens a second
+      // terminal. It also stops "+" mashing from queueing sessions across the
+      // server's retry window.
       let creating: Promise<void> | null = null;
       function create(): Promise<void> {
         creating ??= openNewSession().finally(() => {
@@ -2800,7 +2161,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // sit in storage forever.
         acknowledgeSwitchNotify(id);
         forgetCueSeen(id);
-        notifier.forget(id); // no more notifications can arrive for a gone session
+        ctx.shell.notifications.forget(id);
         tab.aria.remove();
         // Remove immediately (no exit animation): a lingering element made the
         // "+" teleport after a delay, and made a last-tab replacement appear in
@@ -2930,35 +2291,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return closeMany(tabList.map((t) => t.id));
       }
 
-      // --- Inline rename (R5) ---
+      // --- Inline rename ---
       // The edit surface is the label's OWN box, so the width the user types into
-      // is the width the label will have. An <input>, not contenteditable: real
-      // text-input semantics, IME support, a mobile keyboard, and no rich-HTML
-      // paste surface.
-      //
-      // editingId is also the stand-down flag for every chip handler that would
-      // otherwise fight the field (click-to-switch, the arrow/Delete keys,
-      // focus-on-switch, the drag) — see the guards at each site.
+      // is the width the label will have. editingId is also the stand-down flag
+      // for every chip handler that would otherwise fight the field.
       let editingId: string | null = null;
       let editInput: HTMLInputElement | null = null;
-      // Where focus goes when the edit ends. R9: back to the chip when the user
-      // arrived from the keyboard (F2 — they were navigating the strip and should
-      // still be), to the terminal otherwise. Recorded at entry because the exit
-      // paths cannot tell them apart.
+      // Recorded at entry because the exit paths cannot tell a keyboard-started
+      // edit (focus returns to the chip) from a pointer one (to the terminal).
       let editFrom: "keyboard" | "pointer" = "pointer";
-      // Tab ids with pinned-name requests in flight, COUNTED per id. While a count
-      // is held, a status record carrying a DIFFERENT value is applied for display
-      // but does not supersede the request: SSE delivery order and REST mutation
-      // order are not one total order, so a record sampled BEFORE our PUT can
-      // arrive after it, and treating it as newer authority would suppress the
-      // request's own rollback and its failure toast.
-      // Counted rather than a Set of ids, because two renames of one tab can be out
-      // at once and the invariant is "no request of OURS is in flight", not "no id
-      // is marked": a bare Set let the first request's completion clear the marker
-      // while the second's PUT was still open, and the second rename then failed
-      // silently. A per-request token would carry more information, but the only
-      // reader asks whether ANY request is out for this id, and the failure handler
-      // already distinguishes its own supersession by (born, nameSeq).
+      // Pinned-name requests in flight, COUNTED per id: two renames of one tab can
+      // be out at once, and a bare Set let the first completion clear the marker
+      // while the second's PUT was still open, so that rename failed silently.
       const namesInFlight = new Map<string, number>();
 
       /** restoreFocusAfterEdit sends focus where the entry path implies. The
@@ -3145,21 +2489,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         });
       }
 
-      /** resolveEdit closes the open edit and applies its value under the rules for
-       *  HOW it was closed. One function rather than a commit path per caller,
-       *  because the empty-value rule differs and every caller that got it wrong
-       *  did so by hand-inlining a variant:
-       *
-       *  - `"confirm"` (Enter) is the only deliberate confirmation, so it is the
-       *    only mode that may CLEAR a pin from an emptied field.
-       *  - `"blur"` commits a non-empty value (Finder and Explorer both do;
-       *    discarding on a stray click is hostile) and reverts an empty one — a
-       *    blur is loss of focus, not destructive intent, and on a tablet
-       *    dismissing the soft keyboard IS a blur.
-       *  - `"cancel"` (Escape) applies nothing.
-       *
-       *  `focus` is opt-out for the callers that are not a user finishing an edit
-       *  (a reorder, a pre-empting second edit): they should not move focus. */
+      /** Close the open edit under the rules for HOW it was closed. `"confirm"`
+       *  (Enter) is the only mode that may CLEAR a pin from an emptied field;
+       *  `"blur"` commits a non-empty value and reverts an empty one, because a
+       *  blur is loss of focus rather than destructive intent, and dismissing a
+       *  tablet's soft keyboard IS a blur; `"cancel"` applies nothing. `focus` is
+       *  opt-out for a caller that is not the user finishing an edit. */
       function resolveEdit(mode: "confirm" | "blur" | "cancel", focus = true): void {
         const id = editingId;
         if (id === null) {
@@ -3184,38 +2519,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // hideTabMenu / showTabMenu drive the right-click menu. showTabMenu rebuilds
-      // the items for the target tab (disabled states reflect its position) and
-      // clamps into the visible viewport, flipping above the pointer near the
-      // bottom edge (mirrors context-menu.ts).
-      //
-      // menuSwallow covers the contextmenu-then-touchend race: iPadOS Safari
-      // raises a context menu from a LONG-PRESS, and the same gesture emits a
-      // click on release which onDocClickMenu would read as a click-away.
-      // menuTouch records whether the press that raised the menu was a finger,
-      // since only touch emits that trailing click.
-      //
-      // The window is a fixed 350ms, so arming it here — mid-press, when the
-      // platform delivers `contextmenu` — only covers a release that comes within
-      // 350ms; hold the chip a beat longer and the menu still dismissed itself on
-      // release. menuOpenedInPress carries the fact that THIS press opened the
-      // menu through to its pointerup, which re-arms on the release edge. The
-      // flag is what keeps that re-arm off an unrelated later tap, whose click is
-      // a genuine dismiss.
+      // A long-press raises `contextmenu` mid-press and emits a click on release,
+      // which onDocClickMenu would read as a click-away. The swallow window is
+      // fixed, so arming it at `contextmenu` missed a release held a beat longer;
+      // menuOpenedInPress carries the fact through to pointerup, which re-arms on
+      // the release edge, and keeps that re-arm off an unrelated later tap.
       const menuSwallow = createClickSwallow();
       let menuTouch = false;
       let menuOpenedInPress = false;
-      // One listener on the bar rather than one per chip: chips are created and
-      // destroyed as sessions come and go, and both facts recorded here (the
-      // gesture's pointer type, and whether it took the keyboard off the
-      // terminal) belong to the gesture, not to a chip.
+      // One listener on the bar: both facts recorded belong to the gesture, not to
+      // a chip, and chips come and go with sessions.
       bar.addEventListener(
         "pointerdown",
         (e) => {
           menuTouch = e.pointerType === "touch";
           menuOpenedInPress = false;
           noteChromePress();
-          notifier.gesture();
+          ctx.shell.notifications.gesture();
         },
         { passive: true },
       );
@@ -3237,7 +2557,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         "pointerdown",
         () => {
           noteChromePress();
-          notifier.gesture();
+          ctx.shell.notifications.gesture();
         },
         { passive: true },
       );
@@ -3393,52 +2713,25 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           t.activityCount = normalizeActivityCount(rec.activityCount);
         }
         paintActivityMark(t.activityEl, t.activity, t.activityCount);
-        // A session that reports activity is a session whose program speaks OSC 9,
-        // so it is also one that may post a notification: arm the permission
-        // request for the next user gesture (see notify.ts).
+        // A program that speaks OSC 9 may also post a notification: arm the
+        // permission request for the next user gesture.
         if (reports) {
-          notifier.arm();
+          ctx.shell.notifications.arm();
         }
-        // Latest-wins background-tab notification for the switch button's dot: a
-        // background tab (not the active one) reaching "input" (needs you) or
-        // "done" (turn finished) raises the cue in that colour; each qualifying
-        // event overwrites the prior one, and expandSwitcher clears it when the
-        // list opens. The active surface keeps its own needs-input cue (see
-        // syncMobile); this is the moved + upgraded, glanceable version on the
-        // dedicated button.
-        //
-        // Both statuses are LATCHED server-side, so this runs on re-delivered
-        // state as well as on genuine transitions: every SSE (re)open pushes a
-        // snapshot and the poll fallback re-lists every few seconds. What makes a
-        // dismissal stick across those is cueSeen — a latch this viewer already
-        // acknowledged raises nothing, while a status that moved on drops the
-        // acknowledgement so the next latch is a fresh cue.
-        //
-        // Two inputs, one per question, and the ORDER keeps them apart. The
-        // acknowledgement asks whether this reader has SEEN the tab's real state:
-        // RAW status, first, and only for a cue — a non-cue one has nothing to
-        // acknowledge and has to reach the forget below. The raise and the forget
-        // ask whether anything should be ANNOUNCED: folded. Off the fold the
-        // acknowledgement misses a watched turn until its task ends; off the raw
-        // status the forget makes the "" sentinel pointless.
+        // The switch button's latest-wins dot. Cue statuses are LATCHED server-side
+        // and re-delivered on every snapshot, so cueSeen is what makes a dismissal
+        // stick. The acknowledgement reads the RAW status (a non-cue must reach the
+        // forget below); the raise and the forget read the FOLDED one.
         const raw = statusOf(t);
         const cue = cueStatusOf(t);
         if (rec.id === activeId && pageVisible() && isCueStatus(raw)) {
-          // The user is looking at this terminal as it latches, so there is
-          // nothing to notify — and nothing to re-raise once they move away.
-          //
-          // BOTH halves are required, for the reason notify.ts states for its own
-          // suppression rule: keyed on "is this the active tab" alone, this
-          // swallowed the cue of the very session the user left running. That is
-          // the single-session case — one tab is necessarily the active one — and
-          // it is precisely the case the out-of-page surfaces exist for, so a
-          // latch arriving on a HIDDEN page now raises them and is acknowledged
-          // when the user comes back (see onPageVisible).
+          // BOTH halves: keyed on the active tab alone, this swallowed the cue of
+          // the one session the user left running on a hidden page, the case the
+          // out-of-page surfaces exist for.
           markCueSeen(rec.id, raw);
         } else if (cue === "") {
-          // A blanked cue is NO INFORMATION, not a state, so nothing is raised and
-          // the acknowledgement map is left alone: forgetting here would re-raise
-          // the cue from scratch the moment the background task ended.
+          // NO INFORMATION: forgetting here would re-raise the cue from scratch
+          // the moment the background task ended.
         } else if (!isCueStatus(cue)) {
           forgetCueSeen(rec.id);
         } else if (isUnseenCue(cue, rec.id, cueSeen)) {
@@ -3446,58 +2739,33 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           switchNotifyId = rec.id;
           paintSwitchDot();
         }
-        // Record the raw server title; the displayed label (fallback + de-dup)
-        // is recomputed by relabelAll via syncChrome, which the callers run
-        // right after applyStatus. Ignore a BLANK title: a status sweep (or the
-        // process clearing its OSC 0/2 window title) reports an empty string,
-        // and overwriting a good label with it dropped an idle tab back to "New
-        // tab". Hold the last known title until a genuine (non-blank) one
-        // arrives; the derived-from-input fallback is likewise sticky.
-        // The typeof check is not redundant with the type: rec comes from
-        // unvalidated server JSON, and a missing title would make .trim() throw
-        // here and abort the caller's whole reconcile loop.
+        // A BLANK title (a status sweep, or the process clearing its OSC 0/2
+        // title) must not drop an idle tab back to "New tab". The typeof check is
+        // live: rec is unvalidated server JSON, and a missing title would abort
+        // the caller's whole reconcile loop.
         if (typeof rec.title === "string" && rec.title.trim() !== "") {
           t.title = rec.title;
         }
-        // The pinned name is likewise authoritative and un-guarded, and "" is the
-        // meaningful value: it is how a clear made in ANOTHER browser reaches this
-        // one. A blank-guard here would make a remote un-rename invisible.
-        //
-        // The nameSeq bump is gated on the value actually DIFFERING from what we
-        // believe. The wire carries pinnedTitle on every status event, so bumping
-        // unconditionally would mark an in-flight local rename as superseded by
-        // the server's echo of that same rename — and its failure handler would
-        // then decline to roll back or explain itself. A differing value really is
-        // newer authority (a remote rename or clear), and supersedes.
+        // "" is meaningful here: it is how a clear made in ANOTHER browser reaches
+        // this one. The bump is gated on a DIFFERING value because the wire echoes
+        // pinnedTitle on every event, and an unconditional bump would mark an
+        // in-flight local rename as superseded by its own echo.
         if (rec.pinnedTitle !== undefined && rec.pinnedTitle !== (t.pinnedTitle ?? "")) {
           t.pinnedTitle = rec.pinnedTitle;
-          // Only a value arriving with no request of ours in flight is newer
-          // AUTHORITY. During a pending request the record may predate our own PUT
-          // (SSE delivery and REST mutation are not one total order), and bumping
-          // would suppress that request's rollback and its failure toast.
+          // SSE delivery and REST mutation are not one total order: during a
+          // pending request the record may predate our own PUT, and bumping would
+          // suppress that request's rollback and its failure toast.
           if (!namesInFlight.has(rec.id)) {
             t.nameSeq++;
           }
         }
       }
 
-      // Live status: the activity monitor (SSE push) when present, else a poll of
-      // GET /api/sessions. Either way, dots + titles update and vanished sessions
-      // drop; the poll additionally learns of a background exit the SSE would
-      // have pushed (section 22.5).
-      let offStatus: (() => void) | undefined;
-      let offStreamOpen: (() => void) | undefined;
-      let pollTimer: ReturnType<typeof setInterval> | null = null;
-      // One-shot list reconcile shared by both status sources: adopt every
-      // session the server lists, then drop tabs it no longer lists. The poll
-      // fallback runs it on a timer; the SSE path runs it on every stream
-      // (re)open — the reopen against a RESTARTED manager is the moment
-      // zombie tabs must drop, because the fresh server's snapshot carries no
-      // tombstones for sessions it never knew, so those tabs would otherwise
-      // spin "Reconnecting…" forever (judgement finding sf-2).
-      // Guarded against overlapping runs: a server slower than the trigger
-      // cadence (but within the 15s API timeout) would otherwise race tabList
-      // mutation. Skip the extra run instead.
+      // One list reconcile for both status sources: adopt every session the
+      // server lists, then drop tabs it no longer lists. The SSE path runs it on
+      // every (re)open because a RESTARTED manager's snapshot carries no
+      // tombstones for sessions it never knew, so those tabs would otherwise spin
+      // "Reconnecting…" forever. Overlapping runs are skipped, not queued.
       let reconciling = false;
       const reconcileOnce = async (): Promise<void> => {
         if (reconciling) {
@@ -3505,13 +2773,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         reconciling = true;
         try {
-          // Snapshot the mutation epoch BEFORE the list round-trip: the listing
-          // is authoritative only for tabs that already existed when it was
-          // requested. A tab adopted while the GET was in flight (the boot
-          // race: the bootstrap's create vs this stream-open reconcile) is
-          // invisible to the returned snapshot, and dropping it here cascaded
-          // into a duplicate replacement session (dropTab's last-tab intercept
-          // spawns one) — the double-create boot bug.
+          // The listing is authoritative only for tabs that existed when it was
+          // requested: a tab adopted while the GET was in flight is invisible to
+          // it, and dropping it here cascaded into a duplicate replacement session.
           const epochAtList = tabEpoch;
           let list: SessionInfo[];
           try {
@@ -3524,10 +2788,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             adoptSession(info); // add sessions created elsewhere (no local tab)
             applyStatus(info, reportsOf(info.reportsActivity));
           }
-          // A tab the server no longer lists was reaped/closed elsewhere (or
-          // died with a restarted manager): drop it locally (no DELETE — it
-          // is already gone). Tabs born after the list snapshot are spared this
-          // round; the next reconcile sees the server truth for them.
+          // Already gone server-side, so no DELETE; tabs born after the snapshot
+          // wait for the next reconcile.
           const gone = tabList
             .filter((t) => !seen.has(t.id) && t.born <= epochAtList)
             .map((t) => t.id);
@@ -3540,64 +2802,101 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           reconciling = false;
         }
       };
+      function warnLayoutOnce(what: string, err?: unknown): void {
+        if (warnedLayout) {
+          return;
+        }
+        warnedLayout = true;
+        console.warn(`web-terminal-ui: ${what}; the pane layout is not persisted`, err);
+      }
+      function currentLayout(): PaneLayout | null {
+        if (activeId === null) {
+          return null;
+        }
+        return { left: activeId, right: null, handle: 0.5, selected: "left", open: false };
+      }
+      async function writeLayout(retryOnStale: boolean): Promise<void> {
+        const layout = currentLayout();
+        if (layout === null || tornDown) {
+          return;
+        }
+        try {
+          await api.setLayout(layout);
+        } catch (err) {
+          if (err instanceof SessionAPIError && err.status === 409 && retryOnStale) {
+            // A side names a session the server no longer has: this client's view
+            // is behind, so re-list and write the reconciled row once more.
+            await reconcileOnce();
+            await writeLayout(false);
+            return;
+          }
+          if (err instanceof SessionAPIError && err.status === 404) {
+            warnLayoutOnce("this server has no GET/PUT /api/sessions/layout route");
+            return;
+          }
+          warnLayoutOnce("could not write the pane layout", err);
+        }
+      }
+      // Every change of the shown tab writes the record; coalesced so a switch
+      // that clears and shows sends one PUT, and held while no tab is shown.
+      function scheduleLayoutWrite(): void {
+        if (layoutWrite !== null || tornDown) {
+          return;
+        }
+        layoutWrite = setTimeout(() => {
+          layoutWrite = null;
+          void writeLayout(true);
+        }, 0);
+      }
       if (monitor) {
-        offStatus = monitor.onStatus((s) => {
+        const offStatus = monitor.onStatus((s) => {
           if (s.removed) {
             void dropTab(s.id, false); // already gone server-side; no DELETE
             return;
           }
-          // Adopt a session created in another browser so all clients converge.
-          // The status record IS the session's wire shape (SessionStatus extends
-          // SessionInfo), so it flows through whole.
           adoptSession(s);
           applyStatus(s, reportsOf(s.reportsActivity));
           ensureActive();
           syncChrome();
-          // A notification is an EVENT the engine delivers once, on the sweep
-          // that first observes it, so it is handled here rather than in
-          // applyStatus (which also runs on re-delivered STATE). Delivered after
-          // syncChrome so the notification's title is the label the user would
-          // see. The status record is the notification's carrier whether or not
-          // the server has a classifier installed.
-          notifier.deliver(s, {
+          // A notification is an EVENT delivered once, so it is handled here and
+          // not in applyStatus, which also runs on re-delivered STATE. After
+          // syncChrome, so its title is the label the user would see.
+          ctx.shell.notifications.deliver(s, {
             sessionIsActive: s.id === activeId,
             label: tabList.find((t) => t.id === s.id)?.display ?? s.title,
-            // What clicking the notification does. The platform's own click
-            // default focuses the page; this supplies the other half, landing the
-            // user on the session that raised the notification rather than on
-            // whichever tab they last left active. switchTo already no-ops on an
-            // id that is gone, which is the case that matters here: the prompt may
-            // have been answered, or the tab closed, between post and click.
+            // switchTo no-ops on an id that is gone, which is the case that
+            // matters: the tab may have closed between post and click.
             activate: () => {
               switchTo(s.id);
             },
           });
         });
-        offStreamOpen = monitor.onStreamOpen?.(() => {
+        ctx.defer(offStatus);
+        const offStreamOpen = monitor.onStreamOpen?.(() => {
           void reconcileOnce();
         });
+        if (offStreamOpen) {
+          ctx.defer(offStreamOpen);
+        }
       } else {
         const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
-        pollTimer = setInterval(() => {
+        const pollTimer = setInterval(() => {
           void reconcileOnce();
         }, pollMs);
+        ctx.defer(() => {
+          clearInterval(pollTimer);
+        });
       }
 
       // --- Event wiring ---
-      // No input observer. The ENGINE owns a session's name, so no preset does
-      // per-keystroke title work in the browser, and the name is identical for
-      // every client attached to the session — including one that attaches later.
-      // Observe (never consume) keydowns to detect a physical keyboard: a
-      // hardware-only key latches sawHardwareKey, which upgrades focus-on-switch
-      // for a keyboard folio with no trackpad (no fine pointer to key off).
-      const offHwKey = ctx.registerKeydown((ev) => {
+      // A hardware-only key latches sawHardwareKey, which upgrades focus-on-switch
+      // for a keyboard folio with no trackpad.
+      ctx.registerKeydown((ev) => {
         if (!sawHardwareKey && looksLikeHardwareKey(ev)) {
           sawHardwareKey = true;
         }
         return false;
       });
-      // Drive the reorder preview while dragging a tab over the strip. A sweep only
-      // rearranges nothing; the slot opens when the pointer comes to rest (trackRest).
       bar.addEventListener("dragover", (e) => {
         if (!draggingEl) {
           return;
@@ -3608,12 +2907,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         trackRest(e.clientX);
       });
-      // Commit on drop — and, load-bearing, CANCEL the drop's default action. An
-      // uncancelled drop leaves the browser free to act on the drag payload
-      // itself, and WebKit's action is to LOAD it as a URL: with no drop handler
-      // at all, dropping a tab on iPadOS navigated the page to /<session-id>
-      // instead of reordering. Chrome and Firefox ignore an unhandled reorder
-      // drop, which is why the strip looked fine on the desktop.
+      // The preventDefault is load-bearing: WebKit's default for an uncancelled
+      // drop is to LOAD the payload as a URL, so dropping a tab on iPadOS
+      // navigated the page to /<session-id>.
       bar.addEventListener("drop", (e) => {
         const moved = draggingEl;
         if (!moved) {
@@ -3621,27 +2917,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         e.preventDefault();
         dropped = true;
-        // A release decides, and it decides by POSITION: commit the slot the pointer is
-        // actually over rather than whatever a timer had pending. commitSlot no-ops when
-        // the tab already sits there, so a drop with nothing to move costs nothing.
+        // A release decides by POSITION, not by whatever slot a timer had pending.
         endRestNet();
         commitSlot(dropTargetBefore(e.clientX));
         syncOrderFromDom();
-        announceMoved(moved); // the ONE completed-move announcement per gesture
+        announceMoved(moved);
       });
-      // Leaving the strip withdraws a pending slot. The document dragover below does
-      // this too and covers more ground, but it cannot cover the case that matters most
-      // here: the strip is docked at the viewport EDGE, so a pointer can leave it by
-      // leaving the window entirely, and then no other element in the document receives a
-      // dragover to notice with. A pointer that leaves the window is also, by definition,
-      // one that has stopped moving over the strip — so without this the rest window
-      // would run down and open a slot the pointer had already abandoned.
-      //
-      // relatedTarget is what makes dragleave usable at all: it fires on every
-      // child-to-child transition inside the bar (chip to label, label to close), and
-      // the next target being inside the bar is exactly how those are told apart. A
-      // null relatedTarget means the pointer left the window, which is the case this
-      // exists for.
+      // The strip is docked at the viewport EDGE, so a pointer can leave it by
+      // leaving the window, and then no document dragover fires to withdraw the
+      // pending slot; the rest window would open a slot the pointer abandoned.
+      // dragleave fires on every child-to-child transition inside the bar, and a
+      // null relatedTarget is the pointer leaving the window.
       bar.addEventListener("dragleave", (e) => {
         if (!draggingEl) {
           return;
@@ -3651,44 +2937,34 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           endRestNet();
         }
       });
-      // A tab released anywhere OTHER than the strip — over the terminal, over
-      // any other chrome — must be inert, not a navigation, so claim the whole
-      // document as a drop target for the life of a tab drag and swallow the drop
-      // there too. Gated on draggingEl so an unrelated drag (a file dropped on the
-      // page) is left entirely to the browser.
+      // A tab released anywhere OTHER than the strip must be inert, not a
+      // navigation, so the whole document is a drop target for the life of a tab
+      // drag. Gated on draggingEl so a file dropped on the page is the browser's.
       const onDocTabDrop = (e: DragEvent): void => {
         if (!draggingEl) {
           return;
         }
         e.preventDefault();
         if (bar.contains(e.target as Node)) {
-          return; // on the strip: the bar's own handlers own it
+          return;
         }
         if (e.type === "drop") {
-          // Released off the strip, which CANCELS. The strip is the drop zone and it
-          // is a generous one (a --touch-target chip plus the bar's own padding, ~61px
-          // at the viewport edge), and once the pointer has left it this same handler
-          // has already declared there is no candidate slot out here. Committing a
-          // slot anyway would persist an arrangement chosen at a position the user
-          // visibly left, and worse, the outcome would depend on whether the browser
-          // chose to emit `drop` at all: an accepted document drop committed while a
-          // refused release fell through to dragend and reverted. That distinction is
-          // invisible to the person doing the dragging.
-          //
-          // So: leave `dropped` false, withdraw anything pending, and let dragend run the
-          // revert. Nothing is lost silently — the revert animates and announces, so a
-          // mis-release reads as "that did not take" rather than as a mystery.
+          // A release off the strip CANCELS: `dropped` stays false and dragend runs
+          // the revert. Committing a slot here would persist an arrangement chosen
+          // at a position the user visibly left, and would depend on whether the
+          // browser emitted `drop` at all.
           endRestNet();
           return;
         }
-        // dragover, off the strip: no candidate slot exists out here, so withdraw a
-        // pending one rather than let the rest window open a gap for a target the pointer
-        // has already left. A slot already COMMITTED stays put; the pointer may yet come
-        // back onto the strip and release there.
+        // No candidate slot exists off the strip; a COMMITTED slot stays put.
         endRestNet();
       };
       document.addEventListener("dragover", onDocTabDrop);
       document.addEventListener("drop", onDocTabDrop);
+      ctx.defer(() => {
+        document.removeEventListener("dragover", onDocTabDrop);
+        document.removeEventListener("drop", onDocTabDrop);
+      });
       // Active-row close (x): closes the current tab (mirrors a listed row's x).
       // stopPropagation so it is not read as a tap/swipe on the row surface.
       swClose.addEventListener("click", (e) => {
@@ -3708,6 +2984,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         hideTabMenu();
       };
       document.addEventListener("click", onDocClickMenu);
+      ctx.defer(() => {
+        document.removeEventListener("click", onDocClickMenu);
+      });
       // A right-click anywhere other than a tab (the terminal content, elsewhere,
       // or a native browser menu) dismisses the tab menu. A right-click ON a tab
       // is handled by that tab's own contextmenu handler (which reopens it), and
@@ -3718,18 +2997,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       };
       document.addEventListener("contextmenu", onDocContextMenu);
-      // Only a scroll that moves the menu's ANCHOR dismisses it, which is the
-      // strip's own horizontal scroller and nothing else: the menu is placed
-      // root-relative (menu-position.ts rebases onto the offsetParent), so any
-      // scroll that moves .wt-root moves the menu with it, and the terminal's
-      // scroller does not move the chip at all.
-      //
-      // The target check is load-bearing, not a micro-optimization. This listener
-      // is capture-phase on window, so it sees EVERY scroll in the document —
-      // including the terminal surface auto-scrolling to the bottom on each chunk
-      // of output. Without the check, an agent printing into the TUI closed the
-      // tab menu within a frame of it opening, which is unusable on exactly the
-      // screen the menu exists for (a busy multi-agent strip).
+      ctx.defer(() => {
+        document.removeEventListener("contextmenu", onDocContextMenu);
+      });
+      // Only a scroll of the strip's own scroller moves the menu's anchor. The
+      // target check is load-bearing: this capture-phase listener sees EVERY
+      // scroll, and without it the terminal auto-scrolling on each chunk of
+      // output closed the menu within a frame of it opening.
       const onScrollMenu = (e: Event): void => {
         const target = e.target;
         if (target instanceof Element && target.closest(".wt-tab-scroll")) {
@@ -3737,7 +3011,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       };
       window.addEventListener("scroll", onScrollMenu, true);
-      const offMenuKey = ctx.registerKeydown((ev) => {
+      ctx.defer(() => {
+        window.removeEventListener("scroll", onScrollMenu, true);
+      });
+      ctx.registerKeydown((ev) => {
         if (ev.key === "Escape" && tabMenu.classList.contains("visible")) {
           ev.preventDefault();
           hideTabMenu();
@@ -3745,19 +3022,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         return false;
       });
-      // A tap on the terminal/background dismisses an open mobile overlay — the
-      // expanded tab list or the key grid — rather than opening the keyboard, so
-      // tap 1 closes and tap 2 opens the keyboard. Runs in the capture phase and
-      // stops propagation, so the kernel's surface tap-to-focus never fires for
-      // the dismissing tap. Taps inside the switcher or the key grid are left to
-      // their own controls; when nothing is open the tap falls through untouched.
+      // A tap on the terminal dismisses an open mobile overlay (the expanded tab
+      // list or the key grid) rather than opening the keyboard. Capture phase with
+      // stopPropagation, so the surface tap-to-focus never fires for that tap.
       const onDocTapDismiss = (e: PointerEvent): void => {
-        // A swipe gesture on the switcher owns the pointer; its own end logic
-        // (endHorizontal/endVertical, via the window-level endOnUp) resolves the
-        // outcome. Stand down here so this capture-phase handler's stopPropagation
-        // cannot swallow that window-bubble pointerup -- which, when setPointerCapture
-        // failed and the finger released outside the switcher, would strand gActive=true
-        // and brick all future swipes until reload.
+        // A swipe owns the pointer and resolves in the window-level pointerup;
+        // swallowing that here (when setPointerCapture failed and the finger
+        // released outside the switcher) stranded gActive and bricked every swipe.
         if (gActive) {
           return;
         }
@@ -3767,11 +3038,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         const target = e.target as HTMLElement | null;
-        // The tab strip counts as chrome like the switcher: without it, the
-        // desktop-strip keyboard button's own pointerup landed here, closed the
-        // grid, and the button's click then re-opened it — so tapping the button
-        // to CLOSE the grid never worked (a wide-touchscreen / landscape-phone
-        // bug; the switcher's kb button was already exempt via .wt-switcher).
+        // The strip counts as chrome: the desktop keyboard button's own pointerup
+        // otherwise closed the grid here and its click re-opened it.
         const inChrome =
           target !== null &&
           (target.closest(".wt-switcher") !== null ||
@@ -3788,17 +3056,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         e.stopPropagation();
       };
       document.addEventListener("pointerup", onDocTapDismiss, true);
+      ctx.defer(() => {
+        document.removeEventListener("pointerup", onDocTapDismiss, true);
+      });
 
-      // Interactive drag on the bar (mobile). The gesture follows the finger
-      // live rather than only acting on release: after a small axis-lock move it
-      // commits to horizontal (slide the terminal content to preview a tab
-      // switch) or vertical (grow/shrink the tab list under the bar). On release
-      // it snaps: a horizontal drag past a quarter-width commits the switch (else
-      // springs back); a vertical drag past the halfway point snaps the list open
-      // (else closed). A near-stationary release is a tap that toggles the list
-      // (the click listener). swCurrent has touch-action:none so these drags
-      // never scroll the page, and the pointer is captured so a drag that leaves
-      // the bar still delivers its move/up here.
+      // The bar's drag follows the finger live: after the axis lock it previews a
+      // tab switch (horizontal) or grows the tab list (vertical), and snaps on
+      // release past a quarter-width or the halfway point. The pointer is captured
+      // so a drag that leaves the bar still delivers its move/up here.
       let gDownX = 0;
       let gDownY = 0;
       let gAxis: "h" | "v" | null = null;
@@ -3864,7 +3129,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // released without committing, then hands overflow/position back to CSS.
       function springRowsBack(): void {
         const rows = [...rowEls.values()];
-        requestAnimationFrame(() => {
+        frame(() => {
           for (const el of rows) {
             el.style.transition = "transform 0.2s ease-out";
             el.style.transform = "translateY(0)";
@@ -3897,11 +3162,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             el.style.transition = spring;
             el.style.transform = "";
           }
-          window.setTimeout(() => {
+          after(220, () => {
             for (const el of swipeEls) {
               el.style.transition = "";
             }
-          }, 220);
+          });
           return;
         }
         // Commit: switchTo slides the incoming terminal in from the side and (when
@@ -3924,18 +3189,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           el.style.transition = "none";
           el.style.transform = `translateX(${String(Math.round(slide))}px)`;
         }
-        requestAnimationFrame(() => {
+        frame(() => {
           for (const el of swipeEls) {
             el.style.transition = "transform 0.25s cubic-bezier(0.2, 0, 0, 1)";
             el.style.transform = "translateX(0)";
           }
         });
-        window.setTimeout(() => {
+        after(320, () => {
           for (const el of swipeEls) {
             el.style.transition = "";
             el.style.transform = "";
           }
-        }, 320);
+        });
       }
 
       function beginVertical(): void {
@@ -4012,7 +3277,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           !canceled &&
           Math.abs(dx) >= SWIPE_MIN_PX &&
           Math.abs(dx) > Math.abs(dy) * 1.5 &&
-          modes.getMouseMode() === 0
+          ctx.modes.getMouseMode() === 0
         ) {
           // No pointermove locked an axis (a flick with no intermediate move, or
           // a synthetic down/up): fall back to a discrete switch from the net
@@ -4060,7 +3325,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           if (Math.abs(dx) > Math.abs(dy)) {
             // Horizontal switch preview, unless a mouse-mode app is capturing
             // drags (leave the bar swipe inert then, matching the old gate).
-            if (modes.getMouseMode() !== 0) {
+            if (ctx.modes.getMouseMode() !== 0) {
               gActive = false;
               swiped = true;
               gestureAbort?.abort(); // gesture abandoned; drop the window listeners
@@ -4145,20 +3410,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         toggleSwitcher();
       });
 
-      // The kernel-driven bootstrap (sessionOwner.resolveInitialSession): list
-      // existing sessions or create the first one, adopt them, pick the start
-      // tab, bind the renderer to its store — and RETURN its ref rather than
-      // switching; the kernel performs the switch through the same path a tab
-      // switch uses. A null return (nothing could be listed or spawned) keeps
-      // the chrome up with the "+" retry alive, and the kernel — which now sees
-      // the failure directly — dismisses the loading overlay over it.
-      resolveImpl = async (): Promise<SessionRef | null> => {
-        // Initial population: list existing sessions, or create the first one.
-        let sessions: SessionInfo[];
-        try {
-          sessions = await api.list();
-        } catch {
-          sessions = [];
+      // The bootstrap (paneLayoutOwner.resolveInitialLayout): list existing
+      // sessions or create the first one, adopt them, pick the start tab from the
+      // server's layout record, and show it. A false return (nothing could be
+      // listed or spawned) keeps the chrome up with the "+" retry alive, and the
+      // terminal dismisses the loading overlay over it. The record is read once
+      // and never written back by a read.
+      resolveImpl = async (): Promise<boolean> => {
+        const [listed, layoutRead] = await Promise.allSettled([api.list(), api.getLayout()]);
+        let sessions: SessionInfo[] = listed.status === "fulfilled" ? listed.value : [];
+        let layout: PaneLayout | null = null;
+        if (layoutRead.status === "fulfilled") {
+          layout = layoutRead.value;
+          if (layout === null) {
+            warnLayoutOnce("this server has no GET/PUT /api/sessions/layout route");
+          }
+        } else {
+          warnLayoutOnce("could not read the pane layout", layoutRead.reason);
         }
         // Spawn a fresh session unless a LIVE one is listed. An ended session
         // (exited cleanly OR crashed) is viewable history, not a working
@@ -4196,54 +3464,37 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         // From here on, tabs added at runtime (create / adopt) animate in.
         started = true;
-        // Something already activated a tab while the list was in flight. The
-        // chrome mounts synchronously, so a user can tap a chip (or a delivered
-        // notification can be clicked) before this resolves, and an explicit
-        // gesture outranks the saved id — return null and leave that switch alone;
-        // the kernel sees connectionInitiated and leaves the loading overlay to
-        // the normal ready path. ensureActive is deliberately NOT one of these
-        // callers during boot (see its `started` gate): when it was, the SSE
-        // snapshot won this race on every load and the ladder below never ran.
+        // A tap on a chip while the list was in flight outranks the record;
+        // ensureActive is deliberately NOT one of these callers during boot (see
+        // its `started` gate), or the SSE snapshot would win this race on every
+        // load.
         if (activeId !== null) {
-          return null;
+          return true;
         }
-        // Activate the previously-active session if it still exists, else the
-        // first (oldest). Session ids are stable server-side, so a page reload
-        // reconnects to the tab the user left on instead of always the oldest.
-        // Live sessions outrank ended ones (exited or crashed): the saved id is
-        // honored only while its session is still live (a reload used to restore
-        // straight onto the corpse of a died-while-away session and wedge
-        // there), and the default is the oldest LIVE tab. Only when nothing is
-        // live (the fresh-spawn above failed too) does a dead tab start — a
-        // frozen final screen with the "Session ended" banner beats a blank
-        // page.
+        // The record's selected session if it still exists, else the oldest LIVE
+        // tab: a reload must not restore onto the corpse of a session that died
+        // while away. Only when nothing is live does a dead tab start, a frozen
+        // final screen beating a blank page.
         const liveIds = new Set(sessions.filter((s) => !isEndedStatus(s.status)).map((s) => s.id));
         const oldestLive = tabList.find((t) => liveIds.has(t.id));
         let startTab = oldestLive ?? tabList[0];
-        try {
-          const savedId = localStorage.getItem(ACTIVE_TAB_KEY);
-          if (savedId !== null && savedId !== "") {
-            const saved = tabList.find((x) => x.id === savedId);
-            if (saved && (liveIds.has(saved.id) || oldestLive === undefined)) {
-              startTab = saved;
-            }
+        const savedId =
+          layout === null ? null : layout.selected === "right" ? layout.right : layout.left;
+        if (savedId !== null) {
+          const saved = tabList.find((x) => x.id === savedId);
+          if (saved && (liveIds.has(saved.id) || oldestLive === undefined)) {
+            startTab = saved;
           }
-        } catch {
-          /* storage unavailable — fall back to the oldest live tab */
         }
         if (!startTab) {
-          return null;
+          return false;
         }
         activeId = startTab.id;
-        try {
-          localStorage.setItem(ACTIVE_TAB_KEY, startTab.id);
-        } catch {
-          /* storage unavailable — non-fatal */
-        }
         ctx.render.bind(startTab.store);
+        ctx.notifySwitch({ id: startTab.id });
         syncChrome();
         focusInput();
-        return { id: startTab.id };
+        return true;
       };
 
       return {
@@ -4255,39 +3506,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             tabList.map((t) => ({ id: t.id, title: t.display, active: t.id === activeId })),
         },
         teardown() {
-          // Restore the out-of-page surfaces first, while the sinks still exist.
-          // The kernel clears the title prefix on its own teardown, but the app
-          // badge and the icon links are OUR state and nothing else will clear
-          // them: the badge is OS-level and outlives the page entirely, and a
-          // destroyed terminal in an embedded panel leaves the document's icon
-          // pointed at a status variant for a tab that no longer exists.
-          // Change-gated, so this is a no-op when nothing was lit.
-          attention.apply(NO_ATTENTION);
           tornDown = true;
           resolveImpl = null;
-          offStatus?.();
-          offStreamOpen?.();
-          offHwKey();
-          offArmed?.();
-          offMenuKey();
-          document.removeEventListener("click", onDocClickMenu);
-          document.removeEventListener("visibilitychange", onPageVisible);
-          window.removeEventListener("pagehide", onPageGone);
-          window.removeEventListener("pageshow", onPageBack);
-          document.removeEventListener("contextmenu", onDocContextMenu);
-          document.removeEventListener("pointerup", onDocTapDismiss, true);
-          document.removeEventListener("dragover", onDocTabDrop);
-          document.removeEventListener("drop", onDocTabDrop);
-          window.removeEventListener("scroll", onScrollMenu, true);
-          if (pollTimer !== null) {
-            clearInterval(pollTimer);
+          if (layoutWrite !== null) {
+            clearTimeout(layoutWrite);
+            layoutWrite = null;
           }
-          barResize.disconnect();
-          swReserve.disconnect();
-          stopInkCentring();
           surface.classList.remove("wt-with-tabbar");
           varRoot.style.removeProperty("--wt-tabbar-h");
-          root?.classList.remove("wt-tabbed");
+          root.classList.remove("wt-tabbed");
           varRoot.style.removeProperty("--wt-reserve-bottom");
           endSwitchAnim(surface);
           if (collapseClearTimer !== null) {

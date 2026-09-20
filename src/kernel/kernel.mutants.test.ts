@@ -9,8 +9,8 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "./kernel.js";
 import { INPUT_PLACEHOLDER } from "../input-placeholder.js";
+import { mountTerminal } from "../test-helpers/mount.js";
 import type { SessionRef, TerminalContext, TerminalFeature, TerminalHandle } from "./types.js";
 
 // The library's single navigation call lives in its own module so a test can
@@ -21,116 +21,35 @@ import type { SessionRef, TerminalContext, TerminalFeature, TerminalHandle } fro
 const reloadSpy = vi.hoisted(() => vi.fn());
 vi.mock("./navigation.js", () => ({ reloadPage: reloadSpy }));
 
-const hoisted = vi.hoisted(() => ({
-  sendBinary: vi.fn<(buf: Uint8Array) => boolean>(() => true),
-  connectionInit: vi.fn(),
-  renderInit: vi.fn(),
-  getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-  connect: vi.fn(),
-  setSession: vi.fn<(id: string) => void>(),
-  disconnect: vi.fn(),
-  reconnectNow: vi.fn(),
-  resetScrollback: vi.fn(),
-  resetScreen: vi.fn(),
-  updateFontMetrics: vi.fn(),
-  dropBrowseCache: vi.fn(),
-  browseCacheSize: vi.fn<() => number>(() => 0),
-  lastBrowseActivityMs: vi.fn<() => number>(() => 0),
-  boundStore: vi.fn<() => Engine.LineStore | undefined>(() => undefined),
-  currentSessionId: vi.fn<() => string>(() => "session-under-test"),
-}));
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("../test-helpers/fake-engine.js");
+  return createEngineFake();
+});
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    render: {
-      init: hoisted.renderInit,
-      updateFontMetrics: hoisted.updateFontMetrics,
-      setPredictedCursor: vi.fn(),
-      computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
-      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      getCursorPx: hoisted.getCursorPx,
-      getHighestIndex: vi.fn(() => -1),
-      pendingRowCount: vi.fn(() => 0),
-      noteResumeBounds: vi.fn(),
-      handleScreen: vi.fn(),
-      handleScroll: vi.fn(),
-      updateReverseVideo: vi.fn(),
-      resetScrollback: hoisted.resetScrollback,
-      resetScreen: hoisted.resetScreen,
-      browseCacheSize: hoisted.browseCacheSize,
-      lastBrowseActivityMs: hoisted.lastBrowseActivityMs,
-      dropBrowseCache: hoisted.dropBrowseCache,
-      maybeFetchHistory: vi.fn(),
-      handleScrollPosition: vi.fn(),
-      replayMaxForResume: vi.fn(() => 1500),
-      handleHistoryReply: vi.fn(),
-      applyResumeTransition: vi.fn(),
-      noteSolicited: vi.fn(),
-      clearSolicited: vi.fn(),
-      bind: vi.fn(),
-      boundStore: hoisted.boundStore,
-    },
-    scroll: {
-      init: vi.fn(),
-      scrollToBottom: vi.fn(),
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-      // The viewport settle re-pins the bottom through this, so a double without
-      // it throws out of every geometry transition.
-      stickToBottom: vi.fn(),
-    },
-    connection: {
-      init: hoisted.connectionInit,
-      connect: hoisted.connect,
-      sendBinary: hoisted.sendBinary,
-      sendResize: vi.fn(),
-      sendEphemeral: vi.fn(() => true),
-      setClientFocus: vi.fn(),
-      reconnectNow: hoisted.reconnectNow,
-      disconnect: hoisted.disconnect,
-      setSession: hoisted.setSession,
-      forgetSession: vi.fn(),
-      currentSessionId: hoisted.currentSessionId,
-    },
-  };
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
+const { sendBinary, connect, setSession } = fake.connection;
 const {
-  sendBinary,
-  connect,
-  renderInit,
   getCursorPx,
   browseCacheSize,
-  setSession,
-  disconnect,
+  lastBrowseActivityMs,
   resetScrollback,
   resetScreen,
   dropBrowseCache,
-} = hoisted;
+} = fake.renderer;
+const { dispose } = fake;
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
 const dec = new TextDecoder();
 const sentText = (): string => sendBinary.mock.calls.map((c) => dec.decode(c[0])).join("");
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-beforeEach(async () => {
-  vi.resetModules();
-  for (const fn of Object.values(hoisted)) {
-    fn.mockClear();
-  }
-  hoisted.sendBinary.mockReturnValue(true);
-  hoisted.getCursorPx.mockReturnValue({ left: 0, top: 0, cellH: 16 });
-  hoisted.browseCacheSize.mockReturnValue(0);
-  hoisted.lastBrowseActivityMs.mockReturnValue(0);
-  hoisted.boundStore.mockReturnValue(undefined);
-  hoisted.currentSessionId.mockReturnValue("session-under-test");
+beforeEach(() => {
+  fake.reset();
   document.body.replaceChildren();
-  ({ createTerminal } = await import("./kernel.js"));
 });
 
 function rootIn(): HTMLElement {
@@ -236,9 +155,9 @@ describe("a released runtime answers no event it registered for", () => {
   // whatever reference a handler, a feature or a test still holds, so a listener
   // the abort misses keeps serving a terminal that no longer exists.
 
-  it("does not put a keystroke typed into the released textarea on the wire", () => {
+  it("does not put a keystroke typed into the released textarea on the wire", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     const input = ta(root);
     handle.destroy();
     sendBinary.mockClear();
@@ -248,9 +167,9 @@ describe("a released runtime answers no event it registered for", () => {
     expect(sentText()).toBe("");
   });
 
-  it("does not encode a key pressed in the released textarea", () => {
+  it("does not encode a key pressed in the released textarea", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     const input = ta(root);
     handle.destroy();
     sendBinary.mockClear();
@@ -260,9 +179,9 @@ describe("a released runtime answers no event it registered for", () => {
     expect(sentText()).toBe("");
   });
 
-  it("does not repaint the focus class on the released surface", () => {
+  it("does not repaint the focus class on the released surface", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     const input = ta(root);
     const wrap = term(root);
     handle.destroy();
@@ -276,9 +195,9 @@ describe("a released runtime answers no event it registered for", () => {
     expect(wrap.classList.contains("focus")).toBe(true);
   });
 
-  it("does not clear a selection on a tap into the released surface", () => {
+  it("does not clear a selection on a tap into the released surface", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     const wrap = term(root);
     handle.destroy();
     const sel = selectOutsideTerminal();
@@ -293,9 +212,9 @@ describe("a released runtime answers no event it registered for", () => {
     expect(sel.isCollapsed).toBe(false);
   });
 
-  it("does not collapse a selection on a mouse press into the released surface", () => {
+  it("does not collapse a selection on a mouse press into the released surface", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     const wrap = term(root);
     handle.destroy();
     const sel = selectOutsideTerminal();
@@ -305,12 +224,12 @@ describe("a released runtime answers no event it registered for", () => {
     expect(sel.isCollapsed).toBe(false);
   });
 
-  it("does not open a link clicked inside the released subtree", () => {
+  it("does not open a link clicked inside the released subtree", async () => {
     const open = vi.fn();
     vi.stubGlobal("open", open);
     try {
       const root = rootIn();
-      const handle = createTerminal(root, { features: () => [] });
+      const handle = await mountTerminal(root, { features: () => [] });
       const wrap = term(root);
       const link = document.createElement("a");
       link.className = "term-link";
@@ -335,12 +254,12 @@ describe("a released runtime answers no event it registered for", () => {
     }
   });
 
-  it("drops no browse cache when the page is put away after destroy", () => {
+  it("drops no browse cache when the page is put away after destroy", async () => {
     // pagehide is the bfcache entry point, and it fires on a page whose terminal
     // a host may have destroyed minutes earlier: the renderer it would reach is
     // no longer this kernel's business.
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     handle.destroy();
     dropBrowseCache.mockClear();
 
@@ -349,11 +268,11 @@ describe("a released runtime answers no event it registered for", () => {
     expect(dropBrowseCache).not.toHaveBeenCalled();
   });
 
-  it("takes no focus from the public handle after destroy", () => {
+  it("takes no focus from the public handle after destroy", async () => {
     // handle.focus() IS focusTerminal, and a host keeps the handle: focusing a
     // detached textarea would scroll a page that has moved on.
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     const input = ta(root);
     const focus = vi.spyOn(input, "focus");
     handle.destroy();
@@ -365,11 +284,11 @@ describe("a released runtime answers no event it registered for", () => {
 });
 
 describe("the textarea's own focus and blur wiring", () => {
-  it("paints the focus class while the textarea holds focus, and drops it on blur", () => {
+  it("paints the focus class while the textarea holds focus, and drops it on blur", async () => {
     // The class is what every .term rule keys the focused treatment off; nothing
     // else in the library sets it.
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
       const input = ta(root);
       const wrap = term(root);
@@ -383,12 +302,12 @@ describe("the textarea's own focus and blur wiring", () => {
     }
   });
 
-  it("restores the placeholder on blur, so the next backspace still has a target", () => {
+  it("restores the placeholder on blur, so the next backspace still has a target", async () => {
     // A backspace is only observable as an input event when there is something
     // in the field to delete; leaving the field in whatever state the blur found
     // it silently loses the first one after a refocus.
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
       const input = ta(root);
       input.value = "half-typed";
@@ -407,9 +326,9 @@ describe("an open IME composition owns the keyboard", () => {
   // on it: the composed text is delivered once, by compositionend, and anything
   // sent from under a live composition is a duplicate the user never typed.
 
-  it("sends nothing from an input event while a composition is running", () => {
+  it("sends nothing from an input event while a composition is running", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
       const input = ta(root);
       input.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
@@ -423,9 +342,9 @@ describe("an open IME composition owns the keyboard", () => {
     }
   });
 
-  it("sends nothing from a keydown while a composition is running", () => {
+  it("sends nothing from a keydown while a composition is running", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
       const input = ta(root);
       input.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
@@ -441,17 +360,16 @@ describe("an open IME composition owns the keyboard", () => {
     }
   });
 
-  it("resets the composition singleton on destroy, so a later terminal is not stuck mid-IME", () => {
-    // The module is a singleton shared by every mount, so a destroy in the middle
-    // of a composition cycle would otherwise leave the next terminal's keyboard
-    // permanently deferred to an IME that is no longer there.
+  it("keeps a destroy mid-composition from reaching a later terminal, whose own composition starts idle", async () => {
+    // Each pane owns its composition instance; the one torn down mid-IME must
+    // not leave the next terminal's keyboard deferred to an IME that is gone.
     const first = rootIn();
-    const firstHandle = createTerminal(first, { features: () => [] });
+    const firstHandle = await mountTerminal(first, { features: () => [] });
     ta(first).dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
     firstHandle.destroy();
 
     const second = rootIn();
-    const secondHandle = createTerminal(second, { features: () => [] });
+    const secondHandle = await mountTerminal(second, { features: () => [] });
     try {
       sendBinary.mockClear();
       ta(second).dispatchEvent(
@@ -490,7 +408,7 @@ describe("the document-level type-to-focus listener", () => {
         };
       },
     };
-    const handle = createTerminal(root, { features: () => [watcher, noisy] });
+    const handle = await mountTerminal(root, { features: () => [watcher, noisy] });
     // Both features must be REGISTERED before destroy, or teardown never runs and
     // this passes without ever reaching the listener.
     await tick();
@@ -504,12 +422,12 @@ describe("the document-level type-to-focus listener", () => {
     expect(sentText()).toBe("");
   });
 
-  it("stops at the feature that claims the key, without taking the keyboard or the selection", () => {
+  it("stops at the feature that claims the key, without taking the keyboard or the selection", async () => {
     // A claimed key must leave the selection intact, which is the whole reason
     // the chain runs before this listener takes focus: clipboard's Ctrl+Shift+C
     // needs the selection it is about to copy.
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [probeKeydown()] });
+    const handle = await mountTerminal(root, { features: () => [probeKeydown()] });
     try {
       const input = ta(root);
       input.blur();
@@ -538,9 +456,9 @@ describe("the document-level type-to-focus listener", () => {
 });
 
 describe("where the keyboard lands", () => {
-  it("focuses the hidden textarea on mount, so the first keystroke is not lost", () => {
+  it("focuses the hidden textarea on mount, so the first keystroke is not lost", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
       expect(document.activeElement).toBe(ta(root));
     } finally {
@@ -548,9 +466,9 @@ describe("where the keyboard lands", () => {
     }
   });
 
-  it("hands the keyboard back when the page becomes visible again", () => {
+  it("hands the keyboard back when the page becomes visible again", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
       ta(root).blur();
       expect(document.activeElement).not.toBe(ta(root));
@@ -563,9 +481,9 @@ describe("where the keyboard lands", () => {
     }
   });
 
-  it("hands the keyboard back on pageshow, which is the bfcache restore", () => {
+  it("hands the keyboard back on pageshow, which is the bfcache restore", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
       ta(root).blur();
 
@@ -577,12 +495,12 @@ describe("where the keyboard lands", () => {
     }
   });
 
-  it("focuses without scrolling, so raising the soft keyboard cannot shift the page", () => {
+  it("focuses without scrolling, so raising the soft keyboard cannot shift the page", async () => {
     // preventScroll is not modelled by the test DOM, so this asserts the call
     // the kernel makes: an iOS focus that scrolls jumps the terminal out from
     // under the caret, and nothing else in the library would restore it.
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
       const focus = vi.spyOn(ta(root), "focus");
 
@@ -594,7 +512,7 @@ describe("where the keyboard lands", () => {
     }
   });
 
-  it("registers the pointer listeners as passive, so a tap cannot block scrolling", () => {
+  it("registers the pointer listeners as passive, so a tap cannot block scrolling", async () => {
     // Also not modelled by the test DOM: a non-passive touch listener on the
     // scroller costs a frame on every drag, which is the gesture this UI is for.
     //
@@ -604,7 +522,7 @@ describe("where the keyboard lands", () => {
     const spy = vi.spyOn(HTMLElement.prototype, "addEventListener");
     try {
       const root = rootIn();
-      const handle = createTerminal(root, { features: () => [] });
+      const handle = await mountTerminal(root, { features: () => [] });
       const optionsFor = (type: string): AddEventListenerOptions[] =>
         spy.mock.calls
           .filter((c) => c[0] === type)
@@ -657,7 +575,7 @@ describe("what a teardown owes the primitives the kernel built", () => {
           };
         },
       };
-      const handle = createTerminal(rootIn(), { features: () => [first, second] });
+      const handle = await mountTerminal(rootIn(), { features: () => [first, second] });
       await tick();
 
       handle.destroy();
@@ -677,7 +595,7 @@ describe("what a teardown owes the primitives the kernel built", () => {
     // unchanged value), and that timer holds the detached element.
     let ctx: TerminalContext | undefined;
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [probeFeature((c) => (ctx = c))] });
+    const handle = await mountTerminal(root, { features: () => [probeFeature((c) => (ctx = c))] });
     await tick();
     const polite = root.querySelector<HTMLElement>('[aria-live="polite"]');
     if (!ctx || !polite) {
@@ -699,7 +617,7 @@ describe("what a teardown owes the primitives the kernel built", () => {
   it("cancels the toast timer, so nothing writes the toast after destroy", async () => {
     let ctx: TerminalContext | undefined;
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [probeFeature((c) => (ctx = c))] });
+    const handle = await mountTerminal(root, { features: () => [probeFeature((c) => (ctx = c))] });
     await tick();
     const toast = root.querySelector<HTMLElement>(".wt-toast");
     if (!ctx || !toast) {
@@ -732,7 +650,7 @@ describe("what a teardown owes the primitives the kernel built", () => {
       },
     };
     let ctx: TerminalContext | undefined;
-    const handle = createTerminal(rootIn(), {
+    const handle = await mountTerminal(rootIn(), {
       features: () => [other, probeFeature((c) => (ctx = c))],
     });
     await tick();
@@ -756,13 +674,13 @@ describe("what a teardown owes the primitives the kernel built", () => {
         throw new Error("import graph broken");
       },
     };
-    const handle = createTerminal(rootIn(), { features: () => [boom] });
+    const handle = await mountTerminal(rootIn(), { features: () => [boom] });
     await tick();
-    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
 
     handle.destroy();
 
-    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -779,7 +697,7 @@ describe("the fatal-startup rollback", () => {
     // its own layout; leaving it stamped hands the surface compact chrome rules
     // that no longer describe anything.
     const root = rootIn();
-    createTerminal(root, { features: () => [boom] });
+    await mountTerminal(root, { features: () => [boom] });
     await tick();
 
     expect(root.classList.contains("wt-narrow")).toBe(false);
@@ -791,7 +709,7 @@ describe("the fatal-startup rollback", () => {
     // The handler's own UI replaces the recovery panel, not the rollback: a live
     // terminal left underneath it would still hold the socket and the listeners.
     const root = rootIn();
-    createTerminal(root, {
+    await mountTerminal(root, {
       features: () => [boom],
       onFatalError() {
         const own = document.createElement("p");
@@ -808,7 +726,7 @@ describe("the fatal-startup rollback", () => {
   });
 
   it("leaves the handle inert, so a host that kept it cannot write to a dead socket", async () => {
-    const handle = createTerminal(rootIn(), { features: () => [boom] });
+    const handle = await mountTerminal(rootIn(), { features: () => [boom] });
     await tick();
     sendBinary.mockClear();
 
@@ -821,7 +739,7 @@ describe("the fatal-startup rollback", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const root = rootIn();
-      createTerminal(root, {
+      await mountTerminal(root, {
         features: () => [boom],
         onFatalError() {
           throw new Error("reporter broke too");
@@ -839,7 +757,7 @@ describe("the fatal-startup rollback", () => {
     }
   });
 
-  it("reports a handler that throws in the synchronous phase too", () => {
+  it("reports a handler that throws in the synchronous phase too", async () => {
     // The kernel-init phase: the multiple-owner guard throws before any DOM work,
     // so a silent reporting failure here leaves a consumer with no signal at all.
     const twoOwners = (): TerminalFeature<void>[] =>
@@ -853,14 +771,14 @@ describe("the fatal-startup rollback", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const root = rootIn();
-      expect(() =>
-        createTerminal(root, {
+      await expect(
+        mountTerminal(root, {
           features: twoOwners,
           onFatalError() {
             throw new Error("reporter broke too");
           },
         }),
-      ).toThrow(/multiple session-owning features/);
+      ).rejects.toThrow(/multiple session-owning features/);
 
       expect(error).toHaveBeenCalledWith(
         "web-terminal-ui: onFatalError handler failed",
@@ -877,7 +795,7 @@ describe("the fatal-startup rollback", () => {
     // default surface afterwards would put library UI back into a root the host
     // has explicitly released.
     const root = rootIn();
-    const handle: TerminalHandle = createTerminal(root, {
+    const handle: TerminalHandle = await mountTerminal(root, {
       features: () => [boom],
       onFatalError() {
         // Initialized by the time this runs: the rollback is dispatched from a
@@ -904,7 +822,7 @@ describe("the fatal-startup rollback", () => {
     // records why the seam is a separate module.
     reloadSpy.mockClear();
     const root = rootIn();
-    createTerminal(root, { features: () => [boom] });
+    await mountTerminal(root, { features: () => [boom] });
     await tick();
 
     const button = root.querySelector<HTMLButtonElement>(".wt-fatal-reload");
@@ -935,7 +853,7 @@ describe("a startup cancelled under the kernel", () => {
           });
         },
       };
-      const handle = createTerminal(rootIn(), { features: () => [slow] });
+      const handle = await mountTerminal(rootIn(), { features: () => [slow] });
       handle.destroy();
       reject?.(new Error("too late"));
       await tick();
@@ -976,7 +894,7 @@ describe("a startup cancelled under the kernel", () => {
             };
           }),
       };
-      const handle = createTerminal(rootIn(), { features: () => [registrar, slow] });
+      const handle = await mountTerminal(rootIn(), { features: () => [registrar, slow] });
       await tick();
       handle.destroy();
       release?.();
@@ -1010,7 +928,7 @@ describe("a startup cancelled under the kernel", () => {
       },
       setup: () => ({ teardown: () => undefined }),
     };
-    const handle = createTerminal(rootIn(), { features: () => [owner] });
+    const handle = await mountTerminal(rootIn(), { features: () => [owner] });
     await tick();
     handle.destroy();
     setSession.mockClear();
@@ -1041,7 +959,7 @@ describe("a startup cancelled under the kernel", () => {
         return { teardown: () => undefined };
       },
     };
-    const handle = createTerminal(rootIn(), { features: () => [owner], loading });
+    const handle = await mountTerminal(rootIn(), { features: () => [owner], loading });
     try {
       await tick();
       await tick();
@@ -1055,8 +973,8 @@ describe("a startup cancelled under the kernel", () => {
 });
 
 describe("the handle after destroy", () => {
-  it("reset() touches neither the scrollback nor the screen", () => {
-    const handle = createTerminal(rootIn(), { features: () => [] });
+  it("reset() touches neither the scrollback nor the screen", async () => {
+    const handle = await mountTerminal(rootIn(), { features: () => [] });
     handle.destroy();
     resetScrollback.mockClear();
     resetScreen.mockClear();
@@ -1069,13 +987,13 @@ describe("the handle after destroy", () => {
 });
 
 describe("the narrow-layout driver", () => {
-  it("watches the root for size changes in both dimensions", () => {
+  it("watches the root for size changes in both dimensions", async () => {
     // .wt-narrow is what every compact CSS rule keys off, and the root's size
     // changes without a window resize (a keyboard slide, a host panel animating).
     const observe = vi.spyOn(ResizeObserver.prototype, "observe");
     try {
       const root = rootIn();
-      const handle = createTerminal(root, { features: () => [] });
+      const handle = await mountTerminal(root, { features: () => [] });
       expect(observe).toHaveBeenCalledWith(root);
       handle.destroy();
     } finally {
@@ -1083,7 +1001,7 @@ describe("the narrow-layout driver", () => {
     }
   });
 
-  it("requires ResizeObserver rather than pretending to degrade without it", () => {
+  it("requires ResizeObserver rather than pretending to degrade without it", async () => {
     // kernel.ts used to guard this observer with `typeof ResizeObserver ===
     // "function"`, promising a browser without the constructor a terminal minus
     // the narrow-layout enhancement. It never delivered one: viewport.init()
@@ -1094,7 +1012,7 @@ describe("the narrow-layout driver", () => {
     // and unguardable here; the assertion is that it is stated honestly.
     vi.stubGlobal("ResizeObserver", undefined);
     try {
-      expect(() => createTerminal(rootIn(), { features: () => [] })).toThrow(
+      await expect(mountTerminal(rootIn(), { features: () => [] })).rejects.toThrow(
         /ResizeObserver is not a constructor/,
       );
     } finally {
@@ -1104,19 +1022,19 @@ describe("the narrow-layout driver", () => {
 });
 
 describe("the browse-cache sweep", () => {
-  it("keeps no sweep running after destroy, with a cache the sweep would drop", () => {
+  it("keeps no sweep running after destroy, with a cache the sweep would drop", async () => {
     // The sweep callback has no destroy guard of its own: the interval cleared on
     // abort is the only thing that stops it, so a released terminal would keep
     // reaching into a renderer the host has moved on from, once a minute, for the
     // life of the page.
     vi.useFakeTimers();
     try {
-      const handle = createTerminal(rootIn(), { features: () => [] });
+      const handle = await mountTerminal(rootIn(), { features: () => [] });
       handle.destroy();
       // A cache the sweep WOULD act on: with an empty one the sweep short-circuits
       // and a surviving interval looks identical to a cancelled one.
       browseCacheSize.mockReturnValue(12);
-      hoisted.lastBrowseActivityMs.mockReturnValue(0);
+      lastBrowseActivityMs.mockReturnValue(0);
       dropBrowseCache.mockClear();
 
       vi.advanceTimersByTime(300_000);
@@ -1134,10 +1052,10 @@ describe("the composition view follows the cursor", () => {
   // the platform scroll the page to reveal it, moving the terminal out from under
   // the caret. So both are placed at the cursor the renderer reports.
 
-  it("places both at the cursor before the first frame", () => {
+  it("places both at the cursor before the first frame", async () => {
     getCursorPx.mockReturnValue({ left: 24, top: 96, cellH: 19 });
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
       const view = root.querySelector<HTMLElement>(".composition-view");
       expect(view?.style.left).toBe("24px");
@@ -1148,13 +1066,11 @@ describe("the composition view follows the cursor", () => {
     }
   });
 
-  it("moves them when the renderer reports a cursor move", () => {
+  it("moves them when the renderer reports a cursor move", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     try {
-      const onCursorMove = (
-        renderInit.mock.calls[0]?.[0] as { onCursorMove?: () => void } | undefined
-      )?.onCursorMove;
+      const onCursorMove = fake.options().onCursorMove;
       if (!onCursorMove) {
         throw new Error("the kernel gave the renderer no cursor-move hook");
       }
@@ -1177,7 +1093,7 @@ describe("the composition view follows the cursor", () => {
     vi.useFakeTimers();
     try {
       const root = rootIn();
-      const handle = createTerminal(root, { features: () => [] });
+      const handle = await mountTerminal(root, { features: () => [] });
       await vi.advanceTimersByTimeAsync(0);
       getCursorPx.mockReturnValue({ left: 8, top: 240, cellH: 19 });
 
@@ -1199,7 +1115,9 @@ describe("the document title, which the kernel is the only writer of", () => {
     // both for nothing.
     document.title = "kiro-cli";
     let ctx: TerminalContext | undefined;
-    const handle = createTerminal(rootIn(), { features: () => [probeFeature((c) => (ctx = c))] });
+    const handle = await mountTerminal(rootIn(), {
+      features: () => [probeFeature((c) => (ctx = c))],
+    });
     await tick();
     if (!ctx) {
       throw new Error("the probe feature never ran");
@@ -1227,11 +1145,15 @@ describe("the document title, which the kernel is the only writer of", () => {
       },
     });
     try {
-      ctx.titlePrefix("(2) ");
+      const reporter = ctx.shell.attention({ icons: false });
+      reporter.report({ count: 2, icon: null });
       expect(writes).toBe(1);
       expect(document.title).toBe("(2) kiro-cli");
 
-      ctx.titlePrefix("(2) ");
+      // The same report again, and a program re-announcing the title it already
+      // has (a shell redrawing its prompt): neither composes a different title.
+      reporter.report({ count: 2, icon: null });
+      fake.callbacks().onMessage?.({ type: "title", title: "kiro-cli" } as never);
 
       expect(writes).toBe(1);
     } finally {
@@ -1246,14 +1168,14 @@ describe("a browser with no matchMedia at all", () => {
   // has to hold: reading the answer from a missing function throws out of an event
   // handler, which loses the gesture entirely rather than degrading it.
 
-  it("still preserves the keyboard on a touch press", () => {
+  it("still preserves the keyboard on a touch press", async () => {
     // The synthetic mousedown after a touch tap is cancelled to keep iOS's
     // keyboard up, and that decision reads the pointer question: a detect that
     // does not hold throws out of the handler and the cancellation is lost.
     vi.stubGlobal("matchMedia", undefined);
     try {
       const root = rootIn();
-      const handle = createTerminal(root, { features: () => [] });
+      const handle = await mountTerminal(root, { features: () => [] });
       const wrap = term(root);
 
       wrap.dispatchEvent(
@@ -1269,11 +1191,11 @@ describe("a browser with no matchMedia at all", () => {
     }
   });
 
-  it("still focuses the terminal on a clean touch tap", () => {
+  it("still focuses the terminal on a clean touch tap", async () => {
     vi.stubGlobal("matchMedia", undefined);
     try {
       const root = rootIn();
-      const handle = createTerminal(root, { features: () => [] });
+      const handle = await mountTerminal(root, { features: () => [] });
       const wrap = term(root);
       ta(root).blur();
 
@@ -1295,7 +1217,9 @@ describe("a browser with no matchMedia at all", () => {
     vi.stubGlobal("matchMedia", undefined);
     try {
       let ctx: TerminalContext | undefined;
-      const handle = createTerminal(rootIn(), { features: () => [probeFeature((c) => (ctx = c))] });
+      const handle = await mountTerminal(rootIn(), {
+        features: () => [probeFeature((c) => (ctx = c))],
+      });
       await tick();
       if (!ctx) {
         throw new Error("the probe feature never ran");
@@ -1321,12 +1245,12 @@ describe("a fontReady the document cannot resolve", () => {
   // unparseable descriptor comes back as a REJECTED promise ("Could not resolve
   // '...' as a font"), and a well-formed descriptor naming a missing family
   // RESOLVES with zero faces, which is not an error at all.
-  it("reports a document with no Font Loading API by name, and does not wedge startup", () => {
+  it("reports a document with no Font Loading API by name, and does not wedge startup", async () => {
     const restoreFonts = shadowFonts(undefined);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const root = rootIn();
-      const handle = createTerminal(root, {
+      const handle = await mountTerminal(root, {
         features: () => [],
         fontReady: "14px SomeMissingFace",
       });
@@ -1349,7 +1273,7 @@ describe("a fontReady the document cannot resolve", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const root = rootIn();
-      const handle = createTerminal(root, {
+      const handle = await mountTerminal(root, {
         features: () => [],
         fontReady: "not a font at all",
       });

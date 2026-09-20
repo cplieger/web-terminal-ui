@@ -1,24 +1,35 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import type { TerminalContext, FeatureInstance } from "../kernel/types.js";
-import type { mobileToolbar as MobileToolbarFn, MobileToolbarApi } from "./mobile-toolbar.js";
+import { POWER_ON_MODES, createModeState } from "@cplieger/web-terminal-engine";
+import type { TerminalContext, FeatureInstance, ModeReaders } from "../kernel/types.js";
+import { mobileToolbar, type MobileToolbarApi } from "./mobile-toolbar.js";
 
-let armed = false;
-const isCtrlArmed = vi.fn(() => armed);
-const applyStickyCtrl = vi.fn((t: string) => t);
-const setCtrlArmed = vi.fn((v: boolean) => {
-  armed = v;
-});
-const dispose = vi.fn();
-let onCtrlChange: ((a: boolean) => void) | undefined;
-let sendFromToolbar: ((text: string) => void) | undefined;
-const bindMobileToolbar = vi.fn(
-  (o: { onCtrlChange: (a: boolean) => void; send: (text: string) => void }) => {
-    onCtrlChange = o.onCtrlChange;
-    sendFromToolbar = o.send;
-    return { isCtrlArmed, applyStickyCtrl, setCtrlArmed, dispose };
-  },
-);
+// Hoisted because the mock factory below runs before this module's own
+// statements, and the feature is imported as a value.
+const { state, isCtrlArmed, applyStickyCtrl, setCtrlArmed, dispose, bindMobileToolbar } =
+  vi.hoisted(() => {
+    const state: {
+      armed: boolean;
+      onCtrlChange: ((a: boolean) => void) | undefined;
+      sendFromToolbar: ((text: string) => void) | undefined;
+      modes: unknown;
+    } = { armed: false, onCtrlChange: undefined, sendFromToolbar: undefined, modes: undefined };
+    const isCtrlArmed = vi.fn(() => state.armed);
+    const applyStickyCtrl = vi.fn((t: string) => t);
+    const setCtrlArmed = vi.fn((v: boolean) => {
+      state.armed = v;
+    });
+    const dispose = vi.fn();
+    const bindMobileToolbar = vi.fn(
+      (o: { onCtrlChange: (a: boolean) => void; send: (text: string) => void; modes: unknown }) => {
+        state.onCtrlChange = o.onCtrlChange;
+        state.sendFromToolbar = o.send;
+        state.modes = o.modes;
+        return { isCtrlArmed, applyStickyCtrl, setCtrlArmed, dispose };
+      },
+    );
+    return { state, isCtrlArmed, applyStickyCtrl, setCtrlArmed, dispose, bindMobileToolbar };
+  });
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
@@ -28,46 +39,65 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
 function fakeCtx(): {
   ctx: TerminalContext;
   slot: HTMLElement;
+  modes: ModeReaders;
   transform: (b: Uint8Array) => Uint8Array;
-  offTransform: ReturnType<typeof vi.fn>;
   send: ReturnType<typeof vi.fn>;
+  /** What the terminal does on destroy: the instance's `teardown()`, then every
+   *  release the feature handed to `ctx.defer`, newest first. */
+  destroy(inst: FeatureInstance<MobileToolbarApi>): void;
 } {
   const slot = document.createElement("div");
   let transformFn: ((b: Uint8Array) => Uint8Array) | undefined;
-  const offTransform = vi.fn();
   const send = vi.fn();
+  const scope: (() => void)[] = [];
+  // A real mode state: the toolbar reads it at press time for the arrow and
+  // Escape bytes, and the shell hands the selected pane's through ctx.modes.
+  const modes: ModeReaders = createModeState(POWER_ON_MODES);
   const ctx = {
     region: () => slot,
     send,
+    modes,
     registerInputTransform: (fn: (b: Uint8Array) => Uint8Array) => {
       transformFn = fn;
-      return offTransform;
+      return () => undefined;
+    },
+    defer: (release: () => void) => {
+      scope.push(release);
     },
   } as unknown as TerminalContext;
-  return { ctx, slot, transform: (b) => transformFn?.(b) ?? b, offTransform, send };
+  return {
+    ctx,
+    slot,
+    modes,
+    transform: (b) => transformFn?.(b) ?? b,
+    send,
+    destroy(inst) {
+      inst.teardown();
+      while (scope.length > 0) {
+        scope.pop()?.();
+      }
+    },
+  };
 }
 
-let mobileToolbar: typeof MobileToolbarFn;
-
-beforeEach(async () => {
-  armed = false;
+beforeEach(() => {
+  state.armed = false;
   isCtrlArmed.mockClear();
   applyStickyCtrl.mockClear();
   applyStickyCtrl.mockImplementation((t: string) => t);
   setCtrlArmed.mockClear();
   dispose.mockClear();
   bindMobileToolbar.mockClear();
-  onCtrlChange = undefined;
-  sendFromToolbar = undefined;
-  vi.resetModules();
-  ({ mobileToolbar } = await import("./mobile-toolbar.js"));
+  state.onCtrlChange = undefined;
+  state.sendFromToolbar = undefined;
+  state.modes = undefined;
 });
 
 describe("mobileToolbar: sticky-Ctrl outbound transform", () => {
   it("passes bytes through unchanged when Ctrl is not armed", async () => {
     const f = fakeCtx();
     await mobileToolbar().setup(f.ctx);
-    armed = false;
+    state.armed = false;
     const input = new Uint8Array([0x61]);
     expect(f.transform(input)).toBe(input);
     expect(applyStickyCtrl).not.toHaveBeenCalled();
@@ -76,7 +106,7 @@ describe("mobileToolbar: sticky-Ctrl outbound transform", () => {
   it("rewrites a typed char to its Ctrl byte when armed and the mapping changes it", async () => {
     const f = fakeCtx();
     await mobileToolbar().setup(f.ctx);
-    armed = true;
+    state.armed = true;
     applyStickyCtrl.mockImplementation(() => "\u0003"); // Ctrl+C
     const out = f.transform(new Uint8Array([0x63])); // 'c'
     expect(Array.from(out)).toEqual([0x03]);
@@ -85,7 +115,7 @@ describe("mobileToolbar: sticky-Ctrl outbound transform", () => {
   it("returns the original bytes (no re-encode) when the mapping is a no-op", async () => {
     const f = fakeCtx();
     await mobileToolbar().setup(f.ctx);
-    armed = true;
+    state.armed = true;
     applyStickyCtrl.mockImplementation((t: string) => t);
     const input = new Uint8Array([0x63]);
     expect(f.transform(input)).toBe(input);
@@ -110,17 +140,17 @@ describe("mobileToolbar: API + lifecycle", () => {
     const api = inst.api as MobileToolbarApi;
     const seen: boolean[] = [];
     const off = api.onCtrlArmedChange((a) => seen.push(a));
-    onCtrlChange?.(true);
-    onCtrlChange?.(false);
+    state.onCtrlChange?.(true);
+    state.onCtrlChange?.(false);
     off();
-    onCtrlChange?.(true);
+    state.onCtrlChange?.(true);
     expect(seen).toEqual([true, false]);
   });
 
   it("onDetach disarms a latched sticky-Ctrl so it cannot fire against the next session", async () => {
     const f = fakeCtx();
     const inst = (await mobileToolbar().setup(f.ctx)) as FeatureInstance<MobileToolbarApi>;
-    armed = true;
+    state.armed = true;
     inst.onDetach?.();
     expect(setCtrlArmed).toHaveBeenCalledWith(false);
   });
@@ -128,7 +158,7 @@ describe("mobileToolbar: API + lifecycle", () => {
   it("onDetach does nothing when Ctrl is not armed", async () => {
     const f = fakeCtx();
     const inst = (await mobileToolbar().setup(f.ctx)) as FeatureInstance<MobileToolbarApi>;
-    armed = false;
+    state.armed = false;
     inst.onDetach?.();
     expect(setCtrlArmed).not.toHaveBeenCalled();
   });
@@ -151,7 +181,7 @@ describe("mobileToolbar: API + lifecycle", () => {
   it("routes the toolbar's key output through the kernel funnel, encoded", async () => {
     const f = fakeCtx();
     await mobileToolbar().setup(f.ctx);
-    sendFromToolbar?.("\x1b[A");
+    state.sendFromToolbar?.("\x1b[A");
     expect(f.send).toHaveBeenCalledTimes(1);
     expect(new TextDecoder().decode(f.send.mock.calls[0]?.[0] as Uint8Array)).toBe("\x1b[A");
   });
@@ -172,14 +202,67 @@ describe("mobileToolbar: API + lifecycle", () => {
     expect(bar?.classList.contains("no-transition")).toBe(false);
   });
 
-  it("teardown disposes the engine binding, drops the transform, and removes the toolbar", async () => {
+  it("hands the pane's mode state to the engine binding", async () => {
+    // The arrow and Escape bytes depend on the application-cursor and kitty
+    // flags of the pane that will receive them, so the binding reads ctx.modes
+    // rather than any state of its own.
+    const f = fakeCtx();
+    await mobileToolbar().setup(f.ctx);
+    expect(state.modes).toBe(f.modes);
+  });
+
+  it("teardown removes the toolbar, and the engine binding is released by the cleanup scope", async () => {
+    // The binding's release lives in the scope rather than in teardown() so a
+    // setup that throws after taking it still gives it back.
     const f = fakeCtx();
     const inst = (await mobileToolbar().setup(f.ctx)) as FeatureInstance<MobileToolbarApi>;
     expect(f.slot.querySelector(".key-toolbar")).not.toBeNull();
     inst.teardown();
-    expect(f.offTransform).toHaveBeenCalledTimes(1);
-    expect(dispose).toHaveBeenCalledTimes(1);
     expect(f.slot.querySelector(".key-toolbar")).toBeNull();
+    expect(dispose).not.toHaveBeenCalled();
+    f.destroy(inst);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels the pending first frame when destroyed before it, so nothing runs against the removed toolbar", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let next = 1;
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      frames.set(next, cb);
+      return next++;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      frames.delete(id);
+    });
+    const f = fakeCtx();
+    const inst = (await mobileToolbar().setup(f.ctx)) as FeatureInstance<MobileToolbarApi>;
+    const bar = f.slot.querySelector(".key-toolbar");
+    expect(frames.size).toBe(1);
+    f.destroy(inst);
+    expect(frames.size).toBe(0);
+    expect(bar?.classList.contains("no-transition")).toBe(true);
+  });
+
+  it("cancels the pending second frame when destroyed between the two", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let next = 1;
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      frames.set(next, cb);
+      return next++;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      frames.delete(id);
+    });
+    const f = fakeCtx();
+    const inst = (await mobileToolbar().setup(f.ctx)) as FeatureInstance<MobileToolbarApi>;
+    const bar = f.slot.querySelector(".key-toolbar");
+    const first = frames.get(1);
+    frames.delete(1);
+    first?.(0);
+    expect(frames.size).toBe(1);
+    f.destroy(inst);
+    expect(frames.size).toBe(0);
+    expect(bar?.classList.contains("no-transition")).toBe(true);
   });
 });
 
@@ -197,12 +280,12 @@ describe("mobileToolbar: teardown releases the arm/disarm subscribers", () => {
     const api = inst.api as MobileToolbarApi;
     const seen: boolean[] = [];
     api.onCtrlArmedChange((a) => seen.push(a));
-    onCtrlChange?.(true);
+    state.onCtrlChange?.(true);
     expect(seen).toEqual([true]);
 
     inst.teardown();
-    onCtrlChange?.(false);
-    onCtrlChange?.(true);
+    state.onCtrlChange?.(false);
+    state.onCtrlChange?.(true);
 
     expect(seen).toEqual([true]);
   });

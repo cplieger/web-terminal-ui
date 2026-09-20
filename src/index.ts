@@ -1,15 +1,8 @@
-// @cplieger/web-terminal-ui — the reference touch-first browser UI built on the
-// @cplieger/web-terminal-engine engine.
-//
-// v3 entry: createTerminal(root, { features }) builds a small kernel (display
-// output, hidden textarea, IME, engine wiring, input funnel, connection-state,
-// layout regions) plus opt-in feature modules. Feature bundles live at
-// "@cplieger/web-terminal-ui/presets" (presetSingle / presetTouch /
-// presetTabbed); a consumer that hand-picks features imports them individually.
-//
-// A consumer who wants a different UI depends on @cplieger/web-terminal-engine
-// directly and wires the engine's render/scroll/connection/keyboard modules to
-// their own DOM.
+// @cplieger/web-terminal-ui: the reference touch-first browser UI built on
+// @cplieger/web-terminal-engine. createTerminal(root, { features }) builds a
+// small kernel (display output, hidden textarea, IME, one engine instance, the
+// input funnel, connection state, layout regions) plus opt-in feature modules;
+// bundles live at "@cplieger/web-terminal-ui/presets".
 
 export { createTerminal } from "./kernel/kernel.js";
 export { localScrollbackStorage } from "./kernel/scrollback-storage.js";
@@ -26,6 +19,19 @@ export type {
   PersistedScrollback,
   ScrollbackPersistence,
   SessionOwnerRegistration,
+  PaneLayoutOwnerRegistration,
+  PaneSide,
+  PaneHandle,
+  ShellContext,
+  AttentionOptions,
+  AttentionState,
+  AttentionReporter,
+  NotificationEvent,
+  NotificationView,
+  Notifier,
+  SplitState,
+  SplitController,
+  ModeReaders,
   TerminalContext,
   TerminalEvents,
   RegionName,

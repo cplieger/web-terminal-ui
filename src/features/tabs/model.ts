@@ -1,84 +1,56 @@
-// tabs/model.ts — the session MODEL half of the tabs feature: the wire type,
-// the per-tab record, the session REST client, the close-tombstone set, and the
-// pinned-name helpers. No DOM, no chrome, no kernel context —
-// everything here is factory/pure and unit-testable in isolation. The chrome
-// halves are strip.ts (desktop) and switcher.ts (mobile); index.ts wires all
-// three over the kernel context.
+// The session MODEL half of the tabs feature: the wire type, the per-tab record,
+// the session REST client, the close-tombstone set and the pinned-name helpers.
+// No DOM and no kernel context; index.ts wires it over the chrome halves.
 
 import type { LineStore } from "@cplieger/web-terminal-engine";
 import type { SessionInfo } from "@cplieger/web-terminal-engine";
 import type { ViewMemory } from "@cplieger/web-terminal-engine";
-import type { TabHandle } from "../../kernel/types.js";
+import type { PaneSide, TabHandle } from "../../kernel/types.js";
 
-// One session's wire shape (SessionInfo) is the ENGINE's exported type — the
-// same repo as the Go terminal.SessionInfo it mirrors, so the cross-language
-// contract has one home. Type-only import: erases at compile, no runtime dep.
 export type { SessionInfo };
 
-/** A status record as the tabs feature consumes it: the session's REST wire
- *  shape plus the percentage that exists only on the status STREAM
- *  (SessionStatus.progressValue). Both status sources flow through one code path
- *  this way, and the optionality is meaningful: the polling fallback lists
- *  SessionInfo with no percentage at all, which means "no information" and must
- *  not be read as "the percentage was cleared". */
+/** A status record as the tabs feature consumes it: the REST wire shape plus the
+ *  percentage that exists only on the status STREAM. The polling fallback lists
+ *  no percentage at all, which means "no information", not "cleared". */
 export type StatusRecord = SessionInfo & {
   readonly progressValue?: number;
 };
 
-// The status vocabulary, module-private on purpose: every consumer asks one of
-// the predicates below (isEndedStatus / statusRevealsDot / isCueStatus /
-// statusPhrase) instead of comparing strings itself, so a status's
-// MEANING has exactly one home. Adding a status means adding it to the
-// predicates that should include it, not to a comparison at each call site.
+// The status vocabulary is module-private so a status's MEANING has one home:
+// every consumer asks a predicate below instead of comparing strings.
 //
-// The server-side status of a session whose process has exited (mirrors the
-// engine's terminal.StatusExited). Such a session is viewable history — its
-// final screen replays and the kernel shows "Session ended" — but it can never
-// produce output again, so session selection prefers live sessions everywhere.
+// An exited session is viewable history that can never produce output again, so
+// session selection prefers live sessions everywhere.
 const STATUS_EXITED = "exited";
 
-/** The other end-of-process status (engine terminal.StatusCrashed): a non-zero
- *  exit status, or a terminating signal the program was not asked for. A
- *  server-initiated end (a closed tab, the idle reaper, a server shutdown) is
- *  reported as "exited", so a routine restart never paints as a failure. Like
- *  "exited" it is terminal: nothing clears it, and it outranks every progress
- *  state. */
+/** A non-zero exit status or an unrequested signal. A server-initiated end (a
+ *  closed tab, the reaper, a shutdown) is reported as "exited", so a routine
+ *  restart never paints as a failure. Terminal, like "exited". */
 const STATUS_CRASHED = "crashed";
 
-/** OSC 9;4 progress state 2, the error state (iTerm2 semantics). A STATE, not an
- *  event: it persists until the program reports another progress state, or the
- *  process dies (which outranks it). */
+/** OSC 9;4 progress state 2, the error state (iTerm2 semantics). A STATE that
+ *  persists until the program reports another, or the process dies. */
 const STATUS_FAILED = "failed";
 
-/** OSC 9;4 progress state 4, the warning state (iTerm2 semantics; ConEmu calls
- *  the same state paused). Same persistence rules as STATUS_FAILED. */
+/** OSC 9;4 progress state 4, the warning state (iTerm2 semantics). */
 const STATUS_WARNING = "warning";
 
-/** isEndedStatus reports whether a status means the session's process is GONE,
- *  whichever way it went. Session selection asks this — not `=== "exited"` —
- *  because a crashed session is exactly as dead as an exited one: reloading onto
- *  either is the stuck-loading wedge the bootstrap's live-session preference
- *  exists to avoid. */
+/** Whether the session's process is GONE, whichever way it went: reloading onto
+ *  a crashed session is the same stuck-loading wedge as onto an exited one. */
 export function isEndedStatus(status: string): boolean {
   return status === STATUS_EXITED || status === STATUS_CRASHED;
 }
 
-/** The statuses whose dot must be visible even if the server never set the
- *  session's sticky reportsActivity flag. `warning` and `failed` are OSC 9;4
- *  states, so the flag is set for them in practice and this only floors it;
- *  `crashed` is the case that needs it — a plain shell that dies badly has
- *  reported no activity in its life, and its red dot is the one thing the user
- *  most needs to see. An ordinary `exited` deliberately stays gated: a clean end
- *  is not news. */
+/** The statuses whose dot shows even without the sticky reportsActivity flag: a
+ *  plain shell that dies badly has reported no activity in its life, and its red
+ *  dot is the one thing the user most needs to see. A clean exit is not news. */
 export function statusRevealsDot(status: string): boolean {
   return status === STATUS_WARNING || status === STATUS_FAILED || status === STATUS_CRASHED;
 }
 
-/** statusPhrase is the human wording for a status, used for BOTH the dot's hover
- *  tooltip and the suffix in a tab's accessible name — one definition, so what a
- *  sighted user reads on hover and what a screen reader announces cannot
- *  disagree. An unknown status (a newer server: the wire is parsed, not
- *  validated) falls back to the raw value rather than being hidden. */
+/** The human wording for a status, for BOTH the dot's tooltip and the tab's
+ *  accessible name, so they cannot disagree. An unknown status (a newer server)
+ *  falls back to the raw value rather than being hidden. */
 export function statusPhrase(status: string): string {
   switch (status) {
     case "working":
@@ -120,65 +92,33 @@ export function normalizeProgress(value: unknown): number {
   return Math.min(100, Math.round(value));
 }
 
-/** statusOwnsProgress reports whether a status is one the program's OSC 9;4
- *  progress channel is currently speaking through. Only these may show a bar.
- *
- *  The tab keeps the last percentage the server reported, and the server keeps
- *  sending it (correctly — a progress state persists until the program changes
- *  it), so this predicate is what stops that value from being painted underneath a
- *  status that came from somewhere else entirely. `input` and `done` come from the
- *  NOTIFICATION channel; `idle` is the absence of a progress state; `exited` and
- *  `crashed` are process facts. A percentage under any of those is a claim about
- *  a different channel than the one the reader is looking at. */
+/** Whether the OSC 9;4 progress channel is speaking through this status; only
+ *  these may show a bar. The server keeps sending the last percentage while the
+ *  state persists, and `input`, `done`, `idle`, `exited` and `crashed` come from
+ *  other channels, so a percentage under them is a claim about the wrong one. */
 export function statusOwnsProgress(status: string): boolean {
   return status === "working" || status === STATUS_FAILED || status === STATUS_WARNING;
 }
 
-/** renderedProgress is the percentage a status may actually SHOW. The tab keeps
- *  the last value the server reported; this is the one place that decides whether
- *  it is still meaningful, so the clearing rule has a single home.
- *
- *  Two things clear it, and both are honest — neither invents a state change the
- *  program never made:
- *
- *   1. The program's own clear: OSC 9;4;0, or the abbreviated OSC 9;4, which the
- *      engine reports as percentage -1. That is the spec path, and the value
- *      arriving as PROGRESS_ABSENT is all it takes.
- *   2. The status is not one the progress channel owns (statusOwnsProgress) —
- *      checked here. That covers a dead process, whose progress is meaningless
- *      and which nothing will ever clear, and equally a `done` or `input` latch,
- *      which is the notification channel talking. Measured: kiro-cli parks
- *      progress state 4 at its context-usage percentage when idle, so a finished
- *      turn used to paint a green done dot beside a 72% bar — a number about the
- *      context window, rendered as how far along the work was.
- *
- *  There is deliberately NO third clear. 100% is not special: state 1 at 100 is a
- *  STATE that persists, and the progress channel carries no "done" signal at all,
- *  so a program that pins 100 and goes quiet keeps its bar — the same "persists
- *  until the program says otherwise" property the indeterminate state already has.
- *  There is also no TIMEOUT: a timer would assert a change the program never
- *  reported (Ghostty's ~15s one does, which is why it also asks emitters to
- *  refresh once a second; nothing here requires a keep-alive). */
+/** The percentage a status may SHOW. Two things clear it: the program's own
+ *  OSC 9;4;0 (arriving as PROGRESS_ABSENT) and a status the channel does not own
+ *  (kiro-cli parks state 4 at its context-usage percentage when idle, which once
+ *  painted a done dot beside a 72% bar). Deliberately no third clear: 100% is a
+ *  STATE that persists, and a timeout would assert a change the program never
+ *  reported. */
 export function renderedProgress(status: string, progress: number): number {
   return statusOwnsProgress(status) ? progress : PROGRESS_ABSENT;
 }
 
 // The secondary-activity vocabulary: a host-reported background activity that
-// OUTLIVES the turn, orthogonal to the status above. Module-private for the same
-// reason the status vocabulary is — every consumer asks a predicate, so a state's
-// MEANING has one home.
-//
-// A background task is running.
+// OUTLIVES the turn, orthogonal to the status above.
 const ACTIVITY_WORKING = "working";
 // Stopped and resumable; nobody is being asked for anything.
 const ACTIVITY_WAITING = "waiting";
-// A background task is blocked on the user.
 const ACTIVITY_INPUT = "input";
 
-/** normalizeActivity cleans the wire value into the closed set, or "" for no
- *  mark. Anything outside it — an unknown state from a newer server, a
- *  non-string, absent — is "": an unrecognised state must fail toward NO mark
- *  rather than toward a lit one whose meaning this build cannot name. */
+/** The wire value in the closed set, or "" for no mark: an unrecognised state
+ *  must fail toward NO mark rather than a lit one this build cannot name. */
 export function normalizeActivity(value: unknown): string {
   if (value === ACTIVITY_WORKING || value === ACTIVITY_WAITING || value === ACTIVITY_INPUT) {
     return value;
@@ -186,10 +126,8 @@ export function normalizeActivity(value: unknown): string {
   return "";
 }
 
-/** normalizeActivityCount cleans the count off the wire: a non-integer, a
- *  negative or an absent value is 0. The engine documents count >= 1 whenever
- *  the state is non-empty, so 0 beside a live state is a server that does not
- *  count, which activityPhrase reads as one. */
+/** The count off the wire; a non-integer, a negative or an absent value is 0,
+ *  which activityPhrase reads as one beside a live state. */
 export function normalizeActivityCount(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
     return 0;
@@ -197,13 +135,8 @@ export function normalizeActivityCount(value: unknown): number {
   return value;
 }
 
-/** activityPhrase is the human wording for the mark, used for BOTH its hover
- *  tooltip and the suffix in a tab's accessible name — one definition, so what a
- *  sighted user reads on hover and what a screen reader announces cannot
- *  disagree (the statusPhrase rule). "" for no mark.
- *
- *  It cannot say "workflow": the secondary channel is generic, so the wording has
- *  to be true for whatever a host puts on it. */
+/** The human wording for the mark, for BOTH its tooltip and the tab's accessible
+ *  name; "" for no mark. It cannot say "workflow": the channel is generic. */
 export function activityPhrase(state: string, count: number): string {
   const normalized = normalizeActivity(state);
   if (normalized === "") {
@@ -220,22 +153,13 @@ export function activityPhrase(state: string, count: number): string {
   return `${subject} waiting for you`;
 }
 
-/** tabAccessibleName is a tab's announced name: its rendered label plus the
- *  session's state, and the percentage when one is showing.
- *
- *  The percentage is announced but never DRAWN as text. No terminal emulator puts
- *  a number next to a tab label — Windows Terminal draws a ring over the tab icon,
- *  Ghostty and kitty a bar on a window edge, ConEmu a percentage in the WINDOW
- *  title — and the visible number cost label width in a chip that already shrinks
- *  to a 100px floor. The bar answers "how far" for the eye; this answers it for a
- *  screen reader, which cannot see the bar at all (it is decoration with no text).
- *
- *  Pass PROGRESS_ABSENT for progress to announce the state alone. Callers hand in
- *  renderedProgress's output, so a percentage the tab is not showing is not
- *  announced either.
- *
- *  A RECORD rather than positional arguments: `label` and `status` are adjacent
- *  same-typed strings, so a transposition compiles. */
+/** A tab's announced name: its label, the session's state, and the percentage
+ *  when one is showing. The percentage is announced but never DRAWN as text (no
+ *  emulator puts a number beside a tab label, and it costs width in a chip that
+ *  shrinks to a 100px floor); the bar is decoration a screen reader cannot see.
+ *  Pass renderedProgress's output, so an unshown percentage is not announced. A
+ *  record rather than positional arguments, because `label` and `status` are
+ *  adjacent same-typed strings. */
 export function tabAccessibleName(v: {
   readonly label: string;
   readonly status: string;
@@ -251,44 +175,20 @@ export function tabAccessibleName(v: {
   return activity === "" ? head : `${head} (${activity})`;
 }
 
-// localStorage key for the last active session id, so a page reload reopens the
-// tab the user left on rather than always defaulting to the oldest one.
-export const ACTIVE_TAB_KEY = "wt-active-session";
-
 // One-time "swipe to switch" hint, remembered across loads.
 export const SWIPE_HINT_KEY = "wt-swipe-hint-seen";
 
-/** The session statuses that raise an attention cue: the mobile switcher's
- *  aggregate dot, and the three out-of-page surfaces derived from the same set
- *  (see attention.ts). The rule is "only states that want the user — it's like a
- *  notification": a background terminal blocked on the user ("input"), one whose
- *  turn finished ("done"), one whose process died badly ("crashed"), and one that
- *  reported an error ("failed").
- *
- *  `working` and `warning` are excluded because they are ONGOING and
- *  informational: an animated dot pinned to the switch button would nag with
- *  nothing to act on. `failed` was excluded on the same reasoning and that was
- *  wrong — OSC 9;4 state 2 is not ongoing, it is a result the program parked and
- *  does not revisit until its next state change, which is exactly the shape of a
- *  thing to tell the user about. It is also the half of "red" a viewer cares most
- *  about: `crashed` was already here, so an errored turn raised nothing while a
- *  dead process raised everything.
- *
- *  Declared once here so the raise test, the acknowledgement store and every
- *  attention sink cannot disagree about which statuses are cue-worthy. */
+/** The statuses that raise an attention cue: only states that WANT the user, like
+ *  a notification. `working` and `warning` are ongoing and informational, so a
+ *  dot for them would nag with nothing to act on; `failed` is a parked result the
+ *  program does not revisit, so it belongs. Declared once so the raise test, the
+ *  acknowledgement store and every attention sink cannot disagree. */
 export type CueStatus = "input" | "done" | "crashed" | "failed";
 
-/** Severity order over CueStatus, most severe first, AND the complete set: this
- *  array is what isCueStatus tests against, so the type and the runtime list
- *  cannot drift the way two hand-maintained four-way checks could.
- *
- *  The order is read by the one surface that can show a single state (the browser
- *  tab icon), which paints the most severe unseen cue. That is a total order and
- *  so a defensible rule, unlike picking a session.
- *
- *  A dead process outranks a reported error (the session is gone, not merely
- *  unhappy), an error outranks a request for input, and a finished turn is the
- *  mildest thing worth a cue at all. */
+/** Severity order, most severe first, AND the complete set isCueStatus tests
+ *  against. The browser tab icon can show one state and paints the most severe
+ *  unseen cue: a dead process outranks a reported error, which outranks a request
+ *  for input, and a finished turn is the mildest thing worth a cue. */
 export const CUE_SEVERITY: readonly CueStatus[] = [STATUS_CRASHED, STATUS_FAILED, "input", "done"];
 
 /** isCueStatus narrows a raw server status to a cue-worthy one. */
@@ -297,7 +197,7 @@ export function isCueStatus(status: string): status is CueStatus {
 }
 
 /** worseCue returns whichever of two cues is more severe; "" means no cue. */
-export function worseCue(a: CueStatus | "", b: CueStatus | ""): CueStatus | "" {
+function worseCue(a: CueStatus | "", b: CueStatus | ""): CueStatus | "" {
   if (a === "") {
     return b;
   }
@@ -318,30 +218,17 @@ export function cueIconName(status: CueStatus): "input" | "done" | "alert" {
   return "alert";
 }
 
-/** The cue statuses that mean the session's own turn is OVER WITHOUT INCIDENT, and
- *  therefore the only ones a live background task may blank.
- *
- *  Narrow on purpose, and `done` is the whole set. Every other cue status is
- *  something the viewer has to be told AT ONCE, so none of them may wait on a task:
- *  `crashed` and `exited` mean the PROCESS is gone (and a task belonging to a dead
- *  session is dead too), `input` IS what the viewer is being pointed at whatever
- *  else the session is doing, and `failed` is an error the program declared, which
- *  does not become less urgent because something else is still running. On this
- *  engine's path `failed` is OSC 9;4 state 2 rather than a turn verdict, so it is
- *  deliberately NOT treated the way vibekit's settle probe treats its own `failed`
- *  (see web-terminal-engine.md). */
+/** The cue statuses meaning the turn is OVER WITHOUT INCIDENT, the only ones a
+ *  live background task may blank. `done` is the whole set: every other cue must
+ *  reach the viewer AT ONCE, and `failed` here is OSC 9;4 state 2 rather than a
+ *  turn verdict. */
 const SETTLED_CUES: ReadonlySet<string> = new Set<CueStatus>(["done"]);
 
-/** foldedCueStatus is the status the CUE surfaces see for a session: its own
- *  status, unless a settled turn's background task is still running, in which
- *  case "". Nothing about the status DOT changes — the strip keeps rendering the
- *  turn's real state; only the cue's view of it is blanked.
- *
- *  "" and NOT "idle", and the difference is load-bearing: "" means NO
- *  INFORMATION, so a caller must leave the wt-cue-seen map alone, where "idle" is
- *  a real non-cue state that FORGETS the acknowledgement. Blanking with "idle"
- *  would drop the dismissal and re-raise the cue from scratch the moment the task
- *  ended, even for a session the viewer had already visited. */
+/** The status the CUE surfaces see: the session's own, unless a settled turn's
+ *  background task is still running, in which case "". "" and NOT "idle": "" means
+ *  NO INFORMATION, so the seen map is left alone, where "idle" is a real non-cue
+ *  state that would forget the acknowledgement and re-raise the cue when the task
+ *  ends. The status DOT keeps rendering the real state. */
 export function foldedCueStatus(status: string, activity: string): string {
   if (!SETTLED_CUES.has(status) || normalizeActivity(activity) === "") {
     return status;
@@ -349,14 +236,9 @@ export function foldedCueStatus(status: string, activity: string): string {
   return "";
 }
 
-/** isUnseenCue reports whether a session's CURRENT status is a cue this viewer
- *  has not acknowledged. The single predicate behind both the raise and the
- *  attention count, so a dot can never light for a session the count omits.
- *
- *  Note what it does NOT consider: whether the session is the active tab. A
- *  latch arriving on the active tab is acknowledged at arrival (applyStatus), so
- *  it is already absent from the unseen set by the time anything folds over it,
- *  and no caller needs a special case. */
+/** Whether a session's CURRENT status is a cue this viewer has not acknowledged;
+ *  the one predicate behind the raise and the attention count. A latch arriving
+ *  on a shown tab is acknowledged at arrival, so no caller needs a special case. */
 export function isUnseenCue(
   status: string,
   id: string,
@@ -365,39 +247,53 @@ export function isUnseenCue(
   return isCueStatus(status) && seen.get(id) !== status;
 }
 
-/** localStorage key for the cues this viewer has already SEEN: session id -> the
- *  latched status that was acknowledged.
- *
- *  It has to be remembered, because dismissing the cue does not change the
- *  session: `input` and `done` are LATCHED server-side (the engine clears them
- *  only on the session's next working phase) and the status stream re-delivers
- *  the latch in the snapshot it pushes on every open. So a dismissed dot came
- *  back on the next page load — and, since the snapshot is re-pushed on every
- *  SSE reconnect, on a phone simply returning to a backgrounded page.
- *
- *  Client-side for the same reason as ACTIVE_TAB_KEY: "I have seen this" is a
- *  property of the VIEWER, not of the session. A phone acknowledging a finished
- *  turn must not blank the dot on the desktop watching the same server, so this
- *  needs no engine API. Contrast the tab ARRANGEMENT, which is a property of the
- *  session set and so is the server's (see compareTabOrder): a reorder is meant
- *  to reach the other device, and an acknowledgement is not.
- *
- *  Keyed per session rather than as one latest-wins slot: several background tabs
- *  can hold a latched status at once while the cue only ever shows the newest, so
- *  a single-slot acknowledgement would let every other one re-raise the dot on
- *  the next load. */
+/** What the cue fold reads per tab; structural, so a caller passes its own tab
+ *  objects. */
+export interface CueCandidate {
+  readonly id: string;
+  readonly status: string;
+}
+
+/** The unseen cues over the tab list: a COUNT for the title and the badge, one
+ *  WORST for the icon. A count is set-valued and needs no rule for choosing among
+ *  sessions; severity is a total order, so the icon's choice is not arbitrary.
+ *  Neither names a session, the standing constraint on a page-wide surface. */
+export interface CueSummary {
+  readonly count: number;
+  readonly worst: CueStatus | "";
+}
+
+/** Fold the tab list and this viewer's acknowledgements into the one summary
+ *  every attention surface renders. */
+export function summarizeCues(
+  tabs: readonly CueCandidate[],
+  seen: ReadonlyMap<string, CueStatus>,
+): CueSummary {
+  let count = 0;
+  let worst: CueStatus | "" = "";
+  for (const tab of tabs) {
+    if (!isUnseenCue(tab.status, tab.id, seen)) {
+      continue;
+    }
+    count += 1;
+    worst = worseCue(worst, tab.status);
+  }
+  return { count, worst };
+}
+
+/** localStorage key for the cues this viewer has SEEN: session id -> the
+ *  acknowledged status. Remembered because `input` and `done` are latched on the
+ *  server and re-delivered in every snapshot, so a dismissed dot came back on
+ *  every reload; client-side because "seen" is the VIEWER's, not the session's;
+ *  per session because several background tabs can hold a latch at once. */
 export const CUE_SEEN_KEY = "wt-cue-seen";
 
-/** Bound on the acknowledgement map: every key is a live session server-side, so
- *  a real one is nowhere near this, and a corrupted or hostile stored value
+/** Bound on the acknowledgement map, so a corrupted or hostile stored value
  *  cannot make the restore path do unbounded work. */
 export const MAX_PERSISTED_CUE_SEEN = 200;
 
-/** parseCueSeen reads stored acknowledgements into a clean map. Anything it
- *  cannot trust is dropped (or, for a broken document, all of it): a lost
- *  acknowledgement only re-lights a dot the user can dismiss again, so degrading
- *  to "nothing acknowledged" is always safe. Pure, so it is testable without a
- *  storage backend; the caller owns the localStorage read and its try/catch. */
+/** Read stored acknowledgements into a clean map, dropping anything untrusted: a
+ *  lost acknowledgement only re-lights a dot the user can dismiss again. */
 export function parseCueSeen(raw: string | null): Map<string, CueStatus> {
   const out = new Map<string, CueStatus>();
   if (raw === null || raw === "") {
@@ -452,41 +348,21 @@ export interface TabOrderKey {
  *  is a real position at the front of the strip. */
 const ORDER_ABSENT = Number.MAX_SAFE_INTEGER;
 
-/** createdMillis reads a wire createdAt as a number for comparison. An
- *  unparseable value sorts LAST rather than first: the caller's question is where
- *  a tab belongs in a strip, and the end is the answer that reads as "new" —
- *  putting a tab the client cannot date at the head would rewrite the top of the
- *  strip on the strength of a value it failed to read.
- *
- *  Milliseconds, deliberately, against a wire value carrying nanoseconds: the
- *  server's own tiebreak is the id, this one's is too, and the pair therefore
- *  agree on every input a human can produce. Comparing the STRINGS instead would
- *  be wrong, not merely coarse — Go's RFC 3339 encoding drops trailing zeros
- *  from the fraction, so ".15" sorts before ".1" lexically. */
+/** A wire createdAt as a number. An unparseable value sorts LAST: the end reads
+ *  as "new", where the head would rewrite the top of the strip on a value the
+ *  client failed to read. Milliseconds against a nanosecond wire value, because
+ *  the id is the tiebreak on both sides; comparing the STRINGS would be wrong,
+ *  since Go's RFC 3339 encoding drops trailing zeros and ".15" sorts before ".1". */
 function createdMillis(raw: string): number {
   const when = Date.parse(raw);
   return Number.isNaN(when) ? Number.MAX_SAFE_INTEGER : when;
 }
 
-/** compareTabOrder is the total order the strip is built in: the server's shared
- *  position, then age, then id.
- *
- *  The server owns the arrangement (engine 3.9.0, `PUT /api/sessions/order`), so
- *  a drag on one device moves the tab on every device, and a browser with no
- *  history of this server still opens on the arrangement its owner chose. This
- *  replaced a per-browser `localStorage` arrangement, which by construction could
- *  not travel and which left a second device with no arrangement at all.
- *
- *  Age and id remain, and each answers a case the position cannot: age orders
- *  every session when the server keeps no order (an older engine sends no field,
- *  so all positions are absent and creation order is the honest fallback), and
- *  the id makes the order TOTAL, so two sessions created inside one millisecond
- *  cannot swap places between two runs.
- *
- *  Age is read from the `createdAt` field rather than from the wire SEQUENCE on
- *  purpose. Sessions arrive from two racing sources — the status stream's
- *  snapshot on open, and the bootstrap's GET /api/sessions — so a client that
- *  merges them sees neither source's order, however well each source sorted. */
+/** The total order the strip is built in: the server's shared position, then
+ *  age, then id. Age covers a server that keeps no order, and the id makes the
+ *  order TOTAL. Age is read from `createdAt` rather than the wire SEQUENCE
+ *  because sessions arrive from two racing sources (the stream's snapshot and
+ *  the bootstrap's list), so a merged client sees neither source's order. */
 export function compareTabOrder(a: TabOrderKey, b: TabOrderKey): number {
   const posA = a.order ?? ORDER_ABSENT;
   const posB = b.order ?? ORDER_ABSENT;
@@ -504,14 +380,9 @@ export function compareTabOrder(a: TabOrderKey, b: TabOrderKey): number {
   return a.id < b.id ? -1 : 1;
 }
 
-/** orderedInsertIndex returns where `incoming` belongs in `current` (the tabs
- *  already on the strip, in display order) under compareTabOrder: the index of
- *  the first tab that sorts after it, else the end.
- *
- *  This is what makes the strip independent of the order tabs ARRIVE in. Each
- *  insertion goes before the first tab that outranks the new one, which keeps a
- *  list built from an empty strip sorted at every step, so all arrival orders of
- *  one session set converge on the same strip. */
+/** Where `incoming` belongs in `current` under compareTabOrder: before the first
+ *  tab that outranks it, else the end, so every arrival order of one session set
+ *  converges on the same strip. */
 export function orderedInsertIndex(current: readonly TabOrderKey[], incoming: TabOrderKey): number {
   for (let i = 0; i < current.length; i++) {
     const other = current[i];
@@ -524,20 +395,15 @@ export function orderedInsertIndex(current: readonly TabOrderKey[], incoming: Ta
 
 export interface Tab {
   id: string;
-  /** Local mutation epoch at which this tab was adopted (a monotonic counter,
-   *  not a timestamp). The list reconcile snapshots the counter BEFORE its GET
-   *  /api/sessions and drops a server-unlisted tab only when the tab predates
-   *  that snapshot — a tab born while the list was in flight (the bootstrap's
-   *  create racing the SSE stream-open reconcile) is invisible to that stale
-   *  listing, and dropping it would cascade into a duplicate replacement
-   *  session (the boot double-create bug). */
+  /** The local mutation epoch at which this tab was adopted. The list reconcile
+   *  snapshots the counter BEFORE its GET and drops an unlisted tab only when
+   *  the tab predates the snapshot: a tab born while the list was in flight is
+   *  invisible to that stale listing, and dropping it cascaded into a duplicate
+   *  replacement session. */
   born: number;
-  /** The title the SERVER resolved for this session: its pinned name, else the
-   *  program's OSC 0/2 window title, else a title the host pushed through
-   *  SetSessionTitle, else the engine's own foreground-process/cwd inference.
-   *  Possibly empty only against an engine that has none of those. The displayed
-   *  label adds a numbered fallback and de-duplication (see relabelAll in
-   *  index.ts). */
+  /** The title the SERVER resolved: the pinned name, else the program's OSC 0/2
+   *  title, else a host-pushed title, else the engine's own inference. The
+   *  displayed label adds a numbered fallback and de-duplication. */
   title: string;
   /** The computed, de-duplicated label actually shown in the chrome. */
   display: string;
@@ -569,19 +435,12 @@ export interface Tab {
   /** How many sources produced that state, 0 when the server does not count. */
   activityCount: number;
   aria: TabHandle;
-  /** This tab's saved reading position: the absolute LINE at the viewport top
-   *  plus its on-screen offset and the follow state, as captureViewMemory()
-   *  returned it when the tab was last left. Null for a tab never viewed (and
-   *  for one left on the alternate screen, which has no absolute indices worth
-   *  remembering) — restoring null means "follow the tail", which is the right
-   *  default for a first visit.
-   *
-   *  NOT a pixel scrollTop, which is what this was until 2026-08: a rebuild has
-   *  built only ~301 of up to 5000 rows when the restore lands, so the browser
-   *  clamped the offset away, and it stopped meaning the same line as soon as
-   *  the tab's session produced output while backgrounded
-   *  (engine docs/scroll-position-fidelity.md §1.1). In memory only, like
-   *  before: a reload starts every tab following. */
+  /** This tab's saved reading position as captureViewMemory() returned it when
+   *  the tab was last left; null (follow the tail) for a tab never viewed or left
+   *  on the alternate screen. NOT a pixel scrollTop: a rebuild has built only
+   *  ~301 of up to 5000 rows when the restore lands, so the browser clamped the
+   *  offset away, and it stopped meaning the same line once the session produced
+   *  output while backgrounded. In memory only. */
   view: ViewMemory | null;
   /** Sticky: true once this session emitted a genuine activity signal (OSC 9;4).
    *  Its activity dot is shown only while true; a session that never reports
@@ -600,89 +459,126 @@ export interface Tab {
   nameSeq: number;
 }
 
-/** baseLabel is a tab's label before de-duplication: the user's pinned name if
- *  there is one, otherwise the title the SERVER resolved.
- *
- *  Only two rungs, because the engine now owns every automatic source and folds
- *  them into `title` in precedence order (pinned, the program's OSC window title,
- *  a title the host pushed through SetSessionTitle, then its own
- *  foreground-process/cwd inference). A client that re-implemented that ladder could only disagree with
- *  the server and with every other client.
- *
- *  The pin is still checked here, even though the server also folds it into
- *  `title`, so a rename paints immediately instead of waiting for the round trip.
- *
- *  fallback=true marks the "New tab" case so relabelAll leaves untitled tabs
- *  unnumbered. */
+/** A tab's label before de-duplication: the pinned name, else the title the
+ *  SERVER resolved. Only two rungs, because the engine folds every automatic
+ *  source into `title` and a client re-implementing that ladder could only
+ *  disagree with it. The pin is still read here so a rename paints before the
+ *  round trip. fallback=true marks "New tab" so relabelAll leaves it unnumbered. */
 export function baseLabel(tab: Tab): { text: string; fallback: boolean } {
   const real = pinnedNameOf(tab) || tab.title.trim();
   return real ? { text: real, fallback: false } : { text: "New tab", fallback: true };
 }
 
-/** pinnedNameOf normalizes a tab's pin: trimmed, with a whitespace-only value
- *  reading as absent. One definition, so baseLabel's precedence and the menu's
- *  enabled state can never disagree about whether a tab is pinned. */
+/** A tab's pin, trimmed, with a whitespace-only value reading as absent; one
+ *  definition so baseLabel and the menu's enabled state cannot disagree. */
 function pinnedNameOf(tab: Tab): string {
   return tab.pinnedTitle?.trim() ?? "";
 }
 
-/** hasPinnedName reports whether a tab carries a user-set name, which is what
- *  gates the tab menu's "use the automatic name" item. */
+/** Whether a tab carries a user-set name, which gates the tab menu's "use the
+ *  automatic name" item. */
 export function hasPinnedName(tab: Tab): boolean {
   return pinnedNameOf(tab) !== "";
 }
 
-/** The session REST client (GET/POST/DELETE /api/sessions + PUT .../title),
- *  bound to an apiBase. Every call is timeout-bounded: fetch has no default
- *  timeout, and a stalled-but-open server would otherwise leave a bootstrap
- *  list/create await pending forever (the old permanent-loading-overlay wedge;
- *  under the v4 session-owner contract the kernel would eventually see nothing,
- *  but a bounded call recovers into the retry chrome MUCH sooner). */
+/** The session REST client, bound to an apiBase. Every call is timeout-bounded:
+ *  fetch has no default timeout, and a stalled-but-open server would leave a
+ *  bootstrap await pending forever. */
 export interface SessionAPI {
   list(): Promise<SessionInfo[]>;
   create(): Promise<SessionInfo>;
   close(id: string): Promise<void>;
-  /** Set the user's pinned name for a session. UNLIKE setTitle this THROWS on
-   *  failure: a rename the user typed and that silently did not persist looks
-   *  correct until the next reload, so the caller must be able to surface it. */
+  /** Set the user's pinned name. THROWS on failure: a rename that silently did
+   *  not persist looks correct until the next reload. */
   setPinnedTitle(id: string, title: string): Promise<void>;
-  /** Remove a session's pinned name so its label falls back to the automatic
-   *  sources. Throws on failure, for the same reason as setPinnedTitle. */
+  /** Remove a session's pinned name. Throws on failure, as setPinnedTitle does. */
   clearPinnedTitle(id: string): Promise<void>;
-  /** Replace the display order every viewer of this server shares, by sending
-   *  every live session id in the wanted order.
-   *
-   *  THROWS on failure, and the status is the point. A 409 means the server's
-   *  session set is not the one the caller listed, so this client has not yet
-   *  seen a session created or closed elsewhere; the caller answers it by
-   *  re-listing and sending again, not by telling the user. Any other status is a
-   *  genuine failure of a reorder the user performed.
-   *
-   *  Absent from a server before engine 3.9.0, where it answers 404. */
+  /** Replace the display order every viewer of this server shares. THROWS on
+   *  failure, and the status is the point: a 409 means the caller's session set
+   *  is stale, answered by re-listing and sending again, not by telling the user.
+   *  A server before the route answers 404. */
   setOrder(ids: readonly string[]): Promise<void>;
+  /** The pane layout every viewer of this server shares. Null on 404, a server
+   *  before the route, against which the layout runs unpersisted; a throw on any
+   *  other non-2xx. */
+  getLayout(): Promise<PaneLayout | null>;
+  /** Replace the shared pane layout. Throws on non-2xx as `setOrder` does: a 409
+   *  means a side names a session that is not live. */
+  setLayout(layout: PaneLayout): Promise<void>;
+}
+
+/** The server's pane-layout record: which session each pane shows, the handle's
+ *  left share, the pane that receives typing (its session is the active tab), and
+ *  whether the split is open. When `open` is false `left` is the one shown session. */
+export interface PaneLayout {
+  readonly left: string | null;
+  readonly right: string | null;
+  readonly handle: number;
+  readonly selected: PaneSide;
+  readonly open: boolean;
+}
+
+/** A record read from the wire is a claim until its shape is checked. */
+function readPaneLayout(body: unknown): PaneLayout | null {
+  if (typeof body !== "object" || body === null) {
+    return null;
+  }
+  const rec = body as Record<string, unknown>;
+  const side = (v: unknown): string | null | undefined =>
+    v === null || v === undefined ? null : typeof v === "string" ? v : undefined;
+  const left = side(rec["left"]);
+  const right = side(rec["right"]);
+  const handle = rec["handle"];
+  const selected = rec["selected"];
+  const open = rec["open"];
+  if (
+    left === undefined ||
+    right === undefined ||
+    typeof handle !== "number" ||
+    !Number.isFinite(handle) ||
+    handle < 0 ||
+    handle > 1 ||
+    (selected !== "left" && selected !== "right") ||
+    typeof open !== "boolean"
+  ) {
+    return null;
+  }
+  return isConsistentLayout({ left, right, handle, selected, open })
+    ? { left, right, handle, selected, open }
+    : null;
+}
+
+/** The server's own rules for a well-formed record: a closed split shows only its
+ *  left side and selects it, one session is never on both sides, and an open split
+ *  with one shown side selects that side. */
+function isConsistentLayout(l: PaneLayout): boolean {
+  if (!l.open) {
+    return l.right === null && l.selected === "left";
+  }
+  if (l.left !== null && l.right !== null) {
+    return l.left !== l.right;
+  }
+  if (l.left !== null) {
+    return l.selected === "left";
+  }
+  if (l.right !== null) {
+    return l.selected === "right";
+  }
+  return true;
 }
 
 const SESSION_API_TIMEOUT_MS = 15000;
 
-/** A non-2xx response from the session API, carrying what the server actually
- *  said instead of flattening it into a message string.
- *
- *  The motivating case is a host that legitimately and TEMPORARILY refuses
- *  session creation: web-terminal-kiro answers 503 with `Retry-After: 5` and a
- *  body message while its tool engine installs the manifest's tools on first
- *  boot. Callers that only saw an `Error` could not tell that apart from a 500,
- *  could not honour the retry hint, and could not repeat the server's
- *  explanation — so the page read as broken while the server was deliberately
- *  waiting. Everything needed to do better is on this error. */
+/** A non-2xx response from the session API, carrying what the server said. A
+ *  host may TEMPORARILY refuse session creation (a 503 with `Retry-After` and a
+ *  body message while it installs tools on first boot), and a caller that only
+ *  saw an `Error` read that as a broken page. */
 export class SessionAPIError extends Error {
   /** HTTP status, so a caller can branch on 503 (retry) vs 429 vs 5xx. */
   readonly status: number;
-  /** Retry-After in milliseconds, or undefined when the server sent no usable
-   *  hint. */
+  /** Retry-After in milliseconds, or undefined without a usable hint. */
   readonly retryAfterMs: number | undefined;
-  /** The human-readable message from the error envelope, when the server sent
-   *  one (webhttp's `error` field, or `message` elsewhere), so the host's own
-   *  explanation can reach the user verbatim. Length-capped because it is
+  /** The error envelope's human-readable message, length-capped because it is
    *  server-controlled text destined for UI chrome. */
   readonly serverMessage: string | undefined;
 
@@ -720,15 +616,9 @@ function parseRetryAfter(header: string | null): number | undefined {
   return Math.min(Math.max(when - Date.now(), 0), RETRY_AFTER_MAX_MS);
 }
 
-/** Pull the error envelope's human-readable message out of a failed response,
- *  without letting a non-JSON body, a hostile payload, or a slow read break the
- *  caller: the status and retry hint matter more than the prose, so every failure
- *  here is simply "no server message".
- *
- *  Two field names are accepted. `error` is the field the first-party Go envelope
- *  writes (webhttp's ErrorResponse, `json:"error"`), which is what every server in
- *  this family returns; `message` is the common alternative elsewhere. Preferring
- *  `error` keeps the family's own hosts authoritative. */
+/** The error envelope's human-readable message, or undefined on any failure: the
+ *  status and retry hint matter more than the prose. `error` is the first-party
+ *  envelope's field and is preferred; `message` is the common alternative. */
 async function readServerMessage(r: Response): Promise<string | undefined> {
   try {
     const body: unknown = await r.json();
@@ -768,11 +658,8 @@ export function createSessionAPI(apiBase: string): SessionAPI {
         throw await sessionError("list", r);
       }
       const data: unknown = await r.json();
-      // A 200 with a non-array body -- a proxy error object, or a Go server
-      // marshaling a nil session slice as JSON `null` -- must not reach the
-      // bootstrap's `sessions.length` / `for...of` (or the poll's `list.map`)
-      // uncaught. Reject a non-array so the callers' existing catch paths
-      // recover (bootstrap -> [], poll -> skip the tick).
+      // A 200 with a non-array body (a proxy error object, a nil slice marshaled
+      // as `null`) is a throw the callers' catch paths already recover from.
       if (!Array.isArray(data)) {
         throw new Error("web-terminal-ui: session list returned a non-array body");
       }
@@ -832,6 +719,34 @@ export function createSessionAPI(apiBase: string): SessionAPI {
         throw await sessionError("set order", r);
       }
     },
+    async getLayout(): Promise<PaneLayout | null> {
+      const r = await fetch(`${apiBase}/layout`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
+      });
+      if (r.status === 404) {
+        return null;
+      }
+      if (!r.ok) {
+        throw await sessionError("get layout", r);
+      }
+      const layout = readPaneLayout(await r.json());
+      if (layout === null) {
+        throw new Error("web-terminal-ui: session layout returned a malformed body");
+      }
+      return layout;
+    },
+    async setLayout(layout: PaneLayout): Promise<void> {
+      const r = await fetch(`${apiBase}/layout`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(layout),
+        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
+      });
+      if (!r.ok) {
+        throw await sessionError("set layout", r);
+      }
+    },
   };
 }
 
@@ -877,21 +792,15 @@ export function createTombstones(ttlMs: number = CLOSE_TOMBSTONE_MS): Tombstones
   };
 }
 
-/** MAX_PINNED_NAME bounds a user-typed tab name, mirroring the engine's own
- *  pinned-title cap so the field cannot accept text the server would silently
- *  truncate. A hand-typed label past ~40 characters is never visible in a 300px
- *  chip; 128 is generous. Counted in CODE POINTS, matching the server's runes —
- *  a naive `slice` would count UTF-16 code units and could cut a surrogate pair in
- *  half, sending a lone surrogate to the server. Neither bound is a count of
- *  user-perceived characters (a grapheme cluster is neither, per UAX #29); both
- *  are defensive limits, not display promises. */
+/** The bound on a user-typed tab name, mirroring the engine's pinned-title cap so
+ *  the field cannot accept text the server would silently truncate. Counted in
+ *  CODE POINTS, matching the server's runes: a naive `slice` counts UTF-16 units
+ *  and could send a lone surrogate. */
 export const MAX_PINNED_NAME = 128;
 
-/** sanitizePinnedName cleans a user-typed tab name before it is displayed or
- *  sent: control characters and DEL out (they would inject newlines or escape
- *  sequences into the label and into logs, CWE-117), trimmed, bounded by code
- *  point. Applied client-side rather than trusting the server's round-trip, so
- *  the optimistic label matches what the server will store. */
+/** A user-typed tab name cleaned before display and send: control characters and
+ *  DEL out (CWE-117), trimmed, bounded by code point. Client-side, so the
+ *  optimistic label matches what the server will store. */
 export function sanitizePinnedName(s: string): string {
   const kept: string[] = [];
   for (const ch of s) {

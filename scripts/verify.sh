@@ -23,21 +23,34 @@ if [ ! -d "$ENGINE_DIR/web/src" ]; then
   exit 1
 fi
 
-printf '%s\n' "[1/4] overlay local engine -> $PKG"
-mkdir -p "$PKG/src"
-find "$PKG/src" -maxdepth 1 -name '*.ts' -delete
-# Ship only runtime source; tests/fuzz/setup pull in vitest/fast-check which
-# aren't installed in this package's node_modules and would break the typecheck.
-# The `*-setup.ts` suffix is the engine's convention for a vitest setup file, so
-# this glob covers any setup file it adds without needing this list updated.
-for f in "$ENGINE_DIR"/web/src/*.ts; do
-  case "$f" in
-    *.test.ts | *fuzz* | *-setup.ts) continue ;;
-  esac
-  cp "$f" "$PKG/src/"
-done
-# Minimal manifest so bundler resolution maps the bare specifier to src.
-cp "$ENGINE_DIR/web/package.json" "$PKG/package.json"
+if [ -L "$PKG" ]; then
+  # The overlay's delete and copy would write THROUGH a symlink into whatever it
+  # points at, so a linked package is never overlaid: a link to this engine
+  # already resolves to its source, and a link anywhere else is refused.
+  if [ "$(realpath "$PKG")" = "$(realpath "$ENGINE_DIR/web")" ]; then
+    printf '%s\n' "[1/4] $PKG links to $ENGINE_DIR/web; overlay skipped"
+  else
+    printf '%s\n' "error: $PKG is a symlink to $(realpath "$PKG"), not to $ENGINE_DIR/web" >&2
+    printf '%s\n' "       remove the link or point ENGINE_DIR at its target" >&2
+    exit 1
+  fi
+else
+  printf '%s\n' "[1/4] overlay local engine -> $PKG"
+  mkdir -p "$PKG/src"
+  find "$PKG/src" -maxdepth 1 -name '*.ts' -delete
+  # Ship only runtime source; tests/fuzz/setup pull in vitest/fast-check which
+  # aren't installed in this package's node_modules and would break the typecheck.
+  # The `*-setup.ts` suffix is the engine's convention for a vitest setup file, so
+  # this glob covers any setup file it adds without needing this list updated.
+  for f in "$ENGINE_DIR"/web/src/*.ts; do
+    case "$f" in
+      *.test.ts | *fuzz* | *-setup.ts) continue ;;
+    esac
+    cp "$f" "$PKG/src/"
+  done
+  # Minimal manifest so bundler resolution maps the bare specifier to src.
+  cp "$ENGINE_DIR/web/package.json" "$PKG/package.json"
+fi
 # Vite pre-bundles node_modules deps and keys the cache on the manifest rather
 # than on file contents, so an overlay that ADDS an export is invisible until the
 # cache is dropped: the suite then fails on the new symbol while the overlaid

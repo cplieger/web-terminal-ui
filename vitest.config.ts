@@ -122,7 +122,7 @@ export default defineConfig({
     // coverage exclude below, scripts/verify.sh): they import vitest, which a
     // consumer does not install, so shipping one breaks the consumer's build.
     // Name any new setup file `*-setup.ts` and every filter covers it already.
-    setupFiles: ["./src/fc-strict-setup.ts"],
+    setupFiles: ["./src/fc-strict-setup.ts", "./src/mounted-terminal-setup.ts"],
     printConsoleTrace: true,
     expandSnapshotDiff: true,
     coverage: {

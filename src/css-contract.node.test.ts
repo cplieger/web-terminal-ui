@@ -32,7 +32,7 @@ const tabsFeature = readFileSync(path.join(packageDir, "src/features/tabs/index.
 // Same shape, one pairing further: which of --font-mono's families the font-ready
 // gate names is a decision split across a CSS token and a TS literal, and nothing
 // but text can hold the two together.
-const kernelSource = readFileSync(path.join(packageDir, "src/kernel/kernel.ts"), "utf8");
+const paneSource = readFileSync(path.join(packageDir, "src/kernel/pane.ts"), "utf8");
 
 describe("engine-toggled class contract", () => {
   it("styles DECSCNM reverse video (.term-reverse-video) as a default-pair swap", () => {
@@ -171,7 +171,7 @@ describe("tiling-overlay contract (the cell-glyph font)", () => {
   const quotedFamilies = (stack: string): string[] =>
     [...stack.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
 
-  const fontReady = /DEFAULT_FONT_READY\s*=\s*'([^']+)'/.exec(kernelSource);
+  const fontReady = /DEFAULT_FONT_READY\s*=\s*'([^']+)'/.exec(paneSource);
 
   it("stacks --font-mono overlay-first, companion second, platform keyword last", () => {
     // ORDER is the assertion, not membership. Gecko takes the line box from the
@@ -247,7 +247,7 @@ describe("tiling-overlay contract (the cell-glyph font)", () => {
     // overlay is that family, so the gate opens on its 11 KB while the companion is
     // still loading. Omitting it defends nothing — its metrics are copied from the
     // companion and it carries no "M", which is the glyph the width probe measures.
-    expect(fontReady, "DEFAULT_FONT_READY is a single-quoted literal in kernel.ts").not.toBeNull();
+    expect(fontReady, "DEFAULT_FONT_READY is a single-quoted literal in pane.ts").not.toBeNull();
     expect(quotedFamilies(fontReady![1]!), "the gate names the companion alone").toEqual([
       COMPANION,
     ]);

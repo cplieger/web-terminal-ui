@@ -20,9 +20,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "../../kernel/kernel.js";
-import type * as TabsModule from "./index.js";
-import type { TerminalFeature } from "../../kernel/types.js";
+import { tabs } from "./index.js";
+import { mountTerminal } from "../../test-helpers/mount.js";
+import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
@@ -48,6 +48,7 @@ function fakeMonitor(): {
   const subs = new Set<(s: SessionStatus) => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
+    scope: "shell",
     setup() {
       return {
         api: {
@@ -74,9 +75,7 @@ function fakeMonitor(): {
   };
 }
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let tabs: (typeof TabsModule)["tabs"];
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+let term: TerminalHandle | undefined;
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -89,6 +88,16 @@ let list: unknown[];
 
 const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
+  if (String(url).endsWith("/layout")) {
+    return Promise.resolve(
+      method === "PUT"
+        ? jsonResponse(null, 204)
+        : jsonResponse(
+            { left: null, right: null, handle: 0.5, selected: "left", open: false },
+            200,
+          ),
+    );
+  }
   if (method === "POST") {
     return Promise.resolve(
       jsonResponse({ id: "s-new", title: "fresh", createdAt: "9", status: "idle" }, 201),
@@ -97,7 +106,6 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   if (method === "DELETE" || method === "PUT") {
     return Promise.resolve(jsonResponse(null, 204));
   }
-  void url;
   return Promise.resolve(jsonResponse(list, 200));
 });
 
@@ -108,8 +116,7 @@ function setVisibility(state: "visible" | "hidden"): void {
   Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
 }
 
-beforeEach(async () => {
-  vi.resetModules();
+beforeEach(() => {
   fetchMock.mockClear();
   list = [
     { id: "s1", title: "one", createdAt: "1", status: "idle" },
@@ -120,8 +127,6 @@ beforeEach(async () => {
   document.title = "Host page";
   localStorage.clear();
   setVisibility("visible");
-  ({ createTerminal } = await import("../../kernel/kernel.js"));
-  ({ tabs } = await import("./index.js"));
 });
 
 afterEach(() => {
@@ -146,7 +151,7 @@ async function mount(): Promise<{
   const monitor = fakeMonitor();
   const root = document.createElement("div");
   document.body.appendChild(root);
-  term = createTerminal(root, {
+  term = await mountTerminal(root, {
     features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
   });
   await until(() => root.querySelectorAll(".wt-tab").length === list.length);

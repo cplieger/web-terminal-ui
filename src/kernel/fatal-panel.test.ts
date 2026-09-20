@@ -25,7 +25,7 @@
 // guard throws before any DOM or engine work, so the kernel renders its panel
 // with nothing mocked.
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
-import { createTerminal } from "./kernel.js";
+import { mountTerminal } from "../test-helpers/mount.js";
 import type { TerminalFeature } from "./types.js";
 
 declare global {
@@ -113,11 +113,14 @@ const twoOwners = (): TerminalFeature[] =>
   }));
 
 /** Mount a root and drive the kernel into its fatal panel. Returns the panel. */
-function fatalPanel(layout: "viewport" | "container", host?: HTMLElement): HTMLDialogElement {
+async function fatalPanel(
+  layout: "viewport" | "container",
+  host?: HTMLElement,
+): Promise<HTMLDialogElement> {
   const root = document.createElement("div");
   (host ?? document.body).appendChild(root);
   mounted.push(host ?? root);
-  expect(() => createTerminal(root, { features: twoOwners, layout })).toThrow();
+  await expect(mountTerminal(root, { features: twoOwners, layout })).rejects.toThrow();
   const panel = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
   if (!panel) {
     throw new Error("the kernel rendered no fatal panel");
@@ -126,8 +129,8 @@ function fatalPanel(layout: "viewport" | "container", host?: HTMLElement): HTMLD
 }
 
 describe("the fatal panel's box, with the shipped stylesheet loaded", () => {
-  it("fills the viewport when modal, so the UA's capped fit-content box is gone", () => {
-    const panel = fatalPanel("viewport");
+  it("fills the viewport when modal, so the UA's capped fit-content box is gone", async () => {
+    const panel = await fatalPanel("viewport");
     expect(panel.matches(":modal")).toBe(true);
 
     const rect = panel.getBoundingClientRect();
@@ -148,7 +151,7 @@ describe("the fatal panel's box, with the shipped stylesheet loaded", () => {
     expect(cs.borderTopWidth).toBe("0px");
   });
 
-  it("refuses a host page's own generic dialog base rule", () => {
+  it("refuses a host page's own generic dialog base rule", async () => {
     // The panel is a <dialog> now, so an embedder's unlayered `dialog { ... }`
     // base rule reaches it where a <section> was never a plausible target. At
     // (0,0,1) it cedes every property the (0,1,0) base rule declares and wins
@@ -159,7 +162,7 @@ describe("the fatal panel's box, with the shipped stylesheet loaded", () => {
     hostSheet.textContent = "dialog { margin: 2rem; border-radius: 8px; box-shadow: 0 0 4px #000 }";
     document.head.appendChild(hostSheet);
     try {
-      const panel = fatalPanel("viewport");
+      const panel = await fatalPanel("viewport");
       const rect = panel.getBoundingClientRect();
       expect(rect.left).toBe(0);
       expect(rect.top).toBe(0);
@@ -175,7 +178,7 @@ describe("the fatal panel's box, with the shipped stylesheet loaded", () => {
     }
   });
 
-  it("stays pinned to the viewport when the host document is scrolled", () => {
+  it("stays pinned to the viewport when the host document is scrolled", async () => {
     // A top-layer element resolves an absolute position against the INITIAL
     // containing block, which is viewport-SIZED but canvas-anchored — so the
     // base rule's `position: absolute` equals the UA's `dialog:modal
@@ -196,7 +199,7 @@ describe("the fatal panel's box, with the shipped stylesheet loaded", () => {
     spacer.style.cssText = "height: 3000px";
     document.body.appendChild(spacer);
     try {
-      const panel = fatalPanel("viewport");
+      const panel = await fatalPanel("viewport");
       expect(panel.matches(":modal")).toBe(true);
       window.scrollTo(0, 900);
       // The document really did move, or the assertion below proves nothing.
@@ -213,12 +216,12 @@ describe("the fatal panel's box, with the shipped stylesheet loaded", () => {
     }
   });
 
-  it("keeps the package's :where(.wt-root) rules once promoted to the top layer", () => {
+  it("keeps the package's :where(.wt-root) rules once promoted to the top layer", async () => {
     // A promoted dialog is painted outside every ancestor's paint context, but it
     // does not MOVE in the DOM — so the scoped selectors still match, and this is
     // what says so rather than assuming it. Without them the panel renders as
     // unstyled UA chrome exactly when it matters most.
-    const panel = fatalPanel("viewport");
+    const panel = await fatalPanel("viewport");
     expect(panel.closest(".wt-root")).not.toBeNull();
     expect(panel.matches(":where(.wt-root) .wt-fatal")).toBe(true);
 
@@ -232,23 +235,23 @@ describe("the fatal panel's box, with the shipped stylesheet loaded", () => {
     expect(getComputedStyle(card!).borderTopWidth).toBe("1px");
   });
 
-  it("paints the backdrop in the panel's own background, not the UA's dim", () => {
+  it("paints the backdrop in the panel's own background, not the UA's dim", async () => {
     // The panel IS the dim, so a second differently-coloured layer under it would
     // show as a lighter seam the moment anything makes the panel smaller than the
     // viewport. The UA default is rgba(0, 0, 0, 0.1).
-    const panel = fatalPanel("viewport");
+    const panel = await fatalPanel("viewport");
     const backdrop = getComputedStyle(panel, "::backdrop").backgroundColor;
     expect(backdrop).toBe(getComputedStyle(panel).backgroundColor);
     expect(backdrop).not.toBe("rgba(0, 0, 0, 0.1)");
   });
 
-  it("fills only its own root when non-modal, leaving the host page's box alone", () => {
+  it("fills only its own root when non-modal, leaving the host page's box alone", async () => {
     // The embedded case: no top layer, so the panel positions against
     // .wt-root.wt-container and the application around it is untouched.
     const host = document.createElement("div");
     host.style.cssText = "position: absolute; left: 40px; top: 30px; width: 300px; height: 200px";
     document.body.appendChild(host);
-    const panel = fatalPanel("container", host);
+    const panel = await fatalPanel("container", host);
 
     expect(panel.open).toBe(true);
     expect(panel.matches(":modal")).toBe(false);

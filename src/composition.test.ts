@@ -1,13 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
-import * as composition from "./composition.js";
+import { createComposition, type Composition } from "./composition.js";
 import { keyboard } from "@cplieger/web-terminal-engine";
 
 const { bracketTextForPaste, prepareTextForTerminal } = keyboard;
 
+let composition: Composition;
 let textarea: HTMLTextAreaElement;
 let view: HTMLElement;
 let send: Mock<(bytes: string) => void>;
 let paste: Mock<(text: string) => void>;
+/** The pane's mode state as the paste funnel reads it; bracketed paste on. */
+const pasteModes: keyboard.PasteModes = { isBracketedPaste: () => true };
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -19,9 +22,9 @@ beforeEach(() => {
   // so the funnel (bracket + newline-normalize) is applied here and forwarded to
   // send, keeping the paste-jacking assertions on `send` meaningful.
   paste = vi.fn<(text: string) => void>((text) => {
-    send(bracketTextForPaste(prepareTextForTerminal(text)));
+    send(bracketTextForPaste(prepareTextForTerminal(text), pasteModes));
   });
-  composition.init({
+  composition = createComposition({
     textarea,
     compositionView: view,
     getCursorPx: () => ({ left: 0, top: 0, cellH: 16 }),
@@ -30,9 +33,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
-  // The module keeps composing/sendingComposition at module scope, so a case
-  // that leaves a composition open would hand it to the next one.
-  composition.cancelComposition();
+  composition.teardown();
   vi.useRealTimers();
 });
 
@@ -50,6 +51,12 @@ function compositionUpdate(data: string): CompositionEvent {
 }
 
 describe("composition: native paste is bracketed and sanitized (paste-jacking defense)", () => {
+  it("hands the raw clipboard text to the pane's paste funnel", () => {
+    textarea.dispatchEvent(pasteEvent("ls\n\x1b[201~rm"));
+    expect(paste).toHaveBeenCalledTimes(1);
+    expect(paste).toHaveBeenCalledWith("ls\n\x1b[201~rm");
+  });
+
   it("wraps pasted text in DEC 2004 sentinels and neutralizes an embedded closing marker", () => {
     textarea.dispatchEvent(pasteEvent("ls\n\x1b[201~rm"));
     expect(send).toHaveBeenCalledTimes(1);
@@ -102,6 +109,29 @@ describe("composition: composition lifecycle", () => {
     vi.advanceTimersByTime(0);
     expect(composition.isComposing()).toBe(false);
     expect(send).toHaveBeenCalledWith("\u4F60\u597D");
+  });
+
+  it("keeps two panes' compositions apart", () => {
+    const otherArea = document.createElement("textarea");
+    const otherView = document.createElement("div");
+    document.body.append(otherArea, otherView);
+    const otherSend = vi.fn<(bytes: string) => void>();
+    const other = createComposition({
+      textarea: otherArea,
+      compositionView: otherView,
+      getCursorPx: () => ({ left: 0, top: 0, cellH: 16 }),
+      send: otherSend,
+      paste: vi.fn(),
+    });
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    expect(composition.isComposing()).toBe(true);
+    expect(other.isComposing()).toBe(false);
+    textarea.value = "\u4F60";
+    textarea.dispatchEvent(new CompositionEvent("compositionend"));
+    vi.advanceTimersByTime(0);
+    expect(send).toHaveBeenCalledWith("\u4F60");
+    expect(otherSend).not.toHaveBeenCalled();
+    other.teardown();
   });
 });
 
@@ -228,7 +258,8 @@ describe("composition: positionCompositionView anchors the textarea at the conte
     // the composition view), so both take the cursor's content coordinates
     // directly; .term being pinned to the visual viewport (viewport.ts) is what
     // keeps that on-screen above the keyboard.
-    composition.init({
+    composition.teardown();
+    composition = createComposition({
       textarea,
       compositionView: view,
       getCursorPx: () => ({ left: 40, top: 5000, cellH: 16 }),
@@ -268,7 +299,8 @@ describe("composition: compositionupdate mirrors the in-progress phrase", () => 
 
   it("re-anchors the view as the cursor advances mid-composition", () => {
     const cursor = { left: 12, top: 34, cellH: 16 };
-    composition.init({
+    composition.teardown();
+    composition = createComposition({
       textarea,
       compositionView: view,
       getCursorPx: () => cursor,
@@ -340,7 +372,7 @@ describe("composition: a composition that produced nothing", () => {
   });
 });
 
-describe("composition: teardown releases the kernel it was initialised with", () => {
+describe("composition: teardown releases the textarea it was built over", () => {
   it("cancels an in-flight composition so a remount does not inherit it", () => {
     textarea.dispatchEvent(new CompositionEvent("compositionstart"));
     expect(composition.isComposing()).toBe(true);
@@ -348,6 +380,17 @@ describe("composition: teardown releases the kernel it was initialised with", ()
     composition.teardown();
 
     expect(composition.isComposing()).toBe(false);
+  });
+
+  it("drops a deferred send that was pending at teardown", () => {
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    textarea.value = "\u4F60";
+    textarea.dispatchEvent(new CompositionEvent("compositionend"));
+
+    composition.teardown();
+    vi.advanceTimersByTime(0);
+
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("stops listening for compositionstart", () => {

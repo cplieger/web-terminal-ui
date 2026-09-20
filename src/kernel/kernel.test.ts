@@ -7,8 +7,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { userEvent } from "vitest/browser";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "./kernel.js";
 import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
+import { mountTerminal } from "../test-helpers/mount.js";
+import { destroyMounted } from "../test-helpers/mounted-registry.js";
 import { clipboard } from "../features/clipboard.js";
 import type {
   TerminalContext,
@@ -17,126 +18,34 @@ import type {
   TerminalStartupFailure,
 } from "./types.js";
 
-const sendBinary = vi.fn<(buf: Uint8Array) => boolean>(() => true);
-const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
-const connect = vi.fn();
-const setSession = vi.fn<(id: string) => void>();
-const disconnect = vi.fn();
-const reconnectNow = vi.fn();
-const resetScrollback = vi.fn();
-const resetScreen = vi.fn();
-const renderInit = vi.fn<(opts: Parameters<typeof Engine.render.init>[0]) => void>();
-const scrollInit = vi.fn<(opts: Parameters<typeof Engine.scroll.init>[0]) => void>();
-// Hoisted so a test can drive the browse-cache TTL: the sweep reads both of
-// these, and short-circuits on an empty cache.
-const browseCacheSize = vi.fn<() => number>(() => 0);
-const lastBrowseActivityMs = vi.fn<() => number>(() => 0);
-const dropBrowseCache = vi.fn<(pageVisible: boolean) => void>();
-// Hoisted so the scroll seam test can assert the callback the kernel builds
-// actually REACHES the renderer, not merely that it is a function.
-const handleScrollPosition = vi.fn();
-// Hoisted so a test can say "this store is the visible tab's": the sweep splits
-// the bound store (conditional drop, through the renderer) from every background
-// one (unconditional, direct), and without a bound store to name, the split is
-// invisible.
-const boundStore = vi.fn<() => Engine.LineStore | undefined>(() => undefined);
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("../test-helpers/fake-engine.js");
+  return createEngineFake();
+});
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    render: {
-      init: renderInit,
-      updateFontMetrics: vi.fn(),
-      setPredictedCursor: vi.fn(),
-      computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
-      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-      getHighestIndex: vi.fn(() => -1),
-      pendingRowCount: vi.fn(() => 0),
-      noteResumeBounds: vi.fn(),
-      handleScreen: vi.fn(),
-      handleScroll: vi.fn(),
-      updateReverseVideo: vi.fn(),
-      resetScrollback,
-      resetScreen,
-      // The demand-paging surface the kernel wires (engine
-      // docs/paged-scrollback.md §5): the browse-cache TTL calls the first two on
-      // every visibility transition, so a double without them throws there.
-      browseCacheSize,
-      lastBrowseActivityMs,
-      dropBrowseCache,
-      maybeFetchHistory: vi.fn(),
-      handleScrollPosition,
-      replayMaxForResume: vi.fn(() => 1500),
-      handleHistoryReply: vi.fn(),
-      applyResumeTransition: vi.fn(),
-      noteSolicited: vi.fn(),
-      clearSolicited: vi.fn(),
-      bind: vi.fn(),
-      boundStore,
-    },
-    scroll: {
-      init: scrollInit,
-      scrollToBottom: vi.fn(),
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-      // Reached through viewport.ts's settle handler, which a real browser fires
-      // on its own: viewport.init() observes the term wrap with a ResizeObserver,
-      // and a real one delivers its first observation asynchronously, so every
-      // mount opens a transition that settles ~350ms later and pins to the bottom.
-      // Absent from this double the settle threw "stickToBottom is not a
-      // function" out of a timer, 16 times over.
-      stickToBottom: vi.fn(),
-    },
-    connection: {
-      init: connectionInit,
-      connect,
-      sendBinary,
-      sendResize: vi.fn(),
-      sendEphemeral: vi.fn(() => true),
-      setClientFocus: vi.fn(),
-      reconnectNow,
-      disconnect,
-      setSession,
-      forgetSession: vi.fn(),
-      // The engine's own per-tab session identity. The kernel reads it to scope
-      // the unverified-restore guard to ONE session, so a double that omits it
-      // makes every close path throw.
-      currentSessionId: vi.fn<() => string>(() => "session-under-test"),
-    },
-  };
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
+const { sendBinary, connect, setSession, reconnectNow } = fake.connection;
+const {
+  resetScrollback,
+  resetScreen,
+  browseCacheSize,
+  lastBrowseActivityMs,
+  dropBrowseCache,
+  boundStore,
+} = fake.renderer;
+const { dispose } = fake;
 const dec = new TextDecoder();
 const sentText = (): string => sendBinary.mock.calls.map((c) => dec.decode(c[0])).join("");
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-beforeEach(async () => {
-  vi.resetModules();
-  sendBinary.mockClear();
-  connectionInit.mockClear();
-  connect.mockClear();
-  setSession.mockClear();
-  disconnect.mockClear();
-  reconnectNow.mockClear();
-  resetScrollback.mockClear();
-  resetScreen.mockClear();
-  renderInit.mockClear();
-  scrollInit.mockClear();
-  browseCacheSize.mockClear();
-  browseCacheSize.mockReturnValue(0);
-  lastBrowseActivityMs.mockClear();
-  lastBrowseActivityMs.mockReturnValue(0);
-  dropBrowseCache.mockClear();
-  boundStore.mockClear();
-  boundStore.mockReturnValue(undefined);
+beforeEach(() => {
+  fake.reset();
   document.body.replaceChildren();
-  ({ createTerminal } = await import("./kernel.js"));
 });
 
 function rootIn(): HTMLElement {
@@ -173,9 +82,9 @@ function declareScrollGeometry(
 }
 
 describe("bare kernel builds a working terminal with no chrome", () => {
-  it("builds the display output and the hidden textarea, and no feature chrome", () => {
+  it("builds the display output and the hidden textarea, and no feature chrome", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
 
     expect(root.querySelector(".term-output")).not.toBeNull();
     expect(root.querySelector(".term-input")).not.toBeNull();
@@ -187,18 +96,18 @@ describe("bare kernel builds a working terminal with no chrome", () => {
     expect(root.querySelector(".ctx-menu")).toBeNull();
   });
 
-  it("sends typed text raw through the funnel (insertText)", () => {
+  it("sends typed text raw through the funnel (insertText)", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "ab" }));
     expect(sentText()).toBe("ab");
     expect(sentText()).not.toContain("\x1b[200~");
   });
 
-  it("brackets and sanitizes a paste (paste-jacking defense)", () => {
+  it("brackets and sanitizes a paste (paste-jacking defense)", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(
       new InputEvent("input", { inputType: "insertFromPaste", data: "ls\n\x1b[201~rm -rf /" }),
@@ -211,17 +120,17 @@ describe("bare kernel builds a working terminal with no chrome", () => {
     expect(sent).toContain("ls\r");
   });
 
-  it("normalizes a typed NBSP to a real space (iOS quirk)", () => {
+  it("normalizes a typed NBSP to a real space (iOS quirk)", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "a\u00A0b" }));
     expect(sentText()).toBe("a b");
   });
 
-  it("destroy() clears the built DOM", () => {
+  it("destroy() clears the built DOM", async () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: () => [] });
+    const term = await mountTerminal(root, { features: () => [] });
     expect(root.querySelector(".term-output")).not.toBeNull();
     term.destroy();
     expect(root.querySelector(".term-output")).toBeNull();
@@ -230,9 +139,9 @@ describe("bare kernel builds a working terminal with no chrome", () => {
 });
 
 describe("startup connect gating (session-managed vs single-terminal)", () => {
-  it("connects at startup for the single-terminal case (no session-managing feature)", () => {
+  it("connects at startup for the single-terminal case (no session-managing feature)", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     // No feature owns sessions, so the kernel opens the bare /ws itself.
     expect(connect).toHaveBeenCalledTimes(1);
   });
@@ -248,7 +157,7 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: () => [owner] });
+    await mountTerminal(root, { features: () => [owner] });
     // A bare /ws here would 404 against a SessionManager.
     expect(connect).not.toHaveBeenCalled();
     await tick(); // setup completes
@@ -270,7 +179,7 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: () => [owner], loading });
+    await mountTerminal(root, { features: () => [owner], loading });
     await tick();
     await tick();
     // No session could be listed or spawned: the kernel saw the null directly
@@ -295,14 +204,14 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: () => [owner], loading });
+    await mountTerminal(root, { features: () => [owner], loading });
     await tick();
     await tick();
     expect(loading.classList.contains("fade")).toBe(true);
     expect(errors).toContain("session-owner");
   });
 
-  it("throws when two features register as session owner", () => {
+  it("throws when two features register as session owner", async () => {
     const root = rootIn();
     const mk = (name: string): TerminalFeature => ({
       name,
@@ -311,7 +220,7 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
         return { teardown: () => undefined };
       },
     });
-    expect(() => createTerminal(root, { features: () => [mk("a"), mk("b")] })).toThrow(
+    await expect(mountTerminal(root, { features: () => [mk("a"), mk("b")] })).rejects.toThrow(
       // Names the collision: a consumer composing presets sees two features it
       // did not know both claimed sessions, and the names are the only way to
       // know which one to drop.
@@ -321,9 +230,9 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
 });
 
 describe("layout modes and root classes", () => {
-  it("stamps wt-root + wt-viewport by default and removes them on destroy", () => {
+  it("stamps wt-root + wt-viewport by default and removes them on destroy", async () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: () => [] });
+    const term = await mountTerminal(root, { features: () => [] });
     expect(root.classList.contains("wt-root")).toBe(true);
     expect(root.classList.contains("wt-viewport")).toBe(true);
     expect(root.classList.contains("wt-container")).toBe(false);
@@ -332,18 +241,18 @@ describe("layout modes and root classes", () => {
     expect(root.classList.contains("wt-viewport")).toBe(false);
   });
 
-  it("stamps wt-container for layout: container", () => {
+  it("stamps wt-container for layout: container", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [], layout: "container" });
+    await mountTerminal(root, { features: () => [], layout: "container" });
     expect(root.classList.contains("wt-container")).toBe(true);
     expect(root.classList.contains("wt-viewport")).toBe(false);
   });
 });
 
 describe("host handle send/reset", () => {
-  it("send() routes through the sanitizing funnel and no-ops after destroy", () => {
+  it("send() routes through the sanitizing funnel and no-ops after destroy", async () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: () => [] });
+    const term = await mountTerminal(root, { features: () => [] });
     term.send(new TextEncoder().encode("echo hi\n"));
     expect(sentText()).toContain("echo hi");
     sendBinary.mockClear();
@@ -352,9 +261,9 @@ describe("host handle send/reset", () => {
     expect(sendBinary).not.toHaveBeenCalled();
   });
 
-  it("reset() drops the local scrollback and screen without injecting keystrokes", () => {
+  it("reset() drops the local scrollback and screen without injecting keystrokes", async () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: () => [] });
+    const term = await mountTerminal(root, { features: () => [] });
     sendBinary.mockClear();
     term.reset();
     expect(resetScrollback).toHaveBeenCalledTimes(1);
@@ -378,12 +287,12 @@ describe("process exit (the engine's definitive 4001 close)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: () => [watcher], loading });
+    await mountTerminal(root, { features: () => [watcher], loading });
     await tick(); // let feature setup complete
     expect(loading.classList.contains("fade")).toBe(false);
 
     // The engine reports the process-exited close on the active socket.
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onProcessExit?.();
 
     // The overlay comes down even though no screen frame ever rendered
@@ -407,10 +316,10 @@ describe("process exit (the engine's definitive 4001 close)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: () => [watcher], loading });
+    await mountTerminal(root, { features: () => [watcher], loading });
     await tick();
 
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onWireIncompatible?.({
       source: "server-close",
       clientVersion: 4,
@@ -440,10 +349,10 @@ describe("process exit (the engine's definitive 4001 close)", () => {
       throw new Error("host blew up");
     });
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    createTerminal(root, { features: () => [watcher], loading, onSessionEnded });
+    await mountTerminal(root, { features: () => [watcher], loading, onSessionEnded });
     await tick();
 
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     // The kernel must not rethrow into the engine's close handler either: the
     // socket teardown is mid-flight and has nowhere to put an exception.
     expect(() => {
@@ -460,10 +369,10 @@ describe("process exit (the engine's definitive 4001 close)", () => {
 
   it("leaves the host uninformed about an ordinary close, which is not an end", async () => {
     const onSessionEnded = vi.fn();
-    createTerminal(rootIn(), { features: () => [], onSessionEnded });
+    await mountTerminal(rootIn(), { features: () => [], onSessionEnded });
     await tick();
 
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onClose();
 
     expect(onSessionEnded).not.toHaveBeenCalled();
@@ -491,9 +400,9 @@ describe("reattach", () => {
         return { teardown: () => undefined };
       },
     };
-    const term = createTerminal(root, { features: () => [watcher] });
+    const term = await mountTerminal(root, { features: () => [watcher] });
     await tick();
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onProcessExit?.(); // the definitive close; also marks the kernel loaded
     resetScrollback.mockClear();
     resetScreen.mockClear();
@@ -516,7 +425,7 @@ describe("reattach", () => {
   });
 
   it("injects no keystrokes, and starts nothing: reconnecting is all it does", async () => {
-    const term = createTerminal(rootIn(), { features: () => [] });
+    const term = await mountTerminal(rootIn(), { features: () => [] });
     await tick();
     sendBinary.mockClear();
 
@@ -527,7 +436,7 @@ describe("reattach", () => {
   });
 
   it("is a no-op after destroy, like every other handle member", async () => {
-    const term = createTerminal(rootIn(), { features: () => [] });
+    const term = await mountTerminal(rootIn(), { features: () => [] });
     await tick();
     term.destroy();
     reconnectNow.mockClear();
@@ -542,7 +451,6 @@ describe("reattach", () => {
 
 describe("switch detach (design 5.1 switch safety)", () => {
   it("cancels IME composition, and runs onDetach before setSession and before onSwitch", async () => {
-    const composition = await import("../composition.js");
     const root = rootIn();
     const order: string[] = [];
     let ctx: TerminalContext | undefined;
@@ -562,19 +470,23 @@ describe("switch detach (design 5.1 switch safety)", () => {
         };
       },
     };
-    createTerminal(root, { features: () => [spy] });
+    await mountTerminal(root, { features: () => [spy] });
     await tick(); // setupFeatures runs in the background; let it capture ctx
 
     // Start an IME composition on the kernel's textarea, then switch.
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
+    const view = root.querySelector(".composition-view") as HTMLElement;
     ta.dispatchEvent(new CompositionEvent("compositionstart"));
-    expect(composition.isComposing()).toBe(true);
+    expect(view.classList.contains("active")).toBe(true);
 
     setSession.mockClear();
     ctx?.notifySwitch({ id: "s9" });
 
-    // Composition was cancelled on detach, so nothing leaks to the new session.
-    expect(composition.isComposing()).toBe(false);
+    // Composition was cancelled on detach, so nothing leaks to the new session,
+    // and the input gate it held is open again.
+    expect(view.classList.contains("active")).toBe(false);
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "x" }));
+    expect(sentText()).toBe("x");
     // Ordering: every onDetach, then setSession, then every onSwitch.
     expect(order).toEqual(["detach", "switch"]);
     expect(setSession).toHaveBeenCalledWith("s9");
@@ -610,7 +522,7 @@ describe("feature lifecycle", () => {
         };
       },
     };
-    createTerminal(root, { features: () => [fake, peerReader] });
+    await mountTerminal(root, { features: () => [fake, peerReader] });
     await tick();
 
     // Region chrome mounted.
@@ -630,7 +542,7 @@ describe("feature lifecycle", () => {
         return { teardown: off };
       },
     };
-    createTerminal(root, { features: () => [dropAll] });
+    await mountTerminal(root, { features: () => [dropAll] });
     await tick();
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "x" }));
@@ -647,7 +559,7 @@ describe("feature lifecycle", () => {
         return { teardown };
       },
     };
-    const term = createTerminal(root, { features: () => [f] });
+    const term = await mountTerminal(root, { features: () => [f] });
     await tick();
     term.destroy();
     expect(teardown).toHaveBeenCalledTimes(1);
@@ -673,13 +585,13 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
         return { teardown: peerTeardown };
       },
     };
-    createTerminal(root, { features: () => [peer, boom], loading });
+    await mountTerminal(root, { features: () => [peer, boom], loading });
     await tick();
 
     // The completed peer rolled back, the socket closed, the terminal DOM is
     // gone — nothing half-live remains behind the recovery surface.
     expect(peerTeardown).toHaveBeenCalledTimes(1);
-    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
     expect(root.querySelector(".term-output")).toBeNull();
     // The pre-JS overlay came down (nothing else would ever lower it), and the
     // surface is a REALLY modal dialog: a full-page terminal has no usable UI
@@ -704,7 +616,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     // is that the app around a broken panel still works.
     const hostButton = document.createElement("button");
     document.body.appendChild(hostButton);
-    createTerminal(root, { features: () => [boom], layout: "container" });
+    await mountTerminal(root, { features: () => [boom], layout: "container" });
     await tick();
     const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
     expect(fatal?.getAttribute("role")).toBe("alertdialog");
@@ -729,7 +641,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     document.body.insertBefore(before, root);
     const after = document.createElement("button");
     document.body.appendChild(after);
-    createTerminal(root, { features: () => [boom] });
+    await mountTerminal(root, { features: () => [boom] });
     await tick();
     const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
     const reload = root.querySelector<HTMLButtonElement>(".wt-fatal-reload");
@@ -764,7 +676,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     // test above, by the synchronous-throw one, and by fatal-panel.test.ts's
     // container geometry.
     const root = rootIn();
-    createTerminal(root, { features: () => [boom] });
+    await mountTerminal(root, { features: () => [boom] });
     await tick();
     const modal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
     expect(modal?.matches(":modal")).toBe(true);
@@ -778,7 +690,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     // detached root is reachable from a typed call. Throwing here would replace
     // the real startup cause with a second error out of the catch.
     const root = document.createElement("div");
-    createTerminal(root, { features: () => [boom] });
+    await mountTerminal(root, { features: () => [boom] });
     await tick();
     const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
     expect(fatal?.open).toBe(true);
@@ -791,7 +703,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
       name: "async-boom",
       setup: () => Promise.reject(new Error("nope")),
     };
-    createTerminal(root, { features: () => [asyncBoom] });
+    await mountTerminal(root, { features: () => [asyncBoom] });
     await tick();
     await tick();
     expect(root.querySelector(".wt-fatal")).not.toBeNull();
@@ -800,7 +712,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
   it("lets onFatalError take over the surface and delivers the failure", async () => {
     const root = rootIn();
     const seen: TerminalStartupFailure[] = [];
-    createTerminal(root, {
+    await mountTerminal(root, {
       features: () => [boom],
       onFatalError(failure) {
         seen.push(failure);
@@ -829,7 +741,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
 
   it("shows the built-in surface when the handler itself throws", async () => {
     const root = rootIn();
-    createTerminal(root, {
+    await mountTerminal(root, {
       features: () => [boom],
       onFatalError() {
         throw new Error("reporter broke too");
@@ -841,7 +753,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
 
   it("destroy() after a fatal removes the surface and boundary classes", async () => {
     const root = rootIn();
-    const term = createTerminal(root, { features: () => [boom] });
+    const term = await mountTerminal(root, { features: () => [boom] });
     await tick();
     expect(root.querySelector(".wt-fatal")).not.toBeNull();
     term.destroy();
@@ -862,7 +774,7 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     const root = rootIn();
     const hostButton = document.createElement("button");
     document.body.appendChild(hostButton);
-    const term = createTerminal(root, { features: () => [boom] });
+    const term = await mountTerminal(root, { features: () => [boom] });
     await tick();
     // The page IS inert first, or the assertion after destroy() means nothing.
     hostButton.focus();
@@ -884,13 +796,39 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
           };
         }),
     };
-    const term = createTerminal(root, { features: () => [slow, boom] });
+    const term = await mountTerminal(root, { features: () => [slow, boom] });
     term.destroy();
     release?.();
     await tick();
     // An intentional destroy during setup is cancellation, not failure.
     expect(root.querySelector(".wt-fatal")).toBeNull();
     expect(root.childElementCount).toBe(0);
+  });
+
+  it("destroy() mid-setup releases what the pending setup handed to ctx.defer, and a later defer runs at once", async () => {
+    // A setup that never settles is not in the instance list, so its scope is the
+    // only owner of the timer or listener it took before the await.
+    const root = rootIn();
+    const released = vi.fn();
+    const lateRelease = vi.fn();
+    let captured: TerminalContext | undefined;
+    const stuck: TerminalFeature = {
+      name: "stuck",
+      setup(ctx) {
+        captured = ctx;
+        ctx.defer(released);
+        return new Promise(() => undefined);
+      },
+    };
+    const term = await mountTerminal(root, { features: () => [stuck] });
+    await tick();
+    expect(released).not.toHaveBeenCalled();
+
+    term.destroy();
+
+    expect(released).toHaveBeenCalledTimes(1);
+    captured?.defer(lateRelease);
+    expect(lateRelease).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -907,19 +845,19 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
       },
     }));
 
-  it("still rethrows to the caller", () => {
+  it("still rethrows to the caller", async () => {
     const root = rootIn();
-    expect(() => createTerminal(root, { features: () => twoOwners() })).toThrow(
+    await expect(mountTerminal(root, { features: () => twoOwners() })).rejects.toThrow(
       /multiple session-owning features/,
     );
   });
 
-  it("renders the recovery surface and lowers the overlay instead of leaving a stuck spinner", () => {
+  it("renders the recovery surface and lowers the overlay instead of leaving a stuck spinner", async () => {
     const root = rootIn();
     const loading = document.createElement("div");
     document.body.appendChild(loading);
 
-    expect(() => createTerminal(root, { features: () => twoOwners(), loading })).toThrow();
+    await expect(mountTerminal(root, { features: () => twoOwners(), loading })).rejects.toThrow();
 
     // The pre-JS overlay came down. Before this phase was wired, nothing ever
     // lowered it on a synchronous throw: the page kept spinning forever.
@@ -932,31 +870,31 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
     expect(root.querySelector(".wt-fatal-reload")).not.toBeNull();
   });
 
-  it("stamps the boundary classes even though the throw preceded the normal stamping", () => {
+  it("stamps the boundary classes even though the throw preceded the normal stamping", async () => {
     const root = rootIn();
-    expect(() => createTerminal(root, { features: () => twoOwners() })).toThrow();
+    await expect(mountTerminal(root, { features: () => twoOwners() })).rejects.toThrow();
     // Load-bearing, not cosmetic: every .wt-fatal rule is scoped
     // :where(.wt-root), so without these the surface renders unstyled.
     expect(root.classList.contains("wt-root")).toBe(true);
     expect(root.classList.contains("wt-viewport")).toBe(true);
   });
 
-  it("is non-modal in container layout, like the async phase", () => {
+  it("is non-modal in container layout, like the async phase", async () => {
     const root = rootIn();
-    expect(() =>
-      createTerminal(root, { features: () => twoOwners(), layout: "container" }),
-    ).toThrow();
+    await expect(
+      mountTerminal(root, { features: () => twoOwners(), layout: "container" }),
+    ).rejects.toThrow();
     expect(root.classList.contains("wt-container")).toBe(true);
     const fatal = root.querySelector<HTMLDialogElement>("dialog.wt-fatal");
     expect(fatal?.open).toBe(true);
     expect(fatal?.matches(":modal")).toBe(false);
   });
 
-  it("delivers the failure as phase kernel-init and lets a handler take over", () => {
+  it("delivers the failure as phase kernel-init and lets a handler take over", async () => {
     const root = rootIn();
     const seen: TerminalStartupFailure[] = [];
-    expect(() =>
-      createTerminal(root, {
+    await expect(
+      mountTerminal(root, {
         features: () => twoOwners(),
         onFatalError(failure) {
           seen.push(failure);
@@ -964,7 +902,7 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
           return true;
         },
       }),
-    ).toThrow();
+    ).rejects.toThrow();
 
     expect(seen).toHaveLength(1);
     expect(seen[0]?.phase).toBe("kernel-init");
@@ -974,16 +912,16 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
     expect(root.querySelector("main")).not.toBeNull();
   });
 
-  it("falls back to the built-in surface when the handler itself throws", () => {
+  it("falls back to the built-in surface when the handler itself throws", async () => {
     const root = rootIn();
-    expect(() =>
-      createTerminal(root, {
+    await expect(
+      mountTerminal(root, {
         features: () => twoOwners(),
         onFatalError() {
           throw new Error("reporting broke");
         },
       }),
-    ).toThrow(/multiple session-owning features/);
+    ).rejects.toThrow(/multiple session-owning features/);
     // The ORIGINAL cause reaches the caller, not the handler's error, and a
     // reporting failure never leaves the page blank.
     expect(root.querySelector(".wt-fatal")).not.toBeNull();
@@ -997,32 +935,32 @@ describe("fatal startup (a SYNCHRONOUS throw out of createTerminal)", () => {
 // entered). Taking a selector and a thunk pulls both inside. These tests are the
 // contract that lets a consumer delete its own fatal dialog and not get it back.
 describe("startup failures that used to escape the boundary", () => {
-  it("resolves a mount selector so the caller never has to null-check one", () => {
+  it("resolves a mount selector so the caller never has to null-check one", async () => {
     const root = rootIn();
     root.id = "terminal";
-    const term = createTerminal("#terminal", { features: () => [] });
+    const term = await mountTerminal("#terminal", { features: () => [] });
     // Mounted into the element the selector named, not somewhere invented.
     expect(root.querySelector(".term-output")).not.toBeNull();
     term.destroy();
   });
 
-  it("accepts an element too, for an embedder that already holds one", () => {
+  it("accepts an element too, for an embedder that already holds one", async () => {
     // The trap was never "passing an element", it was "passing the result of a
     // lookup". An embedder that created its own div must not be forced to invent
     // a selector for it.
     const root = rootIn();
-    const term = createTerminal(root, { features: () => [] });
+    const term = await mountTerminal(root, { features: () => [] });
     expect(root.querySelector(".term-output")).not.toBeNull();
     term.destroy();
   });
 
-  it("shows the recovery surface when the mount selector matches nothing", () => {
+  it("shows the recovery surface when the mount selector matches nothing", async () => {
     const loading = document.createElement("div");
     document.body.appendChild(loading);
 
-    expect(() => createTerminal("#not-in-this-document", { features: () => [], loading })).toThrow(
-      /no element matches the mount selector/,
-    );
+    await expect(
+      mountTerminal("#not-in-this-document", { features: () => [], loading }),
+    ).rejects.toThrow(/no element matches the mount selector/);
 
     // There is no root to render into, so the kernel appends its own
     // full-viewport host rather than restyling document.body. Before the
@@ -1041,19 +979,19 @@ describe("startup failures that used to escape the boundary", () => {
     expect(loading.classList.contains("fade")).toBe(true);
   });
 
-  it("does NOT seize the page for an embedded terminal with a missing mount target", () => {
+  it("does NOT seize the page for an embedded terminal with a missing mount target", async () => {
     const before = document.body.className;
     const seen: TerminalStartupFailure[] = [];
 
-    expect(() =>
-      createTerminal("#not-in-this-document", {
+    await expect(
+      mountTerminal("#not-in-this-document", {
         features: () => [],
         layout: "container",
         onFatalError(failure) {
           seen.push(failure);
         },
       }),
-    ).toThrow(/no element matches the mount selector/);
+    ).rejects.toThrow(/no element matches the mount selector/);
 
     // An embedded terminal is one panel in a host application that is otherwise
     // working. Claiming the viewport to report its own panel's failure would
@@ -1067,20 +1005,20 @@ describe("startup failures that used to escape the boundary", () => {
     expect(seen[0]?.surface).toBeUndefined();
   });
 
-  it("routes a throwing feature thunk through the recovery surface", () => {
+  it("routes a throwing feature thunk through the recovery surface", async () => {
     const root = rootIn();
     const boom = new Error("preset could not be built");
     const loading = document.createElement("div");
     document.body.appendChild(loading);
 
-    expect(() =>
-      createTerminal(root, {
+    await expect(
+      mountTerminal(root, {
         features: () => {
           throw boom;
         },
         loading,
       }),
-    ).toThrow(boom);
+    ).rejects.toThrow(boom);
 
     // As an eagerly-evaluated array argument this throw never reached the
     // library at all: it happened at the call site, so the consumer's own
@@ -1090,13 +1028,13 @@ describe("startup failures that used to escape the boundary", () => {
     expect(loading.classList.contains("fade")).toBe(true);
   });
 
-  it("names the resolved surface so a handler knows where to render", () => {
+  it("names the resolved surface so a handler knows where to render", async () => {
     const root = rootIn();
     root.id = "terminal";
     const seen: TerminalStartupFailure[] = [];
 
-    expect(() =>
-      createTerminal("#terminal", {
+    await expect(
+      mountTerminal("#terminal", {
         features: (): never => {
           throw new Error("nope");
         },
@@ -1106,7 +1044,7 @@ describe("startup failures that used to escape the boundary", () => {
           return true;
         },
       }),
-    ).toThrow();
+    ).rejects.toThrow();
 
     // The handler rendered into the element the failure named, and the built-in
     // surface stood down.
@@ -1115,25 +1053,196 @@ describe("startup failures that used to escape the boundary", () => {
     expect(root.querySelector(".wt-fatal")).toBeNull();
   });
 
-  it("rejects a selector that matches a non-HTML element with the reason", () => {
+  it("rejects a selector that matches a non-HTML element with the reason", async () => {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.id = "mount";
     document.body.appendChild(svg);
     // Diagnosable at the boundary rather than as a missing-property crash deep
     // inside the build.
-    expect(() => createTerminal("#mount", { features: () => [] })).toThrow(
+    await expect(mountTerminal("#mount", { features: () => [] })).rejects.toThrow(
       /matched a non-HTML element/,
     );
   });
 });
 
+// The title, the loading overlay, the status stream and the notification
+// permission are the document's, so one live terminal per document is the rule.
+// The ordinary fatal path would draw on the resolved root, and here that root may
+// be the FIRST terminal's, so this failure is reported with no surface and no
+// DOM write at all.
+describe("one terminal per document", () => {
+  /** Snapshot of everything the first terminal owns that a second call must
+   *  leave alone: its child nodes by identity, the title and the engine count. */
+  function snapshotOf(root: HTMLElement): {
+    children: Node[];
+    title: string;
+    engines: number;
+    bodyChildren: number;
+  } {
+    return {
+      children: [...root.childNodes],
+      title: document.title,
+      engines: fake.createTerminalEngine.mock.calls.length,
+      bodyChildren: document.body.childElementCount,
+    };
+  }
+  function expectUntouched(root: HTMLElement, before: ReturnType<typeof snapshotOf>): void {
+    const after = [...root.childNodes];
+    expect(after).toHaveLength(before.children.length);
+    // Identity, not structure: a rebuilt subtree with the same markup is exactly
+    // the write this asserts never happened.
+    for (const [i, node] of after.entries()) {
+      expect(node).toBe(before.children[i]);
+    }
+    expect(document.title).toBe(before.title);
+    expect(fake.createTerminalEngine).toHaveBeenCalledTimes(before.engines);
+    expect(dispose).not.toHaveBeenCalled();
+    expect(document.body.childElementCount).toBe(before.bodyChildren);
+    expect(document.querySelector(".wt-fatal")).toBeNull();
+  }
+
+  it("refuses a second terminal on the SAME root and leaves the first one's DOM untouched", async () => {
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    const before = snapshotOf(root);
+    const seen: TerminalStartupFailure[] = [];
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    before.bodyChildren += 1;
+
+    await expect(
+      mountTerminal(root, {
+        features: () => [],
+        loading,
+        onFatalError(failure) {
+          seen.push(failure);
+        },
+      }),
+    ).rejects.toThrow(/a terminal already exists in this document/);
+
+    expectUntouched(root, before);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.phase).toBe("kernel-init");
+    expect(seen[0]?.surface).toBeUndefined();
+    // The second caller's own overlay is not faded: nothing was built behind it.
+    expect(loading.classList.contains("fade")).toBe(false);
+  });
+
+  it("refuses a second terminal on a DIFFERENT root without stamping or filling it", async () => {
+    const first = rootIn();
+    await mountTerminal(first, { features: () => [] });
+    const before = snapshotOf(first);
+    const second = rootIn();
+    before.bodyChildren += 1;
+
+    await expect(mountTerminal(second, { features: () => [] })).rejects.toThrow(
+      /a terminal already exists in this document/,
+    );
+
+    expectUntouched(first, before);
+    expect(second.className).toBe("");
+    expect(second.childElementCount).toBe(0);
+  });
+
+  it("admits a new terminal once the first has been destroyed", async () => {
+    const root = rootIn();
+    const first = await mountTerminal(root, { features: () => [] });
+    first.destroy();
+
+    const second = await mountTerminal(root, { features: () => [] });
+
+    expect(root.querySelector(".term-input")).not.toBeNull();
+    expect(fake.createTerminalEngine).toHaveBeenCalledTimes(2);
+    second.destroy();
+  });
+
+  it("admits a terminal in a second document, each shell owning its own document", async () => {
+    // The registration is keyed on the ROOT's document, so a same-origin iframe
+    // holds a terminal of its own beside the page's, and neither refuses the other.
+    const outer = rootIn();
+    await mountTerminal(outer, { features: () => [] });
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const inner = frame.contentDocument;
+    if (!inner) {
+      throw new Error("no frame document");
+    }
+    const innerRoot = inner.createElement("div");
+    inner.body.appendChild(innerRoot);
+    try {
+      const term = await mountTerminal(innerRoot, { features: () => [] });
+      expect(innerRoot.querySelector(".term-input")).not.toBeNull();
+      expect(fake.createTerminalEngine).toHaveBeenCalledTimes(2);
+
+      await expect(
+        mountTerminal(inner.createElement("div"), { features: () => [] }),
+      ).rejects.toThrow(/a terminal already exists in this document/);
+      term.destroy();
+    } finally {
+      frame.remove();
+    }
+  });
+
+  it("refuses a root whose document has no window before claiming anything", async () => {
+    // A created document has no browsing context, so nothing in it can lay out
+    // or take focus; the failure is an ordinary kernel-init report on that root.
+    const detached = document.implementation.createHTMLDocument("nowhere");
+    const root = detached.createElement("div");
+    detached.body.appendChild(root);
+    const seen: TerminalStartupFailure[] = [];
+
+    await expect(
+      mountTerminal(root, {
+        features: () => [],
+        onFatalError(failure) {
+          seen.push(failure);
+        },
+      }),
+    ).rejects.toThrow(/document has no window/);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.phase).toBe("kernel-init");
+    expect(seen[0]?.surface).toBe(root);
+    expect(fake.createTerminalEngine).not.toHaveBeenCalled();
+    // The refused document was never registered, so it is not "in use" either.
+    const again = detached.createElement("div");
+    detached.body.appendChild(again);
+    await expect(mountTerminal(again, { features: () => [] })).rejects.toThrow(
+      /document has no window/,
+    );
+  });
+
+  it("admits a new terminal after a build that failed before its pane, so a broken overlay cannot claim the document", async () => {
+    // The overlay controller is acquired after the registration and before the
+    // pane; a throw there is a kernel-init failure like any other and must give
+    // the document back.
+    const first = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    loading.append = () => {
+      throw new Error("overlay refused");
+    };
+    await expect(mountTerminal(first, { features: () => [], loading })).rejects.toThrow(
+      "overlay refused",
+    );
+    expect(fake.createTerminalEngine).not.toHaveBeenCalled();
+    expect(first.querySelector(".wt-fatal")).not.toBeNull();
+
+    const second = rootIn();
+    const term = await mountTerminal(second, { features: () => [] });
+
+    expect(second.querySelector(".term-input")).not.toBeNull();
+    expect(fake.createTerminalEngine).toHaveBeenCalledTimes(1);
+    term.destroy();
+  });
+});
+
 describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () => {
   it("snaps the viewport to the bottom after accepted input reaches the socket", async () => {
-    const { scroll } = await import("@cplieger/web-terminal-engine");
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     await tick();
-    const snap = vi.mocked(scroll.scrollToBottom);
+    const snap = fake.scroll.scrollToBottom;
     snap.mockClear();
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "a" }));
@@ -1141,7 +1250,6 @@ describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () 
   });
 
   it("does NOT snap when an input transform drops the bytes", async () => {
-    const { scroll } = await import("@cplieger/web-terminal-engine");
     const dropAll: TerminalFeature = {
       name: "drop",
       setup(ctx) {
@@ -1149,9 +1257,9 @@ describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () 
       },
     };
     const root = rootIn();
-    createTerminal(root, { features: () => [dropAll] });
+    await mountTerminal(root, { features: () => [dropAll] });
     await tick();
-    const snap = vi.mocked(scroll.scrollToBottom);
+    const snap = fake.scroll.scrollToBottom;
     snap.mockClear();
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "x" }));
@@ -1159,13 +1267,12 @@ describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () 
   });
 
   it("does NOT snap when sendBinary rejects the input", async () => {
-    const { scroll, connection } = await import("@cplieger/web-terminal-engine");
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     await tick();
-    const snap = vi.mocked(scroll.scrollToBottom);
+    const snap = fake.scroll.scrollToBottom;
     snap.mockClear();
-    vi.mocked(connection.sendBinary).mockReturnValueOnce(false);
+    sendBinary.mockReturnValueOnce(false);
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "a" }));
     expect(snap).not.toHaveBeenCalled();
@@ -1173,26 +1280,26 @@ describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () 
 });
 
 describe("scrollbackLines (the consumer retained-line budget)", () => {
-  it("passes a valid cap to the engine renderer as maxLines", () => {
+  it("passes a valid cap to the engine renderer as maxLines", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [], scrollbackLines: 1500 });
-    expect(renderInit).toHaveBeenCalledTimes(1);
-    expect(renderInit.mock.calls[0]?.[0]).toMatchObject({ maxLines: 1500 });
+    await mountTerminal(root, { features: () => [], scrollbackLines: 1500 });
+    expect(fake.createTerminalEngine).toHaveBeenCalledTimes(1);
+    expect(fake.options()).toMatchObject({ maxLines: 1500 });
   });
 
-  it("omits maxLines entirely when the option is unset (engine default applies)", () => {
+  it("omits maxLines entirely when the option is unset (engine default applies)", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
-    expect(renderInit).toHaveBeenCalledTimes(1);
-    expect(renderInit.mock.calls[0]?.[0]).not.toHaveProperty("maxLines");
+    await mountTerminal(root, { features: () => [] });
+    expect(fake.createTerminalEngine).toHaveBeenCalledTimes(1);
+    expect(fake.options()).not.toHaveProperty("maxLines");
   });
 
-  it("ignores a non-integer or non-positive cap rather than clamping it", () => {
+  it("ignores a non-integer or non-positive cap rather than clamping it", async () => {
     const root = rootIn();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
-      createTerminal(root, { features: () => [], scrollbackLines: 0.5 });
-      expect(renderInit.mock.calls[0]?.[0]).not.toHaveProperty("maxLines");
+      await mountTerminal(root, { features: () => [], scrollbackLines: 0.5 });
+      expect(fake.options()).not.toHaveProperty("maxLines");
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("scrollbackLines"));
     } finally {
       warn.mockRestore();
@@ -1213,7 +1320,7 @@ describe("scrollbackLines (the consumer retained-line budget)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: () => [probe], scrollbackLines: 8 });
+    await mountTerminal(root, { features: () => [probe], scrollbackLines: 8 });
     await tick();
     expect(captured).toBeDefined();
     const store = captured?.newLineStore();
@@ -1266,33 +1373,33 @@ describe("mouse selection: a press never turns into a native text drag", () => {
   };
   const collapsed = (): boolean => window.getSelection()?.isCollapsed ?? true;
 
-  it("collapses the selection on a bare left press", () => {
+  it("collapses the selection on a bare left press", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     selectOutputText(root);
     press(root, { button: 0 });
     expect(collapsed()).toBe(true);
   });
 
-  it("keeps the selection for a right press, so the context menu can copy it", () => {
+  it("keeps the selection for a right press, so the context menu can copy it", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     selectOutputText(root);
     press(root, { button: 2 });
     expect(collapsed()).toBe(false);
   });
 
-  it("keeps the selection for a middle press, which pastes it on Linux", () => {
+  it("keeps the selection for a middle press, which pastes it on Linux", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     selectOutputText(root);
     press(root, { button: 1 });
     expect(collapsed()).toBe(false);
   });
 
-  it("keeps the selection for a modified press (Shift extends, Ctrl adds a range)", () => {
+  it("keeps the selection for a modified press (Shift extends, Ctrl adds a range)", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     selectOutputText(root);
     press(root, { button: 0, shiftKey: true });
     expect(collapsed()).toBe(false);
@@ -1304,9 +1411,9 @@ describe("mouse selection: a press never turns into a native text drag", () => {
     expect(collapsed()).toBe(false);
   });
 
-  it("leaves a touch press alone: the platform's selection UI owns it", () => {
+  it("leaves a touch press alone: the platform's selection UI owns it", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const term = root.querySelector(".term");
     selectOutputText(root);
     term?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
@@ -1365,16 +1472,16 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     return ev;
   }
 
-  const armed = (): HTMLElement => {
+  const armed = async (): Promise<HTMLElement> => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     ta(root).blur();
     selectInOutput(root);
     return root;
   };
 
-  it("sends the character and takes the keyboard back", () => {
-    const root = armed();
+  it("sends the character and takes the keyboard back", async () => {
+    const root = await armed();
     typeOnDocument({ key: "x" });
     expect(sentText()).toBe("x");
     expect(sendBinary).toHaveBeenCalledOnce();
@@ -1382,30 +1489,31 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(window.getSelection()?.isCollapsed).toBe(true);
   });
 
-  it("cancels the keystroke it sends, so no input event can duplicate it", () => {
-    armed();
+  it("cancels the keystroke it sends, so no input event can duplicate it", async () => {
+    await armed();
     const ev = typeOnDocument({ key: "x" });
     expect(ev.defaultPrevented).toBe(true);
   });
 
-  it("sends a space, and an astral character, as one character each", () => {
+  it("sends a space, and an astral character, as one character each", async () => {
     // A fresh arming per case: the first send focuses the input and collapses the
     // selection, so a second key in the same state is correctly NOT armed.
     for (const key of [" ", "\u{1F600}"]) {
       sendBinary.mockClear();
+      destroyMounted();
       document.body.replaceChildren();
-      armed();
+      await armed();
       typeOnDocument({ key });
       expect(sentText()).toBe(key);
     }
   });
 
-  it("stays out of the way while the textarea holds focus", () => {
+  it("stays out of the way while the textarea holds focus", async () => {
     // The textarea path owns a focused terminal: its keydown maps a printable to
     // "ignore" and the `input` event sends it. The document listener must not add
     // a second send when that keydown bubbles up to it.
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     selectInOutput(root);
     ta(root).focus();
     ta(root).dispatchEvent(
@@ -1414,7 +1522,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(sentText()).toBe("");
   });
 
-  it("sends nothing while any control holds focus", () => {
+  it("sends nothing while any control holds focus", async () => {
     const cases: (() => void)[] = [
       () => {
         const b = document.createElement("button");
@@ -1448,8 +1556,9 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     ];
     for (const focusSomething of cases) {
       sendBinary.mockClear();
+      destroyMounted();
       document.body.replaceChildren();
-      const root = armed();
+      const root = await armed();
       focusSomething();
       typeOnDocument({ key: "x" });
       expect(sentText()).toBe("");
@@ -1457,10 +1566,10 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     }
   });
 
-  it("sends nothing unless this terminal owns a real selection", () => {
+  it("sends nothing unless this terminal owns a real selection", async () => {
     // A caret is not a selection.
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     ta(root).blur();
     const output = root.querySelector(".term-output");
     const text = document.createTextNode("line 1 the quick brown fox");
@@ -1486,12 +1595,13 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(sentText()).toBe("");
   });
 
-  it("sends nothing for a selection that spans out of the output, either way", () => {
+  it("sends nothing for a selection that spans out of the output, either way", async () => {
     for (const reverse of [false, true]) {
       sendBinary.mockClear();
+      destroyMounted();
       document.body.replaceChildren();
       const root = rootIn();
-      createTerminal(root, { features: () => [] });
+      await mountTerminal(root, { features: () => [] });
       ta(root).blur();
       const output = root.querySelector(".term-output");
       const inside = document.createTextNode("terminal output text");
@@ -1513,7 +1623,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     }
   });
 
-  it("leaves modified keys to the browser, so Ctrl+C still copies the selection", () => {
+  it("leaves modified keys to the browser, so Ctrl+C still copies the selection", async () => {
     for (const init of [
       { key: "c", ctrlKey: true },
       { key: "c", metaKey: true },
@@ -1522,8 +1632,9 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
       { key: "Backspace", altKey: true },
     ]) {
       sendBinary.mockClear();
+      destroyMounted();
       document.body.replaceChildren();
-      armed();
+      await armed();
       typeOnDocument(init);
       expect(sentText()).toBe("");
       // The selection has to survive, or Ctrl+C would copy nothing.
@@ -1531,23 +1642,24 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     }
   });
 
-  it("recovers an AltGr character, which arrives with the AltGraph modifier", () => {
-    armed();
+  it("recovers an AltGr character, which arrives with the AltGraph modifier", async () => {
+    await armed();
     typeOnDocument({ key: "\u20AC", ctrlKey: true, altKey: true }, { altGraph: true });
     expect(sentText()).toBe("\u20AC");
   });
 
-  it("leaves Tab to the browser, so a keyboard user can move on", () => {
+  it("leaves Tab to the browser, so a keyboard user can move on", async () => {
     for (const init of [{ key: "Tab" }, { key: "Tab", shiftKey: true }]) {
       sendBinary.mockClear();
+      destroyMounted();
       document.body.replaceChildren();
-      armed();
+      await armed();
       typeOnDocument(init);
       expect(sentText()).toBe("");
     }
   });
 
-  it("encodes the functional keys exactly as the focused path does", () => {
+  it("encodes the functional keys exactly as the focused path does", async () => {
     for (const [init, bytes] of [
       [{ key: "Enter" }, "\r"],
       [{ key: "Backspace" }, "\x7f"],
@@ -1555,22 +1667,24 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
       [{ key: "Escape" }, "\x1b"],
     ] as [KeyboardEventInit & { key: string }, string][]) {
       sendBinary.mockClear();
+      destroyMounted();
       document.body.replaceChildren();
-      armed();
+      await armed();
       typeOnDocument(init);
       expect(sentText()).toBe(bytes);
     }
   });
 
-  it("leaves a dead key and an IME start to the platform", () => {
+  it("leaves a dead key and an IME start to the platform", async () => {
     // A dead key has no bytes and no character, so it delivers nothing and must
     // not touch the selection or the focus. The composed character arrives on the
     // NEXT keydown, which this listener then recovers normally, so the accent
     // survives rather than being traded for focus.
     for (const key of ["Dead", "Process", "Unidentified"]) {
       sendBinary.mockClear();
+      destroyMounted();
       document.body.replaceChildren();
-      const root = armed();
+      const root = await armed();
       const ev = typeOnDocument({ key });
       expect(sentText()).toBe("");
       expect(ev.defaultPrevented).toBe(false);
@@ -1579,7 +1693,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     }
   });
 
-  it("leaves the selection alone for a key that delivers nothing", () => {
+  it("leaves the selection alone for a key that delivers nothing", async () => {
     // The blocker this pins: taking focus before deciding what the key does meant
     // a bare Shift cleared the selection. Shift is how a user reaches Shift+click
     // to extend a selection and Ctrl+Shift+C to copy one, so clearing on it broke
@@ -1596,8 +1710,9 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
       "BrowserSearch",
     ]) {
       sendBinary.mockClear();
+      destroyMounted();
       document.body.replaceChildren();
-      const root = armed();
+      const root = await armed();
       typeOnDocument({ key });
       expect(sentText()).toBe("");
       expect(window.getSelection()?.isCollapsed).toBe(false);
@@ -1605,7 +1720,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     }
   });
 
-  it("survives the Shift-first chord order of Ctrl+Shift+C", () => {
+  it("survives the Shift-first chord order of Ctrl+Shift+C", async () => {
     // Pressing Shift before Ctrl is an ordinary way to form the chord, and each
     // press is its own keydown. The two lead presses must leave the selection for
     // the third to copy.
@@ -1624,7 +1739,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
       },
     };
     const root = rootIn();
-    createTerminal(root, { features: () => [probe] });
+    await mountTerminal(root, { features: () => [probe] });
     ta(root).blur();
     selectInOutput(root);
     typeOnDocument({ key: "Shift", shiftKey: true });
@@ -1634,10 +1749,10 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(sentText()).toBe("");
   });
 
-  it("leaves a key the host page already handled", () => {
+  it("leaves a key the host page already handled", async () => {
     // preventDefault is the platform's own way to say "handled", so an embedder
     // with a document-level keymap needs no option to opt out of this listener.
-    armed();
+    await armed();
     const ev = new KeyboardEvent("keydown", { key: "j", bubbles: true, cancelable: true });
     Object.defineProperty(ev, "getModifierState", { value: () => false });
     document.addEventListener("keydown", (e) => e.preventDefault(), { capture: true, once: true });
@@ -1646,61 +1761,54 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(window.getSelection()?.isCollapsed).toBe(false);
   });
 
-  it("grants the AltGraph exception to a character, never to a mapped key", () => {
+  it("grants the AltGraph exception to a character, never to a mapped key", async () => {
     // AltGraph is not a reliable signal by itself: Firefox reports it for plain
     // Option on macOS and for ordinary Ctrl+Alt on Windows. Admitting every
     // AltGraph event would hand the terminal Option+ArrowLeft, which is back.
-    armed();
+    await armed();
     typeOnDocument({ key: "ArrowLeft", altKey: true }, { altGraph: true });
     expect(sentText()).toBe("");
     expect(window.getSelection()?.isCollapsed).toBe(false);
   });
 
-  it("leaves the keystroke to the IME while a composition is running", () => {
+  it("leaves the keystroke to the IME while a composition is running", async () => {
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     ta(root).blur();
     selectInOutput(root);
     ta(root).dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
     typeOnDocument({ key: "a" });
     expect(sentText()).toBe("");
     expect(window.getSelection()?.isCollapsed).toBe(false);
-    // The composition has to be closed before this test ends. composition.ts holds
-    // `composing` in a module-level singleton, and in a real browser the module is
-    // evaluated ONCE for the whole file: the browser's module map is URL-keyed, so
-    // the beforeEach's `vi.resetModules()` + re-import hands back the SAME
-    // instance rather than a fresh graph. A composition left open here therefore
-    // stays open for every later test in this file, each of which then bails at
-    // the kernel's isComposing() gate and passes for the wrong reason (measured:
-    // six of them). destroy() resets the singleton — the contract
+    // The open composition goes with its pane: destroy() cancels it, which
     // kernel.mutants.test.ts pins directly.
     handle.destroy();
   });
 
-  it("normalizes a typed NBSP to a space, as the focused path does", () => {
+  it("normalizes a typed NBSP to a space, as the focused path does", async () => {
     // One physical key must not produce two byte sequences depending on which
     // listener caught it. AltGr+Space yields U+00A0 on some Linux keymaps.
-    armed();
+    await armed();
     typeOnDocument({ key: "\u00A0" });
     expect(sentText()).toBe(" ");
   });
 
-  it("sends nothing when the input cannot actually take focus", () => {
+  it("sends nothing when the input cannot actually take focus", async () => {
     // Focus can fail to land: an inert subtree under an open modal dialog, or a
     // released root. Bytes whose effect the user cannot see must not reach the
     // shell, so the listener fails closed rather than sending blind.
-    const root = armed();
+    const root = await armed();
     Object.defineProperty(ta(root), "focus", { value: () => undefined });
     typeOnDocument({ key: "x" });
     expect(sentText()).toBe("");
   });
 
-  it("scrolls the viewport for Shift+PageUp and Shift+PageDown", () => {
+  it("scrolls the viewport for Shift+PageUp and Shift+PageDown", async () => {
     // The test document loads no stylesheet, so the terminal pane has nothing to
     // overflow and the scroll arms need declared geometry to move against;
     // without it this test would pass against a helper that only called
     // preventDefault.
-    const root = armed();
+    const root = await armed();
     const term = root.querySelector(".term") as HTMLElement;
     declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 1000 });
     typeOnDocument({ key: "PageUp", shiftKey: true });
@@ -1713,13 +1821,13 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(sentText()).toBe("");
   });
 
-  it("stops a page down at the maximum offset, not one screen past it", () => {
+  it("stops a page down at the maximum offset, not one screen past it", async () => {
     // The ceiling used to be scrollHeight, which is one clientHeight past the end
     // of the content, so a page down from near the bottom handed the container an
     // offset it cannot legally hold and relied on it to clamp. WebKit does not
     // reliably do that, and an out-of-range offset is what leaves the viewport
     // over empty space.
-    const root = armed();
+    const root = await armed();
     const term = root.querySelector(".term") as HTMLElement;
     declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 3500 });
     selectInOutput(root);
@@ -1729,14 +1837,14 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(sentText()).toBe("");
   });
 
-  it("lets the real clipboard feature copy the selection with focus on the body", () => {
+  it("lets the real clipboard feature copy the selection with focus on the body", async () => {
     // The design promised this integration, and the probe test above cannot stand
     // in for it: the real handler keys on `ev.code`, not `ev.key`, and reads the
     // ambient selection itself.
     const writeText = vi.fn(() => Promise.resolve());
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     const root = rootIn();
-    createTerminal(root, { features: () => [clipboard()] });
+    await mountTerminal(root, { features: () => [clipboard()] });
     ta(root).blur();
     selectInOutput(root);
     typeOnDocument({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
@@ -1745,7 +1853,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     vi.unstubAllGlobals();
   });
 
-  it("runs the feature keydown chain with the selection still intact", () => {
+  it("runs the feature keydown chain with the selection still intact", async () => {
     // This is what makes clipboard's Ctrl+Shift+C reachable after a mouse
     // selection: the chain has to see the key BEFORE anything takes focus, or the
     // selection it copies is already gone.
@@ -1767,7 +1875,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
       },
     };
     const root = rootIn();
-    createTerminal(root, { features: () => [probe] });
+    await mountTerminal(root, { features: () => [probe] });
     ta(root).blur();
     selectInOutput(root);
     typeOnDocument({ key: "C", ctrlKey: true, shiftKey: true });
@@ -1777,7 +1885,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(window.getSelection()?.isCollapsed).toBe(false);
   });
 
-  it("stops listening once the terminal is destroyed", () => {
+  it("stops listening once the terminal is destroyed", async () => {
     // destroy() also removes the output DOM, which would invalidate the selection
     // and make this pass for the wrong reason. A real browser will not select
     // detached nodes at all (addRange is ignored, and the selection reads back
@@ -1786,7 +1894,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     // selection is genuine, and the only thing left to stop the send is the
     // aborted listener.
     const root = rootIn();
-    const handle = createTerminal(root, { features: () => [] });
+    const handle = await mountTerminal(root, { features: () => [] });
     const output = root.querySelector(".term-output");
     if (!output) {
       throw new Error("no .term-output");
@@ -1808,70 +1916,31 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
   });
 });
 
-describe("demand-paged scrollback wiring", () => {
-  // This whole feature shipped DARK: the engine grew the server control, the
-  // client store, the fetch controller and the gap markers, and every one of its
-  // own tests passed — while this kernel, the only thing that constructs a
-  // terminal, passed none of the options that connect them. Nothing asserted the
-  // connection, so nothing failed. These tests assert the seam itself.
-  //
-  // Each option below is a decision one module cannot make alone: the transport
-  // is store-blind and viewport-blind, and the renderer has no socket. A missing
-  // one does not break a test elsewhere — it just silently disables paging.
-
-  it("gives the renderer a transport to fetch history with", () => {
-    createTerminal(rootIn(), { features: () => [] });
-    const opts = renderInit.mock.calls[0]?.[0];
-    expect(opts).toBeDefined();
-    expect(typeof opts?.requestHistory).toBe("function");
-    expect(typeof opts?.historyBudget).toBe("function");
+describe("the engine instance", () => {
+  it("builds one engine over this pane's output and scroll container", async () => {
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    expect(fake.createTerminalEngine).toHaveBeenCalledTimes(1);
+    const opts = fake.options();
+    expect(opts.output).toBe(root.querySelector(".term-output"));
+    expect(opts.termWrap).toBe(root.querySelector(".term"));
+    expect(opts.sessionIdKey).toBe("vterm-session-id");
   });
 
-  it("gives the scroll layer the position seam that drives the trigger", () => {
-    // Not onUserScrollChange: that fires only on a follow/hold TOGGLE, so a
-    // reader moving WITHIN history would never notify — and that is exactly when
-    // paging has to work.
-    createTerminal(rootIn(), { features: () => [] });
-    const opts = scrollInit.mock.calls[0]?.[0];
-    expect(opts).toBeDefined();
-    expect(typeof opts?.onScrollPosition).toBe("function");
+  it("disposes the engine exactly once on destroy()", async () => {
+    const term = await mountTerminal(rootIn(), { features: () => [] });
+    term.destroy();
+    term.destroy();
+    expect(dispose).toHaveBeenCalledTimes(1);
   });
 
-  it("routes that seam to the renderer's scroll-position hook, and INVOKES it", () => {
-    // Asserting the callback exists is what let the feature ship dark the first
-    // time. The seam is only wired if calling it reaches the renderer, so call it.
-    // One hook, not two: the renderer owns the ordering of the paging trigger and
-    // the drain resume, precisely so a consumer cannot wire half of it.
-    createTerminal(rootIn(), { features: () => [] });
-    const opts = scrollInit.mock.calls[0]?.[0];
-    handleScrollPosition.mockClear();
-    opts?.onScrollPosition?.();
-    expect(handleScrollPosition).toHaveBeenCalledTimes(1);
-  });
-
-  it("gives the transport every store and viewport decision it cannot make", () => {
-    createTerminal(rootIn(), { features: () => [] });
-    const cb = connectionInit.mock.calls[0]?.[0];
-    expect(cb).toBeDefined();
-    for (const name of [
-      "getReplayMax",
-      "onHistoryReply",
-      "onResumeTransition",
-      "noteSolicited",
-      "clearSolicited",
-      "onHistoryRetry",
-    ] as const) {
-      expect(typeof cb?.[name], `connection.init must wire ${name}`).toBe("function");
-    }
-  });
-
-  it("asks for no more resume replay than it intends to keep resident", () => {
-    // The bound the server honours. Sending nothing is not an option — the server
+  it("asks for no more resume replay than it intends to keep resident", async () => {
+    // The bound the server honours. Sending nothing is not an option: the server
     // bounds the replay regardless, and a client that predicted no bound would
     // miss the resulting replay jump.
-    createTerminal(rootIn(), { features: () => [] });
-    const cb = connectionInit.mock.calls[0]?.[0];
-    const max = cb?.getReplayMax?.();
+    await mountTerminal(rootIn(), { features: () => [] });
+    const cb = fake.callbacks();
+    const max = cb.getReplayMax?.();
     expect(typeof max).toBe("number");
     expect(max).toBeGreaterThan(0);
   });
@@ -1888,9 +1957,9 @@ describe("browse-cache TTL", () => {
     vi.useRealTimers();
   });
 
-  it("drops an idle cache on the sweep, and passes the page's visibility", () => {
+  it("drops an idle cache on the sweep, and passes the page's visibility", async () => {
     vi.useFakeTimers();
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     browseCacheSize.mockReturnValue(1200);
     lastBrowseActivityMs.mockReturnValue(Date.now() - TTL_MS - 1);
 
@@ -1903,9 +1972,9 @@ describe("browse-cache TTL", () => {
     expect(dropBrowseCache).toHaveBeenCalledWith(true);
   });
 
-  it("leaves a recently-read cache alone", () => {
+  it("leaves a recently-read cache alone", async () => {
     vi.useFakeTimers();
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     browseCacheSize.mockReturnValue(1200);
     lastBrowseActivityMs.mockReturnValue(Date.now()); // just read
 
@@ -1914,14 +1983,14 @@ describe("browse-cache TTL", () => {
     expect(dropBrowseCache).not.toHaveBeenCalled();
   });
 
-  it("does NOT drop on the return transition, even with the TTL long expired", () => {
+  it("does NOT drop on the return transition, even with the TTL long expired", async () => {
     // An earlier version enforced the TTL the throttled hidden period owed, right
     // here, with hidden-page semantics (unconditional). That deleted the rows the
     // returning reader was parked on, in the one moment they are certain to look
     // at them — and it bought at most 60 s over the periodic sweep, which applies
     // the visible-page rule instead. The page is visible the instant this fires,
     // so the visible rule is the correct one and this branch has nothing to add.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     browseCacheSize.mockReturnValue(1200);
     lastBrowseActivityMs.mockReturnValue(Date.now() - TTL_MS - 1);
 
@@ -1930,7 +1999,7 @@ describe("browse-cache TTL", () => {
     expect(dropBrowseCache).not.toHaveBeenCalled();
   });
 
-  it("drops every cache on FREEZE, TTL or no TTL", () => {
+  it("drops every cache on FREEZE, TTL or no TTL", async () => {
     // The one state the periodic sweep cannot cover: a frozen page runs no code,
     // so without a last-chance hook its caches stay resident for the whole freeze
     // and a discard then throws them away unread. Unconditional here is the
@@ -1944,7 +2013,7 @@ describe("browse-cache TTL", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [grabber] });
+    await mountTerminal(rootIn(), { features: () => [grabber] });
     const background = captured?.newLineStore("session-bg");
     if (background === undefined) {
       throw new Error("the feature never ran");
@@ -1962,12 +2031,12 @@ describe("browse-cache TTL", () => {
     expect(bgDrop).toHaveBeenCalledWith(-1, false);
   });
 
-  it("drops on pagehide INTO bfcache, but not on an ordinary pagehide", () => {
+  it("drops on pagehide INTO bfcache, but not on an ordinary pagehide", async () => {
     // Safari's path to the same frozen state, on the platform this feature is
     // for: `freeze` is Chrome's signal and bfcache entry is Safari's, and either
     // can fire without the other. An ordinary pagehide (a real navigation away)
     // needs no drop — the page is going away with its memory.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     browseCacheSize.mockReturnValue(1200);
     lastBrowseActivityMs.mockReturnValue(Date.now());
 
@@ -1980,7 +2049,7 @@ describe("browse-cache TTL", () => {
     expect(dropBrowseCache).toHaveBeenCalledWith(false);
   });
 
-  it("sweeps a BACKGROUND tab's store, which the renderer never sees", () => {
+  it("sweeps a BACKGROUND tab's store, which the renderer never sees", async () => {
     // render.* only ever reports the BOUND store, so a sweep written against it
     // reaches the visible tab and nothing else: every background tab's cache was
     // immortal for the life of the page, at up to the engine's whole cache budget
@@ -1997,7 +2066,7 @@ describe("browse-cache TTL", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [grabber] });
+    await mountTerminal(rootIn(), { features: () => [grabber] });
     const background = captured?.newLineStore("session-bg");
     if (background === undefined) {
       throw new Error("the feature never ran");
@@ -2015,20 +2084,20 @@ describe("browse-cache TTL", () => {
   });
 });
 
-describe("the document title is composed from a base and a feature prefix", () => {
+describe("the document title is composed from a base and the attention count", () => {
   // The kernel owns document.title precisely so these two inputs cannot erase each
   // other. Before it did, the OSC 0/2 branch assigned the title directly, so any
   // shell or editor in any tab wiped a feature's attention prefix, and no ordering
   // fixed it because both inputs change on their own schedule.
   //
-  // ctx.titlePrefix is exercised here through a throwaway feature rather than
+  // ctx.shell.attention is exercised here through a throwaway feature rather than
   // through tabs, so this asserts the KERNEL's contract and not the tabs feature's
   // use of it.
 
   /** Mount a terminal carrying one feature that captures ctx, so a test can drive
-   *  ctx.titlePrefix directly. */
+   *  the attention reporter directly. */
   async function withTitleFeature(): Promise<{
-    setPrefix: (text: string) => void;
+    setCount: (count: number) => void;
     emitTitle: (title: string) => void;
     destroy: () => void;
   }> {
@@ -2044,25 +2113,27 @@ describe("the document title is composed from a base and a feature prefix", () =
     };
     const root = document.createElement("div");
     document.body.appendChild(root);
-    const term = createTerminal(root, { features: () => [probe] });
+    const term = await mountTerminal(root, { features: () => [probe] });
     await tick();
     if (!ctxRef) {
       throw new Error("the probe feature never ran");
     }
-    const captured = ctxRef;
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const reporter = ctxRef.shell.attention({ icons: false });
+    const cbs = fake.callbacks();
     return {
-      setPrefix: (text) => captured.titlePrefix(text),
+      setCount: (count) => {
+        reporter.report({ count, icon: null });
+      },
       emitTitle: (title) => cbs.onMessage?.({ type: "title", title } as never),
       destroy: () => term.destroy(),
     };
   }
 
-  it("puts the prefix first and keeps it across a later OSC 0/2 title", async () => {
+  it("puts the count first and keeps it across a later OSC 0/2 title", async () => {
     document.title = "Served page";
     const t = await withTitleFeature();
 
-    t.setPrefix("(2) ");
+    t.setCount(2);
     expect(document.title).toBe("(2) Served page");
 
     // The program's title replaces the BASE only. This is the assertion the whole
@@ -2075,24 +2146,68 @@ describe("the document title is composed from a base and a feature prefix", () =
     t.emitTitle("   ");
     expect(document.title).toBe("(2) vim README.md");
 
-    // Clearing the prefix leaves the program's title in place.
-    t.setPrefix("");
+    // A count of zero leaves the program's title in place.
+    t.setCount(0);
     expect(document.title).toBe("vim README.md");
     t.destroy();
   });
 
-  it("clears a SET prefix on destroy, leaving the base alone", async () => {
-    // The pre-existing destroy assertion in features/tabs runs with the prefix
-    // already empty, so paintTitle is a no-op there and the cleanup could be
+  it("clears a SET count on destroy, leaving the base alone", async () => {
+    // The pre-existing destroy assertion in features/tabs runs with the count
+    // already zero, so paintTitle is a no-op there and the cleanup could be
     // deleted with that suite green. This is the case that actually pins it.
     document.title = "Served page";
     const t = await withTitleFeature();
 
-    t.setPrefix("(1) ");
+    t.setCount(1);
     expect(document.title).toBe("(1) Served page");
 
     t.destroy();
     expect(document.title).toBe("Served page");
+  });
+
+  it("composes the title of the ROOT's document, leaving the importing document's alone", async () => {
+    // A same-origin iframe is a second document with a window of its own. The
+    // one-shell-per-document rule admits a terminal there, and that terminal
+    // owns THAT document's title, base and mark alike.
+    document.title = "Outer page";
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const inner = frame.contentDocument;
+    if (!inner) {
+      throw new Error("no frame document");
+    }
+    inner.title = "Inner page";
+    const root = inner.createElement("div");
+    inner.body.appendChild(root);
+    let ctxRef: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "title-probe",
+      setup(ctx) {
+        ctxRef = ctx;
+        return { api: undefined, teardown: vi.fn() };
+      },
+    };
+    try {
+      const term = await mountTerminal(root, { features: () => [probe] });
+      await tick();
+      if (!ctxRef) {
+        throw new Error("the probe feature never ran");
+      }
+      ctxRef.shell.attention({ icons: false }).report({ count: 3, icon: null });
+      expect(inner.title).toBe("(3) Inner page");
+      expect(document.title).toBe("Outer page");
+
+      fake.callbacks().onMessage?.({ type: "title", title: "vim README.md" } as never);
+      expect(inner.title).toBe("(3) vim README.md");
+      expect(document.title).toBe("Outer page");
+
+      term.destroy();
+      expect(inner.title).toBe("vim README.md");
+      expect(document.title).toBe("Outer page");
+    } finally {
+      frame.remove();
+    }
   });
 });
 
@@ -2135,59 +2250,61 @@ describe("narrow layout: compact in EITHER dimension", () => {
   // wants the thumb-reach switcher, which is exactly the case a width-only test
   // cannot see.
 
-  it("is not narrow on a desktop root", () => {
+  it("is not narrow on a desktop root", async () => {
     const root = rootIn();
     sizeRoot(root, 1280, 800);
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     expect(root.classList.contains("wt-narrow")).toBe(false);
   });
 
-  it("is narrow on a portrait phone (skinny)", () => {
+  it("is narrow on a portrait phone (skinny)", async () => {
     const root = rootIn();
     sizeRoot(root, 390, 844);
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     expect(root.classList.contains("wt-narrow")).toBe(true);
   });
 
-  it("is narrow on a LANDSCAPE phone, which is wide but short", () => {
+  it("is narrow on a LANDSCAPE phone, which is wide but short", async () => {
     // 932x430: an iPhone 14 Pro Max rotated. Wider than the width breakpoint by
     // 330px, so only the height half can catch it.
     const root = rootIn();
     sizeRoot(root, 932, 430);
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     expect(root.classList.contains("wt-narrow")).toBe(true);
   });
 
-  it("is not narrow on a landscape tablet, which is the case the height bound separates", () => {
+  it("is not narrow on a landscape tablet, which is the case the height bound separates", async () => {
     // The smallest iPad is 744 CSS px tall in landscape, so the 500px bound clears
     // it with margin — a tablet gets the desktop strip.
     const root = rootIn();
     sizeRoot(root, 1024, 744);
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     expect(root.classList.contains("wt-narrow")).toBe(false);
   });
 
-  it("counts the width breakpoint itself as narrow, and one pixel past it as not", () => {
+  it("counts the width breakpoint itself as narrow, and one pixel past it as not", async () => {
     const atBound = rootIn();
     sizeRoot(atBound, 600, 800);
-    createTerminal(atBound, { features: () => [] });
+    const first = await mountTerminal(atBound, { features: () => [] });
     expect(atBound.classList.contains("wt-narrow")).toBe(true);
+    first.destroy();
 
     const pastBound = rootIn();
     sizeRoot(pastBound, 601, 800);
-    createTerminal(pastBound, { features: () => [] });
+    await mountTerminal(pastBound, { features: () => [] });
     expect(pastBound.classList.contains("wt-narrow")).toBe(false);
   });
 
-  it("counts the height breakpoint itself as narrow, and one pixel past it as not", () => {
+  it("counts the height breakpoint itself as narrow, and one pixel past it as not", async () => {
     const atBound = rootIn();
     sizeRoot(atBound, 1280, 500);
-    createTerminal(atBound, { features: () => [] });
+    const first = await mountTerminal(atBound, { features: () => [] });
     expect(atBound.classList.contains("wt-narrow")).toBe(true);
+    first.destroy();
 
     const pastBound = rootIn();
     sizeRoot(pastBound, 1280, 501);
-    createTerminal(pastBound, { features: () => [] });
+    await mountTerminal(pastBound, { features: () => [] });
     expect(pastBound.classList.contains("wt-narrow")).toBe(false);
   });
 
@@ -2207,7 +2324,7 @@ describe("narrow layout: compact in EITHER dimension", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: () => [probe] });
+    await mountTerminal(root, { features: () => [probe] });
     await tick();
 
     expect(captured?.layout()).toEqual({ narrow: true, coarse: true });
@@ -2225,16 +2342,16 @@ describe("narrow layout: compact in EITHER dimension", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: () => [probe] });
+    await mountTerminal(root, { features: () => [probe] });
     await tick();
 
     expect(captured?.layout()).toEqual({ narrow: false, coarse: false });
   });
 
-  it("drops the narrow class on destroy, so a re-mount starts clean", () => {
+  it("drops the narrow class on destroy, so a re-mount starts clean", async () => {
     const root = rootIn();
     sizeRoot(root, 390, 844);
-    const term = createTerminal(root, { features: () => [] });
+    const term = await mountTerminal(root, { features: () => [] });
     expect(root.classList.contains("wt-narrow")).toBe(true);
     term.destroy();
     expect(root.classList.contains("wt-narrow")).toBe(false);
@@ -2247,9 +2364,9 @@ describe("consumer theme overrides", () => {
   // whole point is to override the shipped tokens for THIS instance, not to hand
   // a consumer arbitrary inline style on the terminal root.
 
-  it("sets each custom property on the root", () => {
+  it("sets each custom property on the root", async () => {
     const root = rootIn();
-    createTerminal(root, {
+    await mountTerminal(root, {
       features: () => [],
       theme: { "--wt-bg": "#101014", "--wt-fg": "#e6e6e6" },
     });
@@ -2257,9 +2374,9 @@ describe("consumer theme overrides", () => {
     expect(root.style.getPropertyValue("--wt-fg")).toBe("#e6e6e6");
   });
 
-  it("ignores a key that is not a custom property", () => {
+  it("ignores a key that is not a custom property", async () => {
     const root = rootIn();
-    createTerminal(root, {
+    await mountTerminal(root, {
       features: () => [],
       // A consumer reaching for `position` is reaching past the token contract:
       // the layout-mode class owns how the root claims space.
@@ -2269,18 +2386,18 @@ describe("consumer theme overrides", () => {
     expect(root.style.getPropertyValue("--wt-bg")).toBe("#101014");
   });
 
-  it("ignores a key that merely CONTAINS the custom-property prefix", () => {
+  it("ignores a key that merely CONTAINS the custom-property prefix", async () => {
     const root = rootIn();
-    createTerminal(root, {
+    await mountTerminal(root, {
       features: () => [],
       theme: { "font-family--": "serif" } as Record<string, string>,
     });
     expect(root.style.getPropertyValue("font-family--")).toBe("");
   });
 
-  it("writes no custom property of its own to the root with no theme", () => {
+  it("writes no custom property of its own to the root with no theme", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     // Not "the style attribute is absent": viewport.init() publishes the visual
     // viewport's geometry on the root as --kb-inset/--vv-top, which it is supposed
     // to do and which a real browser (a real window.visualViewport) makes happen
@@ -2293,7 +2410,7 @@ describe("consumer theme overrides", () => {
   });
 });
 
-describe("toast (the kernel-owned shared primitive)", () => {
+describe("toast (the kernel-owned shared primitive)", async () => {
   const toastEl = (root: HTMLElement): HTMLElement | null =>
     root.querySelector<HTMLElement>(".wt-toast");
 
@@ -2307,7 +2424,7 @@ describe("toast (the kernel-owned shared primitive)", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(root, { features: () => [probe] });
+    await mountTerminal(root, { features: () => [probe] });
     await tick();
     if (captured === undefined) {
       throw new Error("the probe feature never ran");
@@ -2397,7 +2514,7 @@ describe("feature error routing", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
     if (captured === undefined) {
       throw new Error("the probe feature never ran");
@@ -2407,7 +2524,7 @@ describe("feature error routing", () => {
     // The definitive 4001 close, because it publishes its state immediately: an
     // ordinary close is suppressed until the first frame has landed (the loading
     // overlay owns the screen), so it would deliver no event to throw from.
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onProcessExit?.();
 
     expect(logged).toHaveBeenCalled();
@@ -2428,11 +2545,11 @@ describe("feature error routing", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
     logged.mockClear();
 
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onProcessExit?.();
 
     expect(onError).toHaveBeenCalledTimes(1);
@@ -2457,9 +2574,9 @@ describe("feature error routing", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
 
     expect(() => {
       cbs.onProcessExit?.();
@@ -2484,10 +2601,10 @@ describe("feature error routing", () => {
       },
     };
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onProcessExit?.();
 
     expect(onError).not.toHaveBeenCalled();
@@ -2516,7 +2633,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2538,7 +2655,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2556,7 +2673,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
     sendBinary.mockReturnValue(false); // the outbox is full
 
@@ -2582,7 +2699,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2607,7 +2724,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2633,7 +2750,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2656,7 +2773,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2681,7 +2798,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2707,7 +2824,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2733,7 +2850,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2760,7 +2877,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2784,7 +2901,7 @@ describe("the input funnel's transform and observer chains", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
@@ -2803,13 +2920,8 @@ describe("a stale composition gate must not leak control bytes (desktop/iOS CJK)
   const ta = (): HTMLTextAreaElement =>
     document.querySelector(".term-input") as HTMLTextAreaElement;
 
-  afterEach(async () => {
-    const composition = await import("../composition.js");
-    composition.cancelComposition();
-  });
-
-  it("sends nothing for a keydown the event itself marks as composing", () => {
-    createTerminal(rootIn(), { features: () => [] });
+  it("sends nothing for a keydown the event itself marks as composing", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, isComposing: true }),
@@ -2817,19 +2929,19 @@ describe("a stale composition gate must not leak control bytes (desktop/iOS CJK)
     expect(sendBinary).not.toHaveBeenCalled();
   });
 
-  it("still sends an ordinary Enter, so the guard has not swallowed the terminal", () => {
-    createTerminal(rootIn(), { features: () => [] });
+  it("still sends an ordinary Enter, so the guard has not swallowed the terminal", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13 }));
     expect(sentText()).toBe("\r");
   });
 
-  it("still sends CR for an Android Enter, which reports 229 with no composition", () => {
+  it("still sends CR for an Android Enter, which reports 229 with no composition", async () => {
     // Android reports keyCode 229 for nearly every soft-keyboard key, so an
     // UNGATED 229 guard swallowed ordinary Enter and the terminal then received
     // the textarea's own LF instead of CR. That regression shipped in this branch
     // and was caught in review; the guard is gated on an open composition.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, isComposing: false }),
@@ -2837,11 +2949,11 @@ describe("a stale composition gate must not leak control bytes (desktop/iOS CJK)
     expect(sentText()).toBe("\r");
   });
 
-  it("still sends DEL for an Android Backspace, which reports 229 with no composition", () => {
+  it("still sends DEL for an Android Backspace, which reports 229 with no composition", async () => {
     // Same regression, other control: with the guard ungated, held Backspace did
     // nothing at all, because the input listener's deletion branch deliberately
     // sends nothing on the premise that keydown already sent the byte.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Backspace", keyCode: 229, isComposing: false }),
@@ -2849,12 +2961,12 @@ describe("a stale composition gate must not leak control bytes (desktop/iOS CJK)
     expect(sentText()).toBe("\x7f");
   });
 
-  it("swallows the 229 commit key only while a composition is open", () => {
+  it("swallows the 229 commit key only while a composition is open", async () => {
     // The gate itself: the same event is a real Enter with no composition (above)
     // and a composition commit with one. Chrome and Safari both report keyCode
     // 229 for that commit key and Safari reports isComposing false for it
     // (measured in quill PR #3445), which is why the second signal exists.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.dispatchEvent(new CompositionEvent("compositionstart"));
     el.dispatchEvent(
@@ -2873,8 +2985,8 @@ describe("autocorrect: a retroactive rewrite is dropped, not applied", () => {
   const ta = (): HTMLTextAreaElement =>
     document.querySelector(".term-input") as HTMLTextAreaElement;
 
-  it("sends nothing when a suggestion rewrites text already typed", () => {
-    createTerminal(rootIn(), { features: () => [] });
+  it("sends nothing when a suggestion rewrites text already typed", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.value = `${el.value}hello`;
     el.dispatchEvent(
@@ -2883,8 +2995,8 @@ describe("autocorrect: a retroactive rewrite is dropped, not applied", () => {
     expect(sendBinary).not.toHaveBeenCalled();
   });
 
-  it("restores the placeholder so the next keystroke and held-Backspace still work", () => {
-    createTerminal(rootIn(), { features: () => [] });
+  it("restores the placeholder so the next keystroke and held-Backspace still work", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     const placeholder = el.value;
     el.value = `${placeholder}hello`;
@@ -2892,18 +3004,18 @@ describe("autocorrect: a retroactive rewrite is dropped, not applied", () => {
     expect(el.value).toBe(placeholder);
   });
 
-  it("still sends ordinary typing, which is a different inputType", () => {
+  it("still sends ordinary typing, which is a different inputType", async () => {
     // The guard must not widen: insertText is the user typing.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "ls" }));
     expect(sentText()).toBe("ls");
   });
 
-  it("still sends a glide-typed word, which arrives as one insertText", () => {
+  it("still sends a glide-typed word, which arrives as one insertText", async () => {
     // A length-based guard would have refused this; SwiftKey's flagship input
     // method delivers a whole word in one event and it is real user intent.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "kubectl" }));
     expect(sentText()).toBe("kubectl");
@@ -2914,24 +3026,16 @@ describe("blur must not leave a composition holding the input gate", () => {
   const ta = (): HTMLTextAreaElement =>
     document.querySelector(".term-input") as HTMLTextAreaElement;
 
-  // composition.ts keeps its state at module scope, so a case that leaves a
-  // composition open would hand it to every later test in this file. Without
-  // this, a regression here fails a dozen unrelated tests instead of this one.
-  afterEach(async () => {
-    const composition = await import("../composition.js");
-    composition.cancelComposition();
-  });
-
   it("clears composition state so focus returning can type again", async () => {
-    const composition = await import("../composition.js");
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.dispatchEvent(new CompositionEvent("compositionstart"));
-    expect(composition.isComposing()).toBe(true);
+    // The gate is closed: a keystroke while composing sends nothing.
+    el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
+    expect(sentText()).toBe("");
 
     el.dispatchEvent(new FocusEvent("blur"));
 
-    expect(composition.isComposing()).toBe(false);
     el.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "x" }));
     expect(sentText()).toBe("x");
   });
@@ -2952,8 +3056,8 @@ describe("the input event's value-recovery path (Android/IME, where ev.data is n
     el.dispatchEvent(new InputEvent("input", { inputType: "insertText" }));
   };
 
-  it("sends only the text appended after the placeholder", () => {
-    createTerminal(rootIn(), { features: () => [] });
+  it("sends only the text appended after the placeholder", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
     const placeholder = ta().value;
     expect(placeholder.length).toBeGreaterThan(0);
 
@@ -2962,32 +3066,32 @@ describe("the input event's value-recovery path (Android/IME, where ev.data is n
     expect(sentText()).toBe("hi");
   });
 
-  it("sends nothing when the value is the untouched placeholder", () => {
-    createTerminal(rootIn(), { features: () => [] });
+  it("sends nothing when the value is the untouched placeholder", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
     fireValueInput(ta().value);
     expect(sendBinary).not.toHaveBeenCalled();
   });
 
-  it("sends nothing when the field was emptied", () => {
+  it("sends nothing when the field was emptied", async () => {
     // A cleared field is a delete, not a keystroke: the placeholder is restored
     // and nothing goes on the wire.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     fireValueInput("");
     expect(sendBinary).not.toHaveBeenCalled();
   });
 
-  it("sends the whole value when it does not start with the placeholder", () => {
+  it("sends the whole value when it does not start with the placeholder", async () => {
     // An IME that REPLACES the field rather than appending to it. The value is
     // entirely the user's text, so all of it goes.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     fireValueInput("replaced");
     expect(sentText()).toBe("replaced");
   });
 
-  it("sends the whole value when the placeholder is a SUFFIX rather than a prefix", () => {
+  it("sends the whole value when the placeholder is a SUFFIX rather than a prefix", async () => {
     // Position matters: text before the placeholder is the user's, and treating it
     // as a placeholder-prefixed value would slice the user's own characters off.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const placeholder = ta().value;
 
     fireValueInput(`ab${placeholder}`);
@@ -2997,21 +3101,21 @@ describe("the input event's value-recovery path (Android/IME, where ev.data is n
     expect(sentText()).toBe("ab ");
   });
 
-  it("normalizes an iOS NBSP recovered from the value", () => {
-    createTerminal(rootIn(), { features: () => [] });
+  it("normalizes an iOS NBSP recovered from the value", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
     const placeholder = ta().value;
     fireValueInput(`${placeholder}a\u00A0b`);
     expect(sentText()).toBe("a b");
   });
 
-  it("restores the placeholder afterwards, so the next backspace still has a target", () => {
-    createTerminal(rootIn(), { features: () => [] });
+  it("restores the placeholder afterwards, so the next backspace still has a target", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
     const placeholder = ta().value;
     fireValueInput(`${placeholder}hi`);
     expect(ta().value).toBe(placeholder);
   });
 
-  it("sends nothing for a deletion, whatever is left in the field", () => {
+  it("sends nothing for a deletion, whatever is left in the field", async () => {
     // Backspace and its three siblings are the reason the placeholder exists: the
     // engine's key encoder already sent the control byte on keydown, so the
     // resulting `input` event must send nothing at all. The residual value is what
@@ -3025,8 +3129,9 @@ describe("the input event's value-recovery path (Android/IME, where ev.data is n
       "deleteWordForward",
     ]) {
       sendBinary.mockClear();
+      destroyMounted();
       document.body.replaceChildren();
-      createTerminal(rootIn(), { features: () => [] });
+      await mountTerminal(rootIn(), { features: () => [] });
       const el = ta();
       const placeholder = el.value;
       el.value = `${placeholder}ab`;
@@ -3038,10 +3143,10 @@ describe("the input event's value-recovery path (Android/IME, where ev.data is n
     }
   });
 
-  it("prefers ev.data over the value when both are present", () => {
+  it("prefers ev.data over the value when both are present", async () => {
     // The value still holds the placeholder at this point; taking the data path is
     // what keeps the placeholder out of the wire on the common browsers.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.value = `${el.value}ignored`;
 
@@ -3050,11 +3155,11 @@ describe("the input event's value-recovery path (Android/IME, where ev.data is n
     expect(sentText()).toBe("d");
   });
 
-  it("falls back to the value when ev.data is an empty string", () => {
+  it("falls back to the value when ev.data is an empty string", async () => {
     // An empty `data` is not "nothing typed": Gboard reports it while putting the
     // text in the value, so an empty-string check that admitted it would send
     // nothing at all.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     const placeholder = el.value;
     el.value = `${placeholder}gb`;
@@ -3092,7 +3197,7 @@ describe("the keydown chain on the focused textarea", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     key({ key: "c", ctrlKey: true, shiftKey: true });
@@ -3109,7 +3214,7 @@ describe("the keydown chain on the focused textarea", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe] });
+    await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
 
     key({ key: "c", ctrlKey: true });
@@ -3118,12 +3223,12 @@ describe("the keydown chain on the focused textarea", () => {
     expect(sentText()).toBe("\x03");
   });
 
-  it("scrolls a page up on Shift+PageUp instead of sending it to the pty", () => {
+  it("scrolls a page up on Shift+PageUp instead of sending it to the pty", async () => {
     // Scrollback paging is a CLIENT gesture: the pty has no scrollback to page,
     // so the bytes must not go on the wire and the browser's own PageUp must not
     // also fire.
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const term = root.querySelector<HTMLElement>(".term");
     if (!term) {
       throw new Error("no .term");
@@ -3137,9 +3242,9 @@ describe("the keydown chain on the focused textarea", () => {
     expect(sendBinary).not.toHaveBeenCalled();
   });
 
-  it("clamps a page up at the top rather than scrolling past it", () => {
+  it("clamps a page up at the top rather than scrolling past it", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const term = root.querySelector<HTMLElement>(".term");
     if (!term) {
       throw new Error("no .term");
@@ -3151,9 +3256,9 @@ describe("the keydown chain on the focused textarea", () => {
     expect(term.scrollTop).toBe(0);
   });
 
-  it("scrolls a page down on Shift+PageDown", () => {
+  it("scrolls a page down on Shift+PageDown", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const term = root.querySelector<HTMLElement>(".term");
     if (!term) {
       throw new Error("no .term");
@@ -3167,17 +3272,17 @@ describe("the keydown chain on the focused textarea", () => {
     expect(sendBinary).not.toHaveBeenCalled();
   });
 
-  it("cancels a key it sends, so the browser cannot also act on it", () => {
+  it("cancels a key it sends, so the browser cannot also act on it", async () => {
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const ev = key({ key: "c", ctrlKey: true });
     expect(ev.defaultPrevented).toBe(true);
   });
 
-  it("leaves a printable key to the input event, uncancelled", () => {
+  it("leaves a printable key to the input event, uncancelled", async () => {
     // The encoder defers a plain character on purpose: cancelling here would kill
     // IME and dead-key composition, which only produce text through `input`.
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     const ev = key({ key: "a" });
     expect(ev.defaultPrevented).toBe(false);
     expect(sendBinary).not.toHaveBeenCalled();
@@ -3234,10 +3339,10 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     (root.querySelector(".term-input") as HTMLTextAreaElement).blur();
   };
 
-  it("focuses the input on a clean tap, which is what opens the soft keyboard", () => {
+  it("focuses the input on a clean tap, which is what opens the soft keyboard", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root);
@@ -3245,10 +3350,10 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(true);
   });
 
-  it("bows out of a drag, which is a scroll or a selection-extend", () => {
+  it("bows out of a drag, which is a scroll or a selection-extend", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root, { from: [100, 100], to: [140, 100] });
@@ -3256,10 +3361,10 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("bows out of vertical movement too, not just horizontal", () => {
+  it("bows out of vertical movement too, not just horizontal", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root, { from: [100, 100], to: [100, 60] });
@@ -3267,12 +3372,12 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("counts the movement ceiling itself as still a tap", () => {
+  it("counts the movement ceiling itself as still a tap", async () => {
     // At the threshold, not past it: the contextMenu feature classifies the other
     // side of this same boundary, so an off-by-one here opens a gap or an overlap.
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root, { from: [100, 100], to: [110, 110] });
@@ -3280,10 +3385,10 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(true);
   });
 
-  it("bows out one pixel past the movement ceiling", () => {
+  it("bows out one pixel past the movement ceiling", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root, { from: [100, 100], to: [111, 100] });
@@ -3291,10 +3396,10 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("measures movement as a distance, so a leftward drag counts too", () => {
+  it("measures movement as a distance, so a leftward drag counts too", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root, { from: [100, 100], to: [40, 100] });
@@ -3302,10 +3407,10 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("bows out of a long-press, which belongs to native word-select", () => {
+  it("bows out of a long-press, which belongs to native word-select", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root, { heldMs: 900 });
@@ -3313,10 +3418,10 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("counts the duration ceiling itself as still a tap", () => {
+  it("counts the duration ceiling itself as still a tap", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root, { heldMs: 500 });
@@ -3324,10 +3429,10 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(true);
   });
 
-  it("bows out one millisecond past the duration ceiling", () => {
+  it("bows out one millisecond past the duration ceiling", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root, { heldMs: 501 });
@@ -3335,12 +3440,12 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("leaves a tap on a link to the platform", () => {
+  it("leaves a tap on a link to the platform", async () => {
     // Neither this handler nor the context menu claims a link press: the OS's own
     // affordances (preview on hold, activate on tap) win.
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const output = root.querySelector(".term-output");
     const link = document.createElement("a");
     link.className = "term-link";
@@ -3353,12 +3458,12 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("ignores a mouse pointerup entirely: this handler is touch-only", () => {
+  it("ignores a mouse pointerup entirely: this handler is touch-only", async () => {
     // The click handler owns the mouse, and it applies the selection policy that
     // this one must not.
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     tapSequence(root, { pointerType: "mouse" });
@@ -3366,14 +3471,14 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("clears a selection on a clean tap WITHOUT popping the keyboard", () => {
+  it("clears a selection on a clean tap WITHOUT popping the keyboard", async () => {
     // The deselect tap. iOS otherwise leaves the selection stuck, because the
     // synthetic mousedown the kernel cancels to preserve the keyboard also
     // suppresses the platform's own tap-to-deselect. Focusing here as well would
     // pop the keyboard right after a copy.
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const output = root.querySelector(".term-output");
     const text = document.createTextNode("selected output");
     output?.appendChild(text);
@@ -3391,13 +3496,13 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("clears the selection AND focuses in one tap when a hardware keyboard is present", () => {
+  it("clears the selection AND focuses in one tap when a hardware keyboard is present", async () => {
     // An iPad with a Magic Keyboard has no soft keyboard to protect, so the extra
     // tap the bare-touch rule costs is pure friction — a large part of the
     // reported "2-3 taps to focus".
     stubMedia({ "(any-pointer: fine)": true });
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const output = root.querySelector(".term-output");
     const text = document.createTextNode("selected output");
     output?.appendChild(text);
@@ -3414,13 +3519,13 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(window.getSelection()?.isCollapsed).toBe(true);
     expect(focused(root)).toBe(true);
   });
-  it("cancels the synthetic mousedown after a bare-touch tap, which is what keeps the keyboard up", () => {
+  it("cancels the synthetic mousedown after a bare-touch tap, which is what keeps the keyboard up", async () => {
     // iOS synthesises a mousedown after a touch tap, and letting it through blurs
     // and refocuses the textarea — which closes and reopens the soft keyboard. The
     // xterm.js focus-preservation pattern, scoped to touch.
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const term = root.querySelector(".term");
     term?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
 
@@ -3430,13 +3535,13 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(ev.defaultPrevented).toBe(true);
   });
 
-  it("lets that mousedown through when a hardware keyboard is present", () => {
+  it("lets that mousedown through when a hardware keyboard is present", async () => {
     // There is no soft keyboard to protect on an iPad with a trackpad, and
     // suppressing the mousedown there was DEFEATING the native focus — which is why
     // the terminal needed several taps to focus.
     stubMedia({ "(any-pointer: fine)": true });
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const term = root.querySelector(".term");
     term?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
 
@@ -3459,13 +3564,13 @@ describe("clicking the terminal", () => {
     (root.querySelector(".term-input") as HTMLTextAreaElement).blur();
   };
 
-  it("opens a linkified URL in a new tab, severed from this page", () => {
+  it("opens a linkified URL in a new tab, severed from this page", async () => {
     // noopener is the security property: without it the opened page gets a live
     // `window.opener` handle to the terminal, and the terminal is a shell.
     stubMedia({});
     const opened = vi.spyOn(window, "open").mockReturnValue(null);
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const link = document.createElement("a");
     link.className = "term-link";
     link.href = "https://example.com/path";
@@ -3483,10 +3588,10 @@ describe("clicking the terminal", () => {
     opened.mockRestore();
   });
 
-  it("focuses the terminal on an ordinary click", () => {
+  it("focuses the terminal on an ordinary click", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     blurTerminal(root);
 
     const output = root.querySelector(".term-output");
@@ -3498,10 +3603,10 @@ describe("clicking the terminal", () => {
     expect(focused(root)).toBe(true);
   });
 
-  it("declines while text is selected, so a click does not destroy the selection", () => {
+  it("declines while text is selected, so a click does not destroy the selection", async () => {
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const output = root.querySelector(".term-output");
     if (!output) {
       throw new Error("no .term-output");
@@ -3522,12 +3627,12 @@ describe("clicking the terminal", () => {
     expect(window.getSelection()?.isCollapsed).toBe(false);
   });
 
-  it("declines the synthetic click after a bare-touch tap, which pointerup already handled", () => {
+  it("declines the synthetic click after a bare-touch tap, which pointerup already handled", async () => {
     // On bare touch the pointerup handler owns the gesture; letting the synthetic
     // click focus as well would pop the keyboard on a deselect tap.
     stubMedia({});
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const output = root.querySelector(".term-output");
     if (!output) {
       throw new Error("no .term-output");
@@ -3542,10 +3647,10 @@ describe("clicking the terminal", () => {
     expect(focused(root)).toBe(false);
   });
 
-  it("still focuses after a touch tap when a hardware keyboard is present", () => {
+  it("still focuses after a touch tap when a hardware keyboard is present", async () => {
     stubMedia({ "(any-pointer: fine)": true });
     const root = rootIn();
-    createTerminal(root, { features: () => [] });
+    await mountTerminal(root, { features: () => [] });
     const output = root.querySelector(".term-output");
     if (!output) {
       throw new Error("no .term-output");
@@ -3584,7 +3689,7 @@ describe("browse-cache TTL boundaries and the visible/hidden asymmetry", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [grabber] });
+    await mountTerminal(rootIn(), { features: () => [grabber] });
     await vi.advanceTimersByTimeAsync(0);
     const store = captured?.newLineStore("session-bg");
     if (store === undefined) {
@@ -3593,12 +3698,12 @@ describe("browse-cache TTL boundaries and the visible/hidden asymmetry", () => {
     return store;
   }
 
-  it("leaves an EMPTY bound cache alone, however long ago it was read", () => {
+  it("leaves an EMPTY bound cache alone, however long ago it was read", async () => {
     // Nothing to evict. Calling into the store anyway is not free — the drop
     // schedules a reconcile — and it would run on every sweep for the life of the
     // page on a terminal that never paged any history in.
     vi.useFakeTimers();
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     browseCacheSize.mockReturnValue(0);
     lastBrowseActivityMs.mockReturnValue(Date.now() - 60 * 60_000);
 
@@ -3607,9 +3712,9 @@ describe("browse-cache TTL boundaries and the visible/hidden asymmetry", () => {
     expect(dropBrowseCache).not.toHaveBeenCalled();
   });
 
-  it("drops at exactly the TTL, not one tick later", () => {
+  it("drops at exactly the TTL, not one tick later", async () => {
     vi.useFakeTimers();
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     browseCacheSize.mockReturnValue(1200);
     lastBrowseActivityMs.mockReturnValue(Date.now() + 60_000 - TTL_MS);
 
@@ -3620,9 +3725,9 @@ describe("browse-cache TTL boundaries and the visible/hidden asymmetry", () => {
     expect(dropBrowseCache).toHaveBeenCalledTimes(1);
   });
 
-  it("holds one millisecond short of the TTL", () => {
+  it("holds one millisecond short of the TTL", async () => {
     vi.useFakeTimers();
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     browseCacheSize.mockReturnValue(1200);
     lastBrowseActivityMs.mockReturnValue(Date.now() + 60_000 - TTL_MS + 1);
 
@@ -3631,7 +3736,7 @@ describe("browse-cache TTL boundaries and the visible/hidden asymmetry", () => {
     expect(dropBrowseCache).not.toHaveBeenCalled();
   });
 
-  it("drops UNCONDITIONALLY on a hidden page, where there is no reader to protect", () => {
+  it("drops UNCONDITIONALLY on a hidden page, where there is no reader to protect", async () => {
     // The visible-page drop is conditional inside the store, because a reader
     // parked on cached rows is idle while looking straight at them. A hidden page
     // has no reader, so the same call must not exempt anything.
@@ -3639,7 +3744,7 @@ describe("browse-cache TTL boundaries and the visible/hidden asymmetry", () => {
     const visibility = vi
       .spyOn(document, "visibilityState", "get")
       .mockReturnValue("hidden" as Document["visibilityState"]);
-    createTerminal(rootIn(), { features: () => [] });
+    await mountTerminal(rootIn(), { features: () => [] });
     browseCacheSize.mockReturnValue(1200);
     lastBrowseActivityMs.mockReturnValue(Date.now() - TTL_MS - 1);
 
@@ -3720,6 +3825,10 @@ describe("browse-cache TTL boundaries and the visible/hidden asymmetry", () => {
 });
 
 describe("the loading overlay cannot be resurrected once it is down", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("ignores a second dismissal, so no late failure re-fades a lowered overlay", async () => {
     // Two independent paths lower the overlay and they can both run: a session owner
     // that resolves nothing lowers it so its retry chrome is visible, and any later
@@ -3735,7 +3844,7 @@ describe("the loading overlay cannot be resurrected once it is down", () => {
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [owner], loading });
+    await mountTerminal(rootIn(), { features: () => [owner], loading });
     await tick();
     await tick();
     expect(loading.classList.contains("fade")).toBe(true);
@@ -3743,10 +3852,29 @@ describe("the loading overlay cannot be resurrected once it is down", () => {
     expect(loading.isConnected).toBe(false);
     document.body.appendChild(loading); // the consumer re-attached its own element
 
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onProcessExit?.(); // a second path that would lower the overlay
     loading.dispatchEvent(new Event("transitionend"));
 
+    expect(loading.isConnected).toBe(true);
+  });
+
+  it("destroy() before the first frame stops the overlay's status writes and leaves the overlay to the consumer", async () => {
+    // The status controller's rotation would otherwise keep writing into an
+    // element the consumer owns, for as long as the page lives.
+    vi.useFakeTimers();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const term = await mountTerminal(rootIn(), { features: () => [], loading });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loading.querySelector(".wt-loading-text")).not.toBeNull();
+
+    term.destroy();
+    await vi.advanceTimersByTimeAsync(90_000);
+
+    expect(loading.querySelector(".wt-loading-text")).toBeNull();
+    expect(loading.childElementCount).toBe(0);
+    expect(loading.classList.contains("fade")).toBe(false);
     expect(loading.isConnected).toBe(true);
   });
 });
@@ -3756,7 +3884,7 @@ describe("the recovery surface's accessibility wiring", () => {
   // synchronous and asynchronous startup phases. It is a dialog, so it has to name
   // and describe itself, and focus has to land on the only action available.
 
-  function fatalRoot(): HTMLElement {
+  async function fatalRoot(): Promise<HTMLElement> {
     const root = rootIn();
     const thrower: TerminalFeature = {
       name: "thrower",
@@ -3765,13 +3893,13 @@ describe("the recovery surface's accessibility wiring", () => {
       },
     };
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    createTerminal(root, { features: () => [thrower] });
+    await mountTerminal(root, { features: () => [thrower] });
     logged.mockRestore();
     return root;
   }
 
   it("labels and describes the dialog from its own title and message", async () => {
-    const root = fatalRoot();
+    const root = await fatalRoot();
     await tick();
     const surface = root.querySelector<HTMLElement>(".wt-fatal");
     if (!surface) {
@@ -3793,7 +3921,7 @@ describe("the recovery surface's accessibility wiring", () => {
   });
 
   it("moves focus to the reload button, because the terminal input it left is gone", async () => {
-    const root = fatalRoot();
+    const root = await fatalRoot();
     await tick();
     const button = root.querySelector<HTMLButtonElement>(".wt-fatal-reload");
     expect(button).not.toBeNull();
@@ -3812,9 +3940,9 @@ describe("the consumer's loading overlay is always removed, not merely faded", (
     try {
       const loading = document.createElement("div");
       document.body.appendChild(loading);
-      createTerminal(rootIn(), { features: () => [], loading });
+      await mountTerminal(rootIn(), { features: () => [], loading });
       await vi.advanceTimersByTimeAsync(0);
-      const cbs = connectionInit.mock.calls[0]![0]!;
+      const cbs = fake.callbacks();
       cbs.onProcessExit?.(); // any path that lowers the overlay
       expect(loading.classList.contains("fade")).toBe(true);
       expect(loading.isConnected).toBe(true);
@@ -3832,9 +3960,9 @@ describe("the consumer's loading overlay is always removed, not merely faded", (
     try {
       const loading = document.createElement("div");
       document.body.appendChild(loading);
-      createTerminal(rootIn(), { features: () => [], loading });
+      await mountTerminal(rootIn(), { features: () => [], loading });
       await vi.advanceTimersByTimeAsync(0);
-      const cbs = connectionInit.mock.calls[0]![0]!;
+      const cbs = fake.callbacks();
       cbs.onProcessExit?.();
 
       loading.dispatchEvent(new Event("transitionend"));
@@ -3848,9 +3976,9 @@ describe("the consumer's loading overlay is always removed, not merely faded", (
   it("lowers the overlay only once, so a second close cannot restart the fade", async () => {
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    createTerminal(rootIn(), { features: () => [], loading });
+    await mountTerminal(rootIn(), { features: () => [], loading });
     await tick();
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onProcessExit?.();
     loading.dispatchEvent(new Event("transitionend"));
     expect(loading.isConnected).toBe(false);
@@ -3882,7 +4010,7 @@ describe("ctx.loadingReason (progressive status on the consumer's overlay)", () 
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe], loading });
+    await mountTerminal(rootIn(), { features: () => [probe], loading });
     await tick();
 
     captured?.loadingReason("Waiting for the session list");
@@ -3909,10 +4037,10 @@ describe("ctx.loadingReason (progressive status on the consumer's overlay)", () 
         return { teardown: () => undefined };
       },
     };
-    createTerminal(rootIn(), { features: () => [probe], loading });
+    await mountTerminal(rootIn(), { features: () => [probe], loading });
     await tick();
     captured?.loadingReason("Waiting for the session list");
-    const cbs = connectionInit.mock.calls[0]![0]!;
+    const cbs = fake.callbacks();
     cbs.onProcessExit?.(); // lowers the overlay, which stops the status
 
     captured?.loadingReason("too late");
@@ -3925,13 +4053,13 @@ describe("ctx.loadingReason (progressive status on the consumer's overlay)", () 
 });
 
 describe("the switch path (ctx.notifySwitch and the kernel's owned first connect)", () => {
-  function withSwitchProbe(): {
+  async function withSwitchProbe(): Promise<{
     term: TerminalHandle;
     ctx: () => TerminalContext;
     detached: () => number;
     switched: () => { id: string }[];
     busSwitches: () => { id: string }[];
-  } {
+  }> {
     let captured: TerminalContext | undefined;
     let detaches = 0;
     const switches: { id: string }[] = [];
@@ -3954,7 +4082,7 @@ describe("the switch path (ctx.notifySwitch and the kernel's owned first connect
         };
       },
     };
-    const term = createTerminal(rootIn(), { features: () => [probe] });
+    const term = await mountTerminal(rootIn(), { features: () => [probe] });
     return {
       term,
       ctx: () => {
@@ -3970,7 +4098,7 @@ describe("the switch path (ctx.notifySwitch and the kernel's owned first connect
   }
 
   it("detaches, re-points the socket, attaches, and announces — in that order", async () => {
-    const probe = withSwitchProbe();
+    const probe = await withSwitchProbe();
     await tick();
 
     probe.ctx().notifySwitch({ id: "s2" });
@@ -3983,7 +4111,7 @@ describe("the switch path (ctx.notifySwitch and the kernel's owned first connect
   });
 
   it("clears the textarea across a switch, so half-typed text reaches neither session", async () => {
-    const probe = withSwitchProbe();
+    const probe = await withSwitchProbe();
     await tick();
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
     const placeholder = ta.value;
@@ -3996,7 +4124,7 @@ describe("the switch path (ctx.notifySwitch and the kernel's owned first connect
   });
 
   it("reports the new session as the active one", async () => {
-    const probe = withSwitchProbe();
+    const probe = await withSwitchProbe();
     await tick();
     expect(probe.ctx().session.id).toBeNull();
 
@@ -4008,7 +4136,7 @@ describe("the switch path (ctx.notifySwitch and the kernel's owned first connect
   it("ignores a switch requested after destroy, so a late async cannot reopen the socket", async () => {
     // A feature's un-cancelled create() or poll can resolve after destroy(); without
     // this guard it re-points a torn-down terminal's connection at a session.
-    const probe = withSwitchProbe();
+    const probe = await withSwitchProbe();
     await tick();
     const ctx = probe.ctx();
     probe.term.destroy();

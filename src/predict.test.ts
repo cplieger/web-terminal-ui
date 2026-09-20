@@ -6,11 +6,14 @@
 // we don't model must suspend, not guess.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import * as predict from "./predict.js";
+import { createPredictor, type Predictor } from "./predict.js";
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 
+let predict: Predictor;
+
 beforeEach(() => {
+  predict = createPredictor();
   predict.setDimensions(80, 24);
   predict.onScreenFrame(0, 0);
 });
@@ -165,50 +168,31 @@ describe("predict: setDimensions clamps position", () => {
 });
 
 describe("predict: a resize notifies only when it moved the cursor", () => {
-  function counter(): () => number {
-    let calls = 0;
-    predict.subscribe(() => {
-      calls++;
-    });
-    return () => calls;
-  }
-
-  // Module state is shared and subscribe has no unsubscribe, so every case here
-  // drops its counter before returning (see the subscribe suite above).
-  function release(): void {
-    predict.subscribe(() => {
-      // no-op
-    });
-  }
-
   it("stays quiet when the new size clamps nothing", () => {
     predict.setDimensions(80, 24);
     predict.onScreenFrame(3, 40);
-    const calls = counter();
+    const onChange = vi.fn();
+    predict.subscribe(onChange);
     predict.setDimensions(80, 24);
-    const after = calls();
-    release();
-    expect(after).toBe(0);
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("notifies when the width clamped the column", () => {
     predict.setDimensions(80, 24);
     predict.onScreenFrame(3, 40);
-    const calls = counter();
+    const onChange = vi.fn();
+    predict.subscribe(onChange);
     predict.setDimensions(20, 24);
-    const after = calls();
-    release();
-    expect(after).toBe(1);
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 
   it("notifies when the height clamped the row", () => {
     predict.setDimensions(80, 24);
     predict.onScreenFrame(20, 3);
-    const calls = counter();
+    const onChange = vi.fn();
+    predict.subscribe(onChange);
     predict.setDimensions(80, 10);
-    const after = calls();
-    release();
-    expect(after).toBe(1);
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -242,24 +226,41 @@ describe("predict: frozen when the server cursor is hidden", () => {
 
 describe("predict: subscribe notifies on every state change", () => {
   it("fires onChange for applyInput, onScreenFrame, and reset", () => {
-    let calls = 0;
-    predict.subscribe(() => {
-      calls++;
-    });
+    const onChange = vi.fn();
+    predict.subscribe(onChange);
     predict.onScreenFrame(0, 0);
-    const afterFrame = calls;
+    const afterFrame = onChange.mock.calls.length;
     predict.applyInput(enc("a"));
-    const afterInput = calls;
+    const afterInput = onChange.mock.calls.length;
     predict.reset();
-    const afterReset = calls;
-    // Drop the counter reference so it can't leak into later tests
-    // (module state is shared under isolate:false, with no unsubscribe).
-    predict.subscribe(() => {
-      // no-op
-    });
+    const afterReset = onChange.mock.calls.length;
     expect(afterFrame).toBeGreaterThan(0);
     expect(afterInput).toBeGreaterThan(afterFrame);
     expect(afterReset).toBeGreaterThan(afterInput);
+  });
+});
+
+describe("predict: dispose()", () => {
+  it("drops the subscriber and returns the cursor to the inactive origin", () => {
+    const onChange = vi.fn();
+    predict.subscribe(onChange);
+    predict.onScreenFrame(5, 10);
+    predict.applyInput(enc("abc"));
+    predict.dispose();
+    expect(predict.get()).toEqual({ row: 0, col: 0, active: false });
+    onChange.mockClear();
+    predict.onScreenFrame(1, 1);
+    predict.applyInput(enc("x"));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("two predictors do not share a cursor", () => {
+    const other = createPredictor();
+    other.setDimensions(80, 24);
+    other.onScreenFrame(4, 4);
+    predict.applyInput(enc("abc"));
+    expect(predict.get()).toEqual({ row: 0, col: 3, active: true });
+    expect(other.get()).toEqual({ row: 4, col: 4, active: true });
   });
 });
 
@@ -331,54 +332,39 @@ describe("predict: a consumed wrap does not wrap the next character too", () => 
 
 describe("predict: prediction is off until the first server frame", () => {
   // Every test above starts from an onScreenFrame, because that is the state the
-  // renderer is in once a session is running. The state a page BOOTS in is
-  // different and is never re-entered: prediction is not armed, so nothing the
-  // user types moves the ghost cursor before the server has said where the real
-  // one is. Guessing from (0,0) would put a ghost cursor on a screen that has not
-  // been painted yet, over a session whose cursor is wherever the shell left it.
-  //
-  // The module keeps this state in module-scope variables, so the boot state only
-  // exists at load: the module is re-imported inside the test for that reason, and
-  // the query has to be BUSTED to get a second evaluation. `vi.resetModules()` on
-  // its own cannot do it in a browser — the module map is URL-keyed, so the
-  // re-import hands back the instance the file's beforeEach already armed with
-  // onScreenFrame, and every assertion below reads an armed module. The `.ts`
-  // extension is load-bearing: written `.js` the suite still passes while v8
-  // attributes every evaluation to a file that does not exist and coverage for
-  // predict.ts collapses to nothing.
-  let bootCount = 0;
-  async function freshPredict(): Promise<typeof predict> {
-    return (await import(
-      /* @vite-ignore */ `./predict.ts?boot=${String(++bootCount)}`
-    )) as typeof predict;
-  }
+  // renderer is in once a session is running. A fresh predictor is not armed, so
+  // nothing the user types moves the ghost cursor before the server has said
+  // where the real one is. Guessing from (0,0) would put a ghost cursor on a
+  // screen that has not been painted yet, over a session whose cursor is
+  // wherever the shell left it.
 
-  it("reports an inactive cursor at the origin before any frame arrives", async () => {
-    const p = await freshPredict();
+  it("reports an inactive cursor at the origin before any frame arrives", () => {
+    const p = createPredictor();
     expect(p.get()).toEqual({ row: 0, col: 0, active: false });
   });
 
-  it("ignores typed input until a frame arms it", async () => {
-    const p = await freshPredict();
-    p.applyInput(new TextEncoder().encode("hello"));
+  it("ignores typed input until a frame arms it", () => {
+    const p = createPredictor();
+    p.applyInput(enc("hello"));
     expect(p.get()).toEqual({ row: 0, col: 0, active: false });
   });
 
-  it("notifies no subscriber for input it ignored", async () => {
-    // The renderer redraws its overlay on every notification; an unarmed module
-    // that still called back would make it redraw a cursor it must not show.
-    const p = await freshPredict();
+  it("notifies no subscriber for input it ignored", () => {
+    // The renderer redraws its overlay on every notification; an unarmed
+    // predictor that still called back would make it redraw a cursor it must
+    // not show.
+    const p = createPredictor();
     const onChange = vi.fn();
     p.subscribe(onChange);
-    p.applyInput(new TextEncoder().encode("x"));
+    p.applyInput(enc("x"));
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("starts predicting from the position the first frame reports", async () => {
-    const p = await freshPredict();
+  it("starts predicting from the position the first frame reports", () => {
+    const p = createPredictor();
     p.setDimensions(80, 24);
     p.onScreenFrame(3, 7);
-    p.applyInput(new TextEncoder().encode("ab"));
+    p.applyInput(enc("ab"));
     expect(p.get()).toEqual({ row: 3, col: 9, active: true });
   });
 });

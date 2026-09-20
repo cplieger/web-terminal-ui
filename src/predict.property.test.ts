@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import * as predict from "./predict.js";
+import { createPredictor } from "./predict.js";
 
 describe("predict: property - the predicted cursor never escapes the screen", () => {
   it("keeps row/col within the current dimensions for any input bytes", () => {
@@ -10,6 +10,7 @@ describe("predict: property - the predicted cursor never escapes the screen", ()
         fc.integer({ min: 1, max: 200 }),
         fc.uint8Array({ maxLength: 512 }),
         (cols, rows, bytes) => {
+          const predict = createPredictor();
           predict.setDimensions(cols, rows);
           predict.onScreenFrame(0, 0);
           predict.applyInput(bytes);
@@ -31,6 +32,7 @@ describe("predict: property - printable advance and backspace are inverse within
         fc.integer({ min: 60, max: 200 }),
         fc.array(fc.integer({ min: 0x20, max: 0x7e }), { maxLength: 50 }),
         (cols, codes) => {
+          const predict = createPredictor();
           predict.setDimensions(cols, 24);
           predict.onScreenFrame(0, 0);
           predict.applyInput(new Uint8Array(codes));

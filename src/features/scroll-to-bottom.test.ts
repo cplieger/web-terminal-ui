@@ -40,16 +40,10 @@ function fakeCtx(): {
     region: () => slot,
     surface: () => surface,
     scroll: {
-      // Reached through viewport.ts's settle handler, which a real browser fires on
-      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
-      // real one delivers its first observation asynchronously, so every mount opens a
-      // transition that settles ~350ms later and pins to the bottom. Absent from the
-      // double, that settle throws out of a timer as an unhandled error.
-      stickToBottom: vi.fn(),
       scrollToBottom: scrollToBottomSpy,
       isUserScrolledUp: () => false,
       currentScrollTop: () => 0,
-      restoreScrollTop: () => undefined,
+      restoreView: () => undefined,
     },
     on: (_e: string, fn: (p: { scrolledUp: boolean }) => void) => {
       scrollHandler = fn;

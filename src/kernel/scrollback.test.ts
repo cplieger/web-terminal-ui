@@ -8,29 +8,14 @@
 // close handler.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type * as Engine from "@cplieger/web-terminal-engine";
 import { LineStore } from "@cplieger/web-terminal-engine";
-import type * as ScrollbackModule from "./scrollback.js";
+import { createScrollbackKeeper, type SessionEpochs } from "./scrollback.js";
 import type { PersistedScrollback, ScrollbackPersistence } from "./types.js";
 
-const { adoptPersistedEpoch, serverEpochOf } = vi.hoisted(() => ({
-  adoptPersistedEpoch: vi.fn<(sessionId: string, epoch: number) => void>(),
-  serverEpochOf: vi.fn<(sessionId: string) => number>(() => 0),
-}));
-
-vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
-  const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    connection: {
-      ...actual.connection,
-      adoptPersistedEpoch,
-      serverEpochOf,
-    },
-  };
-});
-
-let createScrollbackKeeper: (typeof ScrollbackModule)["createScrollbackKeeper"];
+const adoptPersistedEpoch = vi.fn<(sessionId: string, epoch: number) => void>();
+const serverEpochOf = vi.fn<(sessionId: string) => number>(() => 0);
+/** The shell's port, faked: the keeper never reaches a connection itself. */
+const epochs: SessionEpochs = { adoptPersistedEpoch, serverEpochOf };
 
 /** A store holding `n` lines starting at `from`, so absolute indices are
  *  observable (they are the whole reason the epoch matters). */
@@ -76,12 +61,10 @@ function fakeStorage(seed: Record<string, PersistedScrollback> = {}): Scrollback
   };
 }
 
-beforeEach(async () => {
-  vi.resetModules();
+beforeEach(() => {
   adoptPersistedEpoch.mockClear();
   serverEpochOf.mockReset();
   serverEpochOf.mockReturnValue(0);
-  ({ createScrollbackKeeper } = await import("./scrollback.js"));
 });
 
 afterEach(() => {
@@ -97,7 +80,7 @@ describe("scrollback persistence: hydrating", () => {
     // that restarted while the tab was away is DETECTED rather than silently
     // contradicting the restored indices.
     const storage = fakeStorage({ "sess-1": entryFor(seeded(5, 200), 777) });
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
 
     const store = keeper.storeFor("sess-1");
     expect(store.oldestIndex()).toBe(200);
@@ -110,7 +93,7 @@ describe("scrollback persistence: hydrating", () => {
     // A bounded tail is not a complete buffer, and pretending otherwise would
     // make the terminal claim there is nothing above what it shows.
     const storage = fakeStorage({ "sess-1": entryFor(seeded(5, 200), 777) });
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
 
     expect(keeper.storeFor("sess-1").hasTrimmedHistory()).toBe(true);
     keeper.stop();
@@ -120,7 +103,7 @@ describe("scrollback persistence: hydrating", () => {
     // scrollbackLines is the page's memory dial; a store that came back from
     // storage must not be the one place it does not apply.
     const storage = fakeStorage({ "sess-1": entryFor(seeded(12, 0), 777) });
-    const keeper = createScrollbackKeeper(storage, 8);
+    const keeper = createScrollbackKeeper(storage, 8, epochs);
 
     const store = keeper.storeFor("sess-1");
     store.applyScroll({
@@ -134,7 +117,7 @@ describe("scrollback persistence: hydrating", () => {
   });
 
   it("starts empty for a session with nothing stored", () => {
-    const keeper = createScrollbackKeeper(fakeStorage(), undefined);
+    const keeper = createScrollbackKeeper(fakeStorage(), undefined, epochs);
     expect(keeper.storeFor("sess-new").highestIndex()).toBe(-1);
     expect(adoptPersistedEpoch).not.toHaveBeenCalled();
     keeper.stop();
@@ -151,7 +134,7 @@ describe("scrollback persistence: rejecting what cannot be trusted", () => {
     // a far better failure than a terminal that is wrong and then stays blank.
     const storage = fakeStorage({ "sess-1": entryFor(seeded(5, 200), 0) });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
     try {
       expect(keeper.storeFor("sess-1").highestIndex()).toBe(-1);
       expect(adoptPersistedEpoch).not.toHaveBeenCalled();
@@ -179,7 +162,7 @@ describe("scrollback persistence: rejecting what cannot be trusted", () => {
           ...good,
           snapshot: { ...good.snapshot, serverEpoch: bad },
         });
-        const keeper = createScrollbackKeeper(storage, undefined);
+        const keeper = createScrollbackKeeper(storage, undefined, epochs);
         expect(keeper.storeFor("sess-1").highestIndex()).toBe(-1);
         expect(storage.dropped).toEqual(["sess-1"]);
         keeper.stop();
@@ -196,7 +179,7 @@ describe("scrollback persistence: rejecting what cannot be trusted", () => {
     // on access is also what makes collection automatic.
     const old = entryFor(seeded(5, 200), 777, Date.now() - 9 * 24 * 60 * 60 * 1000);
     const storage = fakeStorage({ "sess-1": old });
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
 
     expect(keeper.storeFor("sess-1").highestIndex()).toBe(-1);
     expect(storage.dropped).toEqual(["sess-1"]);
@@ -206,13 +189,14 @@ describe("scrollback persistence: rejecting what cannot be trusted", () => {
   it("honors a consumer-set age bound", () => {
     const entry = entryFor(seeded(5, 200), 777, Date.now() - 5000);
     const fresh = fakeStorage({ "sess-1": entry });
-    const strict = createScrollbackKeeper({ ...fresh, maxAgeMs: 1000 }, undefined);
+    const strict = createScrollbackKeeper({ ...fresh, maxAgeMs: 1000 }, undefined, epochs);
     expect(strict.storeFor("sess-1").highestIndex()).toBe(-1);
     strict.stop();
 
     const lenient = createScrollbackKeeper(
       { ...fakeStorage({ "sess-1": entry }), maxAgeMs: 60_000 },
       undefined,
+      epochs,
     );
     expect(lenient.storeFor("sess-1").highestIndex()).toBe(204);
     lenient.stop();
@@ -223,7 +207,7 @@ describe("scrollback persistence: rejecting what cannot be trusted", () => {
     // expire, so a phone whose clock jumped would keep one entry forever.
     const ahead = entryFor(seeded(5, 200), 777, Date.now() + 30 * 24 * 60 * 60 * 1000);
     const storage = fakeStorage({ "sess-1": ahead });
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
 
     expect(keeper.storeFor("sess-1").highestIndex()).toBe(-1);
     expect(storage.dropped).toEqual(["sess-1"]);
@@ -237,7 +221,7 @@ describe("scrollback persistence: rejecting what cannot be trusted", () => {
     for (const savedAt of [undefined, "yesterday", Number.NaN]) {
       const storage = fakeStorage();
       storage.entries.set("sess-1", { ...good, savedAt } as unknown as PersistedScrollback);
-      const keeper = createScrollbackKeeper(storage, undefined);
+      const keeper = createScrollbackKeeper(storage, undefined, epochs);
       expect(keeper.storeFor("sess-1").highestIndex()).toBe(-1);
       expect(storage.dropped).toEqual(["sess-1"]);
       keeper.stop();
@@ -257,7 +241,7 @@ describe("scrollback persistence: rejecting what cannot be trusted", () => {
     for (const entry of broken) {
       const storage = fakeStorage();
       storage.entries.set("sess-1", entry as PersistedScrollback);
-      const keeper = createScrollbackKeeper(storage, undefined);
+      const keeper = createScrollbackKeeper(storage, undefined, epochs);
       expect(keeper.storeFor("sess-1").highestIndex()).toBe(-1);
       expect(storage.dropped).toEqual(["sess-1"]);
       keeper.stop();
@@ -276,6 +260,7 @@ describe("scrollback persistence: rejecting what cannot be trusted", () => {
         },
       },
       undefined,
+      epochs,
     );
     expect(keeper.storeFor("sess-1").highestIndex()).toBe(-1);
     keeper.stop();
@@ -294,7 +279,7 @@ describe("scrollback persistence: saving", () => {
     serverEpochOf.mockReturnValue(777);
     const fresh = entryFor(seeded(9, 100), 777);
     const storage = fakeStorage({ "sess-a": fresh });
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
     // Hydrate, then never advance: exactly a background page's copy.
     const store = keeper.storeFor("sess-a");
     expect(store.highestIndex()).toBe(108);
@@ -312,7 +297,7 @@ describe("scrollback persistence: saving", () => {
   it("writes the tracked stores on flush, stamped with the session's live epoch", () => {
     serverEpochOf.mockReturnValue(999);
     const storage = fakeStorage();
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
     keeper.track("sess-a", seeded(3, 10));
     keeper.track("sess-b", seeded(3, 50));
 
@@ -330,7 +315,7 @@ describe("scrollback persistence: saving", () => {
     // recent history is what a returning user needs.
     serverEpochOf.mockReturnValue(999);
     const storage = fakeStorage();
-    const keeper = createScrollbackKeeper({ ...storage, lines: 4 }, undefined);
+    const keeper = createScrollbackKeeper({ ...storage, lines: 4 }, undefined, epochs);
     keeper.track("sess-a", seeded(20, 0));
 
     keeper.flush();
@@ -348,7 +333,7 @@ describe("scrollback persistence: saving", () => {
     // discard, made one step earlier so the bad entry never exists.
     serverEpochOf.mockReturnValue(0);
     const storage = fakeStorage();
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
     keeper.track("sess-a", seeded(3, 10));
 
     keeper.flush();
@@ -363,7 +348,7 @@ describe("scrollback persistence: saving", () => {
     // epoch no longer matches — which is why the epoch is persisted at all.
     serverEpochOf.mockReturnValue(999);
     const storage = fakeStorage({ "sess-a": entryFor(seeded(5, 200), 777) });
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
     keeper.track("sess-a", new LineStore());
 
     keeper.flush();
@@ -392,6 +377,7 @@ describe("scrollback persistence: saving", () => {
         },
       },
       undefined,
+      epochs,
     );
     keeper.track("sess-a", seeded(3, 10));
 
@@ -430,6 +416,7 @@ describe("scrollback persistence: saving", () => {
         },
       },
       undefined,
+      epochs,
     );
     keeper.track("sess-a", seeded(3, 10));
 
@@ -448,7 +435,7 @@ describe("scrollback persistence: saving", () => {
     vi.useFakeTimers();
     serverEpochOf.mockReturnValue(999);
     const storage = fakeStorage();
-    const keeper = createScrollbackKeeper({ ...storage, saveIntervalMs: 1000 }, undefined);
+    const keeper = createScrollbackKeeper({ ...storage, saveIntervalMs: 1000 }, undefined, epochs);
     const store = seeded(3, 10);
     keeper.track("sess-a", store);
 
@@ -483,6 +470,7 @@ describe("scrollback persistence: saving", () => {
         },
       },
       undefined,
+      epochs,
     );
     keeper.track("sess-a", seeded(3, 10));
 
@@ -509,6 +497,7 @@ describe("scrollback persistence: saving", () => {
         },
       },
       undefined,
+      epochs,
     );
     keeper.storeFor("sess-1");
 
@@ -522,7 +511,7 @@ describe("scrollback persistence: saving", () => {
     vi.useFakeTimers();
     serverEpochOf.mockReturnValue(999);
     const storage = fakeStorage();
-    const keeper = createScrollbackKeeper({ ...storage, saveIntervalMs: 1000 }, undefined);
+    const keeper = createScrollbackKeeper({ ...storage, saveIntervalMs: 1000 }, undefined, epochs);
     keeper.track("sess-a", seeded(3, 10));
 
     keeper.stop();
@@ -537,7 +526,7 @@ describe("scrollback persistence: forgetting", () => {
   it("deletes a closed session's entry and stops saving it", () => {
     serverEpochOf.mockReturnValue(999);
     const storage = fakeStorage({ "sess-a": entryFor(seeded(5, 200), 777) });
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
     keeper.track("sess-a", seeded(3, 10));
 
     keeper.forget("sess-a");
@@ -558,6 +547,7 @@ describe("scrollback persistence: forgetting", () => {
         },
       },
       undefined,
+      epochs,
     );
     expect(() => {
       keeper.forget("sess-a");
@@ -578,6 +568,7 @@ describe("scrollback persistence: option validation", () => {
       const keeper = createScrollbackKeeper(
         { ...storage, lines: 0, maxAgeMs: -1, saveIntervalMs: 1.5 },
         undefined,
+        epochs,
       );
       keeper.track("sess-a", seeded(3, 10));
       keeper.flush();
@@ -600,7 +591,7 @@ describe("scrollback persistence: option validation", () => {
     // always-empty store, which is a silent opt-out; say so, and say it once
     // rather than per tab.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const keeper = createScrollbackKeeper(fakeStorage(), undefined);
+    const keeper = createScrollbackKeeper(fakeStorage(), undefined, epochs);
     try {
       keeper.noteMissingSessionId();
       keeper.noteMissingSessionId();
@@ -631,6 +622,7 @@ describe("scrollback persistence: the keeper composed with the real store", () =
     const keeper = createScrollbackKeeper(
       localScrollbackStorage({ saveIntervalMs: 1000 }),
       undefined,
+      epochs,
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const setItem = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
@@ -657,12 +649,12 @@ describe("scrollback persistence: the keeper composed with the real store", () =
     const { localScrollbackStorage } = await import("./scrollback-storage.js");
     serverEpochOf.mockReturnValue(999);
     const cfg = localScrollbackStorage();
-    const writer = createScrollbackKeeper(cfg, undefined);
+    const writer = createScrollbackKeeper(cfg, undefined, epochs);
     writer.track("sess-a", seeded(5, 300));
     writer.flush();
     writer.stop();
 
-    const reader = createScrollbackKeeper(localScrollbackStorage(), undefined);
+    const reader = createScrollbackKeeper(localScrollbackStorage(), undefined, epochs);
     const restored = reader.storeFor("sess-a");
     expect(restored.oldestIndex()).toBe(300);
     expect(restored.highestIndex()).toBe(304);
@@ -673,7 +665,7 @@ describe("scrollback persistence: the keeper composed with the real store", () =
   it("drops a closed session's entry from the real store", async () => {
     const { localScrollbackStorage } = await import("./scrollback-storage.js");
     serverEpochOf.mockReturnValue(999);
-    const keeper = createScrollbackKeeper(localScrollbackStorage(), undefined);
+    const keeper = createScrollbackKeeper(localScrollbackStorage(), undefined, epochs);
     keeper.track("sess-a", seeded(3, 10));
     keeper.flush();
     expect(localStorage.getItem("wt.scrollback.sess-a")).not.toBeNull();
@@ -697,6 +689,7 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
     const recent = createScrollbackKeeper(
       fakeStorage({ "sess-1": entryFor(seeded(5, 200), 777, Date.now() - sixDays) }),
       undefined,
+      epochs,
     );
     expect(recent.storeFor("sess-1").highestIndex()).toBe(204);
     recent.stop();
@@ -704,6 +697,7 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
     const stale = createScrollbackKeeper(
       fakeStorage({ "sess-1": entryFor(seeded(5, 200), 777, Date.now() - eightDays) }),
       undefined,
+      epochs,
     );
     expect(stale.storeFor("sess-1").highestIndex()).toBe(-1);
     stale.stop();
@@ -718,6 +712,7 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
     const keeper = createScrollbackKeeper(
       { ...fakeStorage({ "sess-1": entry }), maxAgeMs: 1000 },
       undefined,
+      epochs,
     );
 
     expect(keeper.storeFor("sess-1").highestIndex()).toBe(204);
@@ -733,7 +728,7 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
       "sess-2": entryFor(seeded(5, 300), 0),
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
     try {
       keeper.storeFor("sess-1");
       keeper.storeFor("sess-2");
@@ -761,6 +756,7 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
         },
       },
       undefined,
+      epochs,
     );
     try {
       keeper.track("sess-a", seeded(3, 10));
@@ -782,7 +778,7 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
     // keeper handed out but forgot to track would never be written at all.
     serverEpochOf.mockReturnValue(999);
     const storage = fakeStorage();
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
     const store = keeper.storeFor("sess-new");
     store.applyScroll({
       type: "scroll",
@@ -815,6 +811,7 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
         },
       },
       undefined,
+      epochs,
     );
     keeper.storeFor("sess-1"); // seeds the watermark at 204
     keeper.track("sess-1", seeded(5, 200)); // same content, a store never written
@@ -831,7 +828,7 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
     // write here would land after the terminal it belongs to stopped existing.
     serverEpochOf.mockReturnValue(999);
     const storage = fakeStorage();
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
 
     keeper.stop();
     const store = keeper.storeFor("sess-late");
@@ -849,7 +846,11 @@ describe("scrollback persistence: the boundaries and the tracking contract", () 
     // stop()'s documented job. A live interval holds its closure — and through it
     // every tracked store — for the rest of the page's life.
     vi.useFakeTimers();
-    const keeper = createScrollbackKeeper({ ...fakeStorage(), saveIntervalMs: 1000 }, undefined);
+    const keeper = createScrollbackKeeper(
+      { ...fakeStorage(), saveIntervalMs: 1000 },
+      undefined,
+      epochs,
+    );
     expect(vi.getTimerCount()).toBe(1);
 
     keeper.stop();
@@ -870,7 +871,7 @@ describe("scrollback persistence: forgetting a session forgets the watermark too
     // module documents for a failed save.
     serverEpochOf.mockReturnValue(999);
     const storage = fakeStorage();
-    const keeper = createScrollbackKeeper(storage, undefined);
+    const keeper = createScrollbackKeeper(storage, undefined, epochs);
 
     keeper.track("sess-a", seeded(3, 10));
     keeper.flush();
