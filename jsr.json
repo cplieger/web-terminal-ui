@@ -28,6 +28,7 @@
     "include": [
       "LICENSE",
       "NOTICE",
+      "THIRD_PARTY_NOTICES.md",
       "README.md",
       "src/**/*.ts",
       "css/**/*.css",
