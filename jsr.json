@@ -27,6 +27,7 @@
   "publish": {
     "include": [
       "LICENSE",
+      "NOTICE",
       "README.md",
       "src/**/*.ts",
       "css/**/*.css",

@@ -95,6 +95,7 @@
     "css/",
     "scaffold/",
     "LICENSE",
+    "NOTICE",
     "README.md",
     "!src/**/*.test.ts",
     "!src/**/*-setup.ts",
