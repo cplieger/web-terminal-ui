@@ -15,7 +15,7 @@ terminal:
 - a **display-only** terminal output (native text selection survives redraws)
   and a hidden `<textarea>` that owns the keyboard and IME (the kernel)
 - **tabs**: multiple independent terminals with a desktop strip, a mobile
-  bottom switcher, and a modal overview sheet
+  bottom switcher, a modal overview sheet, and an opt-in two-pane split view
 - an **activity monitor** that drives per-tab status dots (working / idle /
   needs-input / exited) from the server's status stream
 - a **mobile key toolbar** (Tab / Esc / arrows / Enter / sticky-Ctrl) and a
@@ -113,10 +113,13 @@ an **element** only when you already hold one you created yourself. The
 difference matters; see "Startup failures" below. There is no element-id
 contract for the host page to reproduce, and every style and CSS custom
 property is scoped to the `wt-root` class it stamps on your element (removed
-again by `destroy()`). Call it exactly once; the engine's
-render/connection/scroll modules are single-instance per page (tabs multiplex
-sessions over the one kernel). `scaffold/index.html` is a complete reference page
-to copy and adapt.
+again by `destroy()`). Call it at most once per document while the previous
+terminal is alive: the document title, the loading overlay, the status stream and
+the notification permission are properties of the document, so one terminal owns
+them, and a second call reports a `kernel-init` failure and throws without
+touching the page (see "Startup failures"); `destroy()` the first terminal before
+building another, or use the `split` option for a second pane.
+`scaffold/index.html` is a complete reference page to copy and adapt.
 
 Four presets are provided; each is a plain feature-array factory, so you can
 spread and edit it. Import the barrel (`@cplieger/web-terminal-ui/presets`) for
@@ -194,6 +197,7 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
 | `onFatalError`      | _(built-in recovery)_        | Called with a `TerminalStartupFailure` after a fatal startup failure, in either phase (`feature-setup` or `kernel-init`); behavior below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `onSessionEnded`    | _(none)_                     | Called when the active session's process has ended and nothing is retrying: the fact the banner renders as "Session ended". Wire it only if you can act on it: the recovery move is `handle.reattach()`, and whether that helps depends on what your endpoint does on the next connect (see "When a session ends"). Observation only; everything the kernel does about the end happens first and happens regardless, and a handler that throws is logged rather than allowed to take the banner down with it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `theme`             | _(none)_                     | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input`, `--status-warning`, `--status-failed`. The library ships neutral defaults. If you retheme the animated trio (`--status-working` / `--status-warning` / `--status-failed`), keep their LIGHTNESS spread: they differ only in hue, so equal-lightness replacements collapse into one another in greyscale and under deuteranopia.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `split`             | _(off)_                      | Two panes side by side, opened and closed from the tab chrome (see "Split view"). Requires the tabs feature (`tabs()` or a tabbed preset) in `features`; a terminal without it, or a value other than `true` or `false`, fails at `kernel-init`. Without the option the DOM is exactly what it was before the option existed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 `createTerminal()` returns a handle: `focus()` re-focuses the terminal input
 (and opens the soft keyboard on touch); `send(bytes)` sends bytes to the active
@@ -202,7 +206,9 @@ for a "type this command" affordance); `reset()` drops the local scrollback and
 screen without injecting keystrokes (send a redraw keystroke yourself if you
 want one, for example Ctrl+L); `reattach()` attaches again to whatever the server
 serves now, for a session that has ended (see "When a session ends"); and
-`destroy()` tears every feature down and releases the kernel.
+`destroy()` tears every feature down and releases the kernel. With `split: true`
+the handle also carries `split`, the controller of the "Split view" section;
+`focus()`, `send()`, `reset()` and `reattach()` act on the selected pane.
 
 ### Mouse and focus
 
@@ -419,17 +425,32 @@ the library entirely and leaves the page spinning under your overlay with nothin
 but a console error. Those were the two failures every consumer used to
 hand-build its own dialog for.
 
-One case has no panel by design: an embedded terminal (`layout: "container"`)
-whose mount target does not exist. It is one panel inside a host application that
+Two cases have no panel by design, both `kernel-init` with `surface: undefined`
+to say there is nowhere to render. An embedded terminal (`layout: "container"`)
+whose mount target does not exist: it is one panel inside a host application that
 is otherwise working, so claiming the viewport to report its own failure would
-break a healthy page. The failure is still delivered to `onFatalError` and still
-rethrown, with `surface: undefined` to say there is nowhere to render.
+break a healthy page. And a second `createTerminal` while the document already
+holds a live terminal, in either layout: the root it names may be the first
+terminal's, so nothing is written to the page and no overlay is faded. Both are
+still delivered to `onFatalError` and still rethrown.
+
+Under `split: true` a failure in the SECOND pane (its kernel or one of its pane
+features, at the first open) is not the terminal's failure: the first pane keeps
+running, the panel renders into the failed pane's own root, non-modally, with its
+one Reload button, and `onFatalError` receives it with that pane root as
+`surface`. The shared split button in the tab row closes the split and discards
+the failed pane, and the next open builds a fresh one. A pane feature that
+rejects only after the split has already closed finds no place for a panel: the
+healthy pane fills the view again, takes over the tab the failed pane was
+showing, and the failed pane is discarded at once, so `onFatalError` receives
+that failure with `surface: undefined` and nothing is rendered.
 
 `onFatalError` receives the failure after cleanup. Discriminate on `phase`:
 `feature-setup` names the offending `feature`, `kernel-init` does not, because
 feature composition never began. `surface` names the element the built-in panel
-would fill, and is the element to render into if you claim it. Return `true` only
-when you have rendered replacement recovery UI there.
+would fill, and is the element to render into if you claim it; it is `undefined`
+in the cases above where nothing is rendered, so check it first. Return `true`
+only when you have rendered replacement recovery UI there.
 
 If your page also carries an inline bootstrap watchdog (a script that reports
 "the JS bundle never loaded at all", a rung below `import`), it cannot import
@@ -437,6 +458,86 @@ anything by definition. Take its wording from `STARTUP_FAILURE_COPY` (exported a
 the package root and at `@cplieger/web-terminal-ui/startup-copy`, which imports
 nothing and touches no DOM so a build script can read it) and substitute the
 strings into your HTML at build time, rather than restating them by hand.
+
+### Split view
+
+`split: true` lets the person show two tabs side by side. It requires the tabs
+feature, because everything that drives it lives there: the shared tab row, the
+split button, the snap items and the layout record. Your root becomes the shell
+root holding one root per pane and the shared chrome; each pane is a complete
+terminal with its own engine, so an open split holds up to two WebSocket
+connections, one per shown pane. Opening, closing and resizing the split
+is a display re-arrangement only: no tab or session is ever created or closed by
+it, and a tab that leaves a pane stays in the row as an ordinary tab.
+
+Three ways in, all in the tab chrome, none a key chord:
+
+- **The split button** at the right edge of the tab row (and in the mobile
+  switcher bar on a touchscreen) toggles the split. Opening puts the shown tab in
+  the left pane with the right pane empty; the next tab clicked, or the next "+",
+  fills the empty pane. Closing keeps the SELECTED pane's tab and hides the
+  other pane. It is an ordinary button: Tab reaches it, Enter or Space toggles
+  it, `aria-expanded` is its state.
+- **"Snap to left" and "Snap to right"** in a tab's context menu, on a
+  right-click, a touch long-press, or the keyboard (the context-menu key or
+  Shift+F10 on the focused tab, where the browser raises the menu event; Safari
+  binds no key to it, so a keyboard-only person there reaches the menu through
+  an assistive technology's own command). A snapped tab shows on the named side,
+  whatever was there becomes an ordinary tab, and the tab's old side is left
+  empty.
+- **Dragging a tab** out of the row onto the left or right half of the terminal
+  area, which highlights the half under the pointer while the drag lasts.
+
+A tab click follows one rule: an empty pane fills first, otherwise the selected
+pane's tab is replaced. The selected pane is the one that receives typing, the
+last one clicked, touched or typed in. The grip handle between the panes shows
+it: a 6 px pill in the 10 px gutter whose accent edge faces the selected pane,
+and the selected pane keeps the filled blinking cursor while the other pane's is
+hollow and steady. The tab row does not change for selection; both shown tabs
+render identically active. A screen reader hears "Left terminal selected" or
+"Right terminal selected" as a polite announcement, and each pane's tabpanel is
+described by its side and whether it is selected.
+
+While the split is open each shown pane's input is a stop in the Tab order, so
+Tab runs left pane, divider, right pane, then the tab row; an empty pane adds no
+stop. With the split closed the one pane is entered by typing or a click and Tab
+from outside the terminal lands on the tab row.
+
+The handle is a focusable `role="separator"` with `aria-valuenow`, `aria-valuemin`
+and `aria-valuemax` as percentages of the left share. Dragging it (mouse or
+touch, a 24 px hit area) resizes both panes as the pointer moves; the shells are
+told their new size at most every 100 ms and once on release. A pane squeezed
+under 360 px dims, and releasing there closes that pane; releasing above 360 px
+after such a dip snaps the handle back to where the drag started. From the
+keyboard ArrowLeft and ArrowRight nudge the divider by 16 px and Home and End take
+it to the bounds, and every key stops AT the 360 px minimum rather than closing a
+pane; the record is written when the key is released. The default is 50/50.
+
+Under 730 px of pane-row width (two minimum panes and the gutter) the split
+buttons hide, the snap items are disabled, a drop does nothing, and an OPEN split
+collapses to the selected pane, restoring itself when the row is wide again. At
+730 px or wider a window resize keeps both panes at or over 360 px by clamping the
+displayed share; the share the person chose is remembered and comes back when
+the row is wide enough for it.
+
+The arrangement is remembered on the server, beside the tab order, as
+`GET`/`PUT /api/sessions/layout`: the session in each pane, the handle share, the
+selected pane and whether the split is open. It is read once at load, written on
+every change, and dies with the session list, so a reload or another device
+restores the same panes; the active tab is the selected pane's session and is no
+longer kept in `localStorage`. Against a server without the route the split still
+works and nothing is remembered; one console warning says so.
+
+Two rules for a `features` function under `split: true`, both checked at
+`kernel-init`. It is invoked once per pane and must return FRESH feature objects
+every time, because a feature object's `api` and its `ctx.use` identity belong to
+one pane; a saved array (`const f = presetTabbed(); features: () => f`) is
+refused, naming the reused feature. A feature that must exist once per terminal
+rather than once per pane (the built-in tabs, mobile toolbar, activity monitor
+and animations) declares `scope: "shell"`: it is set up once, from the first
+invocation, with a context whose `surface`, `render`, `scroll`, `modes`,
+`session`, `send` and `paste` resolve to the selected pane at call time and whose
+`ctx.shell.pane(side)` reaches one pane explicitly.
 
 ### When a session ends
 

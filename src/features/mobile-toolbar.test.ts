@@ -55,6 +55,7 @@ function fakeCtx(): {
   const modes: ModeReaders = createModeState(POWER_ON_MODES);
   const ctx = {
     region: () => slot,
+    shell: { root: slot },
     send,
     modes,
     registerInputTransform: (fn: (b: Uint8Array) => Uint8Array) => {
@@ -263,6 +264,35 @@ describe("mobileToolbar: API + lifecycle", () => {
     f.destroy(inst);
     expect(frames.size).toBe(0);
     expect(bar?.classList.contains("no-transition")).toBe(true);
+  });
+
+  it("waits for the shell root's own window to paint, not the importing one", async () => {
+    // A same-origin iframe is a second document with a window of its own; the two
+    // settling frames come from the window whose paint they are waiting for. The
+    // importing window's frames are stubbed to never run, so only the frame's own
+    // can settle the toolbar.
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    if (!doc) {
+      throw new Error("no frame document");
+    }
+    try {
+      const f = fakeCtx();
+      const root = doc.createElement("div");
+      doc.body.appendChild(root);
+      (f.ctx as unknown as { shell: { root: HTMLElement } }).shell = { root };
+      await mobileToolbar().setup(f.ctx);
+      const bar = f.slot.querySelector(".key-toolbar");
+      expect(bar?.classList.contains("no-transition")).toBe(true);
+
+      await vi.waitFor(() => {
+        expect(bar?.classList.contains("no-transition")).toBe(false);
+      });
+    } finally {
+      frame.remove();
+    }
   });
 });
 

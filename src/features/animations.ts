@@ -1,3 +1,4 @@
+import { windowOf } from "../kernel/realm.js";
 import type { TerminalFeature } from "../kernel/types.js";
 
 /** Build the animations feature. Exposes no API; its whole effect is the
@@ -9,7 +10,7 @@ export function animations(): TerminalFeature {
     scope: "shell",
     setup(ctx) {
       const root = ctx.shell.root;
-      const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+      const mq = windowOf(root.ownerDocument).matchMedia("(prefers-reduced-motion: reduce)");
       const apply = (): void => {
         root.classList.toggle("wt-animate", !mq.matches);
       };

@@ -831,6 +831,34 @@ describe("the fatal-startup rollback", () => {
     }
     button.click();
     expect(reloadSpy).toHaveBeenCalledTimes(1);
+    expect(reloadSpy).toHaveBeenCalledWith(window);
+  });
+
+  it("reloads the frame a failed terminal was mounted in, not the importing page", async () => {
+    reloadSpy.mockClear();
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const inner = frame.contentDocument;
+    const innerWin = frame.contentWindow;
+    if (!inner || !innerWin) {
+      throw new Error("no frame document");
+    }
+    const root = inner.createElement("div");
+    inner.body.appendChild(root);
+    try {
+      await mountTerminal(root, { features: () => [boom] });
+      await tick();
+      const button = root.querySelector<HTMLButtonElement>(".wt-fatal-reload");
+      if (!button) {
+        throw new Error("no reload button");
+      }
+      button.click();
+      expect(reloadSpy).toHaveBeenCalledTimes(1);
+      expect(reloadSpy).toHaveBeenCalledWith(innerWin);
+      expect(reloadSpy).not.toHaveBeenCalledWith(window);
+    } finally {
+      frame.remove();
+    }
   });
 });
 

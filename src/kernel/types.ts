@@ -1,17 +1,7 @@
-// The kernel/feature contract.
-//
-// A terminal is a small always-present kernel plus opt-in feature modules. This
-// module is the typed spine both sides hang off: the feature interface, the
-// context the kernel hands each feature, the typed event bus payloads, and the
-// layout-region vocabulary. It is fully typed (no `any`, no stringly-typed
-// capability lookup) so a feature's public API is held by reference and a peer
-// reads it through a typed token.
-
 import type { LoadingMessages } from "./loading-status.js";
 import type {
   ScreenMessage,
   ModesMessage,
-  ModeState,
   LineStore,
   StatusStreamCallbacks,
   StoreSnapshot,
@@ -20,8 +10,6 @@ import type {
 
 /** Cancels a subscription or registration. Idempotent by convention. */
 export type Unsubscribe = () => void;
-
-// --- Layout regions ---
 
 /** The named layout regions the kernel owns. A feature mounts its chrome into
  *  one of these; the region owns position, spacing, stack direction, z-order,
@@ -39,8 +27,6 @@ export type RegionName =
  *  visual order (WCAG 2.4.3). */
 export type RegionSlot = string;
 
-// --- Session references ---
-
 /** A reference to a session, carried on switch events and onSwitch. */
 export interface SessionRef {
   readonly id: string;
@@ -56,8 +42,6 @@ export interface SessionView {
   /** Highest absolute line index the active store holds (-1 if empty). */
   highestIndex(): number;
 }
-
-// --- Connection state (mirrors the kernel's connection-state machine) ---
 
 /** Connection state the kernel owns and broadcasts on `connection:state`. */
 export type ConnState =
@@ -77,7 +61,6 @@ export type ConnState =
   // nothing is connecting, so there is nothing to show. Left by the next attach.
   | "idle";
 
-// --- Engine drive handles ---
 // The subset of the engine's renderer and scroll controller features may drive;
 // the kernel assigns the real instances, so drift is caught there. The connection
 // is NOT exposed: features send only through the sanitizing funnel.
@@ -132,28 +115,38 @@ export interface ScrollHandle {
 }
 
 /** The engine's mode-state readers a feature may consult (never write): the
- *  connection writes them from the server's modes frames. */
-export type ModeReaders = Pick<
-  ModeState,
-  | "isBracketedPaste"
-  | "isApplicationCursor"
-  | "getMouseMode"
-  | "isMouseSGR"
-  | "isMousePixels"
-  | "isFocusReporting"
-  | "isApplicationKeypad"
-  | "isReverseVideo"
-  | "getKeyboardFlags"
->;
-
-// --- The shell: panes and the split ---
+ *  connection writes them from the server's modes frames, and the engine's
+ *  `ModeState` satisfies this. */
+export interface ModeReaders {
+  /** True when the server has DEC 2004 (bracketed paste) enabled. */
+  isBracketedPaste(): boolean;
+  /** True when the server has DECCKM (application cursor keys) enabled. */
+  isApplicationCursor(): boolean;
+  /** Active mouse tracking mode (xterm DECSET): 0 = off, 1000 = normal, 1002 = button-event, 1003 = any-event. */
+  getMouseMode(): number;
+  /** True when the server has DEC 1006 (SGR mouse encoding) enabled. */
+  isMouseSGR(): boolean;
+  /** True when the server has DEC 1016 (SGR-pixels mouse) enabled: reports carry pixel coordinates. */
+  isMousePixels(): boolean;
+  /** True when the server has DEC 1004 (focus event reporting) enabled. */
+  isFocusReporting(): boolean;
+  /** True when the server has DECKPAM (application keypad) enabled. */
+  isApplicationKeypad(): boolean;
+  /** True when the server has DEC 5 (reverse video / DECSCNM) enabled. */
+  isReverseVideo(): boolean;
+  /** Kitty keyboard progressive-enhancement flags in effect (bit0 disambiguate,
+   *  bit1 report-event-types, bit2 report-alternate-keys); 0 means legacy encoding. */
+  getKeyboardFlags(): number;
+}
 
 /** One of the two display panes a terminal can show. */
 export type PaneSide = "left" | "right";
 
 /** A pane kernel as the shell and a shell-scoped feature see it. */
 export interface PaneHandle {
-  /** Left while the split is closed; both sides are assigned at every open. */
+  /** Left for the pane a closed split shows and right for the one it hides; both
+   *  sides are reassigned at every open and close, so no session moves between
+   *  kernels for either. */
   readonly side: PaneSide;
   /** The pane root. */
   readonly root: HTMLElement;
@@ -178,7 +171,9 @@ export interface PaneHandle {
    *  connection (which closes its socket), clear the screen and go `idle`, so no
    *  wake handler reconnects a pane that holds no session. Idempotent. */
   clearActiveSession(): void;
-  /** `sendResize()` when the pane is measurable. */
+  /** Send this pane's grid size now, once its font metrics are known. The
+   *  viewport's own settle is not waited for: a handle drag sends the geometry
+   *  under the pointer, and the engine drops a size equal to the last sent. */
   announceSize(): void;
   focus(): void;
   send(bytes: Uint8Array): void;
@@ -204,9 +199,11 @@ export interface SplitController {
   isOpen(): boolean;
   /** Enabled, closed, and the pane row is wide enough for two panes. */
   canOpen(): boolean;
-  /** True when the split is now open; false when nothing changed. */
+  /** True when the split is now open at a 50/50 share; false when nothing changed. */
   open(): boolean;
-  /** The selected pane fills the view; false when nothing changed. */
+  /** The selected pane fills the view; false when nothing changed. The state is
+   *  closed at once; with `wt-animate` on the shell root the grid columns slide
+   *  over `--dur-standard` before the other pane leaves the grid. */
   close(): boolean;
   /** Close one side; the other pane fills the view. */
   closeSide(side: PaneSide): boolean;
@@ -214,8 +211,6 @@ export interface SplitController {
   setRatio(ratio: number, commit: boolean): boolean;
   onChange(cb: (state: SplitState) => void): Unsubscribe;
 }
-
-// --- Page attention: the surfaces outside the terminal's own chrome ---
 
 /** How the page's attention surfaces are bound. */
 export interface AttentionOptions {
@@ -244,8 +239,6 @@ export interface AttentionReporter {
    *  nothing, so a status sweep may call it every tick. */
   report(state: AttentionState): void;
 }
-
-// --- Browser notifications: the page's one notifier ---
 
 /** The notification a session status event carries (OSC 9 `<message>`). Both
  *  members are optional: an older server, or a status with no notification,
@@ -295,7 +288,10 @@ export interface ShellContext {
   /** Built panes, left first. */
   panes(): readonly PaneHandle[];
   selected(): PaneSide;
-  /** False for an invalid value and for an empty, failed, hidden or absent pane. */
+  /** False for an invalid value and for a failed, hidden or absent pane, and for
+   *  an empty pane while another pane shows a tab. While no pane shows one (both
+   *  emptied, a replacement on its way) an empty pane may be selected, so the
+   *  divider faces the pane the new tab is headed for. */
   select(side: PaneSide): boolean;
   onSelectionChange(cb: (side: PaneSide) => void): Unsubscribe;
   /** A pane built, hidden, shown or torn down. */
@@ -327,9 +323,14 @@ export interface ShellContext {
    *  ask for permission. */
   readonly notifications: Notifier;
   readonly split: SplitController;
+  /** The layout owner's boot path: open the split at the share and on the side a
+   *  restored record remembers, where `split.open()` resets them to 0.5 and left.
+   *  The selection is part of the open and is not announced as a change; it may
+   *  rest on `selected` while that pane is still empty, as it may whenever no pane
+   *  shows a tab. False when the split is open already, `committedRatio` is not a
+   *  share of 0 to 1, or `selected` is not a side. */
+  restoreSplit(committedRatio: number, selected: PaneSide): boolean;
 }
-
-// --- Typed event bus payloads ---
 
 /** The inbound-wire + lifecycle events features can subscribe to via ctx.on.
  *  No `unknown`: each event carries a typed payload. */
@@ -356,13 +357,11 @@ export interface TerminalEvents {
   "render:cursor": undefined;
 }
 
-// --- Accessibility primitives (kernel-owned, single source) ---
-
 /** Controls the ARIA tablist/tabpanel seam on the kernel's output surface. The
  *  kernel owns the tabpanel (its output surface); `tabs` registers each tab
  *  button through this so it never crosses into kernel-owned DOM. */
 export interface TablistController {
-  /** The output surface's element id, for a tab's aria-controls. */
+  /** The id of the tabpanel a click on an unshown tab would fill. */
   panelId(): string;
   /** Register a tab button: sets role=tab + aria-controls on it and returns a
    *  handle to update its selected state and label, or remove it. */
@@ -371,8 +370,14 @@ export interface TablistController {
 
 /** Handle to one registered tab's ARIA state. */
 export interface TabHandle {
-  /** Mark this tab selected; the kernel points the panel's aria-labelledby at it. */
+  /** Mark this tab selected; the kernel points its pane's aria-labelledby at it. */
   setSelected(selected: boolean): void;
+  /** Point aria-controls at the tabpanel of the pane showing this tab, or (null)
+   *  at the one a click would fill. */
+  setPanel(side: PaneSide | null): void;
+  /** aria-expanded: whether this tab is shown while the split is open; null
+   *  removes the attribute, for a closed split. */
+  setExpanded(state: boolean | null): void;
   /** Set the accessible label (used for aria-labelledby on the panel). */
   setLabel(text: string): void;
   /** Enter or leave inline-edit mode. ARIA marks a tab's children presentational,
@@ -384,8 +389,6 @@ export interface TabHandle {
   /** Deregister this tab. */
   remove(): void;
 }
-
-// --- The context handed to each feature's setup ---
 
 /** Everything a feature is given at setup: the only surface a feature uses to
  *  affect the terminal. */
@@ -491,8 +494,6 @@ export interface TerminalContext {
   onError(fn: (feature: string, err: unknown) => void): Unsubscribe;
 }
 
-// --- The feature interface ---
-
 /** A feature is a factory value implementing this: a name and a setup the
  *  kernel runs once. `Api` is the feature's own typed public API (void when it
  *  exposes none). */
@@ -533,6 +534,13 @@ export interface PaneLayoutOwnerRegistration {
    *  nothing could be shown; the terminal dismisses the loading overlay so the
    *  owner's retry chrome is visible. */
   resolveInitialLayout(): Promise<boolean>;
+  /** The session shown on `side`, or null for an empty, hidden or failed pane. */
+  shownIn(side: PaneSide): string | null;
+  /** Show a tab in the pane on `side`, emptying the pane that showed it before:
+   *  how the terminal hands a tab to a survivor when the pane showing it leaves.
+   *  The split's own state is the terminal's and is not touched. False when
+   *  refused: an unknown id, or a side whose pane is absent, failed or hidden. */
+  showIn(side: PaneSide, id: string): boolean;
 }
 
 /** How the one session-owning feature and the terminal split the first connect:
@@ -564,14 +572,13 @@ export interface FeatureInstance<Api = void> {
   onSwitch?(session: SessionRef): void;
 }
 
-// --- Entry point ---
-
 /** A fatal failure while createTerminal is starting up, delivered so a consumer
  *  never hand-builds its own startup-failure surface. `kernel-init` is a
  *  SYNCHRONOUS throw out of createTerminal (the recovery surface is rendered,
  *  then the error is RETHROWN); `feature-setup` is an async composition failure,
- *  delivered after the terminal has released everything and cleared its root,
- *  with nothing rethrown. Only `kernel-init` can carry an undefined `surface`. */
+ *  delivered after the failed pane has released everything and cleared its root,
+ *  with nothing rethrown. An undefined `surface` says there is nowhere to
+ *  render, in either phase. */
 export type TerminalStartupFailure =
   | {
       readonly phase: "feature-setup";
@@ -579,9 +586,13 @@ export type TerminalStartupFailure =
       readonly feature: string;
       /** The original thrown or rejected value. */
       readonly cause: unknown;
-      /** The element the built-in surface would fill — always the terminal root
-       *  in this phase, since the terminal had already mounted. */
-      readonly surface: HTMLElement;
+      /** The element the built-in surface would fill, and the element a handler
+       *  claiming the surface (returning true) must render into: the terminal
+       *  root, or under `split` the failed second pane's root while it stays in
+       *  the grid. `undefined` when a second pane fails after the split closed:
+       *  its tab has moved to the healthy pane, which fills the view, and the
+       *  failed pane is discarded with no panel. */
+      readonly surface: HTMLElement | undefined;
     }
   | {
       readonly phase: "kernel-init";
@@ -707,6 +718,13 @@ export interface CreateTerminalOptions {
    *  `PUBLIC_THEME_TOKENS`; this type stays an open Record so a theme can be
    *  built dynamically, which means an unknown key applies to nothing. */
   theme?: Readonly<Record<string, string>>;
+  /** Two panes side by side, driven from the tab chrome (a split button, the tab
+   *  menu's snap items, tab drag and drop, and a focusable divider). Requires the
+   *  built-in tabs feature (`tabs()` or a tabbed preset) in `features`; a terminal
+   *  without it fails at `kernel-init`, as does a value other than true or false.
+   *  With it the root becomes the shell root holding one pane root per pane; the
+   *  DOM of a terminal built without it is unchanged. */
+  split?: boolean;
 }
 
 /** The handle createTerminal returns. Feature APIs are not materialized here
@@ -734,4 +752,7 @@ export interface TerminalHandle {
   /** Tear down every feature in reverse order, dispose all subscriptions, and
    *  release the kernel's DOM and engine wiring. */
   destroy(): void;
+  /** The split controller; present only when `CreateTerminalOptions.split` was
+   *  true. */
+  split?: SplitController;
 }

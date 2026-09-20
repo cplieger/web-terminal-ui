@@ -641,3 +641,86 @@ describe("viewport: teardown and a settle already in flight", () => {
     expect(viewport.isInTransition()).toBe(false);
   });
 });
+
+describe("viewport: bound to the terminal's own document", () => {
+  // A same-origin iframe is a second document with a window, a visual viewport
+  // and a clock of its own. A terminal mounted there follows THAT window's
+  // keyboard and rotation, and the importing page's events are not its business.
+  // Real timers: the frame's clock is not the one vi.useFakeTimers() replaces.
+  let frame: HTMLIFrameElement;
+  let win: Window & typeof globalThis;
+  let tw: HTMLElement;
+
+  beforeEach(async () => {
+    viewport.teardown();
+    vi.useRealTimers();
+    frame = document.createElement("iframe");
+    frame.style.width = "400px";
+    frame.style.height = "300px";
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    const view = frame.contentWindow;
+    if (!doc || !view) {
+      throw new Error("no frame document");
+    }
+    win = view as Window & typeof globalThis;
+    tw = doc.createElement("div");
+    doc.body.appendChild(tw);
+    viewport = createViewport({ termWrap: tw, scroll, onSettled });
+    // Construction publishes the frame's viewport geometry, which starts a
+    // transition; let it settle so each case starts from rest.
+    await vi.waitFor(() => {
+      expect(viewport.isInTransition()).toBe(false);
+    });
+    onSettled.mockClear();
+  });
+
+  afterEach(() => {
+    frame.remove();
+  });
+
+  it("settles from the frame's own resize, and ignores the importing window's", async () => {
+    window.dispatchEvent(new Event("resize"));
+    expect(viewport.isInTransition()).toBe(false);
+
+    win.dispatchEvent(new win.Event("resize"));
+    expect(viewport.isInTransition()).toBe(true);
+    await vi.waitFor(() => {
+      expect(onSettled).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("measures the keyboard inset against the frame's visual viewport and height", () => {
+    // The frame is 300px tall inside a taller page: a bottom inset computed from
+    // the importing window's innerHeight would push the terminal hundreds of
+    // pixels up a keyboard that is not there.
+    tw.style.setProperty("--wt-reserve-bottom", "40px");
+    const vv = win.visualViewport;
+    if (!vv) {
+      throw new Error("no visual viewport");
+    }
+
+    vv.dispatchEvent(new win.Event("resize"));
+
+    expect(tw.style.getPropertyValue("--kb-inset")).toBe("0px");
+    expect(tw.style.bottom).toBe("40px");
+  });
+
+  it("re-measures on the frame's screen.orientation change", () => {
+    expect(viewport.isInTransition()).toBe(false);
+
+    win.screen.orientation.dispatchEvent(new win.Event("change"));
+
+    expect(viewport.isInTransition()).toBe(true);
+  });
+
+  it("arms the settle on the frame's clock, so a frame that goes away takes it along", async () => {
+    win.dispatchEvent(new win.Event("resize"));
+    expect(viewport.isInTransition()).toBe(true);
+
+    frame.remove();
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS + 150));
+
+    expect(onSettled).not.toHaveBeenCalled();
+  });
+});

@@ -1,5 +1,18 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { fromHTML, holdFocusOnPress, PRESSED_CLASS } from "./dom.js";
+
+/** A button in the page, as every wired button is: the release listeners go on
+ *  the button's own window, which a parsed-but-unplaced element does not have. */
+function button(): HTMLElement {
+  const btn = fromHTML(document, `<button type="button" class="wt-btn"></button>`);
+  document.body.appendChild(btn);
+  return btn;
+}
+afterEach(() => {
+  for (const btn of document.querySelectorAll("button.wt-btn")) {
+    btn.remove();
+  }
+});
 
 // The pointer events are spelled as MouseEvent (the pattern the other feature
 // tests use). Only `button` and cancellability matter to the handler, and both
@@ -14,8 +27,6 @@ const press = (el: HTMLElement, init: MouseEventInit = {}): MouseEvent => {
 };
 
 describe("holdFocusOnPress", () => {
-  const button = (): HTMLElement => fromHTML(`<button type="button" class="wt-btn"></button>`);
-
   it("cancels the pointerdown default so the press cannot take focus off the terminal", () => {
     const btn = button();
     holdFocusOnPress(btn);
@@ -66,6 +77,57 @@ describe("holdFocusOnPress", () => {
     expect(btn.classList.contains(PRESSED_CLASS)).toBe(true);
   });
 
+  it("the release ends a press still held: the window listeners go, the class goes, and the button is unwired", () => {
+    const btn = button();
+    const adds: AbortSignal[] = [];
+    const spy = vi.spyOn(window, "addEventListener").mockImplementation((type, fn, options) => {
+      if (type === "pointerup" && typeof options === "object" && options.signal) {
+        adds.push(options.signal);
+      }
+      EventTarget.prototype.addEventListener.call(window, type, fn, options);
+    });
+    const release = holdFocusOnPress(btn);
+    press(btn);
+    expect(adds).toHaveLength(1);
+    expect(adds[0]?.aborted).toBe(false);
+
+    release();
+    expect(adds[0]?.aborted).toBe(true);
+    expect(btn.classList.contains(PRESSED_CLASS)).toBe(false);
+    // Unwired: a later press is the browser's again and paints nothing.
+    expect(press(btn).defaultPrevented).toBe(false);
+    expect(btn.classList.contains(PRESSED_CLASS)).toBe(false);
+    release();
+    spy.mockRestore();
+  });
+
+  it("releases on the button's own window, not the importing one", () => {
+    // A same-origin iframe is a second document with a window of its own; a
+    // button there is released by THAT window's pointerup.
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!doc || !win) {
+      throw new Error("no frame document");
+    }
+    try {
+      const btn = fromHTML(doc, `<button type="button" class="wt-btn"></button>`);
+      doc.body.appendChild(btn);
+      holdFocusOnPress(btn);
+      btn.dispatchEvent(new win.MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+      expect(btn.classList.contains(PRESSED_CLASS)).toBe(true);
+
+      window.dispatchEvent(pointer("pointerup"));
+      expect(btn.classList.contains(PRESSED_CLASS)).toBe(true);
+
+      win.dispatchEvent(new win.MouseEvent("pointerup", { bubbles: true }));
+      expect(btn.classList.contains(PRESSED_CLASS)).toBe(false);
+    } finally {
+      frame.remove();
+    }
+  });
+
   it("paints nothing for a non-primary button, matching what :active does", () => {
     const btn = button();
     holdFocusOnPress(btn);
@@ -97,8 +159,6 @@ describe("holdFocusOnPress", () => {
 // module binds every one of them to the press's own AbortController. These tests
 // assert that registration, because it is the only observable the contract has.
 describe("holdFocusOnPress — a press owns its release listeners", () => {
-  const button = (): HTMLElement => fromHTML(`<button type="button" class="wt-btn"></button>`);
-
   const pointer = (type: string, init: MouseEventInit = {}): MouseEvent =>
     new MouseEvent(type, { bubbles: true, cancelable: true, ...init });
 

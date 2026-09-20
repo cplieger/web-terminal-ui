@@ -163,6 +163,17 @@ describe("composition: cancelComposition (tab-switch detach, design 5.1)", () =>
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("releases the deferred send's timer, not only its effect", () => {
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    textarea.value = "\u4F60\u597D";
+    textarea.dispatchEvent(new CompositionEvent("compositionend"));
+    expect(vi.getTimerCount()).toBe(1);
+
+    composition.cancelComposition();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("restores the placeholder so held-Backspace still repeats on the new session", () => {
     textarea.dispatchEvent(new CompositionEvent("compositionstart"));
     textarea.value = "\u4F60\u597D";
@@ -393,6 +404,19 @@ describe("composition: teardown releases the textarea it was built over", () => 
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("leaves no timer behind when torn down before the deferred send ran", () => {
+    // The pane's teardown promises a clean disposer stack; a zero-delay finalizer
+    // still scheduled keeps the textarea and the send sink alive past it.
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    textarea.value = "\u4F60";
+    textarea.dispatchEvent(new CompositionEvent("compositionend"));
+    expect(vi.getTimerCount()).toBe(1);
+
+    composition.teardown();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("stops listening for compositionstart", () => {
     composition.teardown();
     textarea.dispatchEvent(new CompositionEvent("compositionstart"));
@@ -417,5 +441,41 @@ describe("composition: teardown releases the textarea it was built over", () => 
     const ev = pasteEvent("ls");
     textarea.dispatchEvent(ev);
     expect(ev.defaultPrevented).toBe(false);
+  });
+});
+
+describe("composition: the idle expiry reads the textarea's own clock", () => {
+  it("expires a quiet composition by the frame's Date, not the importing page's", () => {
+    vi.useRealTimers();
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const inner = frame.contentDocument;
+    const innerWin = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!inner || !innerWin) {
+      throw new Error("no frame document");
+    }
+    const area = inner.createElement("textarea");
+    const frameView = inner.createElement("div");
+    inner.body.append(area, frameView);
+    let frameNow = 1_000_000;
+    const frameClock = vi.spyOn(innerWin.Date, "now").mockImplementation(() => frameNow);
+    const inFrame = createComposition({
+      textarea: area,
+      compositionView: frameView,
+      getCursorPx: () => ({ left: 0, top: 0, cellH: 16 }),
+      send: vi.fn(),
+      paste: vi.fn(),
+    });
+    try {
+      area.dispatchEvent(new innerWin.CompositionEvent("compositionstart"));
+      expect(inFrame.isComposing()).toBe(true);
+      // Five seconds pass in the frame while the page's clock barely moves.
+      frameNow += 5_001;
+      expect(inFrame.isComposing()).toBe(false);
+    } finally {
+      inFrame.teardown();
+      frameClock.mockRestore();
+      frame.remove();
+    }
   });
 });

@@ -1,8 +1,6 @@
-// The page's browser notifier: OSC 9 notifications posted through the
-// non-persistent `Notification` constructor, the one surface a page without a
-// service worker has. A notification is an EVENT the engine never replays, so it
-// is delivered once, on the sweep that first observes it. Every capability comes
-// in through NotifierEnv; browserNotifierEnv() is the one place that reads globals.
+// The non-persistent `Notification` constructor is the one notification surface
+// a page without a service worker has. browserNotifierEnv() is the one place
+// that reads globals; everything else takes a NotifierEnv.
 
 import type { Notifier } from "./types.js";
 

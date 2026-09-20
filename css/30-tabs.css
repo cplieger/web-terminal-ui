@@ -433,6 +433,27 @@
   }
 }
 
+:where(.wt-root) .wt-tab-split {
+  flex: none;
+  margin-left: auto;
+}
+
+/* .wt-btn's display would otherwise outrank the attribute. */
+:where(.wt-root) .wt-tab-split[hidden] {
+  display: none;
+}
+
+/* Two auto margins would share the free space between the two buttons. */
+:where(.wt-root) .wt-tab-split:not([hidden]) ~ .wt-tab-kb {
+  margin-left: 0;
+}
+
+@media (any-hover: hover) {
+  :where(.wt-root) .wt-tab-split:hover {
+    background: var(--tab-hover-bg);
+  }
+}
+
 /* ===== Reorder drop slot (tabs feature, desktop drag) =====
    The dragged chip stays in the strip's flow for the whole gesture and renders as
    the SLOT it will land in: an empty dashed outline in the accent over a faint

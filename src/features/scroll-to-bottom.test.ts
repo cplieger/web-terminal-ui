@@ -12,6 +12,8 @@ function fakeCtx(): {
   surface: HTMLElement;
   scrollToBottomSpy: ReturnType<typeof vi.fn>;
   offSpy: ReturnType<typeof vi.fn>;
+  /** What the feature handed to `ctx.defer`, in order. */
+  deferred: (() => void)[];
   emitScroll: (scrolledUp: boolean) => void;
 } {
   const slot = document.createElement("div");
@@ -35,10 +37,15 @@ function fakeCtx(): {
   });
   const scrollToBottomSpy = vi.fn();
   const offSpy = vi.fn();
+  const deferred: (() => void)[] = [];
   let scrollHandler: ((p: { scrolledUp: boolean }) => void) | undefined;
   const ctx = {
     region: () => slot,
     surface: () => surface,
+    shell: { root: surface },
+    defer: (release: () => void) => {
+      deferred.push(release);
+    },
     scroll: {
       scrollToBottom: scrollToBottomSpy,
       isUserScrolledUp: () => false,
@@ -56,6 +63,7 @@ function fakeCtx(): {
     surface,
     scrollToBottomSpy,
     offSpy,
+    deferred,
     emitScroll: (s) => scrollHandler?.({ scrolledUp: s }),
   };
 }
@@ -137,6 +145,23 @@ describe("scrollToBottom feature", () => {
     expect(button(slot)).toBeNull();
     expect(offSpy).toHaveBeenCalledTimes(1);
   });
+
+  it("hands the press wiring's release to the terminal, so a press held across teardown ends with it", () => {
+    stubMatchMedia(false);
+    const { ctx, slot, deferred } = fakeCtx();
+    scrollToBottom().setup(ctx);
+    const btn = button(slot);
+    if (!btn) {
+      throw new Error("no button");
+    }
+    document.body.appendChild(slot);
+    btn.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+    expect(btn.classList.contains("wt-pressed")).toBe(true);
+    expect(deferred).toHaveLength(1);
+    deferred[0]?.();
+    expect(btn.classList.contains("wt-pressed")).toBe(false);
+    slot.remove();
+  });
 });
 
 describe("scrollToBottom: an engine with no matchMedia at all", () => {
@@ -154,5 +179,35 @@ describe("scrollToBottom: an engine with no matchMedia at all", () => {
 
     expect(surface.scrollTo).toHaveBeenCalledWith({ top: 700, behavior: "smooth" });
     expect(scrollToBottomSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("scrollToBottom: in a second document", () => {
+  it("reads reduced motion off the shell root's own window, not the importing one", () => {
+    // A same-origin iframe is a second document with a window of its own; a
+    // terminal mounted there follows that window's media query.
+    stubMatchMedia(false);
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!doc || !win) {
+      throw new Error("no frame document");
+    }
+    try {
+      win.matchMedia = () => ({ matches: true }) as unknown as MediaQueryList;
+      const { ctx, slot, surface, scrollToBottomSpy } = fakeCtx();
+      const root = doc.createElement("div");
+      doc.body.appendChild(root);
+      (ctx as unknown as { shell: { root: HTMLElement } }).shell = { root };
+      scrollToBottom().setup(ctx);
+
+      button(slot)?.click();
+
+      expect(scrollToBottomSpy).toHaveBeenCalledTimes(1);
+      expect(surface.scrollTo).not.toHaveBeenCalled();
+    } finally {
+      frame.remove();
+    }
   });
 });

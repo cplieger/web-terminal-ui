@@ -1,0 +1,176 @@
+:where(.wt-root.wt-split) {
+  --wt-split-gutter: 10px;
+  --wt-split-ratio: 0.5;
+
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+:where(.wt-root.wt-split.wt-split-open) {
+  grid-template-columns:
+    calc((100% - var(--wt-split-gutter)) * var(--wt-split-ratio)) var(--wt-split-gutter)
+    minmax(0, 1fr);
+}
+
+/* Two panes given the same column (the collapse) would otherwise be auto-placed
+   into a second row. */
+:where(.wt-root.wt-split) > .wt-split-pane {
+  grid-row: 1;
+  min-inline-size: 0;
+  min-block-size: 0;
+}
+
+:where(.wt-root.wt-split) > .wt-split-pane.wt-side-left {
+  grid-column: 1;
+}
+
+:where(.wt-root.wt-split) > .wt-split-pane.wt-side-right {
+  grid-column: 3;
+}
+
+:where(.wt-root.wt-split) > .wt-split-pane.wt-pane-hidden {
+  display: none;
+}
+
+:where(.wt-root.wt-split) > .wt-split-pane.wt-pane-closing {
+  opacity: 0.4;
+}
+
+/* 02-terminal.css draws the cursor from the textarea's focus; while the split is
+   open the selection class outranks it in both directions. */
+:where(.wt-root.wt-split.wt-split-open) .wt-pane-selected .term:not(.focus) .term-cursor {
+  background: var(--text);
+  color: var(--bg);
+  box-shadow: none;
+}
+
+:where(.wt-root.wt-split.wt-split-open) .wt-pane-selected .term:not(.focus) .term-cursor-underline {
+  border-bottom: 2px solid var(--text);
+  box-shadow: none;
+}
+
+:where(.wt-root.wt-split.wt-split-open) .wt-pane-selected .term:not(.focus) .term-cursor-bar {
+  border-left: 2px solid var(--text);
+  box-shadow: none;
+}
+
+/* Same specificity as the filled rule above and later in the cascade, so the
+   blink phase still shows. */
+:where(.wt-root.wt-split.wt-split-open .wt-pane-selected)
+  .term:not(.focus).cursor-blink-off
+  .term-cursor {
+  background: transparent;
+  color: var(--text);
+}
+
+:where(.wt-root.wt-split.wt-split-open) .wt-split-pane:not(.wt-pane-selected) .term .term-cursor,
+:where(.wt-root.wt-split.wt-split-open)
+  .wt-split-pane:not(.wt-pane-selected)
+  .term
+  .term-cursor-underline,
+:where(.wt-root.wt-split.wt-split-open)
+  .wt-split-pane:not(.wt-pane-selected)
+  .term
+  .term-cursor-bar {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  box-shadow: inset 0 0 0 1px var(--text);
+  animation: none;
+}
+
+:where(.wt-root.wt-split) > .wt-split-handle {
+  display: none;
+}
+
+:where(.wt-root.wt-split.wt-split-open) > .wt-split-handle {
+  display: block;
+  grid-column: 2;
+  grid-row: 1;
+  position: relative;
+  justify-self: center;
+  inline-size: 24px;
+  margin-inline: -7px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 4;
+}
+
+:where(.wt-root.wt-split) .wt-split-handle::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 9px;
+  inline-size: 6px;
+  inset-block: 12px calc(var(--wt-tabbar-h, 0px) + 12px);
+  border-radius: 3px;
+  background: var(--tab-bg);
+  border-inline: 1px solid var(--border);
+}
+
+:where(.wt-root.wt-split) .wt-split-handle[data-faces="left"]::before {
+  border-inline-start: 2px solid var(--accent);
+}
+
+:where(.wt-root.wt-split) .wt-split-handle[data-faces="right"]::before {
+  border-inline-end: 2px solid var(--accent);
+}
+
+:where(.wt-root.wt-split) .wt-split-handle.wt-handle-held::before {
+  background: color-mix(in oklch, var(--tab-bg), var(--text) 25%);
+}
+
+/* 10-primitives.css scopes the focus ring to button:focus-visible; the handle is
+   a div, and the ring goes on the pill so it follows the visible control. */
+:where(.wt-root.wt-split) .wt-split-handle:focus-visible {
+  outline: none;
+}
+
+:where(.wt-root.wt-split) .wt-split-handle:focus-visible::before {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Collapsed, the unselected pane is hidden in place rather than display: none:
+   what it measures is the width it will have if the split closes, so no
+   zero-size frame reaches its PTY. */
+:where(.wt-root.wt-split.wt-split-open.wt-split-collapsed) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Both side classes named, so this outranks the per-side column rules above. */
+:where(.wt-root.wt-split.wt-split-open.wt-split-collapsed) > .wt-split-pane.wt-side-left,
+:where(.wt-root.wt-split.wt-split-open.wt-split-collapsed) > .wt-split-pane.wt-side-right {
+  grid-column: 1;
+}
+
+:where(.wt-root.wt-split.wt-split-open.wt-split-collapsed) > .wt-split-handle {
+  display: none;
+}
+
+:where(.wt-root.wt-split.wt-split-open.wt-split-collapsed) > .wt-split-pane:not(.wt-pane-selected) {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+:where(.wt-root.wt-split.wt-drop-left)::before,
+:where(.wt-root.wt-split.wt-drop-right)::after {
+  content: "";
+  position: absolute;
+  inset-block: 0 var(--wt-tabbar-h, 0);
+  inline-size: 50%;
+  background: color-mix(in oklch, var(--accent) 12%, transparent);
+  pointer-events: none;
+  z-index: 5;
+}
+
+:where(.wt-root.wt-split.wt-drop-left)::before {
+  inset-inline-start: 0;
+}
+
+:where(.wt-root.wt-split.wt-drop-right)::after {
+  inset-inline-start: 50%;
+}
+
+:where(.wt-root.wt-split.wt-animate.wt-split-closing) {
+  transition: grid-template-columns var(--dur-standard) var(--ease-standard);
+}

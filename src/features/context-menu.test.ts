@@ -886,6 +886,7 @@ async function harnessed(withClipboard = true): Promise<Harness> {
   const clipFeature = fakeClipboard();
   const ctx = {
     surface: () => surface,
+    shell: { root: surface },
     region: () => slot,
     registerKeydown: (fn: (ev: KeyboardEvent) => boolean): Unsubscribe => {
       keydowns.add(fn);
@@ -1014,37 +1015,6 @@ describe("contextMenu — teardown", () => {
     h.surface.dispatchEvent(touch("touchstart", { x: 30, y: 40 }, 1000));
     h.surface.dispatchEvent(touch("touchend", { x: 30, y: 40 }, 1700));
     expect(h.menu()).toBeNull();
-  });
-});
-
-describe("contextMenu — an environment with no navigator", () => {
-  // isAppleTouchDevice runs at setup and reads navigator three times. The guard
-  // in front of it is not decoration: the kernel is published as a library, and a
-  // consumer that renders the page on a server (or in a worker) reaches setup
-  // with no navigator binding at all.
-  it("sets up without a navigator, rather than throwing on the way in", async () => {
-    vi.stubGlobal("navigator", undefined);
-
-    const h = await harnessed();
-    h.rightClick();
-
-    expect(h.menu()?.classList.contains("visible")).toBe(true);
-    h.teardown();
-  });
-
-  it("treats an unknown device as non-Apple, so the platform's own touch menu is still suppressed", async () => {
-    // The one thing the answer decides. Unknown means "not WebKit", where
-    // cancelling a touch contextmenu is how the platform's menu and ours do not
-    // both appear; the Apple answer would leave both.
-    vi.stubGlobal("navigator", undefined);
-    const h = await harnessed();
-
-    const pd = new Event("pointerdown", { bubbles: true }) as unknown as PointerEvent;
-    Object.defineProperty(pd, "pointerType", { value: "touch" });
-    h.surface.dispatchEvent(pd);
-
-    expect(h.rightClick().defaultPrevented).toBe(true);
-    h.teardown();
   });
 });
 

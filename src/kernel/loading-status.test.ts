@@ -477,3 +477,48 @@ describe("loading overlay status text: the wording the library ships", () => {
     expect(visibleText(o)).not.toBe(firstWaiting);
   });
 });
+
+describe("loading overlay status text: an overlay in a second document", () => {
+  // The lines are built in the overlay's own document and run on that window's
+  // clock, so an overlay in a frame is not advanced by the importing page's timers.
+  let status: LoadingStatus | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    status = undefined;
+  });
+  afterEach(() => {
+    status?.stop();
+    vi.useRealTimers();
+    for (const frame of document.querySelectorAll("iframe")) {
+      frame.remove();
+    }
+  });
+
+  it("writes the first line when the frame's clock reaches the delay, not when the importing page's does", () => {
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow;
+    if (!doc || !win) {
+      throw new Error("no frame document");
+    }
+    const due: (() => void)[] = [];
+    Object.defineProperty(win, "setTimeout", {
+      configurable: true,
+      value: (fn: () => void): number => due.push(fn),
+    });
+    const o = doc.createElement("div");
+    doc.body.appendChild(o);
+
+    status = attachLoadingStatus(o);
+
+    vi.advanceTimersByTime(INITIAL_DELAY_MS + SWAP_FADE_MS);
+    expect(visibleText(o)).toBe("");
+
+    // The frame's own timer for the initial delay, then the swap it starts.
+    due[0]?.();
+    due[1]?.();
+    expect(visibleText(o)).toBe(DEFAULT_LOADING_MESSAGES.initial);
+  });
+});

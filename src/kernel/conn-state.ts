@@ -1,7 +1,3 @@
-// The DOM-free connection-state machine: the state, the never-connects give-up
-// and the loading gate. The connectionBanner feature renders whatever it emits;
-// "reconnecting" escalates to "offline" after more than 3 consecutive failures.
-
 import type { ConnState } from "./types.js";
 
 const CONNECTING_GRACE_MS = 600;
@@ -43,13 +39,22 @@ export interface ConnStateMachine {
   destroy(): void;
 }
 
+/** The timers the machine schedules on: the mounted window's, so a grace delay
+ *  runs on the terminal's own clock. */
+export interface ConnStateTimers {
+  setTimeout(handler: () => void, ms: number): number;
+  clearTimeout(id: number): void;
+}
+
 export function createConnState(opts: {
   onState: (s: ConnState) => void;
   onGiveUp?: () => void;
+  timers: ConnStateTimers;
 }): ConnStateMachine {
+  const { timers } = opts;
   let state: ConnState = "connecting";
-  let stableTimer: ReturnType<typeof setTimeout> | null = null;
-  let restartedTimer: ReturnType<typeof setTimeout> | null = null;
+  let stableTimer: number | null = null;
+  let restartedTimer: number | null = null;
   let consecutiveFailures = 0;
   let loaded = false;
 
@@ -72,7 +77,7 @@ export function createConnState(opts: {
 
   function setState(next: ConnState, delay: number): void {
     if (stableTimer !== null) {
-      clearTimeout(stableTimer);
+      timers.clearTimeout(stableTimer);
       stableTimer = null;
     }
     if (delay === 0) {
@@ -80,7 +85,7 @@ export function createConnState(opts: {
       emit();
       return;
     }
-    stableTimer = setTimeout(() => {
+    stableTimer = timers.setTimeout(() => {
       stableTimer = null;
       state = next;
       emit();
@@ -111,9 +116,9 @@ export function createConnState(opts: {
     restarted(): void {
       setState("restarted", 0);
       if (restartedTimer !== null) {
-        clearTimeout(restartedTimer);
+        timers.clearTimeout(restartedTimer);
       }
-      restartedTimer = setTimeout(() => {
+      restartedTimer = timers.setTimeout(() => {
         restartedTimer = null;
         if (state === "restarted") {
           setState("open", 0);
@@ -136,7 +141,7 @@ export function createConnState(opts: {
     idle(): void {
       consecutiveFailures = 0;
       if (restartedTimer !== null) {
-        clearTimeout(restartedTimer);
+        timers.clearTimeout(restartedTimer);
         restartedTimer = null;
       }
       setState("idle", 0);
@@ -149,11 +154,11 @@ export function createConnState(opts: {
     },
     destroy(): void {
       if (stableTimer !== null) {
-        clearTimeout(stableTimer);
+        timers.clearTimeout(stableTimer);
         stableTimer = null;
       }
       if (restartedTimer !== null) {
-        clearTimeout(restartedTimer);
+        timers.clearTimeout(restartedTimer);
         restartedTimer = null;
       }
     },

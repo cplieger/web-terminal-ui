@@ -86,6 +86,33 @@ describe("status share: one stream per path", () => {
     expect(early.onOpen).toHaveBeenCalledTimes(1);
   });
 
+  it("a late subscriber whose immediate onOpen throws is still subscribed and still owns its unsubscribe", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { share, streams } = harness();
+    const offEarly = share.subscribe("/events", { onStatus: vi.fn() });
+    only(streams).callbacks.onOpen?.();
+
+    const late = {
+      onStatus: vi.fn(),
+      onOpen: () => {
+        throw new Error("boom");
+      },
+    };
+    let offLate: (() => void) | undefined;
+    expect(() => {
+      offLate = share.subscribe("/events", late);
+    }).not.toThrow();
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    only(streams).callbacks.onStatus(status("s1"));
+    expect(late.onStatus).toHaveBeenCalledTimes(1);
+
+    offEarly();
+    expect(only(streams).close).not.toHaveBeenCalled();
+    offLate?.();
+    expect(only(streams).close).toHaveBeenCalledTimes(1);
+    errSpy.mockRestore();
+  });
+
   it("keeps delivering to the peer of a subscriber that throws", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { share, streams } = harness();

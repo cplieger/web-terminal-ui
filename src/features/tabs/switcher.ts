@@ -1,11 +1,8 @@
-// tabs/switcher.ts — the mobile bottom-switcher's chrome vocabulary: its
-// templates, the swipe/flick gesture constants, and the closure-free row
-// enter/leave animations. The gesture STATE MACHINE (axis lock, live preview,
-// the release reel) stays in index.ts: it mutates drag state shared with the
-// switch/expand paths, so extracting it would spread one interaction across two
-// files. The desktop chrome vocabulary lives in strip.ts; the session model in
-// model.ts.
+// The swipe state machine (axis lock, live preview, the release reel) stays in
+// index.ts: it mutates drag state shared with the switch and expand paths, so
+// extracting it would spread one interaction across two files.
 
+import { windowOf } from "../../kernel/realm.js";
 import { chipContent } from "./strip.js";
 
 // Swipe recognition on the mobile switcher bar: a mostly-horizontal drag past
@@ -31,24 +28,11 @@ export const VELOCITY_STALE_MS = 32;
 export const PREVIEW_DRAG_RATIO = 0.1;
 export const PREVIEW_PEEK_MAX = 10;
 
-// Mobile bottom bar. One element, two parts stacked in a column: the always-
-// visible bar row (active tab as a tap/swipe surface + keyboard + "+") on top,
-// and a list of the OTHER tabs BELOW it. On swipe-up / tap the whole bar slides
-// up and the list fills in beneath it (down to the safe area); swipe-down /
-// tap collapses it back to the bottom. Selecting a listed tab swaps it into the
-// active row. This replaces the old separate modal overview sheet ("one element"
-// per the user): the bar itself lifts rather than opening a distinct surface.
-// The bar is the FIRST child and the list the SECOND: the switcher is bottom-
-// anchored, so a column with the list last grows the container upward, lifting
-// the bar and revealing the list below it (DOM order = visual order top-to-bottom).
-//   - .wt-switcher-current-wrap: the active-tab row — a select/swipe surface
-//     (.wt-switcher-current with dot + label) plus a close (x) overlaid at the
-//     right, mirroring the listed rows. No "n / m" counter: the list below is a
-//     rotating circular queue, so an absolute position number is meaningless.
-//   - The keyboard button (.wt-switcher-kb, opens the key grid above the bar,
-//     only wired + shown when a keyboardToggle feature is provided) and the
-//     accent "+" (.wt-switcher-new, spawns a terminal) are appended to the bar
-//     row from the shared factories in index.ts (see makeKbButton / makeNewButton).
+// Mobile bottom bar: one element, the always-visible bar row (active tab as a
+// tap/swipe surface, keyboard, "+") FIRST and the list of the other tabs SECOND.
+// The switcher is bottom-anchored, so a column with the list last grows upward
+// on swipe-up and lifts the bar to reveal the list beneath it. No "n / m"
+// counter: the list is a rotating circular queue, so a position is meaningless.
 const CURRENT_CHIP = chipContent({
   dot: "wt-switcher-dot",
   label: "wt-switcher-label",
@@ -85,45 +69,83 @@ export const SWITCHER_ROW_HTML = `
 // the row's own max-height grows from 0 (fading in) on add, and collapses
 // to 0 (fading out, then removed) on close. The flex list's height follows
 // the row, so adding/closing a tab animates the tray height rather than
-// snapping. Inline-driven (cleared when done); the caller gates motion.
+// snapping. Inline-driven (cleared when done); the caller gates motion, and
+// its `signal` ends a motion still running when the owner goes away.
 const ROW_ANIM_MS = 220;
 const ROW_ANIM_EASE = "cubic-bezier(0.2, 0, 0, 1)";
 
-export function animateRowIn(row: HTMLElement): void {
+/** The frame that writes the "to" state and the timer that ends the motion,
+ *  both cancelled by `signal`. The timer also cancels the frame: a background
+ *  tab suspends frames while timers run, and a frame released after `finish()`
+ *  would write the "to" state onto a row nobody owns any more. A motion that
+ *  finished releases its abort listener so a long-lived signal collects nothing. */
+function rowMotion(
+  row: HTMLElement,
+  signal: AbortSignal,
+  toState: () => void,
+  finish: () => void,
+): void {
+  const win = windowOf(row.ownerDocument);
+  const frame = win.requestAnimationFrame(toState);
+  const timer = win.setTimeout(() => {
+    win.cancelAnimationFrame(frame);
+    signal.removeEventListener("abort", cancel);
+    finish();
+  }, ROW_ANIM_MS + 60);
+  const cancel = (): void => {
+    win.cancelAnimationFrame(frame);
+    win.clearTimeout(timer);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+}
+
+export function animateRowIn(row: HTMLElement, signal: AbortSignal): void {
   const h = row.getBoundingClientRect().height;
-  if (h <= 0) {
+  if (h <= 0 || signal.aborted) {
     return;
   }
   row.style.overflow = "hidden";
   row.style.transition = "none";
   row.style.maxHeight = "0";
   row.style.opacity = "0";
-  requestAnimationFrame(() => {
-    row.style.transition = `max-height ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}, opacity ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}`;
-    row.style.maxHeight = `${String(Math.ceil(h))}px`;
-    row.style.opacity = "1";
-  });
-  window.setTimeout(() => {
-    row.style.transition = "";
-    row.style.maxHeight = "";
-    row.style.opacity = "";
-    row.style.overflow = "";
-  }, ROW_ANIM_MS + 60);
+  rowMotion(
+    row,
+    signal,
+    () => {
+      row.style.transition = `max-height ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}, opacity ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}`;
+      row.style.maxHeight = `${String(Math.ceil(h))}px`;
+      row.style.opacity = "1";
+    },
+    () => {
+      row.style.transition = "";
+      row.style.maxHeight = "";
+      row.style.opacity = "";
+      row.style.overflow = "";
+    },
+  );
 }
 
-export function animateRowOut(row: HTMLElement): void {
+export function animateRowOut(row: HTMLElement, signal: AbortSignal): void {
+  if (signal.aborted) {
+    row.remove();
+    return;
+  }
   const h = row.getBoundingClientRect().height;
   row.style.overflow = "hidden";
   row.style.pointerEvents = "none";
   row.style.transition = "none";
   row.style.maxHeight = `${String(Math.ceil(h))}px`;
   row.style.opacity = "1";
-  requestAnimationFrame(() => {
-    row.style.transition = `max-height ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}, opacity ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}`;
-    row.style.maxHeight = "0";
-    row.style.opacity = "0";
-  });
-  window.setTimeout(() => {
-    row.remove();
-  }, ROW_ANIM_MS + 60);
+  rowMotion(
+    row,
+    signal,
+    () => {
+      row.style.transition = `max-height ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}, opacity ${String(ROW_ANIM_MS)}ms ${ROW_ANIM_EASE}`;
+      row.style.maxHeight = "0";
+      row.style.opacity = "0";
+    },
+    () => {
+      row.remove();
+    },
+  );
 }

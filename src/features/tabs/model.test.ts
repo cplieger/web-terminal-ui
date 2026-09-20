@@ -66,14 +66,14 @@ describe("SessionAPIError carries what the server said", () => {
   // tests. `.rejects` fails on a resolve, which is the whole point.
   it("exposes the status so a caller can tell 503 from 500", async () => {
     stubFetch(response(503));
-    const refused = createSessionAPI("/api/sessions").create();
+    const refused = createSessionAPI("/api/sessions", window).create();
     await expect(refused).rejects.toBeInstanceOf(SessionAPIError);
     await expect(refused).rejects.toMatchObject({ status: 503 });
   });
 
   it("parses Retry-After delta-seconds into milliseconds", async () => {
     stubFetch(response(503, {}, { "Retry-After": "5" }));
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       retryAfterMs: 5000,
     });
   });
@@ -82,14 +82,14 @@ describe("SessionAPIError carries what the server said", () => {
     const past = new Date(Date.now() - 60000).toUTCString();
     stubFetch(response(503, {}, { "Retry-After": past }));
     // A date already in the past means "retry now", not "never".
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       retryAfterMs: 0,
     });
   });
 
   it("clamps an absurd Retry-After so a bad header cannot park the UI", async () => {
     stubFetch(response(503, {}, { "Retry-After": "99999" }));
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       retryAfterMs: 60000,
     });
   });
@@ -97,7 +97,7 @@ describe("SessionAPIError carries what the server said", () => {
   it("ignores a missing or unparseable Retry-After", async () => {
     for (const headers of [{}, { "Retry-After": "soon" }, { "Retry-After": "  " }]) {
       stubFetch(response(503, {}, headers));
-      await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
         retryAfterMs: undefined,
       });
     }
@@ -108,28 +108,28 @@ describe("SessionAPIError carries what the server said", () => {
     // the field every server in this family actually returns, and the shape
     // web-terminal-kiro's tools-installing 503 uses.
     stubFetch(response(503, { error: "tools installing", code: "", request_id: "abc" }));
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       serverMessage: "tools installing",
     });
   });
 
   it("also accepts a `message` field", async () => {
     stubFetch(response(503, { message: "installing" }));
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       serverMessage: "installing",
     });
   });
 
   it("prefers `error` over `message` when both are present", async () => {
     stubFetch(response(503, { error: "from error", message: "from message" }));
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       serverMessage: "from error",
     });
   });
 
   it("caps a server message destined for UI chrome", async () => {
     stubFetch(response(503, { message: "x".repeat(400) }));
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       serverMessage: "x".repeat(120),
     });
   });
@@ -138,7 +138,7 @@ describe("SessionAPIError carries what the server said", () => {
     const bodies: unknown[] = [null, "a string", { error: 42 }, { error: "   " }, []];
     for (const body of bodies) {
       stubFetch(response(503, body));
-      await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
         status: 503,
         serverMessage: undefined,
       });
@@ -157,7 +157,7 @@ describe("SessionAPIError carries what the server said", () => {
         } as unknown as Response),
       ),
     );
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       status: 503,
       serverMessage: undefined,
     });
@@ -168,7 +168,7 @@ describe("SessionAPIError carries what the server said", () => {
     // be read as five seconds by a regex anchored on only one end.
     for (const value of ["5x", "x5"]) {
       stubFetch(response(503, {}, { "Retry-After": value }));
-      await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+      await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
         retryAfterMs: undefined,
       });
     }
@@ -179,7 +179,7 @@ describe("SessionAPIError carries what the server said", () => {
     // can send it. Untrimmed, this falls through to the date branch and the retry
     // hint is lost.
     stubFetch(response(503, {}, { "Retry-After": " 30 " }));
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       retryAfterMs: 30_000,
     });
   });
@@ -189,7 +189,7 @@ describe("SessionAPIError carries what the server said", () => {
     // "rejects a refused close, and resolves a successful one" below; keeping it
     // here too would mean one `it` failing for either of two verbs.
     stubFetch(response(500));
-    const refused = createSessionAPI("/api/sessions").list();
+    const refused = createSessionAPI("/api/sessions", window).list();
     await expect(refused).rejects.toBeInstanceOf(SessionAPIError);
     await expect(refused).rejects.toMatchObject({ status: 500 });
   });
@@ -568,7 +568,7 @@ describe("setOrder sends the arrangement to the server", () => {
       calls.push({ url, init });
       return Promise.resolve(new Response(null, { status: 204 }));
     });
-    const api = createSessionAPI("/api/sessions");
+    const api = createSessionAPI("/api/sessions", window);
     await api.setOrder(["s2", "s1"]);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("/api/sessions/order");
@@ -585,7 +585,7 @@ describe("setOrder sends the arrangement to the server", () => {
     // distinguishable.
     for (const status of [409, 404, 500]) {
       vi.stubGlobal("fetch", () => Promise.resolve(new Response("nope", { status })));
-      const api = createSessionAPI("/api/sessions");
+      const api = createSessionAPI("/api/sessions", window);
       await expect(api.setOrder(["s1"])).rejects.toMatchObject({
         name: "SessionAPIError",
         status,
@@ -610,7 +610,7 @@ describe("the layout record's client half", () => {
       return Promise.resolve(response(200, record));
     });
 
-    await expect(createSessionAPI("/api/sessions").getLayout()).resolves.toEqual(record);
+    await expect(createSessionAPI("/api/sessions", window).getLayout()).resolves.toEqual(record);
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("/api/sessions/layout");
@@ -621,12 +621,12 @@ describe("the layout record's client half", () => {
 
   it("answers null on 404, the server before the route, so the layout runs unpersisted", async () => {
     stubFetch(response(404));
-    await expect(createSessionAPI("/api/sessions").getLayout()).resolves.toBeNull();
+    await expect(createSessionAPI("/api/sessions", window).getLayout()).resolves.toBeNull();
   });
 
   it("throws with the status on any other failure, so a 500 is not read as an empty record", async () => {
     stubFetch(response(500));
-    await expect(createSessionAPI("/api/sessions").getLayout()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).getLayout()).rejects.toMatchObject({
       name: "SessionAPIError",
       status: 500,
     });
@@ -652,7 +652,9 @@ describe("the layout record's client half", () => {
     ];
     for (const body of malformed) {
       stubFetch(response(200, body));
-      await expect(createSessionAPI("/api/sessions").getLayout()).rejects.toThrow(/malformed body/);
+      await expect(createSessionAPI("/api/sessions", window).getLayout()).rejects.toThrow(
+        /malformed body/,
+      );
     }
   });
 
@@ -668,7 +670,9 @@ describe("the layout record's client half", () => {
     ];
     for (const body of inconsistent) {
       stubFetch(response(200, body));
-      await expect(createSessionAPI("/api/sessions").getLayout()).rejects.toThrow(/malformed body/);
+      await expect(createSessionAPI("/api/sessions", window).getLayout()).rejects.toThrow(
+        /malformed body/,
+      );
     }
   });
 
@@ -681,19 +685,20 @@ describe("the layout record's client half", () => {
     ];
     for (const body of consistent) {
       stubFetch(response(200, body));
-      await expect(createSessionAPI("/api/sessions").getLayout()).resolves.toEqual(body);
+      await expect(createSessionAPI("/api/sessions", window).getLayout()).resolves.toEqual(body);
     }
   });
 
-  it("reads an absent side as null, which is how the server marshals an empty pane", async () => {
-    stubFetch(response(200, { handle: 0.3, selected: "left", open: true, left: "s2" }));
-    await expect(createSessionAPI("/api/sessions").getLayout()).resolves.toEqual({
-      left: "s2",
-      right: null,
-      handle: 0.3,
-      selected: "left",
-      open: true,
-    });
+  it("refuses a record missing a side: the server writes both keys and marshals an empty pane as null, so an absent one is not a record", async () => {
+    const open: PaneLayout = { left: "s2", right: null, handle: 0.3, selected: "left", open: true };
+    const { left: _left, ...noLeft } = open;
+    const { right: _right, ...noRight } = open;
+    for (const body of [noLeft, noRight]) {
+      stubFetch(response(200, body));
+      await expect(createSessionAPI("/api/sessions", window).getLayout()).rejects.toThrow(
+        /malformed body/,
+      );
+    }
   });
 
   it("PUTs the whole record as JSON to the layout route", async () => {
@@ -704,7 +709,9 @@ describe("the layout record's client half", () => {
     });
     const next = { left: "s2", right: "s1", handle: 0.4, selected: "right" as const, open: true };
 
-    await expect(createSessionAPI("/api/sessions").setLayout(next)).resolves.toBeUndefined();
+    await expect(
+      createSessionAPI("/api/sessions", window).setLayout(next),
+    ).resolves.toBeUndefined();
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("/api/sessions/layout");
@@ -717,7 +724,9 @@ describe("the layout record's client half", () => {
   it("throws with the status on a refused write, so a 409 (a side names a dead session) is told apart from a real failure", async () => {
     for (const status of [409, 400, 404, 500]) {
       vi.stubGlobal("fetch", () => Promise.resolve(new Response("nope", { status })));
-      await expect(createSessionAPI("/api/sessions").setLayout(record)).rejects.toMatchObject({
+      await expect(
+        createSessionAPI("/api/sessions", window).setLayout(record),
+      ).rejects.toMatchObject({
         name: "SessionAPIError",
         status,
       });
@@ -735,7 +744,7 @@ describe("the session API's requests", () => {
       return Promise.resolve(new Response("[]", { status: 200 }));
     });
 
-    await createSessionAPI("/api/sessions").list();
+    await createSessionAPI("/api/sessions", window).list();
 
     expect(calls[0]?.init?.headers).toEqual({ Accept: "application/json" });
     expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
@@ -748,7 +757,7 @@ describe("the session API's requests", () => {
       return Promise.resolve(new Response(null, { status: 204 }));
     });
 
-    await createSessionAPI("/api/sessions").setPinnedTitle("a/b c", "release notes");
+    await createSessionAPI("/api/sessions", window).setPinnedTitle("a/b c", "release notes");
 
     expect(calls[0]?.url).toBe("/api/sessions/a%2Fb%20c/pinned-title");
     expect(calls[0]?.init?.method).toBe("PUT");
@@ -762,14 +771,16 @@ describe("the session API's requests", () => {
     // `sessions.length` or the poll's `list.map` is an uncaught TypeError; as a
     // rejection, both callers' existing catch paths recover.
     stubFetch(response(200, null));
-    await expect(createSessionAPI("/api/sessions").list()).rejects.toThrow();
+    await expect(createSessionAPI("/api/sessions", window).list()).rejects.toThrow();
   });
 
   it("propagates a failed pinned-name clear, so the caller can roll the label back", async () => {
     // Not best-effort, unlike the status writes: the user renamed something and is
     // owed the truth about whether it stuck.
     stubFetch(response(500));
-    await expect(createSessionAPI("/api/sessions").clearPinnedTitle("s1")).rejects.toMatchObject({
+    await expect(
+      createSessionAPI("/api/sessions", window).clearPinnedTitle("s1"),
+    ).rejects.toMatchObject({
       name: "SessionAPIError",
       status: 500,
     });
@@ -780,25 +791,27 @@ describe("the session API's requests", () => {
     // supplied the assertions while close()'s own guard went unpinned in both
     // directions. A close that silently "succeeds" leaves the tab on the strip.
     stubFetch(response(404));
-    const refused = createSessionAPI("/api/sessions").close("s1");
+    const refused = createSessionAPI("/api/sessions", window).close("s1");
     await expect(refused).rejects.toBeInstanceOf(SessionAPIError);
     await expect(refused).rejects.toMatchObject({ status: 404 });
 
     vi.stubGlobal("fetch", () => Promise.resolve(new Response(null, { status: 204 })));
-    await expect(createSessionAPI("/api/sessions").close("s1")).resolves.toBeUndefined();
+    await expect(createSessionAPI("/api/sessions", window).close("s1")).resolves.toBeUndefined();
   });
 
   it("resolves a successful pinned-name clear", async () => {
     vi.stubGlobal("fetch", () => Promise.resolve(new Response(null, { status: 204 })));
 
-    await expect(createSessionAPI("/api/sessions").clearPinnedTitle("s1")).resolves.toBeUndefined();
+    await expect(
+      createSessionAPI("/api/sessions", window).clearPinnedTitle("s1"),
+    ).resolves.toBeUndefined();
   });
 
   it("trims the server's own padding out of the message it hands to the UI", async () => {
     // The string goes straight into chrome, and a host that pads its JSON field
     // would otherwise push the visible text off its own baseline.
     stubFetch(response(503, { error: "  tools installing\n" }));
-    await expect(createSessionAPI("/api/sessions").create()).rejects.toMatchObject({
+    await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       serverMessage: "tools installing",
     });
   });
@@ -1095,7 +1108,7 @@ describe("close tombstones keep a closed tab from flashing back", () => {
   });
 
   it("reports a session the user just closed as tombstoned", () => {
-    const tombs = createTombstones(15_000);
+    const tombs = createTombstones(() => Date.now(), 15_000);
     tombs.add("sess-1");
     expect(tombs.active("sess-1")).toBe(true);
   });
@@ -1103,7 +1116,7 @@ describe("close tombstones keep a closed tab from flashing back", () => {
   it("reports a session it never saw as free to adopt", () => {
     // A false positive here is worse than a flash-back: it would swallow a tab
     // the server legitimately lists and the user never closed.
-    const tombs = createTombstones(15_000);
+    const tombs = createTombstones(() => Date.now(), 15_000);
     tombs.add("sess-1");
     expect(tombs.active("sess-2")).toBe(false);
   });
@@ -1112,7 +1125,7 @@ describe("close tombstones keep a closed tab from flashing back", () => {
     // The far edge is the whole contract: past it the server has had its chance
     // to reap, so a listing that still carries the id is authoritative and the
     // adopt must proceed.
-    const tombs = createTombstones(15_000);
+    const tombs = createTombstones(() => Date.now(), 15_000);
     tombs.add("sess-1");
     vi.advanceTimersByTime(14_999);
     expect(tombs.active("sess-1")).toBe(true);
@@ -1124,7 +1137,7 @@ describe("close tombstones keep a closed tab from flashing back", () => {
     // add() sweeps elapsed entries so the map cannot grow over a long session of
     // opens and closes. A sweep that took live entries with it would re-adopt the
     // tab closed a moment ago, which is the bug the tombstones exist to stop.
-    const tombs = createTombstones(15_000);
+    const tombs = createTombstones(() => Date.now(), 15_000);
     tombs.add("sess-1");
     vi.advanceTimersByTime(1000);
     tombs.add("sess-2");

@@ -1,18 +1,11 @@
-// tabs/strip.ts — the desktop tab strip's chrome vocabulary: the reorder-preview
-// constants, the shared SVG glyphs, the one chip-content builder every chip site
-// reuses, the strip tab template, the shared control markup factories, the
-// status-dot painter, and the required-descendant picker. Everything here is
-// closure-free markup + tiny pure helpers; element construction with event wiring
-// stays in index.ts (it closes over the feature state). The mobile chrome
-// templates and its gesture constants live in switcher.ts; the session model in
-// model.ts.
+// Closure-free markup and pure helpers only; element construction with event
+// wiring stays in index.ts, where it closes over the feature state.
 
 // The status vocabulary itself (which statuses reveal a dot, and how each one is
 // worded for a human) lives in the DOM-free model, so the painters here and the
 // accessible names index.ts builds read one definition.
 import { activityPhrase, normalizeActivity, statusPhrase, statusRevealsDot } from "./model.js";
 
-// --- Reorder preview -------------------------------------------------------
 // Every chip in this strip is the same width (see .wt-tab in 30-tabs.css: a
 // definite 300px with flex-grow 0, so a title changes the label and never the
 // box). That is what makes a reorder hard to read: the chip a release would
@@ -22,33 +15,18 @@ import { activityPhrase, normalizeActivity, statusPhrase, statusRevealsDot } fro
 // the same split switcher.ts keeps for the mobile swipe.
 
 /** How long (ms) the pointer must have been un-moved before a stationary `dragover` is
- *  believed as "stopped".
- *
- *  This is the number that decides how fast the slot opens, and it is small because a
- *  `dragover` at an UNCHANGED position is positive evidence of rest — far better
- *  evidence than the absence of events, which is all the fallback below has. The drag
- *  loop keeps delivering events while the pointer is held still, so a genuinely stopped
- *  pointer announces itself; this only filters the coincidence where one event of a
- *  sweep happens to land within REORDER_MOVE_EPS_PX of the previous one (a direction
- *  reversal, or a frame where the motion was almost entirely vertical). */
+ *  believed as "stopped". Small, because a `dragover` at an UNCHANGED position is
+ *  positive evidence of rest (the drag loop keeps delivering events while the pointer
+ *  is held still); this only filters the coincidence where one event of a sweep lands
+ *  within REORDER_MOVE_EPS_PX of the previous one. */
 export const REORDER_STILL_MS = 50;
 
 /** Fallback guard (ms): commit the pending slot this long after the last MOVEMENT, for
- *  the case where `dragover` stops arriving altogether and no stationary event ever
- *  confirms the stop.
- *
- *  **Its floor is set by the platform, not by taste, and this is the timer that floor
- *  applies to.** HTML5 drag-and-drop only guarantees a `dragover` every 350ms — the drag
- *  loop runs on that cadence, not per mouse movement — so a guard at or below it can
- *  expire BETWEEN two events of a fast sweep, and the strip then commits every slot the
- *  pointer crosses. Measured in production: at 120ms a quick pass over five tabs moved
- *  all five.
- *
- *  A pure quiet-window design has to make this ONE number carry both jobs, which is why
- *  it could not be shortened — the same timer that decides responsiveness was the one
- *  that had to out-wait the cadence, so 500ms was safe and felt slow. Splitting rest
- *  DETECTION (the stationary event above) from the no-events NET (here) lets each be
- *  sized for its own job. This one is rarely the deciding signal at all. */
+ *  the case where `dragover` stops arriving altogether. Its floor is the platform's:
+ *  HTML5 drag-and-drop only guarantees a `dragover` every 350ms, so a guard at or
+ *  below it can expire BETWEEN two events of a fast sweep and commit every slot the
+ *  pointer crosses (measured: at 120ms a quick pass over five tabs moved all five).
+ *  Rest DETECTION is the stationary event above, so this net can stay slow. */
 export const REORDER_REST_MS = 450;
 
 /** Movement (px) between two dragover events below which the pointer counts as still.
@@ -57,19 +35,12 @@ export const REORDER_REST_MS = 450;
 export const REORDER_MOVE_EPS_PX = 3;
 
 /** The one transition both preview stages use (the lean, and the slide that
- *  commits it).
- *
- *  --dur-standard and --ease-standard written out as literals. JS-driven motion
- *  in this package does not read tokens back out of the cascade; the switcher's
- *  release reel spells its own transition the same way. Keep the two in step: a
- *  token edit has to be mirrored here by hand.
- *
- *  The property is `translate`, NOT `transform`, and that is load-bearing rather
- *  than stylistic. Declarations from a running CSS animation out-rank every normal
- *  author declaration, inline style included, so a chip in the middle of
- *  `wt-slot-in` or `wt-tab-in` (both animate `transform: scale`) would ignore an
- *  inline `transform` outright and refuse to move. `translate` is a separate
- *  property that composes with `transform` instead of competing for it. */
+ *  commits it): --dur-standard and --ease-standard as literals, since JS-driven
+ *  motion here reads no token back out of the cascade (mirror a token edit by
+ *  hand). The property is `translate`, NOT `transform`: declarations from a
+ *  running CSS animation out-rank inline style, so a chip mid `wt-slot-in` or
+ *  `wt-tab-in` (both animate `transform: scale`) would ignore an inline
+ *  `transform`; `translate` composes with it instead of competing for it. */
 export const REORDER_SHIFT_TRANS = "translate 0.2s cubic-bezier(0.2, 0, 0, 1)";
 
 /** When (ms after the slide starts) the inline transform and transition come off
@@ -103,31 +74,17 @@ const KB_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" wi
 // background-tab notification dot rides on it (see switchButtonHTML). Same
 // viewBox + stroke=currentcolor treatment as the others.
 const SWITCH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="13" height="13" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3"/></svg>`;
+// Two rectangles side by side, the same glyph whether the split is open or
+// closed: the button's state is its aria-expanded, not its icon.
+const SPLIT_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="8" height="14" rx="2"/><rect x="13" y="5" width="8" height="14" rx="2"/></svg>`;
 
-// chipContent is the ONE builder for a tab chip's content — a status dot, a
-// label, a determinate progress bar, and a close (x) — shared by all three chip
-// sites: the desktop strip (.wt-tab), the mobile active row
-// (.wt-switcher-current), and each expanded mobile list row (.wt-switcher-row).
-// Each site passes its OWN class set (never renamed) so every existing selector
-// — and thus all CSS and all tests — still matches. The one structural
-// difference is WHERE the close sits: the desktop
-// chip nests it flat inside .wt-tab, while the two mobile chips place it as a
-// sibling of the select/swipe button (a button can't nest in a button). So the
-// builder returns two fragments — the dot+label pair and the close — that each
-// site drops into its own structure.
-//
-// The progress bar rides in the dotLabel fragment rather than taking a per-site
-// class: it is positioned against the chip, not laid out in its flex row, so one
-// class (.wt-progress-bar) styles it everywhere and every chip site gets it for
-// free. It starts `hidden` — a session with no percentage must render NO bar
-// (paintProgress).
-//
-// The secondary activity mark (.wt-activity-mark) rides here for the same reason
-// and takes no per-site class either. It carries NO `hidden` attribute, unlike
-// the bar: `hidden` is display:none, and an element out of layout cannot animate
-// into it. Absence is the absence of `data-activity`, which the CSS answers by
-// cancelling the mark's own footprint (see 30-tabs.css), so a chip with no
-// secondary activity measures exactly as it did before this element existed.
+/** The ONE builder for a tab chip's content (status dot, label, progress bar,
+ *  close), shared by the strip chip, the mobile active row and each mobile list
+ *  row. Two fragments, because the mobile chips place the close as a SIBLING of
+ *  their button (a button cannot nest in a button). The bar starts `hidden` (no
+ *  percentage renders no bar); the activity mark carries no `hidden`, since an
+ *  element out of layout cannot animate into it, and its absence is the absence
+ *  of `data-activity`, which the CSS answers by cancelling its footprint. */
 export function chipContent(v: { dot: string; label: string; close: string; closeAttr?: string }): {
   dotLabel: string;
   close: string;
@@ -151,6 +108,12 @@ export function newButtonHTML(cls: string): string {
 }
 export function kbButtonHTML(cls: string): string {
   return `<button type="button" class="${cls}" aria-label="Keyboard keys" aria-expanded="false" hidden>${KB_SVG}</button>`;
+}
+/** The split-view toggle: a stable label with `aria-expanded` as its state, the
+ *  keyboard button's pattern, so a screen reader hears the change on the focused
+ *  button after a keyboard toggle. */
+export function splitButtonHTML(cls: string): string {
+  return `<button type="button" class="${cls}" aria-label="Split view" aria-expanded="false">${SPLIT_SVG}</button>`;
 }
 // The mobile switcher's dedicated open/close button. It toggles the tab list and
 // carries a latest-wins notification dot (a child span) — amber when a background
@@ -180,22 +143,12 @@ export const TAB_HTML = `
   ${TAB_CHIP.close}
 </div>`;
 
-/** paintStatusDot applies a status dot's three orthogonal bits: data-status
- *  drives its appearance (idle / working / warning / failed / done / input /
- *  exited / crashed via CSS), the .wt-reports class controls its visibility, and
- *  `title` gives it a hover tooltip naming the state — the dots are decoration
- *  (aria-hidden), and a colour vocabulary that grew to eight states needs a way
- *  to be read rather than memorised. The tooltip wording is statusPhrase, the
- *  same source the tab's accessible name uses, so hover text and announced text
- *  cannot drift.
- *
- *  Visibility: the dot is hidden by default and shown once the session has
- *  reported activity (OSC 9;4 progress or a classified OSC 9 notification), so a
- *  plain shell's tabs stay clean and label-only while an agent's light up. The
- *  reveal is FLOORED by the status itself (statusRevealsDot) for the states that
- *  are self-evidently news — a plain shell that crashes never reported activity
- *  in its life, and hiding its red dot would hide the only signal it ever
- *  produced. */
+/** A status dot's three orthogonal bits: data-status drives its appearance, the
+ *  .wt-reports class its visibility, and `title` a tooltip worded by statusPhrase,
+ *  the source the tab's accessible name uses, so hover and announced text cannot
+ *  drift. Hidden until the session reports activity, so a plain shell's tabs stay
+ *  label-only; FLOORED by the status itself for the states that are news on their
+ *  own, since a plain shell that crashes never reported activity in its life. */
 export function paintStatusDot(el: HTMLElement, status: string, reports: boolean): void {
   const value = status || "idle";
   el.dataset["status"] = value;
@@ -203,16 +156,11 @@ export function paintStatusDot(el: HTMLElement, status: string, reports: boolean
   el.title = statusPhrase(value);
 }
 
-/** paintActivityMark applies the secondary mark's two bits: data-activity drives
- *  its appearance (working / waiting / input via CSS) and `title` gives it a
- *  hover tooltip, worded by activityPhrase so hover text and announced text
- *  cannot drift. No state REMOVES the attribute, which is what collapses the
- *  mark's footprint to zero.
- *
- *  The reveal is the mark's OWN state, deliberately not the status dot's
- *  reportsActivity gate: a background run is a fact about the session that is
- *  independent of whether its program ever spoke OSC 9, which is the whole point
- *  of a second mark. */
+/** The secondary mark's two bits: data-activity drives its appearance and `title`
+ *  a tooltip worded by activityPhrase. No state REMOVES the attribute, which is
+ *  what collapses the mark's footprint to zero. The reveal is the mark's OWN
+ *  state, not the status dot's reportsActivity gate: a background run is a fact
+ *  independent of whether the program ever spoke OSC 9. */
 export function paintActivityMark(el: HTMLElement, state: string, count: number): void {
   const phrase = activityPhrase(state, count);
   if (phrase === "") {

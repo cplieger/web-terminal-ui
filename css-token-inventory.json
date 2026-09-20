@@ -56,6 +56,8 @@
     "--wt-mark-gap",
     "--wt-mark-ink",
     "--wt-mark-size",
+    "--wt-split-gutter",
+    "--wt-split-ratio",
     "--wt-switcher-h"
   ],
   "referenced": [
@@ -114,6 +116,8 @@
     "--wt-mark-gap",
     "--wt-mark-ink",
     "--wt-mark-size",
+    "--wt-split-gutter",
+    "--wt-split-ratio",
     "--wt-switcher-h",
     "--wt-tabbar-h"
   ]

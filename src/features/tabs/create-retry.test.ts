@@ -36,6 +36,11 @@ function jsonResponse(body: unknown, status: number, headers?: Record<string, st
 // test that wants to stand at the boundary has to own Date.now rather than wait
 // out twenty real minutes.
 let now = 0;
+/** Where a scripted `at` lands: the page's clock, or a frame's when a test
+ *  mounts the terminal in one. */
+let setClock: (t: number) => void = (t) => {
+  now = t;
+};
 
 // POST bodies the server hands back, one per attempt; the last entry repeats once
 // the attempts outrun the script.
@@ -48,8 +53,13 @@ interface Refusal {
 }
 let script: Refusal[];
 let posts = 0;
+/** The ids of every DELETE /api/sessions/{id} the feature sent, in order. */
+let deletes: string[];
 // Armed by a test that wants the page torn down mid-wait.
 let destroyOnPost = 0;
+// Armed by a test that wants the first POST held open until it says so.
+let holdFirstPost = false;
+let releasePost: (() => void) | null = null;
 
 const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
@@ -63,6 +73,10 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
           ),
     );
   }
+  if (method === "DELETE") {
+    deletes.push(String(url).split("/").pop() ?? "");
+    return Promise.resolve(jsonResponse(null, 204));
+  }
   if (method !== "POST") {
     return Promise.resolve(jsonResponse([], 200)); // no live sessions: the bootstrap must create
   }
@@ -75,6 +89,13 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
       term = undefined;
     }, 0);
   }
+  if (holdFirstPost && posts === 1) {
+    return new Promise<Response>((res) => {
+      releasePost = () => {
+        res(jsonResponse({ id: "s-new", title: "", createdAt: "1", status: "idle" }, 201));
+      };
+    });
+  }
   const step = script[Math.min(posts - 1, script.length - 1)];
   if (!step) {
     return Promise.resolve(
@@ -82,7 +103,7 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
     );
   }
   if (step.at !== undefined) {
-    now = step.at;
+    setClock(step.at);
   }
   if (step.status < 400) {
     return Promise.resolve(
@@ -101,8 +122,14 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
 beforeEach(() => {
   fetchMock.mockClear();
   posts = 0;
+  deletes = [];
   destroyOnPost = 0;
+  holdFirstPost = false;
+  releasePost = null;
   now = 0;
+  setClock = (t) => {
+    now = t;
+  };
   script = [];
   vi.spyOn(Date, "now").mockImplementation(() => now);
   vi.stubGlobal("fetch", fetchMock);
@@ -113,6 +140,7 @@ beforeEach(() => {
 afterEach(() => {
   term?.destroy();
   term = undefined;
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -189,6 +217,44 @@ describe("session-create retry: the elapsed-time bound", () => {
     await settle();
     expect(posts).toBe(1);
     expect(toastText(root)).toBe("Couldn't open a terminal: slow down");
+  });
+});
+
+describe("session-create retry: the wait runs on the frame's clock", () => {
+  it("measures the budget by the frame the terminal is mounted in, not the importing page", async () => {
+    // The page's clock stands at 0 throughout; only the frame's advances, and it
+    // is the frame's that reaches the ceiling and ends the wait.
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const inner = frame.contentDocument;
+    const innerWin = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!inner || !innerWin) {
+      throw new Error("no frame document");
+    }
+    innerWin.fetch = fetchMock as unknown as typeof fetch;
+    let frameNow = 0;
+    vi.spyOn(innerWin.Date, "now").mockImplementation(() => frameNow);
+    setClock = (t) => {
+      frameNow = t;
+    };
+    script = [
+      { status: 503, message: "installing tools", retryAfter: "0", at: 10 },
+      { status: 503, message: "installing tools", retryAfter: "0", at: MAX_TOTAL_MS },
+    ];
+    const root = inner.createElement("div");
+    inner.body.appendChild(root);
+    try {
+      term = await mountTerminal(root, { features: () => [tabs()] });
+      await until(() => toastText(root).startsWith("Couldn't open a terminal"), 120);
+      await settle();
+      expect(posts).toBe(2);
+      expect(toastText(root)).toBe("Couldn't open a terminal: installing tools");
+      expect(now).toBe(0);
+    } finally {
+      term?.destroy();
+      term = undefined;
+      frame.remove();
+    }
   });
 });
 
@@ -337,6 +403,46 @@ describe("session-create retry: teardown", () => {
 
     await until(() => posts >= 1, 120);
     await settle();
+    expect(posts).toBe(1);
+  });
+
+  it("releases the wait timer when the page is destroyed under it", async () => {
+    // Abandoning the retry is not enough: a wait timer left pending holds the
+    // feature's closure for as long as the server's hint said, on a page that
+    // has already torn the feature down.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    script = [{ status: 503, message: "installing tools", retryAfter: "5", at: 10 }];
+    await mount();
+    for (let i = 0; i < 20 && posts < 1; i++) {
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    // The refusal has propagated and the five-second wait is armed.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(posts).toBe(1);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    term?.destroy();
+    term = undefined;
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(posts).toBe(1);
+  });
+
+  it("closes a session whose create finished after the page was destroyed, rather than attaching it", async () => {
+    // The POST is in flight when the page goes; the server still answers with a
+    // session. Attaching it would run a tab on chrome that no longer exists, and
+    // leaving it would run a shell nobody can ever close.
+    holdFirstPost = true;
+    await mount();
+    await until(() => releasePost !== null, 120);
+
+    term?.destroy();
+    term = undefined;
+    releasePost?.();
+    await settle();
+
+    expect(deletes).toEqual(["s-new"]);
     expect(posts).toBe(1);
   });
 });

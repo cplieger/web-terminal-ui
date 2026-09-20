@@ -1,12 +1,8 @@
-// Layout regions (design section 22.13).
-//
-// The kernel owns a small layout skeleton: named regions with fixed geometry,
-// stacking, and keyboard-inset behavior. Features contribute chrome into a
-// region via ctx.region(name, slot); the region owns position, spacing, stack
-// direction, z-order, and the keyboard lift, so features cannot invent their own
-// placement or collide. DOM order within a region always equals visual order, so
-// focus order never diverges from reading order (WCAG 2.4.3): each slot is a
-// wrapper inserted in a declared order, and a feature appends into its slot.
+// Layout regions: named containers with fixed geometry, stacking and the
+// keyboard-inset lift. A feature appends its chrome into a slot of one region
+// and decides nothing about placement, so features cannot collide. DOM order
+// within a region equals visual order (WCAG 2.4.3): slots are inserted in a
+// declared order.
 
 import type { RegionName, RegionSlot } from "./types.js";
 
@@ -66,9 +62,10 @@ export function createRegions(root: HTMLElement): Regions {
   const containers = new Map<RegionName, HTMLElement>();
   const slots = new Map<string, HTMLElement>(); // "region:slot" -> slot element
   const unlistedSeen = new Map<string, number>();
+  const doc = root.ownerDocument;
 
   for (const name of REGION_NAMES) {
-    const el = document.createElement("div");
+    const el = doc.createElement("div");
     el.className = `wt-region wt-region-${name}`;
     el.dataset["region"] = name;
     root.appendChild(el);
@@ -85,7 +82,7 @@ export function createRegions(root: HTMLElement): Regions {
     if (!container) {
       throw new Error(`web-terminal-ui: unknown region ${name}`);
     }
-    const el = document.createElement("div");
+    const el = doc.createElement("div");
     el.className = `wt-slot wt-slot-${slot}`;
     el.dataset["slot"] = slot;
     // Insert in declared slot order: before the first existing child whose rank

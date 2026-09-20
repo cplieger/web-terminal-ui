@@ -93,4 +93,40 @@ describe("animations feature", () => {
     drainDeferred();
     expect(mm.listenerCount()).toBe(0);
   });
+
+  it("asks the shell root's own window about reduced motion, not the importing one", () => {
+    // A same-origin iframe is a second document with a window of its own; a
+    // terminal mounted there follows that window's media query.
+    stubMatchMedia(false);
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!doc || !win) {
+      throw new Error("no frame document");
+    }
+    try {
+      const innerListeners = new Set<() => void>();
+      const innerMq: FakeMq = {
+        matches: true,
+        addEventListener: (_t, cb) => {
+          innerListeners.add(cb);
+        },
+        removeEventListener: (_t, cb) => {
+          innerListeners.delete(cb);
+        },
+      };
+      win.matchMedia = () => innerMq as unknown as MediaQueryList;
+      const root = doc.createElement("div");
+      doc.body.appendChild(root);
+      const ctx = { shell: { root }, defer: () => undefined } as unknown as TerminalContext;
+
+      animations().setup(ctx);
+
+      expect(root.classList.contains("wt-animate")).toBe(false);
+      expect(innerListeners.size).toBe(1);
+    } finally {
+      frame.remove();
+    }
+  });
 });

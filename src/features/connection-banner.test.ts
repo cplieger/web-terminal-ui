@@ -13,6 +13,7 @@ function fakeCtx(): {
   let handler: ((s: ConnState) => void) | undefined;
   const ctx = {
     region: () => slot,
+    shell: { root: slot },
     announce,
     on: (_e: string, fn: (s: ConnState) => void) => {
       handler = fn;
@@ -150,6 +151,7 @@ describe("connectionBanner: teardown gives the subscription back", () => {
     let handler: ((s: ConnState) => void) | undefined;
     const ctx = {
       region: () => slot,
+      shell: { root: slot },
       announce,
       on: (_e: string, fn: (s: ConnState) => void) => {
         handler = fn;

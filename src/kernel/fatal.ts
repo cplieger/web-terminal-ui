@@ -1,8 +1,6 @@
-// The startup-failure recovery surface and the loading-overlay fade, shared by
-// the synchronous `kernel-init` path and the asynchronous `feature-setup` path.
-
 import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
 import { reloadPage } from "./navigation.js";
+import { windowOf } from "./realm.js";
 
 /** Fade out and remove a consumer-supplied loading overlay. */
 export function fadeOutOverlay(ld: HTMLElement | undefined): void {
@@ -14,7 +12,7 @@ export function fadeOutOverlay(ld: HTMLElement | undefined): void {
     ld.remove();
   };
   ld.addEventListener("transitionend", removeOverlay, { once: true });
-  window.setTimeout(removeOverlay, 1500);
+  windowOf(ld.ownerDocument).setTimeout(removeOverlay, 1500);
 }
 
 export interface FatalPanelOptions {
@@ -60,7 +58,7 @@ export function renderFatalStartupInto(root: HTMLElement, opts: FatalPanelOption
   reloadButton.type = "button";
   reloadButton.textContent = STARTUP_FAILURE_COPY.reloadLabel;
   reloadButton.addEventListener("click", () => {
-    reloadPage();
+    reloadPage(windowOf(doc));
   });
   card.append(title, messageEl, reloadButton);
   surface.appendChild(card);

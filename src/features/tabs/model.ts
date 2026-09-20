@@ -1,6 +1,4 @@
-// The session MODEL half of the tabs feature: the wire type, the per-tab record,
-// the session REST client, the close-tombstone set and the pinned-name helpers.
-// No DOM and no kernel context; index.ts wires it over the chrome halves.
+// No DOM and no kernel context in this module; index.ts wires it over the chrome.
 
 import type { LineStore } from "@cplieger/web-terminal-engine";
 import type { SessionInfo } from "@cplieger/web-terminal-engine";
@@ -481,6 +479,14 @@ export function hasPinnedName(tab: Tab): boolean {
   return pinnedNameOf(tab) !== "";
 }
 
+/** The realm a session API runs in: the mounted window's `fetch`, its abort
+ *  signals and its clock, never the importing page's. */
+export interface SessionAPIRealm {
+  readonly fetch: typeof fetch;
+  readonly AbortSignal: typeof AbortSignal;
+  readonly Date: typeof Date;
+}
+
 /** The session REST client, bound to an apiBase. Every call is timeout-bounded:
  *  fetch has no default timeout, and a stalled-but-open server would leave a
  *  bootstrap await pending forever. */
@@ -525,7 +531,7 @@ function readPaneLayout(body: unknown): PaneLayout | null {
   }
   const rec = body as Record<string, unknown>;
   const side = (v: unknown): string | null | undefined =>
-    v === null || v === undefined ? null : typeof v === "string" ? v : undefined;
+    v === null ? null : typeof v === "string" ? v : undefined;
   const left = side(rec["left"]);
   const right = side(rec["right"]);
   const handle = rec["handle"];
@@ -598,7 +604,7 @@ const SERVER_MESSAGE_MAX_CHARS = 120;
  *  missing or unparseable value. Clamped so a buggy or hostile header cannot
  *  park the UI for hours, and floored at 0 so a date already in the past retries
  *  immediately rather than never. */
-function parseRetryAfter(header: string | null): number | undefined {
+function parseRetryAfter(header: string | null, now: number): number | undefined {
   if (header === null) {
     return undefined;
   }
@@ -613,7 +619,7 @@ function parseRetryAfter(header: string | null): number | undefined {
   if (Number.isNaN(when)) {
     return undefined;
   }
-  return Math.min(Math.max(when - Date.now(), 0), RETRY_AFTER_MAX_MS);
+  return Math.min(Math.max(when - now, 0), RETRY_AFTER_MAX_MS);
 }
 
 /** The error envelope's human-readable message, or undefined on any failure: the
@@ -638,21 +644,28 @@ async function readServerMessage(r: Response): Promise<string | undefined> {
 }
 
 /** Build the error for a failed session-API response. */
-async function sessionError(operation: string, r: Response): Promise<SessionAPIError> {
+async function failedResponse(
+  operation: string,
+  r: Response,
+  now: number,
+): Promise<SessionAPIError> {
   return new SessionAPIError(
     operation,
     r.status,
-    parseRetryAfter(r.headers.get("Retry-After")),
+    parseRetryAfter(r.headers.get("Retry-After"), now),
     await readServerMessage(r),
   );
 }
 
-export function createSessionAPI(apiBase: string): SessionAPI {
+export function createSessionAPI(apiBase: string, realm: SessionAPIRealm): SessionAPI {
+  const request = (url: string, init: RequestInit): Promise<Response> =>
+    realm.fetch(url, { ...init, signal: realm.AbortSignal.timeout(SESSION_API_TIMEOUT_MS) });
+  const sessionError = (operation: string, r: Response): Promise<SessionAPIError> =>
+    failedResponse(operation, r, realm.Date.now());
   return {
     async list(): Promise<SessionInfo[]> {
-      const r = await fetch(apiBase, {
+      const r = await request(apiBase, {
         headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
         throw await sessionError("list", r);
@@ -666,9 +679,8 @@ export function createSessionAPI(apiBase: string): SessionAPI {
       return data as SessionInfo[];
     },
     async create(): Promise<SessionInfo> {
-      const r = await fetch(apiBase, {
+      const r = await request(apiBase, {
         method: "POST",
-        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
         throw await sessionError("create", r);
@@ -676,9 +688,8 @@ export function createSessionAPI(apiBase: string): SessionAPI {
       return (await r.json()) as SessionInfo;
     },
     async close(id: string): Promise<void> {
-      const r = await fetch(`${apiBase}/${encodeURIComponent(id)}`, {
+      const r = await request(`${apiBase}/${encodeURIComponent(id)}`, {
         method: "DELETE",
-        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
         throw await sessionError("close", r);
@@ -687,20 +698,18 @@ export function createSessionAPI(apiBase: string): SessionAPI {
     // The user's pinned name. Not best-effort: the caller shows a failure and
     // rolls the optimistic label back, so both of these propagate.
     async setPinnedTitle(id: string, title: string): Promise<void> {
-      const r = await fetch(`${apiBase}/${encodeURIComponent(id)}/pinned-title`, {
+      const r = await request(`${apiBase}/${encodeURIComponent(id)}/pinned-title`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title }),
-        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
         throw await sessionError("set pinned title", r);
       }
     },
     async clearPinnedTitle(id: string): Promise<void> {
-      const r = await fetch(`${apiBase}/${encodeURIComponent(id)}/pinned-title`, {
+      const r = await request(`${apiBase}/${encodeURIComponent(id)}/pinned-title`, {
         method: "DELETE",
-        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
         throw await sessionError("clear pinned title", r);
@@ -709,20 +718,18 @@ export function createSessionAPI(apiBase: string): SessionAPI {
     // The shared display order. The path is a literal segment rather than an id,
     // so nothing is interpolated into it.
     async setOrder(ids: readonly string[]): Promise<void> {
-      const r = await fetch(`${apiBase}/order`, {
+      const r = await request(`${apiBase}/order`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ order: ids }),
-        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
         throw await sessionError("set order", r);
       }
     },
     async getLayout(): Promise<PaneLayout | null> {
-      const r = await fetch(`${apiBase}/layout`, {
+      const r = await request(`${apiBase}/layout`, {
         headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (r.status === 404) {
         return null;
@@ -737,11 +744,10 @@ export function createSessionAPI(apiBase: string): SessionAPI {
       return layout;
     },
     async setLayout(layout: PaneLayout): Promise<void> {
-      const r = await fetch(`${apiBase}/layout`, {
+      const r = await request(`${apiBase}/layout`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(layout),
-        signal: AbortSignal.timeout(SESSION_API_TIMEOUT_MS),
       });
       if (!r.ok) {
         throw await sessionError("set layout", r);
@@ -763,11 +769,14 @@ export interface Tombstones {
 
 const CLOSE_TOMBSTONE_MS = 15000;
 
-export function createTombstones(ttlMs: number = CLOSE_TOMBSTONE_MS): Tombstones {
+export function createTombstones(
+  clock: () => number,
+  ttlMs: number = CLOSE_TOMBSTONE_MS,
+): Tombstones {
   const recentlyClosed = new Map<string, number>();
   return {
     add(id: string): void {
-      const now = Date.now();
+      const now = clock();
       // Sweep entries whose window already elapsed (active() treats them as
       // untombstoned anyway) so the map cannot grow without bound over a long
       // session of opens/closes; then record this close.
@@ -783,7 +792,7 @@ export function createTombstones(ttlMs: number = CLOSE_TOMBSTONE_MS): Tombstones
       if (closedAt === undefined) {
         return false;
       }
-      if (Date.now() - closedAt < ttlMs) {
+      if (clock() - closedAt < ttlMs) {
         return true;
       }
       recentlyClosed.delete(id);
