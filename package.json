@@ -96,6 +96,7 @@
     "scaffold/",
     "LICENSE",
     "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
     "README.md",
     "!src/**/*.test.ts",
     "!src/**/*-setup.ts",
