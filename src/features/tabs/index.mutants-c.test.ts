@@ -13,9 +13,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "../../kernel/kernel.js";
-import type * as TabsModule from "./index.js";
-import type { TerminalFeature } from "../../kernel/types.js";
+import { tabs } from "./index.js";
+import type { PaneLayout } from "./model.js";
+import { mountTerminal } from "../../test-helpers/mount.js";
+import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 
@@ -28,6 +29,7 @@ function fakeMonitor(): {
   const subs = new Set<(s: SessionStatus) => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
+    scope: "shell",
     setup() {
       return {
         api: {
@@ -61,6 +63,7 @@ function fakeKeyboardToggle(): {
   let open = false;
   const feature: TerminalFeature<MobileToolbarApi> = {
     name: "mobileToolbar",
+    scope: "shell",
     setup() {
       return {
         api: {
@@ -78,78 +81,26 @@ function fakeKeyboardToggle(): {
   return { feature, isOpen: () => open };
 }
 
-const setSession = vi.fn<(id: string) => void>();
-const forgetSession = vi.fn<(id: string) => void>();
-const bind = vi.fn();
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("../../test-helpers/fake-engine.js");
+  return createEngineFake();
+});
+
+vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
+  const actual = await importActual<typeof Engine>();
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
+});
+
+const { setSession } = fake.connection;
 // A DISTINCT view per call, never one constant: the round trip under test is "the
 // position THIS tab saved comes back to THIS tab", and a double that answers the
 // same object for every tab passes just as well when the wrong tab's position is
 // handed back.
 let viewSeq = 0;
-const captureViewMemory = vi.fn(() => ({ abs: 100 + ++viewSeq, screenTop: -3, following: false }));
-const pendingRowCount = vi.fn(() => 0);
-const getHighestIndex = vi.fn(() => -1);
+const { bind, captureViewMemory, pendingRowCount, getHighestIndex } = fake.renderer;
 
-vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
-  const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    render: {
-      init: vi.fn(),
-      updateFontMetrics: vi.fn(),
-      setPredictedCursor: vi.fn(),
-      computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
-      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-      getHighestIndex,
-      pendingRowCount,
-      noteResumeBounds: vi.fn(),
-      handleScreen: vi.fn(),
-      handleScroll: vi.fn(),
-      updateReverseVideo: vi.fn(),
-      resetScrollback: vi.fn(),
-      resetScreen: vi.fn(),
-      dropBrowseCache: vi.fn(),
-      bind,
-      captureViewMemory,
-      boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
-    },
-    scroll: {
-      // Reached through viewport.ts's settle handler, which a real browser fires on
-      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
-      // real one delivers its first observation asynchronously, so every mount opens a
-      // transition that settles ~350ms later and pins to the bottom. Absent from the
-      // double, that settle throws out of a timer as an unhandled error.
-      stickToBottom: vi.fn(),
-      init: vi.fn(),
-      scrollToBottom: vi.fn(),
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-    },
-    connection: {
-      init: vi.fn(),
-      connect: vi.fn(),
-      sendBinary: vi.fn(() => true),
-      sendResize: vi.fn(),
-      sendEphemeral: vi.fn(() => true),
-      setClientFocus: vi.fn(),
-      reconnectNow: vi.fn(),
-      disconnect: vi.fn(),
-      setSession,
-      forgetSession,
-      serverEpochOf: vi.fn(() => 777),
-      adoptPersistedEpoch: vi.fn(),
-      currentSessionId: vi.fn(() => "unmanaged"),
-    },
-  };
-});
-
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let tabs: (typeof TabsModule)["tabs"];
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+let term: TerminalHandle | undefined;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -161,9 +112,17 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 let listBody: unknown[];
+/** The server's pane-layout record, as GET /api/sessions/layout answers it; the
+ *  default is a fresh server's, with no shown session. */
+let layoutBody: PaneLayout;
 let spawnSeq = 0;
-const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
+const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
+  if (String(url).endsWith("/layout")) {
+    return Promise.resolve(
+      method === "PUT" ? jsonResponse(null, 204) : jsonResponse(layoutBody, 200),
+    );
+  }
   if (method === "POST") {
     spawnSeq++;
     // createdAt is a year here (Date.parse of "1"/"2"/...), so a spawned session
@@ -189,26 +148,30 @@ const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
   return Promise.resolve(jsonResponse(listBody, 200));
 });
 
-beforeEach(async () => {
-  vi.resetModules();
-  setSession.mockClear();
-  forgetSession.mockClear();
-  bind.mockClear();
+beforeEach(() => {
+  fake.reset();
+  // vitest resets every spy to its construction default before each test; the
+  // answers this file depends on are re-declared so they are stated here.
+  captureViewMemory.mockImplementation(() => ({
+    abs: 100 + ++viewSeq,
+    screenTop: -3,
+    following: false,
+  }));
+  fake.connection.serverEpochOf.mockImplementation(() => 777);
+  fake.connection.currentSessionId.mockImplementation(() => "unmanaged");
   pendingRowCount.mockReturnValue(0);
   getHighestIndex.mockReturnValue(-1);
   fetchMock.mockClear();
   spawnSeq = 0;
   viewSeq = 0;
-  captureViewMemory.mockClear();
   listBody = [
     { id: "s1", title: "one", createdAt: "1", status: "idle" },
     { id: "s2", title: "two", createdAt: "2", status: "idle" },
   ];
+  layoutBody = { left: null, right: null, handle: 0.5, selected: "left", open: false };
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
   localStorage.clear();
-  ({ createTerminal } = await import("../../kernel/kernel.js"));
-  ({ tabs } = await import("./index.js"));
 });
 
 afterEach(() => {
@@ -268,7 +231,7 @@ async function mount(feature?: TerminalFeature<unknown>[]): Promise<Mounted> {
   const root = document.createElement("div");
   document.body.appendChild(root);
   const wanted = listBody.length;
-  term = createTerminal(root, { features: () => feature ?? [tabs()] });
+  term = await mountTerminal(root, { features: () => feature ?? [tabs()] });
   await until(() => root.querySelectorAll(".wt-tab").length === wanted);
   return {
     root,
@@ -1233,6 +1196,23 @@ describe("tabs: chrome that only a runtime change moves", () => {
 
     await vi.advanceTimersByTimeAsync(400);
     expect(fresh.classList.contains("wt-tab-enter")).toBe(false);
+  });
+
+  it("destroyed while a chip is still entering, it stops touching that chip", async () => {
+    const m = await mount();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    pick(m.root, ".wt-tab-new").click();
+    await vi.advanceTimersByTimeAsync(0);
+    const fresh = m.chips()[2];
+    if (!fresh) {
+      throw new Error("no third chip");
+    }
+    expect(fresh.classList.contains("wt-tab-enter")).toBe(true);
+
+    term?.destroy();
+    term = undefined;
+    await vi.advanceTimersByTimeAsync(400);
+    expect(fresh.classList.contains("wt-tab-enter")).toBe(true);
   });
 
   it("does not restart the deferred row clear when a collapse gesture lands on a collapsed list", async () => {

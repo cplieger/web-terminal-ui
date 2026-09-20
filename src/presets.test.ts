@@ -5,88 +5,42 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "./kernel/kernel.js";
-import type * as PresetModule from "./presets.js";
 import type { TerminalHandle } from "./kernel/types.js";
+import { presetTouch } from "./presets.js";
+import { mountTerminal } from "./test-helpers/mount.js";
 
-const sendBinary = vi.fn<(buf: Uint8Array) => boolean>(() => true);
-const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("./test-helpers/fake-engine.js");
+  return createEngineFake();
+});
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    render: {
-      init: vi.fn(),
-      updateFontMetrics: vi.fn(),
-      setPredictedCursor: vi.fn(),
-      computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
-      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-      getHighestIndex: vi.fn(() => -1),
-      pendingRowCount: vi.fn(() => 0),
-      noteResumeBounds: vi.fn(),
-      handleScreen: vi.fn(),
-      handleScroll: vi.fn(),
-      updateReverseVideo: vi.fn(),
-      resetScrollback: vi.fn(),
-      resetScreen: vi.fn(),
-      bind: vi.fn(),
-      boundStore: vi.fn(),
-    },
-    scroll: {
-      // Reached through viewport.ts's settle handler, which a real browser fires on
-      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
-      // real one delivers its first observation asynchronously, so every mount opens a
-      // transition that settles ~350ms later and pins to the bottom. Absent from the
-      // double, that settle throws out of a timer as an unhandled error.
-      stickToBottom: vi.fn(),
-      init: vi.fn(),
-      scrollToBottom: vi.fn(),
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-    },
-    connection: {
-      init: connectionInit,
-      connect: vi.fn(),
-      sendBinary,
-      sendResize: vi.fn(),
-      sendEphemeral: vi.fn(() => true),
-      setClientFocus: vi.fn(),
-      reconnectNow: vi.fn(),
-      disconnect: vi.fn(),
-    },
-  };
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let presetTouch: (typeof PresetModule)["presetTouch"];
+const { sendBinary } = fake.connection;
+
 const dec = new TextDecoder();
 const sentText = (): string => sendBinary.mock.calls.map((c) => dec.decode(c[0])).join("");
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-beforeEach(async () => {
-  vi.resetModules();
-  sendBinary.mockClear();
-  connectionInit.mockClear();
+beforeEach(() => {
+  fake.reset();
   document.body.replaceChildren();
-  ({ createTerminal } = await import("./kernel/kernel.js"));
-  ({ presetTouch } = await import("./presets.js"));
 });
 
-function mountTouch(): { root: HTMLElement; term: TerminalHandle } {
+async function mountTouch(): Promise<{ root: HTMLElement; term: TerminalHandle }> {
   const root = document.createElement("div");
   document.body.appendChild(root);
-  const term = createTerminal(root, { features: () => presetTouch() });
+  const term = await mountTerminal(root, { features: () => presetTouch() });
   return { root, term };
 }
 
 describe("presetTouch composition", () => {
   it("assembles every feature's chrome into its region", async () => {
-    const { root } = mountTouch();
+    const { root } = await mountTouch();
     await tick();
     expect(root.querySelector(".key-toolbar")).not.toBeNull(); // mobileToolbar
     expect(root.querySelector(".wt-scroll-bottom")).not.toBeNull(); // scrollToBottom
@@ -95,7 +49,7 @@ describe("presetTouch composition", () => {
   });
 
   it("stacks the key toolbar and scroll button in the same thumb-zone region", async () => {
-    const { root } = mountTouch();
+    const { root } = await mountTouch();
     await tick();
     const region = root.querySelector<HTMLElement>(".wt-region-bottom-inset-end");
     expect(region).not.toBeNull();
@@ -115,7 +69,7 @@ describe("presetTouch composition", () => {
       value: { readText: () => Promise.resolve("echo hi\nrm x") },
     });
     try {
-      const { root } = mountTouch();
+      const { root } = await mountTouch();
       await tick();
       const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
       ta.dispatchEvent(
@@ -137,7 +91,7 @@ describe("presetTouch composition", () => {
   });
 
   it("destroy tears down all feature chrome", async () => {
-    const { root, term } = mountTouch();
+    const { root, term } = await mountTouch();
     await tick();
     expect(root.querySelector(".key-toolbar")).not.toBeNull();
     term.destroy();

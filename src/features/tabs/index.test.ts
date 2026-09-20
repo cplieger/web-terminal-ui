@@ -7,9 +7,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "../../kernel/kernel.js";
-import type * as TabsModule from "./index.js";
-import type { TerminalFeature } from "../../kernel/types.js";
+import { tabs } from "./index.js";
+import type { PaneLayout } from "./model.js";
+import { mountTerminal } from "../../test-helpers/mount.js";
+import type { ShellContext, TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // A plain string constant, so reading it through a separate module instance than
@@ -40,6 +41,7 @@ function fakeMonitor(): {
   const openSubs = new Set<() => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
+    scope: "shell",
     setup() {
       return {
         api: {
@@ -80,6 +82,7 @@ function fakeMonitor(): {
 function snapshotMonitor(snapshot: readonly SessionStatus[]): TerminalFeature<ActivityMonitorApi> {
   return {
     name: "activityMonitor",
+    scope: "shell",
     setup() {
       return {
         api: {
@@ -108,6 +111,7 @@ function fakeKeyboardToggle(): {
   let open = false;
   const feature: TerminalFeature<MobileToolbarApi> = {
     name: "mobileToolbar",
+    scope: "shell",
     setup() {
       return {
         api: {
@@ -125,100 +129,29 @@ function fakeKeyboardToggle(): {
   return { feature, isOpen: () => open };
 }
 
-const setSession = vi.fn<(id: string) => void>();
-const forgetSession = vi.fn<(id: string) => void>();
-const bind = vi.fn();
-// The renderer owns the abs<->pixel mapping, so per-tab view memory is captured
-// through it. Returns a real ViewMemory shape (not null) so the switch assertions
-// below can prove the SAVED view of the outgoing tab is the one handed back to
-// bind for the incoming one — the round trip is the behavior, and a null-returning
-// double would let a broken round trip pass.
-const captureViewMemory = vi.fn(() => ({ abs: 7, screenTop: -3, following: false }));
-// The two render facts the catching-up cue is computed from. Hoisted out of the
-// factory below (like `bind` above) so a test can say "this tab has a warm store
-// and a queue this deep" and the cue's own arithmetic decides the rest; beforeEach
-// puts both back to the empty-store defaults every other test assumes.
-const pendingRowCount = vi.fn(() => 0);
-const getHighestIndex = vi.fn(() => -1);
-
-// getMouseMode has to come through the mock factory rather than a vi.spyOn on the
-// real namespace: an ESM module namespace object is not configurable, so
-// `vi.spyOn(engine.modes, "getMouseMode")` throws "Module namespace is not
-// configurable in ESM" in a real browser (the node transform used to rewrite it
-// into something patchable). The default answers 0 — no mouse-mode application —
-// which is what `...actual` used to give.
-const getMouseMode = vi.fn<() => number>(() => 0);
+// getMouseMode answers 0 (no mouse-mode application) unless a test says otherwise;
+// it is a fake-level override because the swipe gate reads it through `ctx.modes`.
+const getMouseMode = vi.hoisted(() => vi.fn<() => number>(() => 0));
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("../../test-helpers/fake-engine.js");
+  return createEngineFake({ modes: { getMouseMode } });
+});
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    modes: { ...actual.modes, getMouseMode },
-    render: {
-      init: vi.fn(),
-      updateFontMetrics: vi.fn(),
-      setPredictedCursor: vi.fn(),
-      computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
-      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-      getHighestIndex,
-      pendingRowCount,
-      noteResumeBounds: vi.fn(),
-      handleScreen: vi.fn(),
-      handleScroll: vi.fn(),
-      updateReverseVideo: vi.fn(),
-      resetScrollback: vi.fn(),
-      resetScreen: vi.fn(),
-      // Only reached by the kernel's own `freeze` handler, which a tabs test
-      // dispatches when it checks that freezing a background tab does NOT clear
-      // the attention surfaces.
-      dropBrowseCache: vi.fn(),
-      bind,
-      captureViewMemory,
-      boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
-    },
-    scroll: {
-      // Reached through viewport.ts's settle handler, which a real browser fires on
-      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
-      // real one delivers its first observation asynchronously, so every mount opens a
-      // transition that settles ~350ms later and pins to the bottom. Absent from the
-      // double, that settle throws out of a timer as an unhandled error.
-      stickToBottom: vi.fn(),
-      init: vi.fn(),
-      scrollToBottom: vi.fn(),
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-    },
-    connection: {
-      init: vi.fn(),
-      connect: vi.fn(),
-      sendBinary: vi.fn(() => true),
-      sendResize: vi.fn(),
-      sendEphemeral: vi.fn(() => true),
-      setClientFocus: vi.fn(),
-      reconnectNow: vi.fn(),
-      disconnect: vi.fn(),
-      setSession,
-      forgetSession,
-      // Persistence reads the epoch a session's content belongs to and seeds it
-      // back on a hydrate; a non-zero epoch is what makes a stored snapshot
-      // usable at all, so the fake reports one.
-      serverEpochOf: vi.fn(() => 777),
-      adoptPersistedEpoch: vi.fn(),
-      currentSessionId: vi.fn(() => "unmanaged"),
-    },
-  };
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let tabs: (typeof TabsModule)["tabs"];
-// Track the created terminal so afterEach can destroy it: tabs without an
-// activityMonitor starts a polling setInterval, which must be cleared between
-// tests (destroy() runs the feature teardown that clears it).
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+const { setSession } = fake.connection;
+// The renderer owns the abs<->pixel mapping, so per-tab view memory is captured
+// through it. Returns a real ViewMemory shape (not null) so the switch assertions
+// below can prove the SAVED view of the outgoing tab is the one handed back to
+// bind for the incoming one: the round trip is the behavior, and a null-returning
+// double would let a broken round trip pass.
+const { bind, captureViewMemory, pendingRowCount, getHighestIndex } = fake.renderer;
+
+let term: TerminalHandle | undefined;
 
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return {
@@ -236,8 +169,20 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 }
 
 let listBody: unknown[];
-const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
+/** The server's pane-layout record, as GET /api/sessions/layout answers it; the
+ *  default is a fresh server's, with no shown session. */
+let layoutBody: PaneLayout;
+/** Every record the feature PUT, oldest first. */
+let layoutWrites: PaneLayout[];
+const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
+  if (String(url).endsWith("/layout")) {
+    if (method === "PUT") {
+      layoutWrites.push(JSON.parse(String(init?.body)) as PaneLayout);
+      return Promise.resolve(jsonResponse(null, 204));
+    }
+    return Promise.resolve(jsonResponse(layoutBody, 200));
+  }
   if (method === "POST") {
     return Promise.resolve(
       jsonResponse({ id: "s-new", title: "", createdAt: "3", status: "idle" }, 201),
@@ -249,25 +194,23 @@ const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
   return Promise.resolve(jsonResponse(listBody, 200));
 });
 
-beforeEach(async () => {
-  vi.resetModules();
-  setSession.mockClear();
-  forgetSession.mockClear();
-  // mockReset strips the factory default; restore "no mouse-mode application".
+beforeEach(() => {
+  fake.reset();
+  // vitest resets every spy to its construction default before each test; the
+  // view memory and the mouse mode are re-declared so the defaults are stated.
+  captureViewMemory.mockImplementation(() => ({ abs: 7, screenTop: -3, following: false }));
+  fake.connection.serverEpochOf.mockImplementation(() => 777);
+  fake.connection.currentSessionId.mockImplementation(() => "unmanaged");
   getMouseMode.mockReturnValue(0);
-  bind.mockClear();
-  pendingRowCount.mockReturnValue(0);
-  getHighestIndex.mockReturnValue(-1);
-  fetchMock.mockClear();
   listBody = [
     { id: "s1", title: "one", createdAt: "1", status: "idle" },
     { id: "s2", title: "two", createdAt: "2", status: "idle" },
   ];
+  layoutBody = { left: null, right: null, handle: 0.5, selected: "left", open: false };
+  layoutWrites = [];
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
-  localStorage.clear(); // isolate the persisted active-tab id between tests
-  ({ createTerminal } = await import("../../kernel/kernel.js"));
-  ({ tabs } = await import("./index.js"));
+  localStorage.clear();
 });
 
 // Page visibility is a FIXTURE here, not ambient state: two suites decide behaviour
@@ -392,7 +335,7 @@ describe("tabs feature", () => {
   it("builds a tab per listed session with the first active and connects to it", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEls = root.querySelectorAll(".wt-tab");
@@ -411,7 +354,7 @@ describe("tabs feature", () => {
     // is observable through eviction (12 lines committed -> oldest 4 gone).
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()], scrollbackLines: 8 });
+    term = await mountTerminal(root, { features: () => [tabs()], scrollbackLines: 8 });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const store = bind.mock.calls[0]?.[0] as InstanceType<typeof Engine.LineStore>;
@@ -446,7 +389,7 @@ describe("tabs feature", () => {
 
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [tabs()],
       persistScrollback: {
         load: (id) => entries.get(id) ?? null,
@@ -465,12 +408,12 @@ describe("tabs feature", () => {
     expect(store.getLine(500)?.[0]?.t).toBe("restored");
   });
 
-  it("restores the previously-active tab on reload from localStorage", async () => {
+  it("restores the previously-active tab on reload from the server's layout record", async () => {
     // A prior session left s2 active; a reload must reopen s2, not the oldest s1.
-    localStorage.setItem("wt-active-session", "s2");
+    layoutBody = { left: "s2", right: null, handle: 0.5, selected: "left", open: false };
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEls = root.querySelectorAll(".wt-tab");
@@ -479,44 +422,40 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s2");
   });
 
-  // The two cases below are the WRITE half of the restore above, and until they
-  // existed nothing in the repo had one: the record is written from two places
-  // (the bootstrap ladder and every switch), both inside a try/catch, and both
-  // writes could be deleted outright with the whole suite still green. A refused
-  // write is pinned further down ("still switches tabs when the active-tab record
-  // cannot be written"), but surviving an exception says nothing about a
-  // successful write ever happening. localStorage is the browser's own, and the
-  // beforeEach clears it, so what these read back can only have come from the
-  // feature under test in this test.
+  // The WRITE half of the restore above: the record is written on every switch
+  // and never by a read, so what the server holds after a boot and after a click
+  // can only have come from the feature under test.
 
-  it("records the tab the bootstrap activated, so a first reload has an id to restore", async () => {
-    // Storage starts empty here: no saved id, so the ladder falls to the oldest
-    // live tab and s1 under the key is the boot path's own write.
+  it("does not write the record back on a read: a boot that shows the record's tab sends no PUT", async () => {
+    layoutBody = { left: "s1", right: null, handle: 0.5, selected: "left", open: false };
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    await new Promise((r) => setTimeout(r, 0));
 
     expect(root.querySelectorAll(".wt-tab")[0]?.classList.contains("wt-tab-active")).toBe(true);
-    expect(localStorage.getItem("wt-active-session")).toBe("s1");
+    expect(layoutWrites).toEqual([]);
   });
 
-  it("records the tab a switch moved to, not the one the page opened on", async () => {
-    // Seeded with s1 — the id the ladder lands on anyway — so this case pins the
-    // SWITCH's write and nothing else: drop it and storage still says s1 while s2
-    // is the tab on screen. Every other witness of a switch (the renderer bind,
-    // the WS reconnect, the active class) is unchanged by a missing write, which
-    // is how four mutants lived here.
-    localStorage.setItem("wt-active-session", "s1");
+  it("records the tab a switch moved to, as the shown left tab of a closed split", async () => {
+    // Seeded with s1, the id the ladder lands on anyway, so this case pins the
+    // SWITCH's write and nothing else. Every other witness of a switch (the
+    // renderer bind, the WS reconnect, the active class) is unchanged by a missing
+    // write.
+    layoutBody = { left: "s1", right: null, handle: 0.5, selected: "left", open: false };
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
+    await until(() => layoutWrites.length > 0);
 
     expect(root.querySelectorAll(".wt-tab")[1]?.classList.contains("wt-tab-active")).toBe(true);
-    expect(localStorage.getItem("wt-active-session")).toBe("s2");
+    expect(layoutWrites).toEqual([
+      { left: "s2", right: null, handle: 0.5, selected: "left", open: false },
+    ]);
   });
 
   it("restores the saved active tab when the status snapshot wins the boot race", async () => {
@@ -527,14 +466,16 @@ describe("tabs feature", () => {
     // FIRST of those events — a one-tab view — activated it, and the bootstrap
     // ladder found activeId already set and returned before ever reading the saved
     // id. Every reload landed on the oldest tab.
-    localStorage.setItem("wt-active-session", "s2");
+    layoutBody = { left: "s2", right: null, handle: 0.5, selected: "left", open: false };
     const monitor = snapshotMonitor([
       { id: "s1", status: "idle", title: "one", createdAt: "1" },
       { id: "s2", status: "idle", title: "two", createdAt: "2" },
     ]);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [monitor, tabs({ activityMonitor: monitor })] });
+    term = await mountTerminal(root, {
+      features: () => [monitor, tabs({ activityMonitor: monitor })],
+    });
     await until(() => root.querySelectorAll(".wt-tab").length >= 2);
     // Let the bootstrap's list round-trip settle, which is what chooses the tab.
     await new Promise((r) => setTimeout(r, 0));
@@ -556,17 +497,19 @@ describe("tabs feature", () => {
     //
     // This is the path ensureActive's `started` gate must NOT close, and the
     // reason `started` is set on every exit from the bootstrap rather than only
-    // the successful one. Two rejections, so the shared fetch mock's base
-    // implementation is left intact for the rest of the suite.
+    // the successful one. Three rejections (the list, the layout record read
+    // beside it, and the create), so the shared fetch mock's base implementation
+    // is left intact for the rest of the suite.
+    fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
-    await until(() => fetchMock.mock.calls.length >= 2);
+    await until(() => fetchMock.mock.calls.length >= 3);
     await new Promise((r) => setTimeout(r, 0));
     expect(root.querySelectorAll(".wt-tab").length).toBe(0);
     expect(setSession).not.toHaveBeenCalled();
@@ -580,10 +523,10 @@ describe("tabs feature", () => {
 
   it("falls back to the oldest tab when the saved active id no longer exists", async () => {
     // The saved tab was closed before the reload; activate the oldest instead.
-    localStorage.setItem("wt-active-session", "s-gone");
+    layoutBody = { left: "s-gone", right: null, handle: 0.5, selected: "left", open: false };
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEls = root.querySelectorAll(".wt-tab");
@@ -598,7 +541,7 @@ describe("tabs feature", () => {
     listBody = [{ id: "s1", title: "", createdAt: "1", status: "exited" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     expect(setSession).toHaveBeenCalledWith("s-new");
@@ -614,7 +557,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     expect(setSession).toHaveBeenCalledWith("s2");
@@ -623,14 +566,14 @@ describe("tabs feature", () => {
   });
 
   it("ignores a saved active id whose session has exited (no reload-onto-a-corpse)", async () => {
-    localStorage.setItem("wt-active-session", "s1");
+    layoutBody = { left: "s1", right: null, handle: 0.5, selected: "left", open: false };
     listBody = [
       { id: "s1", title: "dead", createdAt: "1", status: "exited" },
       { id: "s2", title: "alive", createdAt: "2", status: "idle" },
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     expect(setSession).toHaveBeenCalledWith("s2");
@@ -654,7 +597,7 @@ describe("tabs feature", () => {
     );
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => setSession.mock.calls.length > 0);
 
     expect(setSession).toHaveBeenCalledWith("s1");
@@ -663,7 +606,7 @@ describe("tabs feature", () => {
   it("switches to another tab: re-points the renderer and reconnects the WS", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     setSession.mockClear();
     bind.mockClear();
@@ -680,7 +623,7 @@ describe("tabs feature", () => {
   it("creates a new tab via + and switches to it", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     root.querySelector<HTMLElement>(".wt-tab-new")?.click();
@@ -698,7 +641,7 @@ describe("tabs feature", () => {
     // that acknowledged nothing on mousedown.
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const plus = root.querySelector<HTMLElement>(".wt-tab-new");
@@ -737,7 +680,7 @@ describe("tabs feature", () => {
     );
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const plus = root.querySelector<HTMLElement>(".wt-tab-new");
@@ -760,7 +703,7 @@ describe("tabs feature", () => {
   it("hands the keyboard back to the terminal when a press re-selects the active tab", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const input = root.querySelector<HTMLElement>(".term-input");
@@ -794,7 +737,7 @@ describe("tabs feature", () => {
     );
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const input = root.querySelector<HTMLElement>(".term-input");
@@ -823,7 +766,7 @@ describe("tabs feature", () => {
   it("renders the + button as a fixed bar item outside the scrolling tab list", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const scroller = root.querySelector(".wt-tab-scroll");
@@ -842,7 +785,7 @@ describe("tabs feature", () => {
   it("keeps a tab's dot hidden until its session reports activity (default)", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // The listed sessions carry no reportsActivity flag: evidence-driven
@@ -855,7 +798,7 @@ describe("tabs feature", () => {
   it("shows the idle dot from tab creation with presumeReports (agent shell)", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs({ presumeReports: true })] });
+    term = await mountTerminal(root, { features: () => [tabs({ presumeReports: true })] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // An agent shell presumes every session reports (presetAgentTabbed): the
@@ -870,7 +813,7 @@ describe("tabs feature", () => {
   it("closes a tab on middle-click", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
@@ -898,7 +841,9 @@ describe("tabs feature", () => {
     ]);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [monitor, tabs({ activityMonitor: monitor })] });
+    term = await mountTerminal(root, {
+      features: () => [monitor, tabs({ activityMonitor: monitor })],
+    });
     await until(() => root.querySelectorAll(".wt-tab").length >= 2);
     // Give the initial list loop a turn to (wrongly) add duplicates.
     await new Promise((r) => setTimeout(r, 0));
@@ -911,7 +856,7 @@ describe("tabs feature", () => {
     listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
 
     fetchMock.mockClear();
@@ -954,7 +899,7 @@ describe("tabs feature", () => {
   it("opens a right-click context menu on a tab with the move and close actions", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const menu = root.querySelector(".wt-tab-menu");
@@ -995,7 +940,7 @@ describe("tabs feature", () => {
   it("manages a roving tabindex: exactly the selected tab is in the Tab order", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEls = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
@@ -1012,7 +957,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     const tabEls = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
@@ -1039,7 +984,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     const tabEls = [...root.querySelectorAll<HTMLElement>(".wt-tab")];
@@ -1052,7 +997,7 @@ describe("tabs feature", () => {
   it("Delete closes the focused tab", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
@@ -1071,7 +1016,7 @@ describe("tabs feature", () => {
     const feature = tabs();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [feature] });
+    term = await mountTerminal(root, { features: () => [feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     // "Move right" on the first tab moves it exactly one slot.
@@ -1100,7 +1045,7 @@ describe("tabs feature", () => {
   it("swallows a tab drop rather than letting the browser act on the payload", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const tabEl = root.querySelector<HTMLElement>(".wt-tab");
@@ -1139,7 +1084,7 @@ describe("tabs feature", () => {
   it("announces a tab move on the polite live region", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     menuItem(openTabMenu(root, 0), "Move right")?.click();
@@ -1157,7 +1102,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     const items = openTabMenu(root, 2);
@@ -1168,7 +1113,7 @@ describe("tabs feature", () => {
   it("survives the terminal auto-scrolling under it, and closes when the strip scrolls", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const menu = root.querySelector(".wt-tab-menu");
@@ -1195,7 +1140,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     fetchMock.mockClear();
@@ -1230,7 +1175,7 @@ describe("tabs feature", () => {
     listBody = [{ id: "s1", title: "", createdAt: "1", status: "idle" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
@@ -1270,7 +1215,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     fetchMock.mockClear();
@@ -1291,7 +1236,7 @@ describe("tabs feature", () => {
     vi.stubGlobal("confirm", () => true);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
@@ -1310,7 +1255,7 @@ describe("tabs feature", () => {
     vi.stubGlobal("confirm", () => false);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     fetchMock.mockClear();
@@ -1327,7 +1272,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
@@ -1343,7 +1288,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
@@ -1358,7 +1303,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
@@ -1386,7 +1331,7 @@ describe("tabs feature", () => {
     const feature = tabs();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [feature] });
+    term = await mountTerminal(root, { features: () => [feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     const labels = (): (string | null)[] =>
       [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
@@ -1404,7 +1349,7 @@ describe("tabs feature", () => {
     listBody = [];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
 
     expect(root.querySelectorAll(".wt-tab").length).toBe(1);
@@ -1416,7 +1361,7 @@ describe("tabs feature", () => {
   it("renders the mobile bar reflecting the active tab, with a close button and no position counter", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     expect(root.querySelector(".wt-switcher-label")?.textContent).toBe("one");
@@ -1434,7 +1379,7 @@ describe("tabs feature", () => {
   it("expands the bar to list the other tabs; a row selects it and collapses", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const switcher = root.querySelector(".wt-switcher");
@@ -1463,7 +1408,7 @@ describe("tabs feature", () => {
     const feature = tabs();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [feature] });
+    term = await mountTerminal(root, { features: () => [feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === 4);
 
     // Make s2 active, then open the list: it should read as the circular queue
@@ -1478,7 +1423,7 @@ describe("tabs feature", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1501,7 +1446,7 @@ describe("tabs feature", () => {
   it("closes a tab from an expanded list row (DELETE)", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     root.querySelector<HTMLElement>(".wt-switcher-current")?.click(); // expand
@@ -1518,7 +1463,7 @@ describe("tabs feature", () => {
   it("collapses the expanded list on a second tap", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const switcher = root.querySelector(".wt-switcher");
@@ -1532,7 +1477,7 @@ describe("tabs feature", () => {
   it("switches tabs on a horizontal swipe of the switcher bar", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const cur = root.querySelector<HTMLElement>(".wt-switcher-current");
@@ -1547,7 +1492,7 @@ describe("tabs feature", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1570,7 +1515,7 @@ describe("tabs feature", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1596,7 +1541,7 @@ describe("tabs feature", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1625,7 +1570,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const feature = tabs({ activityMonitor: monitor.feature });
-    term = createTerminal(root, { features: () => [monitor.feature, feature] });
+    term = await mountTerminal(root, { features: () => [monitor.feature, feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
@@ -1650,7 +1595,7 @@ describe("tabs feature", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1677,7 +1622,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
@@ -1697,7 +1642,7 @@ describe("tabs feature", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const feature = tabs({ activityMonitor: monitor.feature });
-    term = createTerminal(root, { features: () => [monitor.feature, feature] });
+    term = await mountTerminal(root, { features: () => [monitor.feature, feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
@@ -1711,7 +1656,7 @@ describe("tabs feature", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1731,7 +1676,7 @@ describe("tabs feature", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1751,7 +1696,7 @@ describe("tabs feature", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1773,7 +1718,7 @@ describe("tabs feature", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1793,7 +1738,7 @@ describe("tabs feature", () => {
   it("toggles the switcher list closed when the switch button is clicked while open", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const switcher = root.querySelector(".wt-switcher");
@@ -1815,7 +1760,7 @@ describe("tabs feature", () => {
   it("arms the catching-up cue when a switch lands on a tab with nothing cached", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const cue = root.querySelector(".wt-catchup");
@@ -1833,7 +1778,7 @@ describe("tabs feature", () => {
   it("polls the session list to update dots and drop reaped tabs without activityMonitor", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs({ pollMs: 10 })] });
+    term = await mountTerminal(root, { features: () => [tabs({ pollMs: 10 })] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const s2dot = (): HTMLElement | undefined =>
@@ -1858,7 +1803,7 @@ describe("tabs feature", () => {
   it("carries a desktop-strip keyboard button, hidden without a keyboardToggle", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // The desktop strip carries its own keyboard button (like the switcher's):
@@ -1881,7 +1826,7 @@ describe("tabs feature", () => {
   it("maps a vertical wheel over the bar to horizontal tab-list scrolling", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
@@ -1929,7 +1874,7 @@ describe("tabs feature", () => {
     const kbt = fakeKeyboardToggle();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1952,7 +1897,7 @@ describe("tabs feature", () => {
     const kbt = fakeKeyboardToggle();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -1993,7 +1938,7 @@ describe("tabs feature", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // The bootstrap survived it: an unreadable saved id falls back to the oldest
@@ -2013,7 +1958,7 @@ describe("tabs feature", () => {
     stubHostileStorage();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     setSession.mockClear();
 
@@ -2053,7 +1998,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
 
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 200);
     expect(posts).toBe(3);
@@ -2073,7 +2018,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
 
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
 
     // The host's own words reach the page; the library never hardcodes "tools",
     // which is a web-terminal-kiro concept it knows nothing about.
@@ -2094,7 +2039,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
 
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
 
     await until(() => posts > 0, 200);
     await new Promise((r) => setTimeout(r, 20));
@@ -2112,7 +2057,7 @@ describe("tabs feature: stream-open reconcile (manager-restart zombie tabs)", ()
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -2179,7 +2124,7 @@ describe("tabs feature: boot race (stream-open reconcile vs bootstrap create)", 
 
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
 
@@ -2201,7 +2146,7 @@ describe("tabs feature: boot race (stream-open reconcile vs bootstrap create)", 
 // notification, the aggregate cue's allowed set, and the accessible name.
 // Driven through the real feature in a real browser, so what is asserted is the
 // DOM a browser does paint.
-describe("tabs OSC 9 status chrome", () => {
+describe("tabs OSC 9 status chrome", async () => {
   /** Build a terminal with a fake status monitor and wait for both tabs. */
   async function withMonitor(
     opts: Parameters<typeof tabs>[0] = {},
@@ -2209,7 +2154,7 @@ describe("tabs OSC 9 status chrome", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ ...opts, activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -2345,6 +2290,10 @@ describe("tabs OSC 9 status chrome", () => {
       // states paint it again without needing a fresh report.
       monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1" });
       expect(tabBar(root, 0)?.style.width, status).toBe("72%");
+
+      term?.destroy();
+      term = undefined;
+      root.remove();
     }
   });
 
@@ -2354,6 +2303,10 @@ describe("tabs OSC 9 status chrome", () => {
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: 40 });
       expect(tabBar(root, 0)?.hidden, status).toBe(false);
       expect(tabBar(root, 0)?.style.width, status).toBe("40%");
+
+      term?.destroy();
+      term = undefined;
+      root.remove();
     }
   });
 
@@ -2454,8 +2407,8 @@ describe("tabs OSC 9 status chrome", () => {
     // The single-session case, and the one the out-of-page surfaces exist for: with
     // one tab that tab is necessarily the active one, so an acknowledgement keyed on
     // "is this the active tab" alone swallowed the cue of the very session the user
-    // left running. notify.ts states the same rule for notifications; these surfaces
-    // now read it too.
+    // left running. kernel/notify.ts states the same rule for notifications; these
+    // surfaces read it too.
     document.title = "Host page";
     const { root, monitor } = await withMonitor();
 
@@ -2512,8 +2465,7 @@ describe("tabs OSC 9 status chrome", () => {
       expect(iconHref()).toBe("/favicon.svg");
 
       // A bfcache entry fires the same event and that page comes BACK, so the
-      // fold has to re-run rather than be trusted: the sinks are change-gated on
-      // the last applied value, so nothing else would repaint the cue.
+      // cue this feature reported is repainted rather than lost.
       const restored = new Event("pageshow");
       Object.defineProperty(restored, "persisted", { value: true });
       window.dispatchEvent(restored);
@@ -2626,7 +2578,7 @@ describe("tabs secondary activity mark", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
@@ -2797,41 +2749,66 @@ describe("tabs secondary activity mark", () => {
   });
 });
 
-// The OSC 9 Form B notification, wired through the real feature. The policy
-// itself is unit-tested in notify.test.ts; these pin that the feature feeds it
-// the right session/visibility view and the right gesture.
+// The OSC 9 notification, wired through the real feature and the shell's one
+// notifier (ctx.shell.notifications). The policy itself is unit-tested in
+// kernel/notify.test.ts; these pin that the feature feeds it the right
+// session/visibility view, arms it on a reporting session and reports the bar
+// press as the gesture.
 describe("tabs OSC 9 notifications", () => {
-  /** A stubbed browser Notification API: records constructions, and lets a test
-   *  choose the permission state and observe a permission request. */
+  /** A stubbed browser Notification API: records constructions under a chosen
+   *  permission state. */
   function stubNotification(permission: string): {
     posts: { title: string; body: string | undefined }[];
-    requestPermission: ReturnType<typeof vi.fn>;
   } {
     const posts: { title: string; body: string | undefined }[] = [];
-    const requestPermission = vi.fn();
     class FakeNotification {
       static permission = permission;
-      static requestPermission = requestPermission;
       constructor(title: string, options?: { body?: string }) {
         posts.push({ title, body: options?.body });
       }
     }
     vi.stubGlobal("Notification", FakeNotification);
-    return { posts, requestPermission };
+    return { posts };
   }
-  afterEach(() => {
+  /** A shell-scoped feature that captures the shell the tabs feature reports to. */
+  function shellProbe(): { feature: TerminalFeature<void>; shell: () => ShellContext } {
+    let captured: ShellContext | undefined;
+    const feature: TerminalFeature<void> = {
+      name: "shell-probe",
+      scope: "shell",
+      setup(ctx) {
+        captured = ctx.shell;
+        return { api: undefined, teardown: () => undefined };
+      },
+    };
+    return {
+      feature,
+      shell: () => {
+        if (!captured) {
+          throw new Error("the probe feature never ran");
+        }
+        return captured;
+      },
+    };
+  }
+  afterEach(async () => {
     setVisibility("visible");
   });
 
-  async function boot(): Promise<{ root: HTMLElement; monitor: ReturnType<typeof fakeMonitor> }> {
+  async function boot(): Promise<{
+    root: HTMLElement;
+    monitor: ReturnType<typeof fakeMonitor>;
+    shell: () => ShellContext;
+  }> {
     const monitor = fakeMonitor();
+    const probe = shellProbe();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
-      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    term = await mountTerminal(root, {
+      features: () => [probe.feature, monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
-    return { root, monitor };
+    return { root, monitor, shell: probe.shell };
   }
 
   it("posts a background session's notification", async () => {
@@ -2880,6 +2857,33 @@ describe("tabs OSC 9 notifications", () => {
     expect(posts).toEqual([{ title: "one", body: "Response complete" }]);
   });
 
+  it("lets a closed session's id notify again from sequence one", async () => {
+    // The dedupe cursor follows the tab out: a recreated id is a new session, not
+    // one muted up to the sequence the old one reached.
+    const { posts } = stubNotification("granted");
+    const { root, monitor } = await boot();
+    monitor.emit({
+      id: "s2",
+      status: "done",
+      title: "two",
+      createdAt: "2",
+      notification: "First run",
+      notificationSeq: 5,
+    });
+    monitor.emit({ id: "s2", status: "exited", title: "two", createdAt: "2", removed: true });
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+
+    monitor.emit({
+      id: "s2",
+      status: "done",
+      title: "two",
+      createdAt: "9",
+      notification: "Second run",
+      notificationSeq: 1,
+    });
+    expect(posts.map((p) => p.body)).toEqual(["First run", "Second run"]);
+  });
+
   it("passes untrusted notification text as data, never into the DOM", async () => {
     const { posts } = stubNotification("granted");
     const { root, monitor } = await boot();
@@ -2898,18 +2902,22 @@ describe("tabs OSC 9 notifications", () => {
     expect((globalThis as { __pwned2?: boolean }).__pwned2).toBeUndefined();
   });
 
-  it("requests permission on a user gesture once a session reports activity", async () => {
-    const { requestPermission } = stubNotification("default");
-    const { root, monitor } = await boot();
+  it("arms the page's notifier for a reporting session and reports a bar press as the gesture", async () => {
+    // The permission prompt itself is the shell's (kernel/notify.test.ts pins its
+    // once-per-page, armed-and-undecided rule); what the feature owes it is the
+    // two signals, and the bar press is the gesture whatever the pointer type.
+    stubNotification("default");
+    const { root, monitor, shell } = await boot();
+    const arm = vi.spyOn(shell().notifications, "arm");
+    const gesture = vi.spyOn(shell().notifications, "gesture");
 
-    // A press before any activity must not prompt: a plain shell's user can only
-    // answer such a prompt wrongly.
     root
       .querySelector(".wt-tab-bar")
       ?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-    expect(requestPermission).not.toHaveBeenCalled();
+    expect(gesture).toHaveBeenCalledTimes(1);
+    expect(arm).not.toHaveBeenCalled();
 
-    // A reporting session arms it; the next gesture asks, exactly once.
+    // A session that reports activity speaks OSC 9, so it may notify.
     monitor.emit({
       id: "s1",
       status: "working",
@@ -2917,13 +2925,12 @@ describe("tabs OSC 9 notifications", () => {
       createdAt: "1",
       reportsActivity: true,
     });
+    expect(arm).toHaveBeenCalledTimes(1);
+
     root
-      .querySelector(".wt-tab-bar")
-      ?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-    root
-      .querySelector(".wt-tab-bar")
-      ?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-    expect(requestPermission).toHaveBeenCalledTimes(1);
+      .querySelector(".wt-switcher")
+      ?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+    expect(gesture).toHaveBeenCalledTimes(2);
   });
 
   it("degrades to tab-only when permission is denied, without throwing", async () => {
@@ -3018,7 +3025,7 @@ describe("tabs switch-animation lifecycle", () => {
   async function mount2(): Promise<Harness> {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     const surface = root.querySelector(".term");
     const output = root.querySelector(".term-output");
@@ -3290,7 +3297,7 @@ describe("tabs reorder preview", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const feature = tabs();
-    term = createTerminal(root, { features: () => [feature] });
+    term = await mountTerminal(root, { features: () => [feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === count);
     const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
     const surface = root.querySelector<HTMLElement>(".term");
@@ -3824,7 +3831,7 @@ describe("tabs: physical-keyboard detection", () => {
     stubMedia({}); // no fine pointer, no coarse pointer, no reduced motion
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     const input = root.querySelector<HTMLElement>(".term-input");
     if (!input) {
@@ -3901,7 +3908,7 @@ describe("tabs: bulk close by direction", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 4);
     return {
       root,
@@ -3986,7 +3993,7 @@ describe("tabs: bulk close by direction", () => {
     listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
 
     root
@@ -4012,7 +4019,7 @@ describe("tabs: the mobile swipe", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
     const cur = root.querySelector<HTMLElement>(".wt-switcher-current");
     return {
@@ -4059,7 +4066,7 @@ describe("tabs: the mobile swipe", () => {
     listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
     setSession.mockClear();
 
@@ -4114,7 +4121,7 @@ describe("tabs: the swipe-to-switch hint", () => {
     stubMedia(media);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     return root;
   }
@@ -4179,7 +4186,7 @@ describe("tabs: the swipe-to-switch hint", () => {
     stubMedia({ "(pointer: coarse)": true });
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
     expect(toastText(root)).not.toBe(HINT);
   });
@@ -4214,7 +4221,7 @@ describe("tabs: the catching-up cue", () => {
   async function mountCue(): Promise<CueHarness> {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     let nextHandle = 1;
     const frames = new Map<number, FrameRequestCallback>();
@@ -4395,7 +4402,7 @@ describe("tabs: the switcher's gesture recogniser", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
     const cur = root.querySelector<HTMLElement>(".wt-switcher-current");
     const at = (type: string, x: number, y: number, target: EventTarget | null): void => {
@@ -4508,7 +4515,7 @@ describe("tabs: the switcher's gesture recogniser", () => {
   });
 });
 
-describe("tabs: wheel translation across delta modes", () => {
+describe("tabs: wheel translation across delta modes", async () => {
   // A wheel tick arrives in one of three units depending on the browser, and the
   // strip converts all three to pixels of horizontal scroll. index.test.ts covers
   // pixels and lines; pages is the mode a converted unit is easiest to get wrong
@@ -4516,7 +4523,7 @@ describe("tabs: wheel translation across delta modes", () => {
   async function mountBar(): Promise<{ bar: HTMLElement; scroller: HTMLElement }> {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
     const scroller = root.querySelector<HTMLElement>(".wt-tab-scroll");
@@ -4574,7 +4581,7 @@ describe("tabs: duplicate-label numbering", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     expect(idsOf(root)).toEqual(["shell", "shell (2)"]);
 
@@ -4599,7 +4606,7 @@ describe("tabs: teardown leaves the page as it found it", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     // A short poll so a surviving interval is caught inside the test's window.
-    term = createTerminal(root, { features: () => [tabs({ pollMs: 10 })] });
+    term = await mountTerminal(root, { features: () => [tabs({ pollMs: 10 })] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const surface = root.querySelector<HTMLElement>(".term");
@@ -4631,7 +4638,7 @@ describe("tabs: closing one tab from its own menu", () => {
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
     fetchMock.mockClear();
 

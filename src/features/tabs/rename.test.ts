@@ -13,8 +13,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_PINNED_NAME, baseLabel, hasPinnedName, sanitizePinnedName } from "./model.js";
 import type { Tab } from "./model.js";
-import type * as KernelModule from "../../kernel/kernel.js";
-import type * as TabsModule from "./index.js";
+import { tabs } from "./index.js";
+import { mountTerminal } from "../../test-helpers/mount.js";
+import type { TerminalHandle } from "../../kernel/types.js";
 
 // --- Pure model pieces (no DOM) ---
 
@@ -66,9 +67,7 @@ describe("baseLabel", () => {
 
 // --- The editor and the latch, against a real kernel ---
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let tabs: (typeof TabsModule)["tabs"];
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+let term: TerminalHandle | undefined;
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -81,6 +80,16 @@ let listBody: unknown[];
 let pinnedFail = false;
 const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
+  if (String(url).endsWith("/layout")) {
+    return Promise.resolve(
+      method === "PUT"
+        ? jsonResponse(null, 204)
+        : jsonResponse(
+            { left: null, right: null, handle: 0.5, selected: "left", open: false },
+            200,
+          ),
+    );
+  }
   const path = String(url);
   if (path.includes("/pinned-title")) {
     return Promise.resolve(
@@ -98,8 +107,7 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   return Promise.resolve(jsonResponse(listBody, 200));
 });
 
-beforeEach(async () => {
-  vi.resetModules();
+beforeEach(() => {
   fetchMock.mockClear();
   pinnedFail = false;
   listBody = [
@@ -109,8 +117,6 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
   localStorage.clear();
-  ({ createTerminal } = await import("../../kernel/kernel.js"));
-  ({ tabs } = await import("./index.js"));
 });
 
 afterEach(() => {
@@ -127,7 +133,7 @@ async function until(pred: () => boolean, tries = 30): Promise<void> {
 
 async function mount(root: HTMLElement): Promise<void> {
   document.body.appendChild(root);
-  term = createTerminal(root, { features: () => [tabs()] });
+  term = await mountTerminal(root, { features: () => [tabs()] });
   await until(() => root.querySelectorAll(".wt-tab").length === listBody.length);
 }
 

@@ -1,184 +1,114 @@
-// Viewport stability tracker.
-//
-// Coordinates iOS keyboard transitions, window resizes, font-load reflows,
-// and ResizeObserver fires into a single "transition → settle" lifecycle
-// so the rest of the app can act on stable viewport state without each
-// piece reinventing its own debounce/suppress timers.
-//
-// Behavior:
-//   1. Any viewport-affecting event marks "in transition".
-//   2. While in transition: autoscroll is suppressed, input dimensions
-//      may shift, no resize is sent to the server.
-//   3. After SETTLE_MS of no further events, fire onSettled — the caller
-//      then sends the final size, pins to the bottom if still following, etc.
-//      The follow state is read AT SETTLE (see startTransition): a latch taken
-//      at the start of the burst goes stale, because every further event
-//      extends the window without re-reading it.
+// Viewport stability tracker: iOS keyboard transitions, window resizes,
+// font-load reflows and ResizeObserver fires fold into one "transition, then
+// settle" lifecycle, so nothing else needs its own debounce. While in
+// transition no resize is sent; after SETTLE_MS of quiet onSettled fires and the
+// caller sends the final size.
 
-import { scroll } from "@cplieger/web-terminal-engine";
+import type { ScrollController } from "@cplieger/web-terminal-engine";
 
-// Time to wait after the last viewport-changing event before declaring
-// the viewport "settled". Long enough to bridge the iOS keyboard slide
-// (~250ms) with margin for fonts and reflow.
+// Long enough to bridge the iOS keyboard slide (~250ms) with margin for fonts
+// and reflow.
 const SETTLE_MS = 350;
 
-let termWrap: HTMLElement;
-// The terminal root (.wt-root): the geometry CSS vars (--kb-inset, --vv-top)
-// are published here so the terminal subtree — and nothing else on the host
-// page — inherits them. Falls back to termWrap if init was somehow given no
-// root (never in practice; the kernel always passes it).
-let varTarget: HTMLElement;
-let onSettled: ((wasAtBottom: boolean) => void) | null = null;
-let inTransition = false;
-let settleTimer: ReturnType<typeof setTimeout> | null = null;
-// When true, ignore the visualViewport keyboard geometry entirely (a hardware
-// keyboard/trackpad is present, so the soft keyboard never opens). Set at init
-// from the kernel's hasFinePointer; see the onChange note below.
-let suppressKeyboardInset: () => boolean = () => false;
-// Removals for every listener/observer init() attaches, so teardown() can
-// release them on kernel destroy(). Without it the window/visualViewport/
-// screen.orientation listeners and the ResizeObserver survive destroy() and a
-// re-created terminal double-binds them.
-let cleanup: (() => void)[] = [];
-
-function startTransition(): void {
-  inTransition = true;
-  if (settleTimer !== null) {
-    clearTimeout(settleTimer);
-  }
-  settleTimer = setTimeout(() => {
-    settleTimer = null;
-    inTransition = false;
-    // Read the follow state AT SETTLE, not at the start of the burst. Every
-    // viewport event re-arms this timer without re-reading, and on iOS a wake or
-    // keyboard slide emits a stream of them, so a latch captured at the start
-    // stays true across a user scrolling up mid-burst and then yanks them back
-    // down. Asking now is only safe because a content shrink can no longer
-    // corrupt the follow state on its own (the engine's scroll controller
-    // re-engages follow only on a downward user move); before that, this snap
-    // was accidentally repairing the corruption it was also causing.
-    const stillFollowing = !scroll.isUserScrolledUp();
-    if (stillFollowing) {
-      // Pin, do not force. A geometry change can leave scrollTop stale short of
-      // the bottom, which the pin fixes; scrollToBottom would additionally
-      // OVERRIDE the follow state, which is not this handler's call to make.
-      scroll.stickToBottom();
-    }
-    if (onSettled) {
-      onSettled(stillFollowing);
-    }
-  }, SETTLE_MS);
-}
-
-/**
- * Whether a viewport transition is in flight (an iOS keyboard slide, a rotation,
- * a font-load reflow). Geometry measured now is provisional, so a caller that
- * puts a measurement on the wire should wait for the settle instead.
- */
-export function isInTransition(): boolean {
-  return inTransition;
-}
-
-export function init(opts: {
+export interface ViewportOptions {
   termWrap: HTMLElement;
-  /** The terminal root (.wt-root): receives the geometry CSS vars the sibling
-   *  chrome reads (--kb-inset, --vv-top), so they scope to the terminal
-   *  subtree instead of leaking onto the host document. */
+  /** The terminal root: receives the geometry CSS vars the sibling chrome reads
+   *  (--kb-inset, --vv-top), so they scope to the terminal subtree instead of
+   *  leaking onto the host document. */
   root?: HTMLElement;
+  /** This pane's scroll controller, read at settle. */
+  scroll: Pick<ScrollController, "isUserScrolledUp" | "stickToBottom">;
   onSettled: (wasAtBottom: boolean) => void;
   /** Ignore the visualViewport keyboard geometry (a hardware-keyboard device
    *  has no soft keyboard to accommodate); only reserved bottom chrome insets
-   *  the terminal. The kernel passes its hasFinePointer here. */
+   *  the terminal. */
   suppressKeyboardInset?: () => boolean;
-}): void {
-  termWrap = opts.termWrap;
-  varTarget = opts.root ?? opts.termWrap;
-  onSettled = opts.onSettled;
-  suppressKeyboardInset = opts.suppressKeyboardInset ?? (() => false);
+}
 
-  // iOS soft keyboard. interactive-widget=resizes-content makes the
-  // layout viewport shrink; we still apply a manual bottom inset as
-  // fallback for older iOS / other mobile browsers.
+/** One pane's viewport tracker. */
+export interface Viewport {
+  /** Whether a transition is in flight, so geometry measured now is provisional. */
+  isInTransition(): boolean;
+  /** Release every listener and observer, stop the settle timer, and clear the
+   *  CSS vars published on the root. */
+  teardown(): void;
+}
+
+export function createViewport(opts: ViewportOptions): Viewport {
+  const { termWrap, scroll } = opts;
+  const varTarget = opts.root ?? opts.termWrap;
+  const suppressKeyboardInset = opts.suppressKeyboardInset ?? ((): boolean => false);
+  let inTransition = false;
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+  const cleanup: (() => void)[] = [];
+
+  function startTransition(): void {
+    inTransition = true;
+    if (settleTimer !== null) {
+      clearTimeout(settleTimer);
+    }
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      inTransition = false;
+      // Read at SETTLE, not at the start of the burst: every further event
+      // re-arms the timer without re-reading, and on iOS a wake emits a stream
+      // of them, so a latch taken at the start would yank a reader who scrolled
+      // up mid-burst back down.
+      const stillFollowing = !scroll.isUserScrolledUp();
+      if (stillFollowing) {
+        scroll.stickToBottom();
+      }
+      opts.onSettled(stillFollowing);
+    }, SETTLE_MS);
+  }
+
   if (window.visualViewport) {
     const vv = window.visualViewport;
     const onChange = (): void => {
-      // Pin the terminal's fixed box to the exact region the VISUAL viewport
-      // occupies inside the layout viewport. On iOS the soft keyboard shrinks
-      // (and can offset) the visual viewport WITHOUT resizing the layout
-      // viewport — interactive-widget=resizes-content is not honored on iOS
-      // Safari — so a `position: fixed; inset: 0` terminal keeps the full-screen
-      // height (keyboard overlaying the bottom) while iOS scrolls the focused
-      // input into view and shifts the fixed box up, sliding the output and
-      // prompt behind the keyboard (the "content jumps up, hidden until I
-      // scroll" symptom). Driving top AND bottom from visualViewport keeps the
-      // terminal exactly over the visible area in every browser, so nothing is
-      // left behind the keyboard for iOS to scroll to.
-      // suppressKeyboardInset (set at init from the kernel's hasFinePointer): on
-      // a device with a hardware keyboard/trackpad (a desktop, or an iPad with a
-      // Magic Keyboard) the on-screen keyboard never opens, so there is no
-      // keyboard geometry to accommodate. iPadOS has been seen to briefly report
-      // a keyboard-sized visualViewport shrink with no keyboard shown, which this
-      // handler then pinned as a bottom inset and left stuck (the terminal "moved
-      // up ~50%", black below, surviving tab switches because nothing recomputes
-      // it — only a reload cleared it). Ignore the keyboard geometry there and
-      // keep the terminal full-height; only the reserved bottom chrome applies.
+      // iOS shrinks (and can offset) the visual viewport without resizing the
+      // layout viewport, so a `position: fixed; inset: 0` box keeps the
+      // full-screen height behind the keyboard; driving top and bottom from
+      // visualViewport keeps the terminal over the visible area everywhere.
+      // iPadOS has been seen to report a keyboard-sized shrink with no keyboard
+      // shown and pin it, which is what suppressKeyboardInset defends against.
       const offsetTop = suppressKeyboardInset() ? 0 : Math.max(0, Math.round(vv.offsetTop));
       const bottomInset = suppressKeyboardInset()
         ? 0
         : Math.max(0, Math.round(window.innerHeight - vv.offsetTop - vv.height));
-      // Reserved bottom chrome (a bottom tab bar) the content must clear, on top
-      // of the keyboard inset. A feature sets --wt-reserve-bottom (px) on the
-      // root, 0 when none; viewport owns the terminal's fixed-box geometry, so it
-      // folds the reserve into the bottom offset here. The reserve excludes the
-      // keyboard (it is measured with the keyboard closed), so adding it to
-      // bottomInset does not double-count.
-      // Read the reserve off the terminal itself: tabs publishes it on the
-      // root (.wt-root), and termWrap inherits it — nothing terminal-scoped
-      // lives on the document root anymore.
+      // A feature sets --wt-reserve-bottom (px) on the root for bottom chrome the
+      // content must clear; it is measured with the keyboard closed, so adding it
+      // to the keyboard inset does not double-count.
       const rawReserve = Math.max(
         0,
         Math.round(
           parseFloat(getComputedStyle(termWrap).getPropertyValue("--wt-reserve-bottom")) || 0,
         ),
       );
-      // Sanity cap: the reserve is bottom chrome (a tab bar), tens of px. A value
-      // near half the screen is a bad measurement — e.g. the switcher bar
-      // measured while a phantom keyboard inset had lifted it — that would
-      // otherwise strand the lower half of the terminal black. Never let it
-      // exceed a third of the viewport height.
+      // The reserve is a tab bar, tens of px; a value near half the screen is a
+      // bad measurement that would strand the lower half of the terminal black.
       const reserve = Math.min(rawReserve, Math.round(window.innerHeight / 3));
       const bottom = bottomInset + reserve;
       termWrap.style.top = offsetTop > 0 ? `${offsetTop}px` : "";
       termWrap.style.bottom = bottom > 0 ? `${bottom}px` : "";
-      // Expose the same geometry as CSS vars for the sibling chrome, on the
-      // terminal ROOT (scoped: the host page never sees them): --kb-inset
-      // lifts the bottom banner above the keyboard; --vv-top lets the top key
-      // toolbar follow the visual viewport's offset (otherwise it scrolls off
-      // the top when iOS shifts the layout up).
       varTarget.style.setProperty("--kb-inset", `${bottomInset}px`);
       varTarget.style.setProperty("--vv-top", `${offsetTop}px`);
       startTransition();
     };
     vv.addEventListener("resize", onChange);
     vv.addEventListener("scroll", onChange);
-    // Self-heal a stuck inset (see the fine-pointer note above): recompute when
-    // the window regains focus or is restored from the bfcache, so a one-off bad
-    // visualViewport reading that got pinned clears on the next natural
-    // interaction instead of surviving until a full page reload.
+    // Recompute on focus and bfcache restore, so a one-off bad visualViewport
+    // reading clears on the next natural interaction instead of at reload.
     window.addEventListener("focus", onChange);
     window.addEventListener("pageshow", onChange);
     cleanup.push(() => {
       window.removeEventListener("focus", onChange);
       window.removeEventListener("pageshow", onChange);
-    });
-    cleanup.push(() => {
       vv.removeEventListener("resize", onChange);
       vv.removeEventListener("scroll", onChange);
     });
     onChange();
   }
 
-  // Term wrap dimension changes: window resize, font load, devtools dock.
   const ro = new ResizeObserver(startTransition);
   ro.observe(termWrap);
   window.addEventListener("resize", startTransition);
@@ -187,12 +117,9 @@ export function init(opts: {
     window.removeEventListener("resize", startTransition);
   });
 
-  // Orientation change on mobile. iOS Safari often emits the
-  // window.resize event late or not at all on rotation while
-  // visualViewport.resize fires reliably; screen.orientation.change is
-  // the canonical signal that survives both. Modern browsers expose it
-  // on screen.orientation; older Safari falls back to the deprecated
-  // window.orientationchange event.
+  // iOS Safari often emits window.resize late or not at all on rotation while
+  // screen.orientation.change survives; older Safari has only the deprecated
+  // window event.
   const orientation = (screen as Screen & { orientation?: ScreenOrientation }).orientation;
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime guard for older Safari without screen.orientation
   if (orientation) {
@@ -206,28 +133,21 @@ export function init(opts: {
       window.removeEventListener("orientationchange", startTransition);
     });
   }
-}
 
-// Release every listener/observer init() attached and stop the settle timer.
-// The kernel calls this from destroy() so a create->destroy->create remount
-// does not leave stale global listeners double-bound.
-export function teardown(): void {
-  for (const fn of cleanup) {
-    fn();
-  }
-  cleanup = [];
-  if (settleTimer !== null) {
-    clearTimeout(settleTimer);
-    settleTimer = null;
-  }
-  // Clear the CSS vars onChange published on the terminal root, so a destroy
-  // without a remount (which would recompute them) leaves no stale inset.
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- teardown may run before any init in tests
-  if (varTarget) {
-    varTarget.style.removeProperty("--kb-inset");
-    varTarget.style.removeProperty("--vv-top");
-  }
-  inTransition = false;
-  onSettled = null;
-  suppressKeyboardInset = () => false;
+  return {
+    isInTransition: () => inTransition,
+    teardown() {
+      for (const fn of cleanup) {
+        fn();
+      }
+      cleanup.length = 0;
+      if (settleTimer !== null) {
+        clearTimeout(settleTimer);
+        settleTimer = null;
+      }
+      varTarget.style.removeProperty("--kb-inset");
+      varTarget.style.removeProperty("--vv-top");
+      inTransition = false;
+    },
+  };
 }

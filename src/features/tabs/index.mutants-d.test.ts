@@ -12,15 +12,17 @@
 // harness (engine mock, fetch stub, drag helpers) is deliberately duplicated so
 // each file stands on its own.
 //
-// The seam that makes the wire events reachable is `connection.init`: the kernel
-// hands the engine a callbacks object, the mock captures it, and `wire()` lets a
-// test deliver a frame the way the socket would — the same seam
+// The seam that makes the wire events reachable is the callbacks object the
+// kernel hands `createTerminalEngine`: the fake engine keeps it, and `wire()`
+// lets a test deliver a frame the way the socket would — the same seam
 // kernel-wire.test.ts uses, and the only way into a feature's `ctx.on("wire:*")`.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "../../kernel/kernel.js";
-import type * as TabsModule from "./index.js";
+import { tabs } from "./index.js";
+import type { PaneLayout } from "./model.js";
+import { mountTerminal } from "../../test-helpers/mount.js";
+import type { TerminalHandle } from "../../kernel/types.js";
 // The reorder timings, imported rather than restated, for the reason
 // index.test.ts gives: these tests pin the SHAPE of the interaction, not the
 // numbers, so a deliberate retune moves one definition and not a dozen magic
@@ -40,86 +42,25 @@ import {
 const CATCHUP_MIN_BACKLOG = 400;
 const CATCHUP_ARM_DELAY_MS = 150;
 
-const setSession = vi.fn<(id: string) => void>();
-const forgetSession = vi.fn<(id: string) => void>();
-const bind = vi.fn();
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("../../test-helpers/fake-engine.js");
+  return createEngineFake();
+});
+
+vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
+  const actual = await importActual<typeof Engine>();
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
+});
+
+const { setSession } = fake.connection;
 // A DISTINCT view per call, never one constant: a double answering the same
 // object for every tab passes just as well when the wrong tab's position comes
 // back (index.mutants-c.test.ts's note).
 let viewSeq = 0;
-const captureViewMemory = vi.fn(() => ({ abs: 100 + ++viewSeq, screenTop: -3, following: false }));
-const pendingRowCount = vi.fn(() => 0);
-const getHighestIndex = vi.fn(() => -1);
-// The callbacks object the kernel hands the engine's connection layer: the seam
-// a server frame comes in through.
-const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
+const { captureViewMemory, pendingRowCount, getHighestIndex } = fake.renderer;
 
-vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
-  const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    render: {
-      init: vi.fn(),
-      updateFontMetrics: vi.fn(),
-      setPredictedCursor: vi.fn(),
-      computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
-      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-      getHighestIndex,
-      pendingRowCount,
-      noteResumeBounds: vi.fn(),
-      handleScreen: vi.fn(),
-      handleScroll: vi.fn(),
-      handleScrollPosition: vi.fn(),
-      updateReverseVideo: vi.fn(),
-      resetScrollback: vi.fn(),
-      resetScreen: vi.fn(),
-      browseCacheSize: vi.fn(() => 0),
-      lastBrowseActivityMs: vi.fn(() => 0),
-      dropBrowseCache: vi.fn(),
-      maybeFetchHistory: vi.fn(),
-      replayMaxForResume: vi.fn(() => 1500),
-      handleHistoryReply: vi.fn(),
-      applyResumeTransition: vi.fn(),
-      noteSolicited: vi.fn(),
-      clearSolicited: vi.fn(),
-      bind,
-      captureViewMemory,
-      boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
-    },
-    scroll: {
-      init: vi.fn(),
-      scrollToBottom: vi.fn(),
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-      stickToBottom: vi.fn(),
-    },
-    connection: {
-      init: connectionInit,
-      connect: vi.fn(),
-      sendBinary: vi.fn(() => true),
-      sendResize: vi.fn(),
-      sendEphemeral: vi.fn(() => true),
-      setClientFocus: vi.fn(),
-      reconnectNow: vi.fn(),
-      disconnect: vi.fn(),
-      setSession,
-      forgetSession,
-      serverEpochOf: vi.fn(() => 777),
-      adoptPersistedEpoch: vi.fn(),
-      currentSessionId: vi.fn(() => "unmanaged"),
-      historyBudget: vi.fn(() => 0),
-      requestHistory: vi.fn(),
-    },
-  };
-});
-
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let tabs: (typeof TabsModule)["tabs"];
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+let term: TerminalHandle | undefined;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -131,9 +72,17 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 let listBody: unknown[];
+/** The server's pane-layout record, as GET /api/sessions/layout answers it; the
+ *  default is a fresh server's, with no shown session. */
+let layoutBody: PaneLayout;
 let spawnSeq = 0;
-const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
+const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
+  if (String(url).endsWith("/layout")) {
+    return Promise.resolve(
+      method === "PUT" ? jsonResponse(null, 204) : jsonResponse(layoutBody, 200),
+    );
+  }
   if (method === "POST") {
     spawnSeq++;
     return Promise.resolve(
@@ -154,27 +103,30 @@ const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
   return Promise.resolve(jsonResponse(listBody, 200));
 });
 
-beforeEach(async () => {
-  vi.resetModules();
-  setSession.mockClear();
-  forgetSession.mockClear();
-  bind.mockClear();
-  connectionInit.mockClear();
+beforeEach(() => {
+  fake.reset();
+  // vitest resets every spy to its construction default before each test; the
+  // answers this file depends on are re-declared so they are stated here.
+  captureViewMemory.mockImplementation(() => ({
+    abs: 100 + ++viewSeq,
+    screenTop: -3,
+    following: false,
+  }));
+  fake.connection.serverEpochOf.mockImplementation(() => 777);
+  fake.connection.currentSessionId.mockImplementation(() => "unmanaged");
   pendingRowCount.mockReturnValue(0);
   getHighestIndex.mockReturnValue(-1);
   fetchMock.mockClear();
   spawnSeq = 0;
   viewSeq = 0;
-  captureViewMemory.mockClear();
   listBody = [
     { id: "s1", title: "one", createdAt: "1", status: "idle" },
     { id: "s2", title: "two", createdAt: "2", status: "idle" },
   ];
+  layoutBody = { left: null, right: null, handle: 0.5, selected: "left", open: false };
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
   localStorage.clear();
-  ({ createTerminal } = await import("../../kernel/kernel.js"));
-  ({ tabs } = await import("./index.js"));
 });
 
 afterEach(() => {
@@ -190,13 +142,9 @@ async function until(pred: () => boolean, tries = 30): Promise<void> {
   }
 }
 
-/** The callbacks the kernel handed the engine's connection layer. */
-function wire(): Parameters<typeof Engine.connection.init>[0] {
-  const first = connectionInit.mock.calls[0]?.[0];
-  if (first === undefined) {
-    throw new Error("the kernel never called connection.init");
-  }
-  return first;
+/** The callbacks the kernel handed the engine. */
+function wire(): Engine.ConnectionCallbacks {
+  return fake.callbacks();
 }
 
 function screenFrame(base = 0): Engine.ScreenMessage {
@@ -251,7 +199,7 @@ async function mountFrames(): Promise<FrameHarness> {
   pendingRowCount.mockReturnValue(0);
   const root = document.createElement("div");
   document.body.appendChild(root);
-  term = createTerminal(root, { features: () => [tabs()] });
+  term = await mountTerminal(root, { features: () => [tabs()] });
   await until(() => root.querySelectorAll(".wt-tab").length === listBody.length);
   wire().onMessage(screenFrame()); // priming: nothing queued, so nothing arms
   let nextHandle = 1;
@@ -386,7 +334,7 @@ async function mountTitles(): Promise<TitleHarness> {
   threeSessions();
   const root = document.createElement("div");
   document.body.appendChild(root);
-  term = createTerminal(root, { features: () => [tabs()] });
+  term = await mountTerminal(root, { features: () => [tabs()] });
   await until(() => root.querySelectorAll(".wt-tab").length === 3);
   root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
   await until(() => setSession.mock.calls.some((c) => c[0] === "s2"));
@@ -439,7 +387,7 @@ describe("tabs: a switch announces where it landed", () => {
     // who cannot see which chip went active.
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 
@@ -473,7 +421,7 @@ describe("tabs: the mobile swipe on a lone tab", () => {
     listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
     const plus = pick(root, ".wt-tab-new");
     plus.focus();
@@ -600,7 +548,7 @@ async function mountDrag(
   const root = document.createElement("div");
   document.body.appendChild(root);
   const feature = tabs();
-  term = createTerminal(root, { features: () => [feature] });
+  term = await mountTerminal(root, { features: () => [feature] });
   await until(() => root.querySelectorAll(".wt-tab").length === count);
   const bar = pick(root, ".wt-tab-bar");
   const scroller = pick(root, ".wt-tab-scroll");
@@ -1114,7 +1062,7 @@ async function mountReel(): Promise<ReelHarness> {
   });
   const root = document.createElement("div");
   document.body.appendChild(root);
-  term = createTerminal(root, { features: () => [tabs()] });
+  term = await mountTerminal(root, { features: () => [tabs()] });
   await until(() => root.querySelectorAll(".wt-tab").length === 3);
   pick(root, ".wt-switcher-current").click(); // expand
   const rows = (): HTMLElement[] => [...root.querySelectorAll<HTMLElement>(".wt-switcher-row")];

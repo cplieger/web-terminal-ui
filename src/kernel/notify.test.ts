@@ -1,16 +1,12 @@
-// tabs/notify.ts tests: the OSC 9 Form B notification policy. Every capability
-// is injected (NotifierEnv), so the suppression rule, the dedupe, the
-// gesture-gated permission request and the degradation paths are exercised
-// without a real browser permission model.
-//
-// Two of these are SECURITY tests and were red-checked against a deliberately
-// mutated notify.ts (see the comments on each): the untrusted-text test fails if
-// the message is ever written into the DOM, and the suppression test fails if the
-// page-visibility half of the rule is dropped.
+// kernel/notify.ts tests: the OSC 9 notification policy behind
+// ctx.shell.notifications. Every capability is injected (NotifierEnv), so the
+// suppression rule, the dedupe, the gesture-gated permission request and the
+// degradation paths are exercised without a real browser permission model.
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { browserNotifierEnv, createNotifier, shouldNotify } from "./notify.js";
 import type { NotificationCtorLike, NotifierEnv } from "./notify.js";
+import type { NotificationView } from "./types.js";
 
 /** A recording Notification stand-in: captures what the notifier constructed and
  *  the instances themselves, so a test can drive the click the way a browser
@@ -49,17 +45,11 @@ function env(over: Partial<NotifierEnv> = {}): NotifierEnv {
 /** The per-delivery view. `activate` defaults to a no-op so a test that is not
  *  about the click does not have to say anything about it; the click tests pass a
  *  spy. */
-function view(
-  over: Partial<{ sessionIsActive: boolean; label: string; activate: () => void }> = {},
-): { sessionIsActive: boolean; label: string; activate: () => void } {
+function view(over: Partial<NotificationView> = {}): NotificationView {
   return { sessionIsActive: false, label: "a", activate: () => undefined, ...over };
 }
 
 describe("shouldNotify (the suppression rule)", () => {
-  // RED-CHECKED: with the pageVisible half deleted (`return !sessionIsActive`)
-  // the "hidden page" cases below fail — a notification for the session the user
-  // left running in a backgrounded tab would be silently swallowed, which is the
-  // regression this pins.
   it("skips ONLY when the originating session is active AND the page is visible", () => {
     expect(shouldNotify(true, true)).toBe(false);
   });
@@ -115,11 +105,8 @@ describe("createNotifier delivery", () => {
   });
 
   it("treats the untrusted message as TEXT: nothing is parsed as HTML", () => {
-    // RED-CHECKED: with `document.body.innerHTML += text` added to deliver(), the
-    // DOM assertions below fail (an <img> node materialises and the injected
-    // onerror attribute is live). The message is untrusted program output, so the
-    // invariant is that it reaches the browser's own notification surface as a
-    // DATA string and never enters this document.
+    // The message is untrusted program output: it reaches the browser's own
+    // notification surface as a DATA string and never enters this document.
     const { ctor, posts } = fakeCtor();
     const n = createNotifier(env({ ctor }));
     const hostile = `<img src=x onerror="globalThis.__pwned = true"><script>alert(1)</script>`;
@@ -244,13 +231,9 @@ describe("createNotifier delivery", () => {
 // Clicking a notification has to land the user on the session that raised it.
 // The Notifications API's own click default already moves focus to the viewport
 // of the notification's browsing context, so the page comes forward without our
-// help; the half that was missing is the in-page switch, which left the user
-// looking at whichever tab they last had active.
+// help; the in-page switch is the half the notifier owns.
 describe("createNotifier click activation", () => {
   it("activates the notification's own session when clicked", () => {
-    // RED-CHECKED against a notify.ts with the onclick assignment removed: the
-    // activation never fires, which is exactly the reported behaviour (the page
-    // is focused by the platform, the wrong tab is showing).
     const { ctor, made } = fakeCtor();
     const activate = vi.fn();
     const n = createNotifier(env({ ctor }));
@@ -368,7 +351,7 @@ describe("createNotifier permission request", () => {
   });
 });
 
-// browserNotifierEnv is the only place in the feature that touches globals, and
+// browserNotifierEnv is the only place in the notifier that touches globals, and
 // its whole job is to answer safely about a `Notification` that may be absent —
 // or present and not callable, which is what an embedding page that defines its
 // own `Notification` symbol looks like. Every reading goes through a
@@ -378,7 +361,7 @@ describe("createNotifier permission request", () => {
 describe("browserNotifierEnv (the real-globals adapter)", () => {
   it("reports no constructor and a denied permission where Notification is absent", () => {
     vi.stubGlobal("Notification", undefined);
-    const env = browserNotifierEnv();
+    const env = browserNotifierEnv(document);
     expect(env.ctor).toBeUndefined();
     // "denied" rather than "default": nothing may be posted, and nothing may be
     // requested either, since there is no API to request from.
@@ -393,7 +376,7 @@ describe("browserNotifierEnv (the real-globals adapter)", () => {
       /* a browser's Notification is a constructor */
     };
     vi.stubGlobal("Notification", Object.assign(ctor, { permission: "granted" }));
-    const env = browserNotifierEnv();
+    const env = browserNotifierEnv(document);
     expect(env.ctor).toBe(ctor);
     expect(env.permission()).toBe("granted");
   });
@@ -405,7 +388,7 @@ describe("browserNotifierEnv (the real-globals adapter)", () => {
     // post itself throw.
     const request = vi.fn();
     vi.stubGlobal("Notification", { permission: "granted", requestPermission: request });
-    const env = browserNotifierEnv();
+    const env = browserNotifierEnv(document);
     expect(env.ctor).toBeUndefined();
     expect(env.permission()).toBe("denied");
     env.request();
@@ -424,7 +407,7 @@ describe("browserNotifierEnv (the real-globals adapter)", () => {
       { permission: "default", requestPermission: promiseShape },
     );
     vi.stubGlobal("Notification", ctorA);
-    browserNotifierEnv().request();
+    browserNotifierEnv(document).request();
     expect(promiseShape).toHaveBeenCalledTimes(1);
     // Called as a method of Notification, the way both shapes expect.
     expect(promiseShape.mock.instances[0]).toBe(ctorA);
@@ -439,7 +422,7 @@ describe("browserNotifierEnv (the real-globals adapter)", () => {
         { permission: "default", requestPermission: callbackShape },
       ),
     );
-    browserNotifierEnv().request();
+    browserNotifierEnv(document).request();
     expect(callbackShape).toHaveBeenCalledTimes(1);
   });
 
@@ -456,7 +439,7 @@ describe("browserNotifierEnv (the real-globals adapter)", () => {
         { permission: "default" },
       ),
     );
-    const env = browserNotifierEnv();
+    const env = browserNotifierEnv(document);
     expect(() => {
       env.request();
     }).not.toThrow();
@@ -473,14 +456,52 @@ describe("browserNotifierEnv (the real-globals adapter)", () => {
         { permission: 1 },
       ),
     );
-    expect(browserNotifierEnv().permission()).toBe("denied");
+    expect(browserNotifierEnv(document).permission()).toBe("denied");
   });
 
   it("reads page visibility from document.visibilityState", () => {
-    const env = browserNotifierEnv();
+    const env = browserNotifierEnv(document);
     expect(env.pageVisible()).toBe(true);
     const hidden = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
     expect(env.pageVisible()).toBe(false);
     hidden.mockRestore();
+  });
+
+  describe("bound to a second document", () => {
+    afterEach(() => {
+      for (const frame of document.querySelectorAll("iframe")) {
+        frame.remove();
+      }
+    });
+
+    it("reads Notification and the visibility off THAT document's realm", () => {
+      // A same-origin iframe is a second document with a window of its own; a
+      // terminal mounted there must ask that window for permission, not the
+      // importing page's.
+      const frame = document.createElement("iframe");
+      document.body.appendChild(frame);
+      const doc = frame.contentDocument;
+      const win = frame.contentWindow as (Window & { Notification?: unknown }) | null;
+      if (!doc || !win) {
+        throw new Error("no frame document");
+      }
+      const inner = Object.assign(
+        function Inner(): void {
+          /* constructor */
+        },
+        { permission: "granted" },
+      );
+      win.Notification = inner;
+      vi.stubGlobal("Notification", undefined);
+
+      const env = browserNotifierEnv(doc);
+      expect(env.ctor).toBe(inner);
+      expect(env.permission()).toBe("granted");
+
+      const hidden = vi.spyOn(doc, "visibilityState", "get").mockReturnValue("hidden");
+      expect(env.pageVisible()).toBe(false);
+      expect(browserNotifierEnv(document).pageVisible()).toBe(true);
+      hidden.mockRestore();
+    });
   });
 });

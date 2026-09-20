@@ -9,10 +9,11 @@
 // is a fan-out where a dropped arm is invisible until a feature goes dark in
 // production (which is how the paging seam shipped inert).
 //
-// The seam is the mocked `connection.init`: it captures the callbacks object the
-// kernel passes, so a test can deliver a frame the way the socket would. Same for
-// render.init and scroll.init. That is also the seam a FEATURE test needs to reach
-// the kernel's wire:* events — the frame goes in here and comes out on the bus.
+// The seam is the fake engine's `createTerminalEngine`: it captures the
+// callbacks object the kernel passes, so a test can deliver a frame the way the
+// socket would, and its renderer, scroll and connection members are spies. That
+// is also the seam a FEATURE test needs to reach the kernel's wire:* events — the
+// frame goes in here and comes out on the bus.
 //
 // The kernel's font-ready path is gated on `document.fonts`, which a real
 // browser always provides, so this file installs the shape it wants rather than
@@ -25,116 +26,35 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "./kernel.js";
-import type { TerminalContext, TerminalFeature, TerminalHandle } from "./types.js";
+import { mountTerminal } from "../test-helpers/mount.js";
+import type {
+  CreateTerminalOptions,
+  TerminalContext,
+  TerminalFeature,
+  TerminalHandle,
+} from "./types.js";
 
-const connectionInit = vi.fn<(callbacks: Parameters<typeof Engine.connection.init>[0]) => void>();
-const renderInit = vi.fn<(opts: Parameters<typeof Engine.render.init>[0]) => void>();
-const scrollInit = vi.fn<(opts: Parameters<typeof Engine.scroll.init>[0]) => void>();
-const handleScreen = vi.fn();
-const handleScroll = vi.fn();
-const updateReverseVideo = vi.fn();
-const resetScrollback = vi.fn();
-const resetScreen = vi.fn();
-const noteResumeBounds = vi.fn();
-const maybeFetchHistory = vi.fn();
-const sendResize = vi.fn();
-const reconnectNow = vi.fn();
-const dropBrowseCache = vi.fn();
-const currentSessionId = vi.fn<() => string>(() => "session-under-test");
-const updateFontMetrics = vi.fn();
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("../test-helpers/fake-engine.js");
+  return createEngineFake();
+});
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    render: {
-      init: renderInit,
-      updateFontMetrics,
-      setPredictedCursor: vi.fn(),
-      computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
-      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-      getHighestIndex: vi.fn(() => -1),
-      pendingRowCount: vi.fn(() => 0),
-      noteResumeBounds,
-      handleScreen,
-      handleScroll,
-      updateReverseVideo,
-      resetScrollback,
-      resetScreen,
-      browseCacheSize: vi.fn(() => 0),
-      lastBrowseActivityMs: vi.fn(() => 0),
-      dropBrowseCache,
-      maybeFetchHistory,
-      handleScrollPosition: vi.fn(),
-      replayMaxForResume: vi.fn(() => 1500),
-      handleHistoryReply: vi.fn(),
-      applyResumeTransition: vi.fn(),
-      noteSolicited: vi.fn(),
-      clearSolicited: vi.fn(),
-      bind: vi.fn(),
-      boundStore: vi.fn(),
-    },
-    scroll: {
-      init: scrollInit,
-      scrollToBottom: vi.fn(),
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-      stickToBottom: vi.fn(),
-    },
-    connection: {
-      init: connectionInit,
-      connect: vi.fn(),
-      sendBinary: vi.fn(() => true),
-      sendResize,
-      sendEphemeral: vi.fn(() => true),
-      setClientFocus: vi.fn(),
-      reconnectNow,
-      disconnect: vi.fn(),
-      setSession: vi.fn(),
-      forgetSession: vi.fn(),
-      currentSessionId,
-    },
-  };
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-/** Every terminal a test mounted. Destroyed in afterEach, because the kernel's
- *  page-lifecycle and viewport listeners live on `document`/`window` and outlive
- *  the root: a terminal left alive keeps answering `resize` and
- *  `visibilitychange` for the rest of the FILE, and its callbacks reach the same
- *  hoisted engine mocks this file counts calls on. Measured before this existed:
- *  one dispatched `resize` produced 26 `sendResize` calls, one per surviving
- *  terminal. */
-const mounted: TerminalHandle[] = [];
+const { resetScrollback, resetScreen, noteResumeBounds, dropBrowseCache, updateFontMetrics } =
+  fake.renderer;
+const { sendResize, reconnectNow } = fake.connection;
 
-function mount(opts: Parameters<typeof KernelModule.createTerminal>[1]): TerminalHandle {
-  const term = createTerminal(rootIn(), opts);
-  mounted.push(term);
-  return term;
+function mount(opts: CreateTerminalOptions): Promise<TerminalHandle> {
+  return mountTerminal(rootIn(), opts);
 }
 
-beforeEach(async () => {
-  vi.resetModules();
-  connectionInit.mockClear();
-  renderInit.mockClear();
-  scrollInit.mockClear();
-  handleScreen.mockClear();
-  handleScroll.mockClear();
-  updateReverseVideo.mockClear();
-  resetScrollback.mockClear();
-  resetScreen.mockClear();
-  noteResumeBounds.mockClear();
-  maybeFetchHistory.mockClear();
-  sendResize.mockClear();
-  reconnectNow.mockClear();
-  dropBrowseCache.mockClear();
-  updateFontMetrics.mockClear();
-  currentSessionId.mockReturnValue("session-under-test");
+beforeEach(() => {
+  fake.reset();
   document.body.replaceChildren();
   // The settled shape, stated rather than inherited: a load that has already
   // resolved, so the kernel's font gate opens on the first microtask after mount
@@ -143,13 +63,9 @@ beforeEach(async () => {
   // timed-out arm reads it — including for a mount whose deadline outlives its own
   // test, which is every mount in this file.
   restoreFonts = shadowFonts({ load: () => Promise.resolve([]), ready: Promise.resolve() });
-  ({ createTerminal } = await import("./kernel.js"));
 });
 
 afterEach(() => {
-  while (mounted.length > 0) {
-    mounted.pop()?.destroy();
-  }
   restoreFonts();
   restoreFonts = () => undefined;
   vi.useRealTimers();
@@ -329,13 +245,9 @@ function modesFrame(reverseVideo: boolean): Engine.ModesMessage {
   };
 }
 
-/** The callbacks the kernel handed the engine's connection layer. */
-function wire(): Parameters<typeof Engine.connection.init>[0] {
-  const first = connectionInit.mock.calls[0]?.[0];
-  if (first === undefined) {
-    throw new Error("the kernel never called connection.init");
-  }
-  return first;
+/** The callbacks the kernel handed the engine, as the engine would invoke them. */
+function wire(): Engine.ConnectionCallbacks {
+  return fake.callbacks();
 }
 
 interface BusRecord {
@@ -373,7 +285,7 @@ async function withBusProbe(): Promise<{ seen: BusRecord[]; ctx: TerminalContext
       return { teardown: () => undefined };
     },
   };
-  mount({ features: () => [probe] });
+  await mount({ features: () => [probe] });
   await tick();
   if (captured === undefined) {
     throw new Error("the probe feature never ran");
@@ -399,7 +311,7 @@ async function loadedStateWatcher(): Promise<string[]> {
       return { teardown: () => undefined };
     },
   };
-  mount({ features: () => [watcher] });
+  await mount({ features: () => [watcher] });
   await tick();
   wire().onMessage(screenFrame()); // first frame + settled fonts => loaded
   seen.length = 0;
@@ -407,24 +319,20 @@ async function loadedStateWatcher(): Promise<string[]> {
 }
 
 describe("the wire fan-out: a server frame reaches the renderer AND the bus", () => {
-  // Every arm here is a two-consumer split, which is why it needs asserting in
-  // both directions: the renderer paints the frame, and features act on the same
-  // frame through the bus (tabs' unseen-activity cue, the clipboard feature's
-  // OSC 52 handler). Dropping either half leaves the other working, so nothing
-  // else notices.
+  // The engine paints the frame before the kernel sees it; the kernel's half is
+  // the bus, where features act on the same frame (tabs' unseen-activity cue, the
+  // clipboard feature's OSC 52 handler).
 
-  it("gives a screen frame to the renderer and republishes it on the bus", async () => {
+  it("republishes a screen frame on the bus", async () => {
     const { seen } = await withBusProbe();
     const frame = screenFrame(12);
 
     wire().onMessage(frame);
 
-    expect(handleScreen).toHaveBeenCalledTimes(1);
-    expect(handleScreen).toHaveBeenCalledWith(frame);
     expect(seen).toEqual([{ event: "wire:screen", payload: frame }]);
   });
 
-  it("gives a scroll frame to the renderer, and publishes nothing", async () => {
+  it("publishes nothing for a scroll frame", async () => {
     // Committed history lines are the renderer's business alone: no feature
     // subscribes, so the kernel deliberately does not fan this one out.
     const { seen } = await withBusProbe();
@@ -432,18 +340,15 @@ describe("the wire fan-out: a server frame reaches the renderer AND the bus", ()
 
     wire().onMessage(frame);
 
-    expect(handleScroll).toHaveBeenCalledTimes(1);
-    expect(handleScroll).toHaveBeenCalledWith(frame);
     expect(seen).toEqual([]);
   });
 
-  it("repaints reverse video and republishes a modes frame", async () => {
+  it("republishes a modes frame", async () => {
     const { seen } = await withBusProbe();
     const frame = modesFrame(true);
 
     wire().onMessage(frame);
 
-    expect(updateReverseVideo).toHaveBeenCalledTimes(1);
     expect(seen).toEqual([{ event: "wire:modes", payload: frame }]);
   });
 
@@ -491,8 +396,6 @@ describe("the wire fan-out: a server frame reaches the renderer AND the bus", ()
 
     wire().onMessage({ type: "resumeAck", received: 0 });
 
-    expect(handleScreen).not.toHaveBeenCalled();
-    expect(handleScroll).not.toHaveBeenCalled();
     expect(seen).toEqual([]);
   });
 });
@@ -507,7 +410,7 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
     stubFonts(); // never settles in this test
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    mount({ features: () => [], loading });
+    await mount({ features: () => [], loading });
     await tick();
 
     wire().onMessage(screenFrame());
@@ -518,7 +421,7 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
   it("lifts it on the first screen frame once the fonts HAVE settled", async () => {
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    mount({ features: () => [], loading });
+    await mount({ features: () => [], loading });
     await tick();
     expect(loading.classList.contains("fade")).toBe(false);
 
@@ -531,7 +434,7 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
     const settle = stubFonts();
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    mount({ features: () => [], loading });
+    await mount({ features: () => [], loading });
     await tick();
     wire().onMessage(screenFrame());
     expect(loading.classList.contains("fade")).toBe(false);
@@ -548,7 +451,7 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
     const settle = stubFonts();
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    mount({ features: () => [], loading });
+    await mount({ features: () => [], loading });
     await tick();
 
     settle();
@@ -570,7 +473,7 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
     });
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    mount({ features: () => [], loading });
+    await mount({ features: () => [], loading });
     await tick();
 
     wire().onMessage(screenFrame());
@@ -594,7 +497,7 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
     vi.useFakeTimers();
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    mount({ features: () => [], loading });
+    await mount({ features: () => [], loading });
     await vi.advanceTimersByTimeAsync(0);
 
     wire().onMessage(screenFrame());
@@ -611,6 +514,48 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
     warned.mockRestore();
   });
 
+  it("takes the block-period deadline down with a terminal destroyed inside the font wait", async () => {
+    // The frame has landed and the fonts are still pending when the consumer
+    // tears the terminal down. The deadline that would have opened the gate goes
+    // with the pane, so nothing is armed to fade the consumer's overlay later.
+    stubFontsStalled();
+    vi.useFakeTimers();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const term = await mount({ features: () => [], loading });
+    await vi.advanceTimersByTimeAsync(0);
+    wire().onMessage(screenFrame());
+    await vi.advanceTimersByTimeAsync(1000);
+
+    term.destroy();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(loading.classList.contains("fade")).toBe(false);
+  });
+
+  it("ignores fonts that settle after destroy: no overlay fade, no measure, no resize", async () => {
+    // The load promise cannot be cancelled, so its continuation is the one font
+    // path that still runs on a dead pane; it must find the gate closed.
+    const settle = stubFonts();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const term = await mount({ features: () => [], loading });
+    await tick();
+    wire().onMessage(screenFrame());
+    term.destroy();
+    sendResize.mockClear();
+    updateFontMetrics.mockClear();
+
+    settle();
+    await tick();
+    await nextFrame();
+
+    expect(loading.classList.contains("fade")).toBe(false);
+    expect(updateFontMetrics).not.toHaveBeenCalled();
+    expect(sendResize).not.toHaveBeenCalled();
+  });
+
   it("lifts it at the block period when the request STALLS and nothing rejects", async () => {
     // The other half of the same bound, and the half a deadline armed on the
     // rejection cannot reach: with one URL's response held open and no family
@@ -620,7 +565,7 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
     vi.useFakeTimers();
     const loading = document.createElement("div");
     document.body.appendChild(loading);
-    mount({ features: () => [], loading });
+    await mount({ features: () => [], loading });
     await vi.advanceTimersByTimeAsync(0);
 
     wire().onMessage(screenFrame());
@@ -644,7 +589,7 @@ describe("first frame + fonts: the overlay lifts only when BOTH have landed", ()
         return { teardown: () => undefined };
       },
     };
-    mount({ features: () => [probe], loading });
+    await mount({ features: () => [probe], loading });
     await tick();
     const observer = new MutationObserver(() => {
       lowered += 1;
@@ -728,7 +673,7 @@ describe("the resize announce, and the two things it waits for", () => {
 
   it("does not announce a size while the fonts are still loading", async () => {
     stubFonts();
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await viewportSettled();
     sendResize.mockClear();
 
@@ -738,7 +683,7 @@ describe("the resize announce, and the two things it waits for", () => {
   });
 
   it("announces on open once the fonts have settled", async () => {
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await viewportSettled();
     sendResize.mockClear();
 
@@ -749,7 +694,7 @@ describe("the resize announce, and the two things it waits for", () => {
 
   it("announces when the fonts settle after the socket is already open", async () => {
     const settle = stubFonts();
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await viewportSettled();
     wire().onOpen();
     sendResize.mockClear();
@@ -769,7 +714,7 @@ describe("the resize announce, and the two things it waits for", () => {
     // the kernel's viewport-settle arm calls connection.sendResize() without
     // consulting wsOpen, relying on the engine's own `connState.status !==
     // "connected"` early return, which a mocked engine cannot show.
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await tick();
     await nextFrame();
 
@@ -780,7 +725,7 @@ describe("the resize announce, and the two things it waits for", () => {
     // The cell metrics are what turn a pixel box into cols and rows. A size
     // computed from metrics measured before the webfont swapped is wrong in
     // exactly the way the fonts gate exists to avoid.
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await viewportSettled();
     updateFontMetrics.mockClear();
 
@@ -792,7 +737,7 @@ describe("the resize announce, and the two things it waits for", () => {
 
   it("reports NO size to the resume while the fonts are still loading", async () => {
     stubFonts();
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await viewportSettled();
 
     expect(wire().initialSize?.()).toBeNull();
@@ -807,7 +752,7 @@ describe("the resize announce, and the two things it waits for", () => {
     // including a failed face.
     const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const settleFontSet = stubFontsRejecting();
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await viewportSettled();
 
     // Null for the FONTS' reason, not the viewport's: the same call answers a size
@@ -830,7 +775,7 @@ describe("the resize announce, and the two things it waits for", () => {
     const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const settleFontSet = stubFontsRejecting();
     vi.useFakeTimers();
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await vi.advanceTimersByTimeAsync(0);
 
     // A size at all means the DEADLINE opened the gate: the load has rejected and
@@ -857,7 +802,7 @@ describe("the resize announce, and the two things it waits for", () => {
     // opened on the fonts themselves, so it has already measured the metrics `ready`
     // would report, and a second announce would cost the server a resize for nothing.
     const settleFontSet = stubFontsLoaded();
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await viewportSettled();
     expect(wire().initialSize?.()).toEqual({ cols: 80, rows: 24 });
     sendResize.mockClear();
@@ -873,7 +818,7 @@ describe("the resize announce, and the two things it waits for", () => {
     // provisional; a size measured mid-slide costs a second resize and a second
     // redraw the moment it stops moving.
     vi.useFakeTimers();
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await vi.advanceTimersByTimeAsync(0);
 
     window.dispatchEvent(new Event("resize"));
@@ -889,19 +834,8 @@ describe("the decisions the transport cannot make for itself", () => {
   // these forwards a judgement only the renderer can make. Asserting that the
   // callback EXISTS is what let the paging seam ship inert; these call it.
 
-  it("re-runs the full paging trigger when a history request was denied", async () => {
-    // Deliberately not a replay of the denied range: by the time the token bucket
-    // refills, the gap may have healed or the session may have entered alt.
-    mount({ features: () => [] });
-    await tick();
-
-    wire().onHistoryRetry?.();
-
-    expect(maybeFetchHistory).toHaveBeenCalledTimes(1);
-  });
-
   it("forwards the resume's retained-history bounds to the renderer", async () => {
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await tick();
 
     wire().onResumeBounds?.(900, 400);
@@ -912,9 +846,9 @@ describe("the decisions the transport cannot make for itself", () => {
 
   it("publishes the cursor move the renderer reports, so chrome can follow it", async () => {
     const { seen } = await withBusProbe();
-    const opts = renderInit.mock.calls[0]?.[0];
+    const opts = fake.options();
 
-    opts?.onCursorMove?.();
+    opts.onCursorMove?.();
 
     expect(seen).toEqual([{ event: "render:cursor", payload: undefined }]);
   });
@@ -923,10 +857,10 @@ describe("the decisions the transport cannot make for itself", () => {
     // The jump-to-bottom button is a feature, and this is the only thing that tells
     // it to appear.
     const { seen } = await withBusProbe();
-    const opts = scrollInit.mock.calls[0]?.[0];
+    const opts = fake.options();
 
-    opts?.onUserScrollChange?.(true);
-    opts?.onUserScrollChange?.(false);
+    opts.onUserScrollChange?.(true);
+    opts.onUserScrollChange?.(false);
 
     expect(seen).toEqual([
       { event: "scroll:state", payload: { scrolledUp: true } },
@@ -942,7 +876,7 @@ describe("the settle after a viewport transition", () => {
 
   it("announces the settled size once, at the end of the burst", async () => {
     vi.useFakeTimers();
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await vi.advanceTimersByTimeAsync(0);
     sendResize.mockClear();
 
@@ -960,7 +894,7 @@ describe("the settle after a viewport transition", () => {
   it("announces nothing at the settle when the fonts never loaded", async () => {
     stubFonts();
     vi.useFakeTimers();
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     await vi.advanceTimersByTimeAsync(0);
     sendResize.mockClear();
 
@@ -972,7 +906,7 @@ describe("the settle after a viewport transition", () => {
 
   it("stops settling after destroy, so a released terminal puts nothing on the wire", async () => {
     vi.useFakeTimers();
-    const term = mount({ features: () => [] });
+    const term = await mount({ features: () => [] });
     await vi.advanceTimersByTimeAsync(0);
     term.destroy();
     sendResize.mockClear();
@@ -984,7 +918,7 @@ describe("the settle after a viewport transition", () => {
   });
 });
 
-describe("wake-reconnect handlers", () => {
+describe("wake-reconnect handlers", async () => {
   // Each of these opens a socket, so none may fire before the first connect has
   // happened: under a session owner the kernel connects only once
   // resolveInitialSession returns an id, and a bare /ws before then hits a
@@ -994,7 +928,7 @@ describe("wake-reconnect handlers", () => {
   // They live in this file rather than beside the DOM tests because they are
   // document- and window-scoped: they need every earlier terminal torn down, or a
   // leaked listener answers the same event and the count is somebody else's.
-  function ownedTerminal(resolved: Promise<{ id: string } | null>): void {
+  async function ownedTerminal(resolved: Promise<{ id: string } | null>): Promise<void> {
     const owner: TerminalFeature = {
       name: "session-owner",
       sessionOwner: { resolveInitialSession: () => resolved },
@@ -1002,11 +936,11 @@ describe("wake-reconnect handlers", () => {
         return { teardown: () => undefined };
       },
     };
-    mount({ features: () => [owner] });
+    await mount({ features: () => [owner] });
   }
 
-  it("reconnects when the page becomes visible again", () => {
-    mount({ features: () => [] });
+  it("reconnects when the page becomes visible again", async () => {
+    await mount({ features: () => [] });
     reconnectNow.mockClear();
 
     document.dispatchEvent(new Event("visibilitychange"));
@@ -1014,8 +948,8 @@ describe("wake-reconnect handlers", () => {
     expect(reconnectNow).toHaveBeenCalledTimes(1);
   });
 
-  it("reconnects on pageshow", () => {
-    mount({ features: () => [] });
+  it("reconnects on pageshow", async () => {
+    await mount({ features: () => [] });
     reconnectNow.mockClear();
 
     window.dispatchEvent(new Event("pageshow"));
@@ -1023,8 +957,8 @@ describe("wake-reconnect handlers", () => {
     expect(reconnectNow).toHaveBeenCalledTimes(1);
   });
 
-  it("reconnects when the network comes back", () => {
-    mount({ features: () => [] });
+  it("reconnects when the network comes back", async () => {
+    await mount({ features: () => [] });
     reconnectNow.mockClear();
 
     window.dispatchEvent(new Event("online"));
@@ -1032,10 +966,10 @@ describe("wake-reconnect handlers", () => {
     expect(reconnectNow).toHaveBeenCalledTimes(1);
   });
 
-  it("opens no socket on pageshow before an owned first connect has happened", () => {
+  it("opens no socket on pageshow before an owned first connect has happened", async () => {
     // The Firefox race: pageshow fires on the initial load, and a session list that
     // has not resolved yet leaves no session id to put on the URL.
-    ownedTerminal(new Promise(() => undefined));
+    await ownedTerminal(new Promise(() => undefined));
     reconnectNow.mockClear();
 
     window.dispatchEvent(new Event("pageshow"));
@@ -1043,8 +977,8 @@ describe("wake-reconnect handlers", () => {
     expect(reconnectNow).not.toHaveBeenCalled();
   });
 
-  it("opens no socket on visibilitychange or online before an owned first connect", () => {
-    ownedTerminal(new Promise(() => undefined));
+  it("opens no socket on visibilitychange or online before an owned first connect", async () => {
+    await ownedTerminal(new Promise(() => undefined));
     reconnectNow.mockClear();
 
     document.dispatchEvent(new Event("visibilitychange"));
@@ -1054,7 +988,7 @@ describe("wake-reconnect handlers", () => {
   });
 
   it("reconnects once the owner's session HAS been resolved", async () => {
-    ownedTerminal(Promise.resolve({ id: "s1" }));
+    await ownedTerminal(Promise.resolve({ id: "s1" }));
     await tick();
     await tick();
     reconnectNow.mockClear();
@@ -1064,11 +998,11 @@ describe("wake-reconnect handlers", () => {
     expect(reconnectNow).toHaveBeenCalledTimes(1);
   });
 
-  it("stops reconnecting after destroy, so a released terminal cannot reopen a socket", () => {
+  it("stops reconnecting after destroy, so a released terminal cannot reopen a socket", async () => {
     // These listeners live on the document and the window, which outlive the root:
     // a leaked one calls into a disconnected engine every time the reader comes
     // back to the tab.
-    const term = mount({ features: () => [] });
+    const term = await mount({ features: () => [] });
     term.destroy();
     reconnectNow.mockClear();
 
@@ -1081,11 +1015,11 @@ describe("wake-reconnect handlers", () => {
 });
 
 describe("last-chance cache release, and its teardown", () => {
-  it("drops every browse cache on freeze, TTL or no TTL", () => {
+  it("drops every browse cache on freeze, TTL or no TTL", async () => {
     // A frozen page runs no code at all, so the periodic sweep cannot cover it: its
     // caches would stay resident for the whole freeze and a discard would then throw
     // them away unread.
-    mount({ features: () => [] });
+    await mount({ features: () => [] });
     dropBrowseCache.mockClear();
 
     document.dispatchEvent(new Event("freeze"));
@@ -1093,8 +1027,8 @@ describe("last-chance cache release, and its teardown", () => {
     expect(dropBrowseCache).toHaveBeenCalledWith(false);
   });
 
-  it("drops nothing on freeze after destroy", () => {
-    const term = mount({ features: () => [] });
+  it("drops nothing on freeze after destroy", async () => {
+    const term = await mount({ features: () => [] });
     term.destroy();
     dropBrowseCache.mockClear();
 
@@ -1103,9 +1037,9 @@ describe("last-chance cache release, and its teardown", () => {
     expect(dropBrowseCache).not.toHaveBeenCalled();
   });
 
-  it("stops the periodic sweep after destroy", () => {
+  it("stops the periodic sweep after destroy", async () => {
     vi.useFakeTimers();
-    const term = mount({ features: () => [] });
+    const term = await mount({ features: () => [] });
     term.destroy();
     dropBrowseCache.mockClear();
 
@@ -1130,7 +1064,7 @@ describe("an ordinary close is a reconnect, not an end", () => {
         return { teardown: () => undefined };
       },
     };
-    mount({ features: () => [watcher] });
+    await mount({ features: () => [watcher] });
     await tick();
     wire().onMessage(screenFrame()); // past the loading gate
     seen.length = 0;
@@ -1166,7 +1100,7 @@ describe("a feature whose setup fails, and one whose terminal is destroyed mid-s
         throw new Error("setup blew up");
       },
     };
-    mount({ features: () => [reporter, broken] });
+    await mount({ features: () => [reporter, broken] });
     await tick();
     await tick();
 
@@ -1196,7 +1130,7 @@ describe("a feature whose setup fails, and one whose terminal is destroyed mid-s
         return { teardown };
       },
     };
-    const term = mount({ features: () => [slow] });
+    const term = await mount({ features: () => [slow] });
 
     term.destroy();
     release();

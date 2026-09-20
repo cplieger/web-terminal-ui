@@ -7,7 +7,7 @@
  *  made it indistinguishable from a 500 and threw away the retry hint. */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import fc from "fast-check";
-import type { CueStatus, TabOrderKey } from "./model.js";
+import type { CueStatus, PaneLayout, TabOrderKey } from "./model.js";
 import {
   MAX_PERSISTED_CUE_SEEN,
   PROGRESS_ABSENT,
@@ -29,6 +29,7 @@ import {
   statusOwnsProgress,
   statusPhrase,
   statusRevealsDot,
+  summarizeCues,
   tabAccessibleName,
 } from "./model.js";
 
@@ -263,6 +264,99 @@ describe("isCueStatus declares the cue-worthy statuses in one place", () => {
   });
 });
 
+describe("summarizeCues folds the tab list into one attention summary", () => {
+  const seen = (entries: [string, CueStatus][] = []): Map<string, CueStatus> => new Map(entries);
+
+  it("reports nothing for an empty list and for a list with no cue", () => {
+    expect(summarizeCues([], seen())).toEqual({ count: 0, worst: "" });
+    expect(
+      summarizeCues(
+        [
+          { id: "a", status: "working" },
+          { id: "b", status: "idle" },
+          { id: "c", status: "warning" },
+          { id: "d", status: "exited" },
+        ],
+        seen(),
+      ),
+    ).toEqual({ count: 0, worst: "" });
+  });
+
+  it("counts every unacknowledged cue and keeps the most severe", () => {
+    expect(
+      summarizeCues(
+        [
+          { id: "a", status: "done" },
+          { id: "b", status: "input" },
+          { id: "c", status: "working" },
+        ],
+        seen(),
+      ),
+    ).toEqual({ count: 2, worst: "input" });
+  });
+
+  it("orders severity crashed over failed over input over done", () => {
+    // A single surface can show one state, so the order has to be total and
+    // stated. Each pair is asserted BOTH ways round, because a comparison that
+    // ignored its arguments' order would pass a one-directional test.
+    const pairs: [CueStatus, CueStatus, CueStatus][] = [
+      ["crashed", "failed", "crashed"],
+      ["failed", "input", "failed"],
+      ["input", "done", "input"],
+      ["crashed", "done", "crashed"],
+    ];
+    for (const [first, second, worst] of pairs) {
+      expect(
+        summarizeCues(
+          [
+            { id: "a", status: first },
+            { id: "b", status: second },
+          ],
+          seen(),
+        ).worst,
+        `${first} vs ${second}`,
+      ).toBe(worst);
+      expect(
+        summarizeCues(
+          [
+            { id: "a", status: second },
+            { id: "b", status: first },
+          ],
+          seen(),
+        ).worst,
+        `${second} vs ${first}`,
+      ).toBe(worst);
+    }
+  });
+
+  it("excludes a cue this viewer already acknowledged", () => {
+    const list = [
+      { id: "a", status: "input" },
+      { id: "b", status: "crashed" },
+    ];
+    expect(summarizeCues(list, seen([["a", "input"]]))).toEqual({ count: 1, worst: "crashed" });
+    expect(
+      summarizeCues(
+        list,
+        seen([
+          ["a", "input"],
+          ["b", "crashed"],
+        ]),
+      ),
+    ).toEqual({ count: 0, worst: "" });
+  });
+
+  it("counts a cue again once the session moves to a DIFFERENT cue", () => {
+    // The acknowledgement is per (session, status), so a tab that was
+    // acknowledged as done and then blocks on input is news again. This is the
+    // half that a plain "have I seen this session" flag would get wrong.
+    expect(summarizeCues([{ id: "a", status: "input" }], seen([["a", "done"]]))).toEqual({
+      count: 1,
+      worst: "input",
+    });
+  });
+});
+
 describe("the strip's order follows the server, not arrival", () => {
   // Wire records as a server would send them: creation order d, a, c, b, and a
   // shared order the server holds that is deliberately NEITHER creation order nor
@@ -493,6 +587,137 @@ describe("setOrder sends the arrangement to the server", () => {
       vi.stubGlobal("fetch", () => Promise.resolve(new Response("nope", { status })));
       const api = createSessionAPI("/api/sessions");
       await expect(api.setOrder(["s1"])).rejects.toMatchObject({
+        name: "SessionAPIError",
+        status,
+      });
+    }
+  });
+});
+
+describe("the layout record's client half", () => {
+  const record: PaneLayout = {
+    left: "s1",
+    right: null,
+    handle: 0.5,
+    selected: "left",
+    open: false,
+  };
+
+  it("GETs the layout route as JSON and hands back the record", async () => {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve(response(200, record));
+    });
+
+    await expect(createSessionAPI("/api/sessions").getLayout()).resolves.toEqual(record);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("/api/sessions/layout");
+    expect(calls[0]?.init?.method).toBeUndefined();
+    expect(calls[0]?.init?.headers).toEqual({ Accept: "application/json" });
+    expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("answers null on 404, the server before the route, so the layout runs unpersisted", async () => {
+    stubFetch(response(404));
+    await expect(createSessionAPI("/api/sessions").getLayout()).resolves.toBeNull();
+  });
+
+  it("throws with the status on any other failure, so a 500 is not read as an empty record", async () => {
+    stubFetch(response(500));
+    await expect(createSessionAPI("/api/sessions").getLayout()).rejects.toMatchObject({
+      name: "SessionAPIError",
+      status: 500,
+    });
+  });
+
+  it("refuses a 200 whose body is not a layout record, rather than applying it", async () => {
+    // Every branch of the shape check, one malformed body each: a proxy's error
+    // object, a side that is neither a string nor null, a handle out of range,
+    // not a number or the Infinity a `1e999` literal parses to, a selection naming
+    // no side, and an `open` that is not a flag.
+    const malformed: unknown[] = [
+      null,
+      "nope",
+      { ...record, left: 7 },
+      { ...record, right: {} },
+      { ...record, handle: 1.5 },
+      { ...record, handle: -0.1 },
+      { ...record, handle: "0.5" },
+      { ...record, handle: Number.POSITIVE_INFINITY },
+      { ...record, selected: "middle" },
+      { ...record, open: "true" },
+      { left: "s1", right: null, handle: 0.5, selected: "left" },
+    ];
+    for (const body of malformed) {
+      stubFetch(response(200, body));
+      await expect(createSessionAPI("/api/sessions").getLayout()).rejects.toThrow(/malformed body/);
+    }
+  });
+
+  it("refuses a well-typed record that breaks the server's own rules, so a claim the server would 400 is never applied", async () => {
+    // A closed split showing a right side or selecting it, one session on both
+    // sides, and an open split whose one shown side is not the selected one.
+    const inconsistent: unknown[] = [
+      { left: "s1", right: "s2", handle: 0.5, selected: "left", open: false },
+      { left: "s1", right: null, handle: 0.5, selected: "right", open: false },
+      { left: "s1", right: "s1", handle: 0.5, selected: "left", open: true },
+      { left: null, right: "s1", handle: 0.5, selected: "left", open: true },
+      { left: "s1", right: null, handle: 0.5, selected: "right", open: true },
+    ];
+    for (const body of inconsistent) {
+      stubFetch(response(200, body));
+      await expect(createSessionAPI("/api/sessions").getLayout()).rejects.toThrow(/malformed body/);
+    }
+  });
+
+  it("accepts every record shape the server can hold, the empty default included", async () => {
+    const consistent: PaneLayout[] = [
+      { left: null, right: null, handle: 0.5, selected: "left", open: false },
+      { left: null, right: null, handle: 0.5, selected: "left", open: true },
+      { left: "s1", right: "s2", handle: 0.3, selected: "right", open: true },
+      { left: null, right: "s2", handle: 0.5, selected: "right", open: true },
+    ];
+    for (const body of consistent) {
+      stubFetch(response(200, body));
+      await expect(createSessionAPI("/api/sessions").getLayout()).resolves.toEqual(body);
+    }
+  });
+
+  it("reads an absent side as null, which is how the server marshals an empty pane", async () => {
+    stubFetch(response(200, { handle: 0.3, selected: "left", open: true, left: "s2" }));
+    await expect(createSessionAPI("/api/sessions").getLayout()).resolves.toEqual({
+      left: "s2",
+      right: null,
+      handle: 0.3,
+      selected: "left",
+      open: true,
+    });
+  });
+
+  it("PUTs the whole record as JSON to the layout route", async () => {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    const next = { left: "s2", right: "s1", handle: 0.4, selected: "right" as const, open: true };
+
+    await expect(createSessionAPI("/api/sessions").setLayout(next)).resolves.toBeUndefined();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("/api/sessions/layout");
+    expect(calls[0]?.init?.method).toBe("PUT");
+    expect(calls[0]?.init?.body).toBe(JSON.stringify(next));
+    expect(calls[0]?.init?.headers).toEqual({ "Content-Type": "application/json" });
+    expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("throws with the status on a refused write, so a 409 (a side names a dead session) is told apart from a real failure", async () => {
+    for (const status of [409, 400, 404, 500]) {
+      vi.stubGlobal("fetch", () => Promise.resolve(new Response("nope", { status })));
+      await expect(createSessionAPI("/api/sessions").setLayout(record)).rejects.toMatchObject({
         name: "SessionAPIError",
         status,
       });

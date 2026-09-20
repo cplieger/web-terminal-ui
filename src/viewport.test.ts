@@ -1,30 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
-import type * as Engine from "@cplieger/web-terminal-engine";
-import type * as ViewportModule from "./viewport.js";
-
-const { isUserScrolledUp, scrollToBottom, stickToBottom } = vi.hoisted(() => ({
-  isUserScrolledUp: vi.fn<() => boolean>(() => false),
-  scrollToBottom: vi.fn(),
-  stickToBottom: vi.fn(),
-}));
-
-vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
-  const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    scroll: {
-      isUserScrolledUp,
-      scrollToBottom,
-      stickToBottom,
-      init: vi.fn(),
-      suppressScroll: vi.fn(),
-      isInUserScroll: vi.fn(() => false),
-    },
-  };
-});
+import { createViewport, type Viewport } from "./viewport.js";
 
 const SETTLE_MS = 350;
-let viewport: typeof ViewportModule;
+const isUserScrolledUp = vi.fn<() => boolean>(() => false);
+const stickToBottom = vi.fn();
+const scroll = { isUserScrolledUp, stickToBottom };
+let viewport: Viewport;
 let termWrap: HTMLElement;
 let onSettled: Mock<(wasAtBottom: boolean) => void>;
 
@@ -56,38 +37,20 @@ function undoShadow(): void {
   restoreShadow = () => undefined;
 }
 
-/** A fresh evaluation of viewport.ts.
- *
- *  viewport.ts keeps module-level state (the transition latch, the settle timer,
- *  the cleanup list), and every test here calls init(), so the state has to start
- *  clean. `vi.resetModules()` cannot do that in a browser: the module map is
- *  URL-keyed, so the re-import returns the CACHED instance and every test shares
- *  one latch and one growing cleanup list. Busting the query mints a new
- *  instance. The `.ts` extension is load-bearing: written `.js` the suite still
- *  passes while v8 attributes every evaluation to a file that does not exist and
- *  coverage for this module collapses to nothing. */
-let bootCount = 0;
-async function freshViewport(): Promise<typeof ViewportModule> {
-  return (await import(
-    /* @vite-ignore */ `./viewport.ts?boot=${++bootCount}`
-  )) as typeof ViewportModule;
-}
-
-beforeEach(async () => {
+beforeEach(() => {
   vi.useFakeTimers();
   isUserScrolledUp.mockReturnValue(false);
-  viewport = await freshViewport();
   termWrap = document.createElement("div");
   document.body.replaceChildren(termWrap);
   onSettled = vi.fn<(wasAtBottom: boolean) => void>();
-  viewport.init({ termWrap, onSettled });
-  // Flush any transition started by the init-time visualViewport onChange.
+  viewport = createViewport({ termWrap, scroll, onSettled });
+  // Flush any transition started by the construction-time visualViewport onChange.
   vi.advanceTimersByTime(SETTLE_MS + 50);
   onSettled.mockClear();
-  scrollToBottom.mockClear();
   stickToBottom.mockClear();
 });
 afterEach(() => {
+  viewport.teardown();
   vi.useRealTimers();
 });
 
@@ -100,10 +63,8 @@ describe("viewport: settle lifecycle", () => {
     vi.advanceTimersByTime(1);
     expect(onSettled).toHaveBeenCalledTimes(1);
     expect(onSettled).toHaveBeenCalledWith(true);
-    // Pins, never forces: stickToBottom respects the follow state, whereas
-    // scrollToBottom would OVERRIDE it, which is not this handler's decision.
+    // Pins, never forces: stickToBottom respects the follow state.
     expect(stickToBottom).toHaveBeenCalledTimes(1);
-    expect(scrollToBottom).not.toHaveBeenCalled();
   });
 
   it("coalesces a burst of events into a single settle (debounce)", () => {
@@ -142,7 +103,6 @@ describe("viewport: settle lifecycle", () => {
     expect(onSettled).toHaveBeenCalledTimes(1);
     expect(onSettled).toHaveBeenCalledWith(false);
     expect(stickToBottom).not.toHaveBeenCalled();
-    expect(scrollToBottom).not.toHaveBeenCalled();
   });
 
   it("reports a transition in flight so a caller can withhold a provisional measurement", () => {
@@ -154,11 +114,33 @@ describe("viewport: settle lifecycle", () => {
     vi.advanceTimersByTime(1);
     expect(viewport.isInTransition()).toBe(false);
   });
+
+  it("keeps two panes' settle lifecycles apart", () => {
+    // Two viewports over two term wraps: a window resize reaches both, and each
+    // reports its own settle to its own callback exactly once.
+    const otherWrap = document.createElement("div");
+    document.body.appendChild(otherWrap);
+    const otherSettled = vi.fn<(wasAtBottom: boolean) => void>();
+    const other = createViewport({ termWrap: otherWrap, scroll, onSettled: otherSettled });
+    vi.advanceTimersByTime(SETTLE_MS + 50);
+    otherSettled.mockClear();
+    onSettled.mockClear();
+    window.dispatchEvent(new Event("resize"));
+    vi.advanceTimersByTime(SETTLE_MS);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(otherSettled).toHaveBeenCalledTimes(1);
+    other.teardown();
+    window.dispatchEvent(new Event("resize"));
+    expect(viewport.isInTransition()).toBe(true);
+    expect(other.isInTransition()).toBe(false);
+  });
 });
 
 describe("viewport: visualViewport keyboard inset", () => {
+  let inner: Viewport | null = null;
   afterEach(() => {
-    viewport.teardown();
+    inner?.teardown();
+    inner = null;
     undoShadow();
   });
 
@@ -174,7 +156,7 @@ describe("viewport: visualViewport keyboard inset", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    viewport.init({ termWrap: tw, root, onSettled: vi.fn() });
+    inner = createViewport({ termWrap: tw, root, scroll, onSettled: vi.fn() });
     // .term is pinned to the visual viewport: top = offsetTop (30); the bottom
     // inset is the gap from the layout bottom to the keyboard top
     // (innerHeight - offsetTop - vv.height = innerHeight - 30 - (innerHeight - 200) = 170).
@@ -196,7 +178,7 @@ describe("viewport: visualViewport keyboard inset", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    viewport.init({ termWrap: tw, root, onSettled: vi.fn() });
+    inner = createViewport({ termWrap: tw, root, scroll, onSettled: vi.fn() });
     expect(tw.style.top).toBe("");
     expect(tw.style.bottom).toBe("");
     expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
@@ -220,7 +202,13 @@ describe("viewport: visualViewport keyboard inset", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    viewport.init({ termWrap: tw, root, onSettled: vi.fn(), suppressKeyboardInset: () => true });
+    inner = createViewport({
+      termWrap: tw,
+      root,
+      scroll,
+      onSettled: vi.fn(),
+      suppressKeyboardInset: () => true,
+    });
     expect(tw.style.top).toBe("");
     expect(tw.style.bottom).toBe("");
     expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
@@ -230,11 +218,13 @@ describe("viewport: visualViewport keyboard inset", () => {
 
 describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
   const realInnerHeight = window.innerHeight;
+  let inner: Viewport | null = null;
   beforeEach(() => {
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
   });
   afterEach(() => {
-    viewport.teardown();
+    inner?.teardown();
+    inner = null;
     undoShadow();
     Object.defineProperty(window, "innerHeight", { configurable: true, value: realInnerHeight });
   });
@@ -252,7 +242,7 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    viewport.init({ termWrap: tw, root, onSettled: vi.fn() });
+    inner = createViewport({ termWrap: tw, root, scroll, onSettled: vi.fn() });
     // Keyboard closed (vv.height == innerHeight, offsetTop 0) so bottomInset is 0;
     // the 48px reserve (< innerHeight/3 == 300) is the whole bottom offset.
     expect(tw.style.bottom).toBe("48px");
@@ -274,15 +264,15 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    viewport.init({ termWrap: tw, root, onSettled: vi.fn() });
+    inner = createViewport({ termWrap: tw, root, scroll, onSettled: vi.fn() });
     expect(tw.style.bottom).toBe("300px");
   });
 });
 
 // A visualViewport stand-in whose listeners actually fire. Every other suite
 // here stubs addEventListener with a vi.fn, so the geometry is only ever
-// computed by the one direct onChange() call init makes — nothing proved the
-// listener WIRING reacts to a keyboard opening after init, or that teardown
+// computed by the one direct onChange() call construction makes — nothing proved
+// the listener WIRING reacts to a keyboard opening afterwards, or that teardown
 // releases it.
 function liveVisualViewport(
   height: number,
@@ -314,27 +304,26 @@ function liveVisualViewport(
   };
 }
 
-describe("viewport: the visual-viewport wiring reacts after init", () => {
+describe("viewport: the visual-viewport wiring reacts after construction", () => {
   let vv: ReturnType<typeof liveVisualViewport>;
   let root: HTMLElement;
 
   beforeEach(() => {
-    viewport.teardown(); // drop the beforeEach init's window listeners first
+    viewport.teardown(); // drop the outer instance's window listeners first
     vv = liveVisualViewport(window.innerHeight, 0);
     restoreShadow = shadowOwn(window, "visualViewport", vv);
     root = document.createElement("div");
     const tw = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    viewport.init({ termWrap: tw, root, onSettled });
+    viewport = createViewport({ termWrap: tw, root, scroll, onSettled });
   });
 
   afterEach(() => {
-    viewport.teardown();
     undoShadow();
   });
 
-  it("republishes the keyboard inset when the keyboard opens after init", () => {
+  it("republishes the keyboard inset when the keyboard opens after construction", () => {
     vv.height = window.innerHeight - 300;
     vv.fire("resize");
     expect(root.style.getPropertyValue("--kb-inset")).toBe("300px");
@@ -377,7 +366,7 @@ describe("viewport: teardown releases every listener it attached", () => {
     const tw = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    viewport.init({ termWrap: tw, root, onSettled });
+    viewport = createViewport({ termWrap: tw, root, scroll, onSettled });
     expect(root.style.getPropertyValue("--kb-inset")).toBe("200px");
     viewport.teardown();
   });
@@ -421,7 +410,6 @@ describe("viewport: teardown releases every listener it attached", () => {
 
 describe("viewport: rotation is a re-measure signal on both Safari generations", () => {
   afterEach(() => {
-    viewport.teardown();
     undoShadow();
   });
 
@@ -429,10 +417,10 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
     viewport.teardown();
     const orientation = liveVisualViewport(0, 0); // reused as a bare event target
     restoreShadow = shadowOwn(screen, "orientation", orientation);
-    viewport.init({ termWrap, onSettled });
-    // init() reads the real visualViewport and publishes its geometry, which
+    viewport = createViewport({ termWrap, scroll, onSettled });
+    // Construction reads the real visualViewport and publishes its geometry, which
     // starts a transition of its own; flush it so the rotation below is the only
-    // signal under test (the outer beforeEach does the same after its init).
+    // signal under test (the outer beforeEach does the same after its construction).
     vi.advanceTimersByTime(SETTLE_MS + 50);
     expect(viewport.isInTransition()).toBe(false);
     orientation.fire("change");
@@ -452,7 +440,7 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
     // The other half of "lacks it": this browser genuinely has no
     // onorientationchange, so the else-if condition is false on its own merits.
     expect("onorientationchange" in window).toBe(false);
-    viewport.init({ termWrap, onSettled });
+    viewport = createViewport({ termWrap, scroll, onSettled });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     expect(viewport.isInTransition()).toBe(false);
     window.dispatchEvent(new Event("orientationchange"));
@@ -461,12 +449,12 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
 
   it("releases the screen.orientation listener on teardown", () => {
     // screen.orientation is a global the terminal does not own: a listener left on
-    // it survives destroy() and keeps calling into a torn-down module, and a
+    // it survives destroy() and keeps calling into a torn-down instance, and a
     // remount then re-measures twice per rotation.
     viewport.teardown();
     const orientation = liveVisualViewport(0, 0); // reused as a bare event target
     restoreShadow = shadowOwn(screen, "orientation", orientation);
-    viewport.init({ termWrap, onSettled });
+    viewport = createViewport({ termWrap, scroll, onSettled });
 
     viewport.teardown();
     orientation.fire("change");
@@ -477,11 +465,11 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
 
 // A ResizeObserver whose callback a test can actually fire. The real one only
 // reports a size change it observed, on a later frame of its own choosing, so
-// nothing a test does reaches the term-wrap observation init makes on a schedule
-// it can assert against — and that observation is the signal that catches a font
-// load, a devtools dock, and an embedder resizing its panel, none of which raise
-// a window resize event. `disconnect()` is modelled faithfully because teardown's
-// release of the observer is half of what is under test.
+// nothing a test does reaches the term-wrap observation construction makes on a
+// schedule it can assert against — and that observation is the signal that
+// catches a font load, a devtools dock, and an embedder resizing its panel, none
+// of which raise a window resize event. `disconnect()` is modelled faithfully
+// because teardown's release of the observer is half of what is under test.
 interface FakeObserver {
   callback: ResizeObserverCallback;
   targets: Element[];
@@ -525,18 +513,17 @@ describe("viewport: the term wrap's own size is a re-measure signal", () => {
   let tw: HTMLElement;
 
   beforeEach(() => {
-    viewport.teardown(); // drop the outer init's window listeners first
+    viewport.teardown(); // drop the outer instance's window listeners first
     stubResizeObserver();
     tw = document.createElement("div");
     document.body.replaceChildren(tw);
-    viewport.init({ termWrap: tw, onSettled });
+    viewport = createViewport({ termWrap: tw, scroll, onSettled });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     onSettled.mockClear();
     stickToBottom.mockClear();
   });
 
   afterEach(() => {
-    viewport.teardown();
     vi.unstubAllGlobals();
   });
 
@@ -578,13 +565,12 @@ describe("viewport: rotation on older Safari (the deprecated window event)", () 
     viewport.teardown();
     restoreOrientation = shadowOwn(screen, "orientation", undefined);
     restoreShadow = shadowOwn(window, "onorientationchange", null);
-    viewport.init({ termWrap, onSettled });
+    viewport = createViewport({ termWrap, scroll, onSettled });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     onSettled.mockClear();
   });
 
   afterEach(() => {
-    viewport.teardown();
     undoShadow();
     restoreOrientation();
     restoreOrientation = () => undefined;
@@ -611,10 +597,8 @@ describe("viewport: rotation on older Safari (the deprecated window event)", () 
 });
 
 describe("viewport: teardown and a settle already in flight", () => {
-  // Driven through the fake ResizeObserver rather than a window event: earlier
-  // suites in this file deliberately leave their instances mounted, so a window
-  // resize reaches all of them and the engine mock counts their settles too. An
-  // observer fire reaches exactly this instance.
+  // Driven through the fake ResizeObserver rather than a window event, so the
+  // signal reaches exactly this instance.
   let tw: HTMLElement;
 
   beforeEach(() => {
@@ -622,15 +606,13 @@ describe("viewport: teardown and a settle already in flight", () => {
     stubResizeObserver();
     tw = document.createElement("div");
     document.body.replaceChildren(tw);
-    viewport.init({ termWrap: tw, onSettled });
+    viewport = createViewport({ termWrap: tw, scroll, onSettled });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     onSettled.mockClear();
     stickToBottom.mockClear();
-    scrollToBottom.mockClear();
   });
 
   afterEach(() => {
-    viewport.teardown();
     vi.unstubAllGlobals();
   });
 
@@ -646,19 +628,16 @@ describe("viewport: teardown and a settle already in flight", () => {
 
     expect(onSettled).not.toHaveBeenCalled();
     expect(stickToBottom).not.toHaveBeenCalled();
-    expect(scrollToBottom).not.toHaveBeenCalled();
   });
 
-  it("survives a teardown that runs before any init", async () => {
-    // The kernel calls teardown from destroy(), and a consumer that destroys a
-    // terminal whose init never ran (a failed bootstrap) must not get a crash out
-    // of the cleanup path.
-    vi.resetModules();
-    const fresh = await import("./viewport.js");
+  it("survives a second teardown", () => {
+    // The kernel's disposer stack and a consumer's own cleanup may both reach
+    // teardown; the second call must not throw or re-arm anything.
+    viewport.teardown();
 
     expect(() => {
-      fresh.teardown();
+      viewport.teardown();
     }).not.toThrow();
-    expect(fresh.isInTransition()).toBe(false);
+    expect(viewport.isInTransition()).toBe(false);
   });
 });

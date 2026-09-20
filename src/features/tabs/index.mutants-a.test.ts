@@ -29,11 +29,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "../../kernel/kernel.js";
-import type * as TabsModule from "./index.js";
+import { tabs } from "./index.js";
+import type { PaneLayout } from "./model.js";
+import { mountTerminal } from "../../test-helpers/mount.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
-import type { TerminalFeature } from "../../kernel/types.js";
+import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 // The gesture vocabulary, imported rather than restated: these tests pin the
 // SHAPE of each rule (a flick beats distance, a stale sample is ignored, the
 // peek is capped), not the numbers a retune may move.
@@ -47,83 +48,26 @@ import {
   VELOCITY_STALE_MS,
 } from "./switcher.js";
 
-const setSession = vi.fn<(id: string) => void>();
-const bind = vi.fn();
-const sendBinary = vi.fn<(bytes: Uint8Array) => boolean>(() => true);
-
-// The engine is replaced wholesale, as in index.test.ts: a switch re-points the
-// renderer and reconnects the socket, and neither belongs in a DOM-only test.
-// `modes` comes through from the real module so getMouseMode() answers 0 (no
-// mouse-mode application) unless a test says otherwise.
-// getMouseMode has to come through the mock factory rather than a vi.spyOn on the
-// real namespace: an ESM module namespace object is not configurable, so
-// `vi.spyOn(engine.modes, "getMouseMode")` throws "Module namespace is not
-// configurable in ESM" in a real browser (the node transform used to rewrite it
-// into something patchable). The default answers 0 — no mouse-mode application —
-// which is what `...actual` used to give.
-const getMouseMode = vi.fn<() => number>(() => 0);
+// The engine is a fake, as in index.test.ts: a switch re-points the renderer
+// and reconnects the socket, and neither belongs in a DOM-only test. getMouseMode
+// answers 0 (no mouse-mode application) unless a test says otherwise; it is a
+// fake-level override because the swipe gate reads it through `ctx.modes`.
+const getMouseMode = vi.hoisted(() => vi.fn<() => number>(() => 0));
+const fake = await vi.hoisted(async () => {
+  const { createEngineFake } = await import("../../test-helpers/fake-engine.js");
+  return createEngineFake({ modes: { getMouseMode } });
+});
 
 vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   const actual = await importActual<typeof Engine>();
-  return {
-    ...actual,
-    modes: { ...actual.modes, getMouseMode },
-    render: {
-      init: vi.fn(),
-      updateFontMetrics: vi.fn(),
-      setPredictedCursor: vi.fn(),
-      computeSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      cellSize: vi.fn(() => ({ width: 8, height: 17 })),
-      gridSize: vi.fn(() => ({ cols: 80, rows: 24 })),
-      getCursorPx: vi.fn(() => ({ left: 0, top: 0, cellH: 16 })),
-      getHighestIndex: vi.fn(() => -1),
-      pendingRowCount: vi.fn(() => 0),
-      noteResumeBounds: vi.fn(),
-      handleScreen: vi.fn(),
-      handleScroll: vi.fn(),
-      updateReverseVideo: vi.fn(),
-      resetScrollback: vi.fn(),
-      resetScreen: vi.fn(),
-      dropBrowseCache: vi.fn(),
-      bind,
-      captureViewMemory: vi.fn(() => ({ abs: 7, screenTop: -3, following: false })),
-      boundStore: vi.fn(() => ({ getWindow: () => ({ base: 0 }) })),
-    },
-    scroll: {
-      // Reached through viewport.ts's settle handler, which a real browser fires on
-      // its own: viewport.init() observes the term wrap with a ResizeObserver, and a
-      // real one delivers its first observation asynchronously, so every mount opens a
-      // transition that settles ~350ms later and pins to the bottom. Absent from the
-      // double, that settle throws out of a timer as an unhandled error.
-      stickToBottom: vi.fn(),
-      init: vi.fn(),
-      scrollToBottom: vi.fn(),
-      isUserScrolledUp: vi.fn(() => false),
-      currentScrollTop: vi.fn(() => 0),
-      restoreScrollTop: vi.fn(),
-      restoreView: vi.fn(),
-    },
-    connection: {
-      init: vi.fn(),
-      connect: vi.fn(),
-      sendBinary,
-      sendResize: vi.fn(),
-      sendEphemeral: vi.fn(() => true),
-      setClientFocus: vi.fn(),
-      reconnectNow: vi.fn(),
-      disconnect: vi.fn(),
-      setSession,
-      forgetSession: vi.fn(),
-      serverEpochOf: vi.fn(() => 777),
-      adoptPersistedEpoch: vi.fn(),
-      currentSessionId: vi.fn(() => "unmanaged"),
-    },
-  };
+  fake.bindActual(actual);
+  return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let tabs: (typeof TabsModule)["tabs"];
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+const { setSession, sendBinary } = fake.connection;
+const { captureViewMemory } = fake.renderer;
+
+let term: TerminalHandle | undefined;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -135,14 +79,22 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 let listBody: unknown[];
+/** The server's pane-layout record, as GET /api/sessions/layout answers it; the
+ *  default is a fresh server's, with no shown session. */
+let layoutBody: PaneLayout;
 let createStatus = 201;
 // When set, the session list waits on this before resolving. That is how a test
 // says "the user did something while the initial list was still in flight": the
 // chrome mounts synchronously and the status stream fills it, so the race is
 // real, and gating it here makes it deterministic instead of a microtask bet.
 let listGate: Promise<unknown> | null = null;
-const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
+const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
+  if (String(url).endsWith("/layout")) {
+    return Promise.resolve(
+      method === "PUT" ? jsonResponse(null, 204) : jsonResponse(layoutBody, 200),
+    );
+  }
   if (method === "POST") {
     return Promise.resolve(
       createStatus === 201
@@ -158,13 +110,14 @@ const fetchMock = vi.fn((_url: string | URL, init?: RequestInit) => {
     : listGate.then(() => jsonResponse(listBody, 200));
 });
 
-beforeEach(async () => {
-  vi.resetModules();
-  setSession.mockClear();
-  bind.mockClear();
-  // mockReset strips the factory default; restore "no mouse-mode application".
+beforeEach(() => {
+  fake.reset();
+  // vitest resets every spy to its construction default before each test; the
+  // view memory and the mouse mode are re-declared so the defaults are stated.
+  captureViewMemory.mockImplementation(() => ({ abs: 7, screenTop: -3, following: false }));
+  fake.connection.serverEpochOf.mockImplementation(() => 777);
+  fake.connection.currentSessionId.mockImplementation(() => "unmanaged");
   getMouseMode.mockReturnValue(0);
-  sendBinary.mockClear();
   fetchMock.mockClear();
   createStatus = 201;
   listGate = null;
@@ -173,11 +126,10 @@ beforeEach(async () => {
     { id: "s2", title: "two", createdAt: "2", status: "idle" },
     { id: "s3", title: "three", createdAt: "3", status: "idle" },
   ];
+  layoutBody = { left: null, right: null, handle: 0.5, selected: "left", open: false };
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
   localStorage.clear();
-  ({ createTerminal } = await import("../../kernel/kernel.js"));
-  ({ tabs } = await import("./index.js"));
 });
 
 afterEach(() => {
@@ -232,6 +184,7 @@ function fakeKeyboardToggle(open = false): {
   return {
     feature: {
       name: "mobileToolbar",
+      scope: "shell",
       setup() {
         return {
           api: {
@@ -302,7 +255,7 @@ async function mountBar(
   const root = document.createElement("div");
   document.body.appendChild(root);
   const feature = tabs(opts.keyboard ? { keyboardToggle: opts.keyboard } : {});
-  term = createTerminal(root, {
+  term = await mountTerminal(root, {
     features: () => (opts.keyboard ? [opts.keyboard, feature] : [feature]),
   });
   await until(() => root.querySelectorAll(".wt-tab").length === count);
@@ -785,6 +738,66 @@ describe("tabs: the switcher's horizontal drag", () => {
       expect(row.style.transform).toBe("translateY(0px)");
       expect(row.style.transition).toBe("transform 0.2s ease-out");
     }
+  });
+
+  it("destroyed before the spring-back frame, it writes nothing more to the rows it gave up", async () => {
+    stubMatchMedia(false);
+    const h = await mountBar(2, { surfaceWidth: WIDTH });
+    h.openList();
+    h.freezeTime();
+
+    h.down(300, 300, 1000);
+    h.move(250, 300, 1200);
+    h.up(250, 300, 1210);
+    const rows = h.rows();
+    expect(rows).toHaveLength(1);
+
+    term?.destroy();
+    term = undefined;
+    // Teardown hands the rows back to the stylesheet; the cancelled frame must
+    // not ease them afterwards.
+    h.frame();
+    for (const row of rows) {
+      expect(row.style.transform).toBe("");
+      expect(row.style.transition).toBe("");
+    }
+  });
+
+  it("destroyed before the chip's spring-back settles, it leaves the chip's transition alone", async () => {
+    stubMatchMedia(false);
+    const h = await mountBar(3, { surfaceWidth: WIDTH });
+    h.freezeTime();
+
+    h.down(300, 300, 1000);
+    h.move(300 - QUARTER + 10, 300, 1200);
+    h.up(300 - QUARTER + 10, 300, 1210);
+    expect(h.inner.style.transition).toBe("transform 0.2s ease-out");
+
+    term?.destroy();
+    term = undefined;
+    vi.advanceTimersByTime(240);
+    expect(h.inner.style.transition).toBe("transform 0.2s ease-out");
+  });
+
+  it("destroyed mid-commit, it neither starts nor settles the slide-in it had queued", async () => {
+    stubMatchMedia(false);
+    const h = await mountBar(2, { surfaceWidth: WIDTH });
+    h.freezeTime();
+
+    h.down(300, 300, 1000);
+    h.move(300 - QUARTER - 20, 300, 1200);
+    h.up(300 - QUARTER - 20, 300, 1210);
+    expect(h.active()).toBe("two");
+    expect(h.inner.style.transition).toBe("none");
+    const parked = h.inner.style.transform;
+    expect(parked).toMatch(/^translateX\(-?\d+px\)$/);
+
+    term?.destroy();
+    term = undefined;
+    h.frame();
+    vi.advanceTimersByTime(400);
+    expect(h.inner.style.transition).toBe("none");
+    expect(h.inner.style.transform).toBe(parked);
   });
 
   it("commits the switch once the drag passes a quarter of the terminal's width", async () => {
@@ -1432,12 +1445,11 @@ describe("tabs: the switcher's active-row close", () => {
   });
 });
 
-describe("tabs: teardown hands the out-of-page surfaces back", () => {
-  // The chrome goes with the kernel's regions, and the document title is the
-  // kernel's own to compose and clear. The tab ICON is neither: it is this
-  // feature's write onto a document-wide surface that outlives the terminal —
-  // a browser remembers one icon per URL and renders it for the bookmark, the
-  // history row and the new-tab tile.
+describe("tabs: destroy hands the out-of-page surfaces back", () => {
+  // The chrome goes with the kernel's regions; the tab ICON is a document-wide
+  // surface that outlives the terminal (a browser remembers one icon per URL and
+  // renders it for the bookmark, the history row and the new-tab tile), and the
+  // shell restores it for whatever this feature reported.
   function statusMonitor(): {
     feature: TerminalFeature<ActivityMonitorApi>;
     emit: (s: SessionStatus) => void;
@@ -1446,6 +1458,7 @@ describe("tabs: teardown hands the out-of-page surfaces back", () => {
     return {
       feature: {
         name: "activityMonitor",
+        scope: "shell",
         setup() {
           return {
             api: {
@@ -1482,7 +1495,7 @@ describe("tabs: teardown hands the out-of-page surfaces back", () => {
       const monitor = statusMonitor();
       const root = document.createElement("div");
       document.body.appendChild(root);
-      term = createTerminal(root, {
+      term = await mountTerminal(root, {
         features: () => [
           monitor.feature,
           tabs({ activityMonitor: monitor.feature, attentionIcons: true }),
@@ -1508,7 +1521,7 @@ describe("tabs: what list() reports", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const feature = tabs();
-    term = createTerminal(root, { features: () => [feature] });
+    term = await mountTerminal(root, { features: () => [feature] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     expect(feature.api?.list()).toEqual([
@@ -1537,6 +1550,7 @@ describe("tabs: the bootstrap's choice of starting tab", () => {
   ): TerminalFeature<ActivityMonitorApi> {
     return {
       name: "activityMonitor",
+      scope: "shell",
       setup() {
         return {
           api: {
@@ -1569,7 +1583,9 @@ describe("tabs: the bootstrap's choice of starting tab", () => {
     ]);
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [monitor, tabs({ activityMonitor: monitor })] });
+    term = await mountTerminal(root, {
+      features: () => [monitor, tabs({ activityMonitor: monitor })],
+    });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click(); // ...while the list is in flight
@@ -1589,7 +1605,7 @@ describe("tabs: the bootstrap's choice of starting tab", () => {
     // parked on a tab chip.
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
     expect(document.activeElement).toBe(root.querySelector(".term-input"));
@@ -1607,10 +1623,10 @@ describe("tabs: booting onto a page whose sessions have all ended", () => {
       { id: "s2", title: "two", createdAt: "2", status: "exited" },
     ];
     createStatus = 500; // the fresh spawn fails too, so nothing becomes live
-    localStorage.setItem("wt-active-session", "s2");
+    layoutBody = { left: "s2", right: null, handle: 0.5, selected: "left", open: false };
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, { features: () => [tabs()] });
+    term = await mountTerminal(root, { features: () => [tabs()] });
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     await until(() => root.querySelector(".wt-tab-active") !== null, 60);
 

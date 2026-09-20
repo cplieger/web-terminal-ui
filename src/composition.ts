@@ -1,78 +1,23 @@
-// IME / composition support.
-//
-// Mirrors xterm.js's CompositionHelper. The browser fires
-// compositionstart → compositionupdate(s) → compositionend when an IME
-// (Japanese / Korean / Chinese / Vietnamese / dictation / autocorrect
-// suggestion bar) is active. Without a handler, the user sees nothing
-// while typing because keydown/input fire only when the composed
-// phrase is finalised.
-//
-// What this module does:
-//   1. On compositionstart, mark composing=true and capture textarea
-//      selection bounds. Show the floating compositionView at the
-//      cursor with the in-progress text.
-//   2. On compositionupdate, mirror the in-progress text into
-//      compositionView (\u200E LTR markers, RTL CSS direction so long
-//      compositions track their tail).
-//   3. On compositionend, set a setTimeout(0) finaliser. The
-//      compositionend.data property is unreliable on Chromium (Korean
-//      ending consonant moves to next char on vowel input, etc.); the
-//      textarea value at next tick has the truth.
-//   4. While composing, callers' keydown handler must early-return
-//      (handled via isComposing()). xterm.js takes the same approach.
-//
-// Positioning: the compositionView is absolutely positioned inside
-// `termWrap`. The IME UI (browser-rendered popup with candidate words)
-// uses the textarea as its anchor; we move the textarea to the cursor
-// for the same reason.
+// IME / composition support, after xterm.js's CompositionHelper: the browser
+// fires compositionstart, compositionupdate(s) and compositionend while an IME
+// (CJK, Vietnamese, dictation, an autocorrect bar) is active, and without a
+// handler the user sees nothing until the phrase is finalised. The in-progress
+// text is mirrored into a floating view at the cursor; the textarea is moved
+// there too because the IME's candidate popup anchors on it. compositionend's
+// `data` is unreliable on Chromium, so the textarea value is read one tick later.
 
 import { resetToPlaceholder } from "./input-placeholder.js";
 
-let textarea: HTMLTextAreaElement;
-let compositionView: HTMLElement;
-let getCursorPx: () => { left: number; top: number; cellH: number };
-let send: (bytes: string) => void;
-let paste: (text: string) => void;
-
-let composing = false;
-let sendingComposition = false;
-let compositionStart = 0;
-let compositionSuffix = "";
-
-// A composition that never ENDS used to stop the terminal accepting input at
-// all. `composing` gates both the kernel's `input` and `keydown` listeners, and
-// nothing cleared it: no blur handler, no timer. So a keyboard that opened a
-// composition and never closed it left every subsequent keystroke, Enter
-// included, dropped on the floor — reported on Android Chrome with SwiftKey as
-// "typing does not work", recoverable only by tapping a word suggestion, which
-// is what finally fired compositionend.
-//
-// Not a SwiftKey quirk to special-case. Chromium has a filed defect for
-// compositionend going missing (crbug 446714223, in EditContext rather than a
-// textarea, so it is adjacent evidence and not proof of this exact path), and
-// CodeMirror synthesises the event outright for Safari dead keys, which is a
-// working implementation treating the same absence as real.
-//
-// The fix is a STALENESS READ rather than a timer. A composition the user is
-// typing into keeps firing compositionupdate, so its clock keeps refreshing; an
-// abandoned one stops and ages out, releasing the gate. UI Events promises one
-// or more compositionupdate events and one whenever the DOM is updated as part
-// of the composition, not strictly one per key, so this is a heuristic about
-// activity rather than a guaranteed per-keystroke signal. Deliberately NOT
-// refreshed by `input` events: in this failure the user IS typing and those
-// events ARE arriving, so refreshing there would defeat the mechanism.
-//
-// Five seconds is the number Slate's android-input-manager uses for its own
-// composition-gone-quiet bound (a DOM flush decision, not an input gate, so the
-// value is borrowed and the job is not the same). It is generous because the
-// residual risk runs the other way: a composition paused longer than this and
-// then resumed can duplicate its first character. That trade is deliberate —
-// the failure being replaced loses ALL input until an unrelated event fires.
+/** A composition that never ends would gate every later keystroke out, and it
+ *  happens: Android Chrome with SwiftKey fires no compositionend until a word
+ *  suggestion is tapped (crbug 446714223 is adjacent evidence). So the latch is
+ *  read against a STALENESS clock refreshed by compositionupdate alone, never by
+ *  `input` (in this failure the user IS typing). Five seconds is Slate's
+ *  composition-gone-quiet bound; the residual risk is one duplicated character
+ *  after a pause, against losing all input until an unrelated event fires. */
 const COMPOSITION_IDLE_MS = 5000;
 
-let lastCompositionActivity = 0;
-
-export function init(opts: {
+export interface CompositionOptions {
   textarea: HTMLTextAreaElement;
   compositionView: HTMLElement;
   getCursorPx: () => { left: number; top: number; cellH: number };
@@ -80,191 +25,161 @@ export function init(opts: {
   /** The kernel's single bracketed-paste+normalize funnel; the native iOS-callout
    *  paste routes through it rather than re-composing the funnel here. */
   paste: (text: string) => void;
-}): void {
-  textarea = opts.textarea;
-  compositionView = opts.compositionView;
-  getCursorPx = opts.getCursorPx;
-  send = opts.send;
-  paste = opts.paste;
+}
+
+/** One pane's IME state: the latch every input listener gates on, the floating
+ *  view, and the textarea placement. */
+export interface Composition {
+  /** True while an IME composition is in progress, reconciled first: a
+   *  composition quiet for COMPOSITION_IDLE_MS is expired here. */
+  isComposing(): boolean;
+  /** The RAW latch: is a composition open at all, regardless of staleness. Read
+   *  before `isComposing()` by the keydown guard, because keyCode 229 means "an
+   *  IME claimed this key" only while a composition is genuinely open. */
+  isCompositionOpen(): boolean;
+  /** Abort any in-flight composition without sending, and clear the textarea.
+   *  Also neutralizes a just-fired compositionend whose deferred send is still
+   *  pending, so it cannot land on whoever is active after a switch. */
+  cancelComposition(): void;
+  /** Place the view and the textarea at the terminal cursor. */
+  positionCompositionView(): void;
+  /** Release the listeners and any pending send. */
+  teardown(): void;
+}
+
+export function createComposition(opts: CompositionOptions): Composition {
+  const { textarea, compositionView, getCursorPx, send, paste } = opts;
+  let composing = false;
+  let sendingComposition = false;
+  let compositionStart = 0;
+  let compositionSuffix = "";
+  let lastCompositionActivity = 0;
+  let torndown = false;
+
+  function expireComposition(): void {
+    composing = false;
+    lastCompositionActivity = 0;
+    compositionView.textContent = "";
+    compositionView.classList.remove("active");
+  }
+
+  function isComposing(): boolean {
+    if (sendingComposition) {
+      return true;
+    }
+    if (!composing) {
+      return false;
+    }
+    if (Date.now() - lastCompositionActivity <= COMPOSITION_IDLE_MS) {
+      return true;
+    }
+    expireComposition();
+    return false;
+  }
+
+  function cancelComposition(): void {
+    composing = false;
+    sendingComposition = false;
+    lastCompositionActivity = 0;
+    compositionView.textContent = "";
+    compositionView.classList.remove("active");
+    resetToPlaceholder(textarea);
+  }
+
+  function positionCompositionView(): void {
+    const { left, top, cellH } = getCursorPx();
+    compositionView.style.left = `${left}px`;
+    compositionView.style.top = `${top}px`;
+    compositionView.style.height = `${cellH}px`;
+    compositionView.style.lineHeight = `${cellH}px`;
+    // The textarea shares the view's content coordinates and .term is pinned to
+    // the visual viewport, so this keeps the focused input at the VISIBLE cursor,
+    // above the keyboard, where iOS wants it and does not scroll the page.
+    textarea.style.left = `${left}px`;
+    textarea.style.top = `${top}px`;
+    textarea.style.height = `${cellH}px`;
+  }
+
+  function onStart(): void {
+    composing = true;
+    lastCompositionActivity = Date.now();
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    compositionStart = Math.min(start, end);
+    const compositionEnd = Math.max(start, end);
+    compositionSuffix = textarea.value.substring(compositionEnd);
+    compositionView.textContent = "";
+    compositionView.classList.add("active");
+    positionCompositionView();
+  }
+
+  function onUpdate(ev: CompositionEvent): void {
+    lastCompositionActivity = Date.now();
+    // LTR marks plus direction:rtl on the view show a long composition's tail
+    // instead of clipping its start (xterm.js's pattern).
+    compositionView.textContent = `\u200E${ev.data}\u200E`;
+    positionCompositionView();
+  }
+
+  function onEnd(): void {
+    compositionView.classList.remove("active");
+    composing = false;
+    lastCompositionActivity = 0;
+    sendingComposition = true;
+    const startSnapshot = compositionStart;
+    const suffixSnapshot = compositionSuffix;
+    setTimeout(() => {
+      if (!sendingComposition || torndown) {
+        return;
+      }
+      sendingComposition = false;
+      const value = textarea.value;
+      const valueEnd =
+        suffixSnapshot.length > 0 && value.endsWith(suffixSnapshot)
+          ? value.length - suffixSnapshot.length
+          : value.length;
+      const composed = value
+        .substring(startSnapshot, Math.max(startSnapshot, valueEnd))
+        .replace(/\u00A0/g, " ");
+      if (composed.length > 0) {
+        send(composed);
+      }
+      resetToPlaceholder(textarea);
+    }, 0);
+  }
+
+  function onPaste(ev: ClipboardEvent): void {
+    // iOS has no Ctrl+Shift+V; its callout menu fires this on the focused textarea.
+    if (!ev.clipboardData) {
+      return;
+    }
+    const raw = ev.clipboardData.getData("text/plain");
+    if (raw === "") {
+      return;
+    }
+    ev.preventDefault();
+    ev.stopPropagation();
+    paste(raw);
+    resetToPlaceholder(textarea);
+  }
 
   textarea.addEventListener("compositionstart", onStart);
   textarea.addEventListener("compositionupdate", onUpdate);
   textarea.addEventListener("compositionend", onEnd);
   textarea.addEventListener("paste", onPaste);
-}
 
-/** True while an IME composition is in progress, RECONCILED first: a composition
- *  whose clock has not been refreshed for COMPOSITION_IDLE_MS is expired here,
- *  clearing the latch, the clock and the overlay, so a keyboard that never fires
- *  compositionend cannot strand the terminal or leave a stale panel on screen.
- *  A late compositionend still delivers its text — `onEnd` snapshots what it
- *  needs and does not require `composing` to have stayed true.
- *
- *  `sendingComposition` is exempt: that window is bounded by a setTimeout(0)
- *  this module owns. */
-export function isComposing(): boolean {
-  if (sendingComposition) {
-    return true;
-  }
-  if (!composing) {
-    return false;
-  }
-  if (Date.now() - lastCompositionActivity <= COMPOSITION_IDLE_MS) {
-    return true;
-  }
-  expireComposition();
-  return false;
-}
-
-/** The RAW latch: is a composition open at all, regardless of whether it has
- *  gone quiet. Read before the reconciling `isComposing()` by the keydown guard,
- *  because the keyCode 229 signal only means "an IME claimed this key" while a
- *  composition is genuinely open — on Android it is the value for nearly every
- *  soft-keyboard key. */
-export function isCompositionOpen(): boolean {
-  return composing || sendingComposition;
-}
-
-/** Drop a composition that has gone quiet: the latch, the clock and the visible
- *  overlay together. Without the overlay half the gate would say no composition
- *  while `.composition-view.active` still said there was one, leaving a stale
- *  panel over the terminal for as long as the missing compositionend never
- *  arrived. Does NOT touch the textarea: a late compositionend still reads it. */
-function expireComposition(): void {
-  composing = false;
-  lastCompositionActivity = 0;
-  compositionView.textContent = "";
-  compositionView.classList.remove("active");
-}
-
-/** Abort any in-flight composition without sending, and clear the textarea.
- *  The kernel calls this on a tab switch (detach) and on blur: committing
- *  half-composed IME text to either the outgoing or the incoming session is
- *  wrong, so we discard it (design 5.1, "end any composition ... or cancel").
- *  Clearing sendingComposition also neutralizes a just-fired compositionend
- *  whose deferred send is still pending on the microtask/timeout queue, so it
- *  cannot land on whoever is active after the switch. */
-export function cancelComposition(): void {
-  composing = false;
-  sendingComposition = false;
-  lastCompositionActivity = 0;
-  compositionView.textContent = "";
-  compositionView.classList.remove("active");
-  resetToPlaceholder(textarea);
-}
-
-/** Release init()-attached listeners and drop the captured kernel closures on kernel
- *  destroy(), so a destroy without a remount does not retain the old textarea + the
- *  kernel send/paste closure graph. Mirrors viewport.teardown(). */
-export function teardown(): void {
-  cancelComposition(); // neutralize a pending finalizer + reset composing state
-  textarea.removeEventListener("compositionstart", onStart);
-  textarea.removeEventListener("compositionupdate", onUpdate);
-  textarea.removeEventListener("compositionend", onEnd);
-  textarea.removeEventListener("paste", onPaste);
-  // Drop references to the old kernel instance so its closure graph is GC-eligible
-  // (the detached textarea/compositionView are overwritten on the next init()).
-  send = () => {
-    /* no-op after teardown */
+  return {
+    isComposing,
+    isCompositionOpen: () => composing || sendingComposition,
+    cancelComposition,
+    positionCompositionView,
+    teardown() {
+      torndown = true;
+      cancelComposition();
+      textarea.removeEventListener("compositionstart", onStart);
+      textarea.removeEventListener("compositionupdate", onUpdate);
+      textarea.removeEventListener("compositionend", onEnd);
+      textarea.removeEventListener("paste", onPaste);
+    },
   };
-  paste = () => {
-    /* no-op after teardown */
-  };
-  getCursorPx = () => ({ left: 0, top: 0, cellH: 0 });
-}
-
-function onStart(): void {
-  composing = true;
-  lastCompositionActivity = Date.now();
-  const start = textarea.selectionStart;
-  const end = textarea.selectionEnd;
-  compositionStart = Math.min(start, end);
-  const compositionEnd = Math.max(start, end);
-  compositionSuffix = textarea.value.substring(compositionEnd);
-  compositionView.textContent = "";
-  compositionView.classList.add("active");
-  positionCompositionView();
-}
-
-function onUpdate(ev: CompositionEvent): void {
-  // Every keystroke of a live composition lands here, which is what keeps its
-  // staleness clock fresh (see COMPOSITION_IDLE_MS). An abandoned composition
-  // stops firing this and ages out of the gate.
-  lastCompositionActivity = Date.now();
-  // \u200E (LTR mark) wrappers + CSS direction:rtl on the view make
-  // long compositions show their trailing edge instead of being
-  // clipped at the start. Pattern from xterm.js.
-  compositionView.textContent = `\u200E${ev.data}\u200E`;
-  positionCompositionView();
-}
-
-function onEnd(): void {
-  compositionView.classList.remove("active");
-  composing = false;
-  lastCompositionActivity = 0;
-  // The compositionend event fires before the textarea reflects the
-  // final value on most browsers (Chromium especially). Defer one tick
-  // and read the textarea then; xterm.js's pattern.
-  sendingComposition = true;
-  const startSnapshot = compositionStart;
-  const suffixSnapshot = compositionSuffix;
-  setTimeout(() => {
-    if (!sendingComposition) {
-      return;
-    }
-    sendingComposition = false;
-    const value = textarea.value;
-    const valueEnd =
-      suffixSnapshot.length > 0 && value.endsWith(suffixSnapshot)
-        ? value.length - suffixSnapshot.length
-        : value.length;
-    const composed = value
-      .substring(startSnapshot, Math.max(startSnapshot, valueEnd))
-      .replace(/\u00A0/g, " ");
-    if (composed.length > 0) {
-      send(composed);
-    }
-    resetToPlaceholder(textarea);
-  }, 0);
-}
-
-function onPaste(ev: ClipboardEvent): void {
-  // Native `paste` event handler. Required for iOS where Ctrl+Shift+V
-  // is unavailable; users invoke paste from the iOS callout menu and
-  // it fires this event on the focused textarea.
-  if (!ev.clipboardData) {
-    return;
-  }
-  const raw = ev.clipboardData.getData("text/plain");
-  if (raw === "") {
-    return;
-  }
-  ev.preventDefault();
-  ev.stopPropagation();
-  paste(raw);
-  // Restore the placeholder so the subsequent `input` event (some
-  // browsers fire it after paste) and held-Backspace auto-repeat keep
-  // working.
-  resetToPlaceholder(textarea);
-}
-
-/** Position the composition view (and the helper textarea, which
- *  anchors the IME popup) at the current terminal cursor pixel
- *  position. iOS keyboards open without scrolling the layout when
- *  the focused textarea is on screen at a sane location. */
-export function positionCompositionView(): void {
-  const { left, top, cellH } = getCursorPx();
-  compositionView.style.left = `${left}px`;
-  compositionView.style.top = `${top}px`;
-  compositionView.style.height = `${cellH}px`;
-  compositionView.style.lineHeight = `${cellH}px`;
-  // The textarea is position:absolute in the same scroll/content space as the
-  // composition view (see the .term-input CSS note), so the cursor's content
-  // coordinates place it at the cursor row directly. Because .term is pinned to
-  // the visual viewport (viewport.ts), that keeps the textarea at the VISIBLE
-  // cursor, above the keyboard — where iOS wants the focused input so it doesn't
-  // scroll the page to reveal it.
-  textarea.style.left = `${left}px`;
-  textarea.style.top = `${top}px`;
-  textarea.style.height = `${cellH}px`;
 }

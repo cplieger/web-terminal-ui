@@ -1,28 +1,35 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import type * as Engine from "@cplieger/web-terminal-engine";
-import type { SessionStatus } from "@cplieger/web-terminal-engine";
+import type { SessionStatus, StatusStreamCallbacks } from "@cplieger/web-terminal-engine";
 import type { TerminalContext } from "../kernel/types.js";
-import type { activityMonitor as ActivityMonitorFn } from "./activity-monitor.js";
+import { activityMonitor } from "./activity-monitor.js";
 
-const close = vi.fn();
-let captured: ((s: SessionStatus) => void) | undefined;
-let capturedOpen: (() => void) | undefined;
-const connectStatusStream = vi.fn(
-  (_path: string, cb: { onStatus: (s: SessionStatus) => void; onOpen?: () => void }) => {
-    captured = cb.onStatus;
-    capturedOpen = cb.onOpen;
-    return { close };
-  },
-);
-
-vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
-  const actual = await importActual<typeof Engine>();
-  return { ...actual, connectStatusStream };
+// activityMonitor.setup reads two things off its ctx: `shell.subscribeStatus`,
+// the terminal's shared status stream, and `defer`, where it parks the
+// unsubscribe for the terminal to run after teardown. The fake records the
+// callbacks so a test can play the stream, and keeps the releases so a test can
+// drain them the way the terminal does.
+const stream: { callbacks: StatusStreamCallbacks | undefined } = { callbacks: undefined };
+const off = vi.fn();
+const subscribeStatus = vi.fn((_path: string, cb: StatusStreamCallbacks) => {
+  stream.callbacks = cb;
+  return off;
 });
+const captured = (s: SessionStatus): void => stream.callbacks?.onStatus(s);
+const capturedOpen = (): void => stream.callbacks?.onOpen?.();
 
-// activityMonitor.setup ignores its ctx (it reads only opts.eventsPath), so a
-// bare cast is a safe stand-in for this unit test.
-const ctx = {} as unknown as TerminalContext;
+let deferred: (() => void)[] = [];
+const ctx = {
+  shell: { subscribeStatus },
+  defer: (release: () => void) => {
+    deferred.push(release);
+  },
+} as unknown as TerminalContext;
+function drainDeferred(): void {
+  for (const release of deferred.reverse()) {
+    release();
+  }
+  deferred = [];
+}
 
 const status = (id: string, extra: Partial<SessionStatus> = {}): SessionStatus => ({
   id,
@@ -32,23 +39,25 @@ const status = (id: string, extra: Partial<SessionStatus> = {}): SessionStatus =
   ...extra,
 });
 
-let activityMonitor: typeof ActivityMonitorFn;
-
-beforeEach(async () => {
-  vi.resetModules();
-  connectStatusStream.mockClear();
-  close.mockClear();
-  captured = undefined;
-  capturedOpen = undefined;
-  ({ activityMonitor } = await import("./activity-monitor.js"));
+beforeEach(() => {
+  subscribeStatus.mockClear();
+  off.mockClear();
+  stream.callbacks = undefined;
+  deferred = [];
 });
 
 describe("activityMonitor: status map + fan-out", () => {
+  it("subscribes once, to the events path it was given", async () => {
+    await activityMonitor({ eventsPath: "/custom/events" }).setup(ctx);
+    expect(subscribeStatus).toHaveBeenCalledTimes(1);
+    expect(subscribeStatus.mock.calls[0]?.[0]).toBe("/custom/events");
+  });
+
   it("records each session's latest status and returns it from current()", async () => {
     const inst = await activityMonitor().setup(ctx);
-    captured?.(status("s1", { status: "idle" }));
+    captured(status("s1", { status: "idle" }));
     expect(inst.api?.current("s1")?.status).toBe("idle");
-    captured?.(status("s1", { status: "working" }));
+    captured(status("s1", { status: "working" }));
     expect(inst.api?.current("s1")?.status).toBe("working");
     expect(inst.api?.current("absent")).toBeUndefined();
   });
@@ -58,15 +67,15 @@ describe("activityMonitor: status map + fan-out", () => {
     const seen: string[] = [];
     inst.api?.onStatus((s) => seen.push(`a:${s.id}`));
     inst.api?.onStatus((s) => seen.push(`b:${s.id}`));
-    captured?.(status("s1"));
+    captured(status("s1"));
     expect(seen).toEqual(["a:s1", "b:s1"]);
   });
 
   it("drops a session from current() when a removed event arrives", async () => {
     const inst = await activityMonitor().setup(ctx);
-    captured?.(status("s1"));
+    captured(status("s1"));
     expect(inst.api?.current("s1")).toBeDefined();
-    captured?.(status("s1", { removed: true }));
+    captured(status("s1", { removed: true }));
     expect(inst.api?.current("s1")).toBeUndefined();
   });
 
@@ -76,18 +85,23 @@ describe("activityMonitor: status map + fan-out", () => {
     const off = inst.api?.onStatus(() => {
       calls++;
     });
-    captured?.(status("s1"));
+    captured(status("s1"));
     off?.();
-    captured?.(status("s1"));
+    captured(status("s1"));
     expect(calls).toBe(1);
   });
 
-  it("teardown closes the stream and clears state", async () => {
+  it("teardown clears state, and the deferred release unsubscribes from the stream", async () => {
     const inst = await activityMonitor().setup(ctx);
-    captured?.(status("s1"));
+    captured(status("s1"));
     inst.teardown();
-    expect(close).toHaveBeenCalledTimes(1);
     expect(inst.api?.current("s1")).toBeUndefined();
+    // The unsubscribe is parked with the terminal at the subscribe, so a setup
+    // that throws after subscribing releases it too; the terminal runs it after
+    // teardown.
+    expect(off).not.toHaveBeenCalled();
+    drainDeferred();
+    expect(off).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -102,8 +116,8 @@ describe("activityMonitor: subscriber isolation", () => {
     inst.api?.onStatus(() => {
       bCalled = true;
     });
-    // Must not throw out of the engine's onStatus callback (the SSE reader).
-    captured?.(status("s1"));
+    // Must not throw out of the stream's onStatus callback.
+    captured(status("s1"));
     expect(bCalled).toBe(true);
     expect(inst.api?.current("s1")).toBeDefined();
     expect(errSpy).toHaveBeenCalledTimes(1);
@@ -117,32 +131,32 @@ describe("activityMonitor: stream-open fan-out (restart reconcile hook)", () => 
     inst.api?.onStreamOpen?.(() => {
       opens++;
     });
-    capturedOpen?.(); // initial connect
-    capturedOpen?.(); // reconnect (e.g. after a manager restart)
+    capturedOpen(); // initial connect
+    capturedOpen(); // reconnect (e.g. after a manager restart)
     expect(opens).toBe(2);
   });
 
   it("catches a late subscriber up when the stream already opened", async () => {
     const inst = await activityMonitor().setup(ctx);
-    capturedOpen?.(); // stream opens before anyone subscribes
+    capturedOpen(); // stream opens before anyone subscribes
     let opens = 0;
     inst.api?.onStreamOpen?.(() => {
       opens++;
     });
     expect(opens).toBe(1); // immediate catch-up
-    capturedOpen?.();
+    capturedOpen();
     expect(opens).toBe(2);
   });
 
   it("the onStreamOpen unsubscribe stops further delivery", async () => {
     const inst = await activityMonitor().setup(ctx);
-    capturedOpen?.();
+    capturedOpen();
     let opens = 0;
     const off = inst.api?.onStreamOpen?.(() => {
       opens++;
     });
     off?.();
-    capturedOpen?.();
+    capturedOpen();
     expect(opens).toBe(1); // only the catch-up call
   });
 
@@ -156,7 +170,7 @@ describe("activityMonitor: stream-open fan-out (restart reconcile hook)", () => 
     inst.api?.onStreamOpen?.(() => {
       peerRan = true;
     });
-    capturedOpen?.();
+    capturedOpen();
     expect(peerRan).toBe(true);
     expect(errSpy).toHaveBeenCalledTimes(1);
     errSpy.mockRestore();
@@ -164,20 +178,20 @@ describe("activityMonitor: stream-open fan-out (restart reconcile hook)", () => 
 });
 
 describe("activityMonitor: teardown releases the subscribers", () => {
-  // stream.close() stops the SSE reader, but an event already handed to the
-  // callback is in flight and arrives afterwards; and the consumer (tabs) holds
-  // its subscription across a whole page lifetime. So teardown drops the
+  // The unsubscribe stops the stream's delivery, but an event already handed to
+  // the callback is in flight and arrives afterwards; and the consumer (tabs)
+  // holds its subscription across a whole page lifetime. So teardown drops the
   // subscriber sets rather than trusting the transport to fall silent, which is
   // what keeps a torn-down feature from calling back into a torn-down consumer.
   it("delivers no status to a subscriber registered before teardown", async () => {
     const inst = await activityMonitor().setup(ctx);
     const seen: string[] = [];
     inst.api?.onStatus((s) => seen.push(s.id));
-    captured?.(status("before"));
+    captured(status("before"));
     expect(seen).toEqual(["before"]);
 
     inst.teardown();
-    captured?.(status("after"));
+    captured(status("after"));
 
     expect(seen).toEqual(["before"]);
   });
@@ -189,11 +203,11 @@ describe("activityMonitor: teardown releases the subscribers", () => {
     const inst = await activityMonitor().setup(ctx);
     const opens = vi.fn();
     inst.api?.onStreamOpen?.(opens);
-    capturedOpen?.();
+    capturedOpen();
     expect(opens).toHaveBeenCalledTimes(1);
 
     inst.teardown();
-    capturedOpen?.();
+    capturedOpen();
 
     expect(opens).toHaveBeenCalledTimes(1);
   });

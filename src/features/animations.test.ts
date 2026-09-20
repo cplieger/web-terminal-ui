@@ -35,16 +35,31 @@ function stubMatchMedia(reduce: boolean): {
   };
 }
 
-function fakeCtx(): { ctx: TerminalContext; root: HTMLElement } {
+/** A shell context with the two members the feature reads: the shell root the
+ *  class lands on, and `defer`, where the media-query listener's release goes for
+ *  the terminal to run after teardown. */
+function fakeCtx(): { ctx: TerminalContext; root: HTMLElement; drainDeferred: () => void } {
   const root = document.createElement("div");
-  const surface = document.createElement("div");
-  root.appendChild(surface);
-  const ctx = { surface: () => surface } as unknown as TerminalContext;
-  return { ctx, root };
+  const deferred: (() => void)[] = [];
+  const ctx = {
+    shell: { root },
+    defer: (release: () => void) => {
+      deferred.push(release);
+    },
+  } as unknown as TerminalContext;
+  return {
+    ctx,
+    root,
+    drainDeferred: () => {
+      while (deferred.length > 0) {
+        deferred.pop()?.();
+      }
+    },
+  };
 }
 
 describe("animations feature", () => {
-  it("adds wt-animate to the root when reduced motion is NOT requested", () => {
+  it("adds wt-animate to the shell root when reduced motion is NOT requested", () => {
     stubMatchMedia(false);
     const { ctx, root } = fakeCtx();
     animations().setup(ctx);
@@ -68,12 +83,14 @@ describe("animations feature", () => {
     expect(root.classList.contains("wt-animate")).toBe(false);
   });
 
-  it("teardown removes the class and unsubscribes the media-query listener", () => {
+  it("teardown removes the class, and the deferred release drops the media-query listener", () => {
     const mm = stubMatchMedia(false);
-    const { ctx, root } = fakeCtx();
+    const { ctx, root, drainDeferred } = fakeCtx();
     const inst = animations().setup(ctx) as FeatureInstance;
     inst.teardown();
     expect(root.classList.contains("wt-animate")).toBe(false);
+    expect(mm.listenerCount()).toBe(1);
+    drainDeferred();
     expect(mm.listenerCount()).toBe(0);
   });
 });

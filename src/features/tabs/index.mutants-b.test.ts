@@ -10,9 +10,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
-import type * as KernelModule from "../../kernel/kernel.js";
-import type * as TabsModule from "./index.js";
-import type { TerminalFeature } from "../../kernel/types.js";
+import { tabs } from "./index.js";
+import { mountTerminal } from "../../test-helpers/mount.js";
+import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
@@ -32,6 +32,7 @@ function fakeMonitor(): {
   const openSubs = new Set<() => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
+    scope: "shell",
     setup() {
       return {
         api: {
@@ -64,9 +65,7 @@ function fakeMonitor(): {
   };
 }
 
-let createTerminal: (typeof KernelModule)["createTerminal"];
-let tabs: (typeof TabsModule)["tabs"];
-let term: ReturnType<(typeof KernelModule)["createTerminal"]> | undefined;
+let term: TerminalHandle | undefined;
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -107,6 +106,16 @@ function delayed<T>(value: T, ms: number): Promise<T> {
 
 const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
+  if (String(url).endsWith("/layout")) {
+    return Promise.resolve(
+      method === "PUT"
+        ? jsonResponse(null, 204)
+        : jsonResponse(
+            { left: null, right: null, handle: 0.5, selected: "left", open: false },
+            200,
+          ),
+    );
+  }
   const path = String(url);
   if (path.includes("/pinned-title")) {
     return delayed(
@@ -140,8 +149,7 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   return delayed(jsonResponse(server.list, 200), server.listDelayMs);
 });
 
-beforeEach(async () => {
-  vi.resetModules();
+beforeEach(() => {
   fetchMock.mockClear();
   server = {
     list: [
@@ -159,8 +167,6 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
   localStorage.clear();
-  ({ createTerminal } = await import("../../kernel/kernel.js"));
-  ({ tabs } = await import("./index.js"));
 });
 
 afterEach(() => {
@@ -193,7 +199,7 @@ async function mount(
   monitor?: TerminalFeature<ActivityMonitorApi>,
 ): Promise<void> {
   document.body.appendChild(root);
-  term = createTerminal(root, {
+  term = await mountTerminal(root, {
     features: () => (monitor ? [monitor, tabs({ activityMonitor: monitor })] : [tabs()]),
   });
   await until(() => root.querySelectorAll(".wt-tab").length === server.list.length);
@@ -1514,7 +1520,7 @@ describe("tabs: a tab that goes away", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
       persistScrollback: {
         load: () => null,
@@ -1685,7 +1691,7 @@ describe("tabs: a tab that goes away", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
       persistScrollback: {
         load: () => null,
@@ -1888,7 +1894,9 @@ describe("tabs: activating a tab the bootstrap never saw", () => {
     // the stream reopens and the reconcile adopts what the server has, an ENDED
     // session is exactly as unable to produce output as it looks: activating it
     // would wedge the page, so a live sibling outranks it. A corpse is only
-    // auto-activated when nothing else exists.
+    // auto-activated when nothing else exists. Three rejections: the list, the
+    // layout record read beside it, and the create.
+    fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     server.list = [
@@ -1898,10 +1906,10 @@ describe("tabs: activating a tab the bootstrap never saw", () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
-    term = createTerminal(root, {
+    term = await mountTerminal(root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
     });
-    await until(() => fetchMock.mock.calls.length >= 2);
+    await until(() => fetchMock.mock.calls.length >= 3);
     await new Promise((r) => setTimeout(r, 0));
     expect(chips(root)).toHaveLength(0);
 
