@@ -1,7 +1,6 @@
-// activityMonitor: the server's status SSE as a read-only data source with no
-// chrome of its own; peers read it through ctx.use. The server's snapshot on a
-// (re)open carries no tombstones for sessions a REPLACEMENT server never knew,
-// so the open is surfaced through onStreamOpen for a consumer to reconcile on.
+// The server's snapshot on a (re)open carries no tombstones for sessions a
+// REPLACEMENT server never knew, so the open is surfaced through onStreamOpen
+// for a consumer to reconcile on.
 
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import type { TerminalFeature, Unsubscribe } from "../kernel/types.js";

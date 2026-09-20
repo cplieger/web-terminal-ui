@@ -10,7 +10,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   onState = vi.fn<(s: ConnState) => void>();
   onGiveUp = vi.fn<() => void>();
-  m = createConnState({ onState, onGiveUp });
+  m = createConnState({ onState, onGiveUp, timers: window });
 });
 afterEach(() => {
   m.destroy();

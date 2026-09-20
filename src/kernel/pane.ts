@@ -1,12 +1,3 @@
-// One pane kernel: the display-only output surface and the hidden textarea that
-// owns the keyboard, IME/composition, one engine instance, viewport and
-// keyboard-inset handling, the single sanitizing input funnel, the
-// connection-state machine, the shared primitives (toast, announce, tablist) and
-// the named layout regions. Everything visible above the raw terminal is an
-// opt-in feature. The kernel owns the widget's focus: it REPORTS focus and blur
-// to the transport and never writes DEC 1004 bytes itself, because the server
-// derives the answer from every attached client's report plus its own hold.
-
 import {
   createTerminalEngine,
   keyboard,
@@ -20,7 +11,7 @@ import { INPUT_PLACEHOLDER, resetToPlaceholder } from "../input-placeholder.js";
 import { createBus } from "./bus.js";
 import { TAP_MAX_MS, TAP_MOVEMENT_PX, isLinkTarget } from "./gesture.js";
 import { createRegions } from "./regions.js";
-import { createAnnouncer, createTablist } from "./a11y.js";
+import { createAnnouncer, createPaneTablist, type PaneTablist } from "./a11y.js";
 import { createConnState } from "./conn-state.js";
 import { selectionTextWithin } from "./selection.js";
 import { windowOf } from "./realm.js";
@@ -156,12 +147,22 @@ export interface PaneServices {
   titleBase(text: string): void;
   readonly loading: PaneLoading;
   onSessionEnded(): void;
-  registerTablist(controller: TablistController): void;
+  /** This pane's tabpanel half of the ARIA seam, as soon as the panel exists. */
+  registerTablist(controller: PaneTablist): void;
+  /** The tab row's half, for `ctx.tablist()`. */
+  tablist(): TablistController;
   /** The shell's keydown chain, run before this pane's own. */
   onKeydown(ev: KeyboardEvent): boolean;
   /** The two selection drivers. */
   onPointerDown(): void;
   onFocusIn(): void;
+  /** This pane attached a session or became empty. */
+  onSessionChange(): void;
+  /** The server epoch this pane's connection knew for a session it is about to
+   *  forget, so the pane that shows the session next can be seeded with it. */
+  noteEpoch(sessionId: string, epoch: number): void;
+  /** The epoch a pane recorded for `sessionId` before forgetting it; 0 when none. */
+  knownEpoch(sessionId: string): number;
   /** This pane's connection, registered as soon as the engine exists so the
    *  shell's store registry can seed it before the pane's first connect. */
   registerConnection(connection: PaneKernel["connection"]): void;
@@ -189,7 +190,6 @@ export interface PaneKernel extends PaneHandle {
   ): Unsubscribe;
   connectionInitiated(): boolean;
   isDestroyed(): boolean;
-  tablist(): TablistController;
   layout(): { narrow: boolean; coarse: boolean };
   toast(message: string, ms?: number): void;
   announce(message: string, politeness?: "polite" | "assertive"): void;
@@ -205,13 +205,40 @@ export interface PaneKernel extends PaneHandle {
   cleanupRuntime(): void;
   /** Record that this pane's startup failed, so `state()` reads `failed`. */
   markFailed(): void;
+  /** Record whether a closed split hides this pane, so `state()` reads `hidden`
+   *  from the moment the split closes rather than from the class the display
+   *  gets when the closing transition ends. */
+  setHidden(value: boolean): void;
+  /** Whether this pane's input is a stop in the document's Tab order. On while
+   *  the split is open and the pane shows a tab, so Tab runs left input, divider,
+   *  right input, chrome; off otherwise, where typing or a click enters the one
+   *  pane and Tab from outside lands on the chrome. */
+  setTabStop(value: boolean): void;
   /** `cleanupRuntime()` plus the root's classes and children. */
   destroy(): void;
 }
 
-/** Build one pane inside `root`. Synchronous and transactional: every acquisition
- *  pushes its release onto one disposer stack, which a throw drains before it
- *  propagates and `cleanupRuntime()` drains on the way out. */
+/** The consumer's theme as custom properties on `root`, so the whole subtree
+ *  inherits them over the token defaults of css/00-tokens.css. */
+export function applyTheme(root: HTMLElement, theme: CreateTerminalOptions["theme"]): void {
+  if (!theme) {
+    return;
+  }
+  for (const [key, value] of Object.entries(theme)) {
+    if (key.startsWith("--")) {
+      root.style.setProperty(key, value);
+    }
+  }
+}
+
+/** Build one pane kernel inside `root`: the output surface, the hidden textarea
+ *  that owns the keyboard, one engine instance, and the pane's regions and
+ *  primitives; everything visible above the raw terminal is an opt-in feature.
+ *  The pane REPORTS focus and blur to the transport and never writes DEC 1004
+ *  bytes itself, because the server derives the answer from every attached
+ *  client's report plus its own hold. Synchronous and transactional: every
+ *  acquisition pushes its release onto one disposer stack, which a throw drains
+ *  before it propagates and `cleanupRuntime()` drains on the way out. */
 export function buildPane(
   root: HTMLElement,
   opts: CreateTerminalOptions,
@@ -247,21 +274,21 @@ function buildPaneInto(
   // and listens to that document.
   const doc = root.ownerDocument;
   const win = windowOf(doc);
+  // `destroyed` means the runtime is no longer usable, whether through destroy()
+  // or a rollback; `rootReleased` (below) is narrower: the boundary classes are
+  // gone too. The flag is the stack's own, so a callback the build already armed
+  // (the fonts wait) finds it set after a throw as after destroy().
+  let destroyed = false;
+  acquire(() => {
+    destroyed = true;
+  });
   const kernelAbort = new AbortController();
   const { signal } = kernelAbort;
   acquire(() => {
     kernelAbort.abort();
   });
 
-  // The consumer's theme as custom properties on the root, so the whole subtree
-  // inherits them over the token defaults of css/00-tokens.css.
-  if (opts.theme) {
-    for (const [key, value] of Object.entries(opts.theme)) {
-      if (key.startsWith("--")) {
-        root.style.setProperty(key, value);
-      }
-    }
-  }
+  applyTheme(root, opts.theme);
 
   // .wt-root scopes every library token and style rule to this subtree; the
   // layout-mode class decides how the root claims space (the full viewport, or
@@ -293,8 +320,7 @@ function buildPaneInto(
   acquire(() => {
     announcer.destroy();
   });
-  const tablistController = createTablist(outputEl);
-  services.registerTablist(tablistController);
+  services.registerTablist(createPaneTablist(outputEl));
 
   // Narrow = compact in EITHER dimension: skinny (a portrait phone, a narrow
   // panel) or short (a landscape phone). ResizeObserver is a hard requirement
@@ -303,28 +329,24 @@ function buildPaneInto(
     root.classList.toggle("wt-narrow", services.narrowProbe());
   }
   updateNarrow();
-  const narrowObserver = new ResizeObserver(updateNarrow);
+  const narrowObserver = new win.ResizeObserver(updateNarrow);
   narrowObserver.observe(root);
   acquire(() => {
     narrowObserver.disconnect();
   });
 
-  // The pane's base title starts as whatever the served document declared, so a
-  // consumer that never receives an OSC title keeps its own <title>.
-  services.titleBase(doc.title);
-
   const toastEl = doc.createElement("div");
   toastEl.className = "wt-toast";
   toastEl.setAttribute("role", "status");
   regions.region("banner", "toast").appendChild(toastEl);
-  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  let toastTimer: number | null = null;
   function toast(message: string, ms = TOAST_MS): void {
     toastEl.textContent = message;
     toastEl.classList.add("visible");
     if (toastTimer !== null) {
-      clearTimeout(toastTimer);
+      win.clearTimeout(toastTimer);
     }
-    toastTimer = setTimeout(() => {
+    toastTimer = win.setTimeout(() => {
       toastTimer = null;
       toastEl.classList.remove("visible");
       toastEl.textContent = "";
@@ -332,7 +354,7 @@ function buildPaneInto(
   }
   acquire(() => {
     if (toastTimer !== null) {
-      clearTimeout(toastTimer);
+      win.clearTimeout(toastTimer);
       toastTimer = null;
     }
   });
@@ -341,7 +363,6 @@ function buildPaneInto(
     services.reportError(feature, err);
   };
 
-  // --- Input funnel (the single sanitizing, session-routed send path) ---
   const inputTransforms: ((b: Uint8Array) => Uint8Array)[] = [];
   const inputObservers: ((b: Uint8Array) => void)[] = [];
   const keydownHandlers: ((ev: KeyboardEvent) => boolean)[] = [];
@@ -360,6 +381,12 @@ function buildPaneInto(
   }
 
   function sendBytes(bytes: Uint8Array): void {
+    // A managed pane with no session (before its first attach, or emptied) sends
+    // nothing: the connection would mint an unmanaged session id and park the
+    // bytes in its outbox for whatever attaches next.
+    if (services.managed && activeSession === null) {
+      return;
+    }
     let out = bytes;
     for (const t of inputTransforms) {
       out = t(out);
@@ -388,17 +415,13 @@ function buildPaneInto(
     sendText(bracketTextForPaste(prepareTextForTerminal(text), engine.modes));
   }
 
-  // --- Active session ---
   let activeSession: SessionRef | null = null;
   // The wake handlers (visibilitychange/pageshow/online) must not open a socket
   // before the first connect: a bare wsPath on a session-gated server 404s, and
   // pageshow fires on the initial load.
   let connectionInitiated = false;
   let failed = false;
-  // `destroyed` means the runtime is no longer usable, whether through destroy()
-  // or a fatal rollback; `rootReleased` is narrower: the boundary classes are
-  // gone too. A fatal pane stays visible and can still be destroyed later.
-  let destroyed = false;
+  let hidden = false;
   let rootReleased = false;
 
   let ready = false;
@@ -421,12 +444,12 @@ function buildPaneInto(
     onGiveUp: () => {
       services.loading.failed();
     },
+    timers: win,
   });
   acquire(() => {
     connState.destroy();
   });
 
-  // --- Engine ---
   // The functions above and below read `engine` from a DOM event, a socket
   // message or a timer, none of which fires before createTerminalEngine returns.
   function updateMousePointer(): void {
@@ -462,12 +485,11 @@ function buildPaneInto(
     callbacks: {
       computeSize: () => engine.renderer.computeSize(),
       getReplayMax: () => engine.renderer.replayMaxForResume(),
-      onResumeBounds(committed, oldest) {
+      onResumeBounds() {
         // A resume VERIFIES the restored store of the socket's OWN session: the
         // server answered under a known epoch. One ack cannot vouch for a tab it
         // never talked to.
         services.stores.verified(engine.connection.currentSessionId());
-        engine.renderer.noteResumeBounds(committed, oldest);
       },
       initialSize: measurableSize,
       onMessage(msg) {
@@ -545,7 +567,7 @@ function buildPaneInto(
   // never emits one). So a blur raised inside a press is withheld and the
   // gesture's REAL end state is reported once it resolves.
   let pressHoldsFocus = false;
-  let focusResolve: ReturnType<typeof setTimeout> | null = null;
+  let focusResolve: number | null = null;
   function reportFocusNow(): void {
     engine.connection.setClientFocus(
       doc.activeElement !== null && termWrap.contains(doc.activeElement),
@@ -555,9 +577,9 @@ function buildPaneInto(
   // within the same task, so a task boundary is the first settled point.
   function endPressFocusGesture(): void {
     if (focusResolve !== null) {
-      clearTimeout(focusResolve);
+      win.clearTimeout(focusResolve);
     }
-    focusResolve = setTimeout(() => {
+    focusResolve = win.setTimeout(() => {
       focusResolve = null;
       pressHoldsFocus = false;
       reportFocusNow();
@@ -565,7 +587,7 @@ function buildPaneInto(
   }
   acquire(() => {
     if (focusResolve !== null) {
-      clearTimeout(focusResolve);
+      win.clearTimeout(focusResolve);
       focusResolve = null;
     }
   });
@@ -573,6 +595,14 @@ function buildPaneInto(
     "focusin",
     () => {
       engine.connection.setClientFocus(true);
+    },
+    { signal },
+  );
+  // Any focus move into the pane selects it, a control in the pane's own regions
+  // included, not only the textarea.
+  root.addEventListener(
+    "focusin",
+    () => {
       services.onFocusIn();
     },
     { signal },
@@ -580,7 +610,7 @@ function buildPaneInto(
   termWrap.addEventListener(
     "focusout",
     (ev) => {
-      if (ev.relatedTarget instanceof Node && termWrap.contains(ev.relatedTarget)) {
+      if (ev.relatedTarget instanceof win.Node && termWrap.contains(ev.relatedTarget)) {
         return;
       }
       if (pressHoldsFocus) {
@@ -603,7 +633,6 @@ function buildPaneInto(
     composition.teardown();
   });
 
-  // --- Input handling ---
   resetToPlaceholder(input);
   input.addEventListener(
     "input",
@@ -733,7 +762,6 @@ function buildPaneInto(
     { signal },
   );
 
-  // --- Focus strategy ---
   // On touch the output is the native text-selection surface, so this does the
   // MINIMUM: it opens the keyboard on a clean tap and otherwise gets out of the
   // browser's way. `any-pointer: fine` rather than pointerType because iPadOS
@@ -780,7 +808,7 @@ function buildPaneInto(
       if (e.pointerType !== "touch") {
         return;
       }
-      if (isLinkTarget(e.target)) {
+      if (isLinkTarget(win, e.target)) {
         return;
       }
       const dx = Math.abs(e.clientX - pointerDownX);
@@ -856,7 +884,6 @@ function buildPaneInto(
     { signal },
   );
 
-  // --- Type-to-focus ---
   // A mouse gesture over `.term-output` leaves focus on the body, so typing
   // silently does nothing (and the two shortcuts on the keydown chain with it).
   // Focusing on the press would collapse the selection, so the browser's model
@@ -927,7 +954,6 @@ function buildPaneInto(
     { signal },
   );
 
-  // --- Viewport ---
   const viewport = createViewport({
     termWrap,
     root,
@@ -946,7 +972,6 @@ function buildPaneInto(
     viewport.teardown();
   });
 
-  // --- Fonts ---
   // Both handles are owned so a pane destroyed inside the font wait fires
   // nothing afterwards: the settled callback would fade the consumer's overlay
   // and measure a disposed renderer.
@@ -954,11 +979,11 @@ function buildPaneInto(
   let firstResizeFrame: number | null = null;
   acquire(() => {
     if (fontDeadline !== null) {
-      clearTimeout(fontDeadline);
+      win.clearTimeout(fontDeadline);
       fontDeadline = null;
     }
     if (firstResizeFrame !== null) {
-      cancelAnimationFrame(firstResizeFrame);
+      win.cancelAnimationFrame(firstResizeFrame);
       firstResizeFrame = null;
     }
   });
@@ -970,7 +995,7 @@ function buildPaneInto(
     if (firstFrameRendered) {
       markReady();
     }
-    firstResizeFrame = requestAnimationFrame(() => {
+    firstResizeFrame = win.requestAnimationFrame(() => {
       firstResizeFrame = null;
       maybeSendFirstResize();
     });
@@ -1013,10 +1038,11 @@ function buildPaneInto(
     onFontSettled();
   }
 
-  // --- Browse-cache TTL ---
   const browseSweep = win.setInterval(() => {
     // The BOUND store has a reader, so its drop is conditional and goes through
-    // the renderer; every other store belongs to a background tab.
+    // the renderer; every other store belongs to a background tab. The engine
+    // stamps browse activity with its own module's Date.now, so the age is read
+    // off that clock and not the mounted window's.
     const bound = engine.renderer.boundStore();
     if (
       engine.renderer.browseCacheSize() > 0 &&
@@ -1034,7 +1060,7 @@ function buildPaneInto(
     }
   }, 60_000);
   acquire(() => {
-    clearInterval(browseSweep);
+    win.clearInterval(browseSweep);
   });
   // Unconditional, for the page about to stop executing: a frozen page runs no
   // code, so its caches would stay resident for the whole freeze. Wrong on the
@@ -1059,7 +1085,6 @@ function buildPaneInto(
     { signal },
   );
 
-  // --- Reconnect-on-wake ---
   doc.addEventListener(
     "visibilitychange",
     () => {
@@ -1108,7 +1133,6 @@ function buildPaneInto(
     { signal },
   );
 
-  // --- Features ---
   const host = createFeatureHost(reportError);
   acquire(() => {
     host.teardownAll();
@@ -1134,6 +1158,13 @@ function buildPaneInto(
     }
     detachSession();
     activeSession = session;
+    // A session another pane forgot arrives with the epoch that pane knew, or the
+    // first resumeAck has nothing to compare against and a server restart between
+    // the two attaches goes undetected.
+    const epoch = services.knownEpoch(session.id);
+    if (epoch !== 0) {
+      engine.connection.adoptPersistedEpoch(session.id, epoch);
+    }
     engine.connection.setSession(session.id);
     // setSession restores the incoming session's mode mirror synchronously and
     // delivers no modes frame.
@@ -1143,6 +1174,7 @@ function buildPaneInto(
       instance.onSwitch?.(session);
     }
     bus.emit("session:switch", session);
+    services.onSessionChange();
   }
 
   function clearActiveSession(): void {
@@ -1151,6 +1183,7 @@ function buildPaneInto(
     }
     const outgoing = activeSession.id;
     detachSession();
+    services.noteEpoch(outgoing, engine.connection.serverEpochOf(outgoing));
     engine.connection.forgetSession(outgoing);
     activeSession = null;
     // `connectionInitiated` must go false here or the wake handlers reconnect a
@@ -1159,6 +1192,7 @@ function buildPaneInto(
     engine.renderer.bind(new LineStore(scrollbackLines));
     engine.renderer.resetScreen();
     connState.idle();
+    services.onSessionChange();
   }
 
   const modes = engine.modes;
@@ -1229,7 +1263,7 @@ function buildPaneInto(
       loadingReason: (message) => {
         services.loading.reason(message);
       },
-      tablist: () => tablistController,
+      tablist: () => services.tablist(),
       newLineStore: (sessionId) => services.stores.newLineStore(sessionId),
       layout,
       notifySwitch(s) {
@@ -1247,11 +1281,15 @@ function buildPaneInto(
       return;
     }
     destroyed = true;
+    // A pane torn down while showing a tab hands the tab's epoch on as an emptied
+    // one does: the tab lives on, and the next pane to show it is seeded from it.
+    if (activeSession !== null) {
+      services.noteEpoch(activeSession.id, engine.connection.serverEpochOf(activeSession.id));
+    }
     activeSession = null;
     held.drain();
   }
 
-  // --- Connect + focus ---
   engine.renderer.updateFontMetrics();
   composition.positionCompositionView();
   if (!services.managed) {
@@ -1275,7 +1313,9 @@ function buildPaneInto(
   }
 
   return {
-    side: services.side,
+    get side() {
+      return services.side;
+    },
     root,
     surface: () => termWrap,
     render: engine.renderer,
@@ -1286,7 +1326,7 @@ function buildPaneInto(
       if (failed) {
         return "failed";
       }
-      if (root.classList.contains("wt-pane-hidden")) {
+      if (hidden) {
         return "hidden";
       }
       return activeSession === null ? "empty" : "shown";
@@ -1297,7 +1337,7 @@ function buildPaneInto(
     notifySwitch: performSwitch,
     clearActiveSession,
     announceSize() {
-      if (!destroyed && measurableSize() !== null) {
+      if (!destroyed && fontsLoaded) {
         engine.connection.sendResize();
       }
     },
@@ -1317,7 +1357,6 @@ function buildPaneInto(
       ),
     connectionInitiated: () => connectionInitiated,
     isDestroyed: () => destroyed,
-    tablist: () => tablistController,
     layout,
     toast,
     announce: (message, politeness) => {
@@ -1355,6 +1394,12 @@ function buildPaneInto(
     cleanupRuntime,
     markFailed() {
       failed = true;
+    },
+    setHidden(value) {
+      hidden = value;
+    },
+    setTabStop(value) {
+      input.tabIndex = value ? 0 : -1;
     },
     destroy() {
       if (rootReleased) {

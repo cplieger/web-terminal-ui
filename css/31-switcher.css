@@ -287,6 +287,21 @@
   pointer-events: none;
 }
 
+:where(.wt-root) .wt-switcher-split {
+  flex: none;
+  width: var(--touch-target);
+}
+
+@media (any-hover: hover) {
+  :where(.wt-root) .wt-switcher-split:hover {
+    background: var(--tab-hover-bg);
+  }
+}
+
+:where(.wt-root) .wt-switcher-split[hidden] {
+  display: none;
+}
+
 /* Tab-switcher button: toggles the list open/closed, sitting between the
    keyboard and "+" buttons. position: relative anchors its notification dot,
    absolutely placed in the top-right corner. It only earns its place with ≥2

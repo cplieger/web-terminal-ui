@@ -1,9 +1,3 @@
-// @cplieger/web-terminal-ui: the reference touch-first browser UI built on
-// @cplieger/web-terminal-engine. createTerminal(root, { features }) builds a
-// small kernel (display output, hidden textarea, IME, one engine instance, the
-// input funnel, connection state, layout regions) plus opt-in feature modules;
-// bundles live at "@cplieger/web-terminal-ui/presets".
-
 export { createTerminal } from "./kernel/kernel.js";
 export { localScrollbackStorage } from "./kernel/scrollback-storage.js";
 export type { LocalScrollbackStorageOptions } from "./kernel/scrollback-storage.js";

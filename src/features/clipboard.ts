@@ -1,3 +1,4 @@
+import { windowOf } from "../kernel/realm.js";
 import { selectionTextWithin } from "../kernel/selection.js";
 import type { TerminalFeature } from "../kernel/types.js";
 
@@ -22,14 +23,16 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
     name: "clipboard",
     setup(ctx) {
       const surface = ctx.surface();
+      const doc = ctx.shell.root.ownerDocument;
+      const win = windowOf(doc);
       function copy(text: string): void {
         // A property access on navigator.clipboard throws outside a secure context.
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- undefined outside secure contexts
-        if (!navigator.clipboard) {
+        if (!win.navigator.clipboard) {
           ctx.toast("Clipboard unavailable");
           return;
         }
-        navigator.clipboard
+        win.navigator.clipboard
           .writeText(text)
           .then(() => {
             ctx.toast("Copied");
@@ -41,11 +44,11 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
 
       function paste(): void {
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- undefined outside secure contexts
-        if (!navigator.clipboard) {
+        if (!win.navigator.clipboard) {
           ctx.toast("Clipboard unavailable");
           return;
         }
-        navigator.clipboard
+        win.navigator.clipboard
           .readText()
           .then((text) => {
             ctx.paste(text);
@@ -91,9 +94,9 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
           ctx.toast("Copied");
         }
       };
-      document.addEventListener("copy", onCopy);
+      doc.addEventListener("copy", onCopy);
       ctx.defer(() => {
-        document.removeEventListener("copy", onCopy);
+        doc.removeEventListener("copy", onCopy);
       });
 
       return {

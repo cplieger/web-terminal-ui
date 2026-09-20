@@ -834,7 +834,10 @@ describe("the decisions the transport cannot make for itself", () => {
   // these forwards a judgement only the renderer can make. Asserting that the
   // callback EXISTS is what let the paging seam ship inert; these call it.
 
-  it("forwards the resume's retained-history bounds to the renderer", async () => {
+  it("lets one resume ack reach the renderer once: the engine's own routing, with no second call from the pane", async () => {
+    // The engine hands the renderer the retained-history bounds before it invokes
+    // onResumeBounds, so the pane's callback is bookkeeping only; a renderer call
+    // of its own would schedule the same work twice per ack.
     await mount({ features: () => [] });
     await tick();
 

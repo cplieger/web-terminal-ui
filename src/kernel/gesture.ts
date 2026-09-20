@@ -16,17 +16,13 @@ export const TAP_MOVEMENT_PX = 10;
  *  belongs to native text selection or the context menu. */
 export const TAP_MAX_MS = 500;
 
-/**
- * Whether a press landed on a LINK, in which case neither handler claims it: the
- * platform's own link affordances (preview on hold, activate on tap) win.
- *
- * Shared for the same reason the thresholds are, and it was NOT: the kernel
- * matched `.term-link` only while the menu matched `a[href], .term-link`, so an
- * ordinary anchor in the output was a link to one half of the boundary and not the
- * other — the menu stood down for the platform while tap-to-focus stole the press.
- * `.term-link` is the engine linkifier's class; `a[href]` covers anchors a consumer
- * or an application wrote itself.
- */
-export function isLinkTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest("a[href], .term-link") !== null;
+/** Whether a press landed on a LINK, in which case neither handler claims it:
+ *  the platform's own link affordances (preview on hold, activate on tap) win.
+ *  One matcher for both halves of the boundary: the kernel once matched
+ *  `.term-link` (the engine linkifier's class) while the menu also matched
+ *  `a[href]`, so an ordinary anchor was a link to one half and not the other.
+ *  `win` is the target's own realm: an element from another document is not an
+ *  `Element` of the importing one. */
+export function isLinkTarget(win: Window & typeof globalThis, target: EventTarget | null): boolean {
+  return target instanceof win.Element && target.closest("a[href], .term-link") !== null;
 }

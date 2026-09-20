@@ -1,8 +1,3 @@
-// The page's attention surfaces: the document-title count prefix, the installed
-// app's icon badge and the tab icon. A feature reports STATE, never events, so
-// rendering is a pure function of the last report that is safe to run on every
-// status sweep, and each sink no-ops when nothing changed.
-
 import type { AttentionOptions, AttentionReporter, AttentionState } from "./types.js";
 
 const NO_ATTENTION: AttentionState = { count: 0, icon: null };

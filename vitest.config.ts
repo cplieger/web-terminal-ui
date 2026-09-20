@@ -1,57 +1,23 @@
-// Vitest configuration for @cplieger/web-terminal-ui unit tests.
-//
-// Two projects, and the DEFAULT is the browser. A test file runs in a real
-// headless Chromium unless its name opts out, because the browser is the
-// environment this package actually ships into and a DOM emulator got a long
-// list of these assertions wrong for free (real layout, a real visualViewport,
-// real TouchEvent/DragEvent/AnimationEvent constructors, the real selection
-// fixup after a subtree is detached).
-//
-// The opt-out is the `.node.test.ts` suffix, and it is load-bearing rather than
-// decorative: placement has to be readable off the filename because one of the
-// two reasons a file needs Node fails SILENTLY when it is misplaced.
-//
-//   - A test that needs Node capabilities (reading the stylesheets with
-//     `node:fs`, writing a golden under UPDATE_GOLDEN=1) throws on the import
-//     when it lands in the browser. Loud, self-correcting.
-//   - A test that needs a browser capability to be ABSENT does not. It passes
-//     vacuously, having exercised the arm it was written to avoid. Those tests
-//     therefore do NOT belong in the node project either: Node has no
-//     `document` at all, which is a third wrong reason to pass. They stay in
-//     the browser project and remove the one capability at the site.
-//
-// Run: vitest --run (single pass) or vitest (watch mode).
+// The browser project is the default: a test runs in headless Chromium unless
+// its name ends in `.node.test.ts`. The suffix is load-bearing because only one
+// misplacement fails loudly: a test needing Node (`node:fs`, a golden write)
+// throws in the browser, while a test needing a browser capability ABSENT passes
+// vacuously in Node too, so it stays in the browser and removes it at the site.
 import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
 
-// Trace view records a DOM snapshot per browser interaction, and the recording
-// is only readable through a reporter that serves it. VITEST_TRACE=1 turns on
-// both halves together, so one variable produces something openable:
-//
-//   VITEST_TRACE=1 npx vitest run src/features/tabs/chip-geometry.test.ts
-//   then open .vitest/index.html
-//
-// Off by default because the snapshots cost time on every browser test and CI
-// has nowhere to publish them. `singleFile` inlines the UI assets so the report
-// is one file to open or attach to an issue, rather than a directory that needs
-// `vite preview` to serve it. This adds no devDependency: the html reporter's
-// @vitest/ui is a hard dependency of @vitest/browser, which is already declared.
+// VITEST_TRACE=1 turns on trace view and the html reporter together, so one
+// variable yields an openable report (.vitest/index.html). Off by default: the
+// snapshots cost time on every browser test and CI has nowhere to publish them.
 const traceView = process.env["VITEST_TRACE"] === "1";
 
 export default defineConfig({
   test: {
     ...(traceView ? { reporters: ["default", ["html", { singleFile: true }]] as const } : {}),
-    // `extends` is a key of the PROJECT, a sibling of `test` and never a key
-    // inside it: spelled `test: { extends: true }` it type-checks, runs, and
-    // inherits nothing (measured on vitest 4.1.11 — setupFiles never loaded and
-    // a 2.5s test passed under a 2s testTimeout). That trap is why the value is
-    // written out here even though vitest 5 defaults it to true: it puts the
-    // correct placement in front of the next reader, and losing a strictness
-    // option (expect.requireAssertions, allowOnly, mockReset, unstubGlobals,
-    // the timeouts, setupFiles) never fails a test, so a mistake here would let
-    // the suite go green while the bar dropped. Verified the other way by
-    // dropping a zero-assertion probe test into each project and confirming it
-    // FAILS.
+    // `extends` is a key of the PROJECT, never of its `test`: spelled
+    // `test: { extends: true }` it type-checks, runs and inherits nothing, and a
+    // lost strictness option never fails a test. Written out although vitest 5
+    // defaults it to true, so the correct placement is in front of the reader.
     projects: [
       {
         extends: true,
@@ -59,10 +25,9 @@ export default defineConfig({
           name: "node",
           environment: "node",
           include: ["src/**/*.node.test.ts"],
-          // .stryker-tmp holds Stryker's sandbox, a full copy of this
-          // directory. A run that dies before cleanTempDir leaves it behind,
-          // and without this the next plain `vitest --run` collects every test
-          // twice.
+          // .stryker-tmp is Stryker's sandbox, a full copy of this directory; a
+          // run that dies before cleanTempDir leaves it behind, and the next
+          // plain `vitest --run` would then collect every test twice.
           exclude: ["node_modules/**", "**/.stryker-tmp/**"],
         },
       },
@@ -116,12 +81,9 @@ export default defineConfig({
       concurrent: false,
       hooks: "stack",
     },
-    // Test-only setup files are named `*-setup.ts` and loaded here in order.
-    // That suffix is the convention every publish and analysis filter matches on
-    // (package.json `files`, jsr.json `publish.exclude`, stryker `mutate`, the
-    // coverage exclude below, scripts/verify.sh): they import vitest, which a
-    // consumer does not install, so shipping one breaks the consumer's build.
-    // Name any new setup file `*-setup.ts` and every filter covers it already.
+    // A setup file imports vitest, which a consumer does not install, so every
+    // publish and analysis filter (package.json `files`, jsr.json, stryker, the
+    // coverage exclude, scripts/verify.sh) excludes `*-setup.ts`: keep the name.
     setupFiles: ["./src/fc-strict-setup.ts", "./src/mounted-terminal-setup.ts"],
     printConsoleTrace: true,
     expandSnapshotDiff: true,
@@ -137,18 +99,10 @@ export default defineConfig({
       showDiff: true,
       includeStack: true,
     },
-    // Persist transformed modules across runs. Top-level since vitest 5, which
-    // deprecated the `experimental.fsModuleCache` spelling this replaced (it
-    // still worked, and warned twice per project per run).
-    //
-    // The path is explicit rather than the v5 default of
-    // `node_modules/.vitest-cache`, because `.vitest-cache/` is already
-    // gitignored here. The tradeoff is that the default location is discarded
-    // by a reinstall while this one is not, and the cache key covers file
-    // content, module id, Vite's environment config and coverage status, but
-    // not installed dependency versions: delete it by hand
-    // (`vitest --clearCache`) if a dependency bump ever serves a stale
-    // transform.
+    // The path is `.vitest-cache`, already gitignored, rather than vitest 5's
+    // `node_modules/.vitest-cache`. A reinstall does not discard it and the key
+    // omits dependency versions, so after a dependency bump serves a stale
+    // transform, clear it by hand (`vitest --clearCache`).
     fsModuleCache: true,
     fsModuleCachePath: ".vitest-cache",
   },

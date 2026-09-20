@@ -7,6 +7,7 @@
 // `data` is unreliable on Chromium, so the textarea value is read one tick later.
 
 import { resetToPlaceholder } from "./input-placeholder.js";
+import { windowOf } from "./kernel/realm.js";
 
 /** A composition that never ends would gate every later keystroke out, and it
  *  happens: Android Chrome with SwiftKey fires no compositionend until a word
@@ -49,12 +50,14 @@ export interface Composition {
 
 export function createComposition(opts: CompositionOptions): Composition {
   const { textarea, compositionView, getCursorPx, send, paste } = opts;
+  // The textarea's own clock and timers: the deferred send belongs to the
+  // document the terminal is mounted in, not the importing page.
+  const win = windowOf(textarea.ownerDocument);
   let composing = false;
-  let sendingComposition = false;
   let compositionStart = 0;
   let compositionSuffix = "";
   let lastCompositionActivity = 0;
-  let torndown = false;
+  let pendingSend: number | null = null;
 
   function expireComposition(): void {
     composing = false;
@@ -64,22 +67,29 @@ export function createComposition(opts: CompositionOptions): Composition {
   }
 
   function isComposing(): boolean {
-    if (sendingComposition) {
+    if (pendingSend !== null) {
       return true;
     }
     if (!composing) {
       return false;
     }
-    if (Date.now() - lastCompositionActivity <= COMPOSITION_IDLE_MS) {
+    if (win.Date.now() - lastCompositionActivity <= COMPOSITION_IDLE_MS) {
       return true;
     }
     expireComposition();
     return false;
   }
 
+  function clearPendingSend(): void {
+    if (pendingSend !== null) {
+      win.clearTimeout(pendingSend);
+      pendingSend = null;
+    }
+  }
+
   function cancelComposition(): void {
     composing = false;
-    sendingComposition = false;
+    clearPendingSend();
     lastCompositionActivity = 0;
     compositionView.textContent = "";
     compositionView.classList.remove("active");
@@ -102,7 +112,7 @@ export function createComposition(opts: CompositionOptions): Composition {
 
   function onStart(): void {
     composing = true;
-    lastCompositionActivity = Date.now();
+    lastCompositionActivity = win.Date.now();
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     compositionStart = Math.min(start, end);
@@ -114,7 +124,7 @@ export function createComposition(opts: CompositionOptions): Composition {
   }
 
   function onUpdate(ev: CompositionEvent): void {
-    lastCompositionActivity = Date.now();
+    lastCompositionActivity = win.Date.now();
     // LTR marks plus direction:rtl on the view show a long composition's tail
     // instead of clipping its start (xterm.js's pattern).
     compositionView.textContent = `\u200E${ev.data}\u200E`;
@@ -125,14 +135,11 @@ export function createComposition(opts: CompositionOptions): Composition {
     compositionView.classList.remove("active");
     composing = false;
     lastCompositionActivity = 0;
-    sendingComposition = true;
+    clearPendingSend();
     const startSnapshot = compositionStart;
     const suffixSnapshot = compositionSuffix;
-    setTimeout(() => {
-      if (!sendingComposition || torndown) {
-        return;
-      }
-      sendingComposition = false;
+    pendingSend = win.setTimeout(() => {
+      pendingSend = null;
       const value = textarea.value;
       const valueEnd =
         suffixSnapshot.length > 0 && value.endsWith(suffixSnapshot)
@@ -163,23 +170,29 @@ export function createComposition(opts: CompositionOptions): Composition {
     resetToPlaceholder(textarea);
   }
 
-  textarea.addEventListener("compositionstart", onStart);
-  textarea.addEventListener("compositionupdate", onUpdate);
-  textarea.addEventListener("compositionend", onEnd);
-  textarea.addEventListener("paste", onPaste);
+  // One signal over every listener, so a registration that throws leaves the
+  // ones before it released with it.
+  const wired = new AbortController();
+  const { signal } = wired;
+  function teardown(): void {
+    cancelComposition();
+    wired.abort();
+  }
+  try {
+    textarea.addEventListener("compositionstart", onStart, { signal });
+    textarea.addEventListener("compositionupdate", onUpdate, { signal });
+    textarea.addEventListener("compositionend", onEnd, { signal });
+    textarea.addEventListener("paste", onPaste, { signal });
+  } catch (err) {
+    teardown();
+    throw err;
+  }
 
   return {
     isComposing,
-    isCompositionOpen: () => composing || sendingComposition,
+    isCompositionOpen: () => composing || pendingSend !== null,
     cancelComposition,
     positionCompositionView,
-    teardown() {
-      torndown = true;
-      cancelComposition();
-      textarea.removeEventListener("compositionstart", onStart);
-      textarea.removeEventListener("compositionupdate", onUpdate);
-      textarea.removeEventListener("compositionend", onEnd);
-      textarea.removeEventListener("paste", onPaste);
-    },
+    teardown,
   };
 }

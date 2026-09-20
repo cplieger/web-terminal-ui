@@ -14,7 +14,8 @@ export interface StatusShare {
   /** Subscribe to the stream at `path`. The first subscriber opens it, the last
    *  one's unsubscribe closes it; a subscriber joining a stream that has already
    *  opened has its `onOpen` called at once, since the stream carries only future
-   *  changes and that subscriber missed the open it would resync on. */
+   *  changes and that subscriber missed the open it would resync on. A callback
+   *  that throws is logged and never propagated, from this call as from the stream. */
   subscribe(path: string, callbacks: StatusStreamCallbacks): Unsubscribe;
   /** Close every stream. A later unsubscribe releases nothing and throws nothing. */
   dispose(): void;
@@ -26,16 +27,20 @@ interface SharedStream {
   opened: boolean;
 }
 
+function deliver(cb: StatusStreamCallbacks, call: (cb: StatusStreamCallbacks) => void): void {
+  try {
+    call(cb);
+  } catch (err) {
+    console.error("web-terminal-ui: status stream subscriber threw", err);
+  }
+}
+
 function fanOut(
   subscribers: Set<StatusStreamCallbacks>,
   call: (cb: StatusStreamCallbacks) => void,
 ): void {
   for (const cb of [...subscribers]) {
-    try {
-      call(cb);
-    } catch (err) {
-      console.error("web-terminal-ui: status stream subscriber threw", err);
-    }
+    deliver(cb, call);
   }
 }
 
@@ -71,7 +76,7 @@ export function createStatusShare(connect: StatusConnector): StatusShare {
       const shared = streams.get(path) ?? open(path);
       shared.subscribers.add(callbacks);
       if (shared.opened) {
-        callbacks.onOpen?.();
+        deliver(callbacks, (cb) => cb.onOpen?.());
       }
       return () => {
         shared.subscribers.delete(callbacks);

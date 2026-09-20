@@ -1,13 +1,4 @@
-/**
- * scrollToBottom feature: a scroll-to-bottom control in the thumb-zone region,
- * shown only while the user has scrolled up. The
- * scroll-state signal comes from the kernel's scroll:state event (the kernel
- * owns scroll.init); this feature just renders the affordance and drives
- * scroll.scrollToBottom.
- *
- * @module
- */
-
+import { windowOf } from "../kernel/realm.js";
 import type { TerminalFeature } from "../kernel/types.js";
 import { fromHTML, holdFocusOnPress } from "./dom.js";
 
@@ -16,22 +7,19 @@ const BUTTON_HTML = `
   <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" d="M7 13l5 5 5-5M7 6l5 5 5-5"/></svg>
 </button>`;
 
-/** Build the scrollToBottom feature. Exposes no API — the button is the whole
- *  surface, and a peer that wants the same effect calls `ctx.scroll.scrollToBottom`
- *  directly.
- *
- *  Its job is resuming FOLLOW, not just moving the viewport, which is why it also
- *  acts when the reader is already at the bottom but holding (an ED3 clamp leaves
- *  exactly that state). The jump is smooth unless the user asked for reduced
- *  motion, and it is idempotent, so binding both `pointerdown` (touch presses feel
- *  immediate) and `click` (keyboard activation) is safe. Teardown unsubscribes and
- *  removes the button. */
+/** Build the scrollToBottom feature. Exposes no API: the button is the whole
+ *  surface, and a peer that wants the effect calls `ctx.scroll.scrollToBottom`.
+ *  Its job is resuming FOLLOW, not just moving the viewport, so it also acts
+ *  when the reader is at the bottom but holding (an ED3 clamp leaves that
+ *  state). The jump is idempotent, so `pointerdown` (touch feels immediate) and
+ *  `click` (keyboard) are both bound. Teardown unsubscribes and removes it. */
 export function scrollToBottom(): TerminalFeature {
   return {
     name: "scrollToBottom",
     setup(ctx) {
+      const win = windowOf(ctx.shell.root.ownerDocument);
       const slot = ctx.region("bottom-inset-end", "scroll");
-      const btn = fromHTML(BUTTON_HTML);
+      const btn = fromHTML(ctx.shell.root.ownerDocument, BUTTON_HTML);
       slot.appendChild(btn);
 
       // Jump to the bottom. With motion allowed, smooth-scroll the surface so
@@ -43,8 +31,8 @@ export function scrollToBottom(): TerminalFeature {
       // scrollToBottom (which re-engages following synchronously).
       const jump = (): void => {
         const reduce =
-          typeof window.matchMedia === "function" &&
-          window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          typeof win.matchMedia === "function" &&
+          win.matchMedia("(prefers-reduced-motion: reduce)").matches;
         if (reduce) {
           ctx.scroll.scrollToBottom();
           return;
@@ -78,7 +66,7 @@ export function scrollToBottom(): TerminalFeature {
       // jump is idempotent, so the pair is safe. holdFocusOnPress keeps the
       // keyboard on the terminal across the press and paints the press class the
       // cancelled default costs this button.
-      holdFocusOnPress(btn);
+      ctx.defer(holdFocusOnPress(btn));
       btn.addEventListener("pointerdown", jump);
       btn.addEventListener("click", jump);
 

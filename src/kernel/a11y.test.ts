@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { createAnnouncer, createTablist } from "./a11y.js";
+import { createAnnouncer, createPaneTablist, createTablist } from "./a11y.js";
+import type { PaneTablist } from "./a11y.js";
+
+/** A row over one pane, whichever side a tab names: the direct-root topology. */
+function oneRow(panel: HTMLElement): ReturnType<typeof createTablist> {
+  const pane = createPaneTablist(panel);
+  return createTablist(() => pane);
+}
 
 describe("a11y: announcer", () => {
   it("creates one polite and one assertive aria-atomic live region", () => {
@@ -119,20 +126,48 @@ describe("a11y: announcer", () => {
     ann.destroy();
     expect(root.children.length).toBe(0);
   });
+
+  it("re-sets the message on the root's own window's timer, not the importing page's", () => {
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const inner = frame.contentDocument;
+    const innerWin = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!inner || !innerWin) {
+      throw new Error("no frame document");
+    }
+    const frameTimeouts = vi.spyOn(innerWin, "setTimeout");
+    const frameClears = vi.spyOn(innerWin, "clearTimeout");
+    vi.useFakeTimers();
+    try {
+      const root = inner.createElement("div");
+      inner.body.appendChild(root);
+      const ann = createAnnouncer(root);
+      ann.announce("ready");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(frameTimeouts.mock.calls.map((c) => c[1])).toEqual([100]);
+      ann.destroy();
+      expect(frameClears).toHaveBeenCalledWith(frameTimeouts.mock.results[0]?.value);
+    } finally {
+      vi.useRealTimers();
+      frameTimeouts.mockRestore();
+      frameClears.mockRestore();
+      frame.remove();
+    }
+  });
 });
 
 describe("a11y: tablist", () => {
   it("marks the panel a tabpanel and returns its id", () => {
     const panel = document.createElement("div");
     panel.id = "mypanel";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     expect(panel.getAttribute("role")).toBe("tabpanel");
     expect(ctl.panelId()).toBe("mypanel");
   });
 
   it("generates a fallback id for a panel/tab with none set", () => {
     const panel = document.createElement("div");
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     expect(panel.id).toMatch(/^wt-panel-\d+$/);
     expect(ctl.panelId()).toBe(panel.id);
     const tab = document.createElement("div");
@@ -144,7 +179,7 @@ describe("a11y: tablist", () => {
   it("registerTab wires role=tab, aria-controls=panel, aria-selected=false", () => {
     const panel = document.createElement("div");
     panel.id = "pnl";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     const tab = document.createElement("div");
     tab.id = "tb1";
     ctl.registerTab(tab);
@@ -156,7 +191,7 @@ describe("a11y: tablist", () => {
   it("manages a roving tabindex: -1 on register, 0 when selected, cleared on remove", () => {
     const panel = document.createElement("div");
     panel.id = "p";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     const tab = document.createElement("div");
     tab.id = "t";
     const handle = ctl.registerTab(tab);
@@ -173,7 +208,7 @@ describe("a11y: tablist", () => {
   it("setLabel sets the tab's aria-label", () => {
     const panel = document.createElement("div");
     panel.id = "p";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     const tab = document.createElement("div");
     tab.id = "t";
     const handle = ctl.registerTab(tab);
@@ -184,7 +219,7 @@ describe("a11y: tablist", () => {
   it("setEditing(true) takes the chip out of the roving sequence, so Tab reaches the field", () => {
     const panel = document.createElement("div");
     panel.id = "p";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     const tab = document.createElement("div");
     tab.id = "t";
     const handle = ctl.registerTab(tab);
@@ -200,7 +235,7 @@ describe("a11y: tablist", () => {
   it("leaving edit mode restores an unselected chip to programmatic focus only", () => {
     const panel = document.createElement("div");
     panel.id = "p";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     const tab = document.createElement("div");
     tab.id = "t";
     const handle = ctl.registerTab(tab);
@@ -214,7 +249,7 @@ describe("a11y: tablist", () => {
   it("leaving edit mode puts the selected chip back in the Tab sequence", () => {
     const panel = document.createElement("div");
     panel.id = "p";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     const tab = document.createElement("div");
     tab.id = "t";
     const handle = ctl.registerTab(tab);
@@ -227,7 +262,7 @@ describe("a11y: tablist", () => {
   it("setSelected(true) labels the panel by the tab; deselecting a tab never relabels it", () => {
     const panel = document.createElement("div");
     panel.id = "p";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     const tabA = document.createElement("div");
     tabA.id = "ta";
     const handleA = ctl.registerTab(tabA);
@@ -248,7 +283,7 @@ describe("a11y: tablist", () => {
   it("remove() clears the panel label when the removed tab currently labels it", () => {
     const panel = document.createElement("div");
     panel.id = "p";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     const tab = document.createElement("div");
     tab.id = "t";
     const handle = ctl.registerTab(tab);
@@ -264,7 +299,7 @@ describe("a11y: tablist", () => {
   it("remove() preserves the panel label when a different tab currently labels it", () => {
     const panel = document.createElement("div");
     panel.id = "p";
-    const ctl = createTablist(panel);
+    const ctl = oneRow(panel);
     const tabA = document.createElement("div");
     tabA.id = "ta";
     const handleA = ctl.registerTab(tabA);
@@ -275,5 +310,83 @@ describe("a11y: tablist", () => {
     handleB.remove();
     // Removing the non-labelling tab must not clear the label (the === tabId guard).
     expect(panel.getAttribute("aria-labelledby")).toBe("ta");
+  });
+
+  it("setPanel points aria-controls at the named pane's panel, and at the one a click would fill for an unshown tab", () => {
+    const left = document.createElement("div");
+    left.id = "pl";
+    const right = document.createElement("div");
+    right.id = "pr";
+    const panes: Record<string, PaneTablist> = {
+      left: createPaneTablist(left),
+      right: createPaneTablist(right),
+    };
+    let fills = "right";
+    const ctl = createTablist((side) => panes[side ?? fills] ?? null);
+    const tab = document.createElement("div");
+    tab.id = "t";
+    const handle = ctl.registerTab(tab);
+    expect(tab.getAttribute("aria-controls")).toBe("pr");
+    expect(ctl.panelId()).toBe("pr");
+
+    handle.setPanel("left");
+    handle.setSelected(true);
+    expect(tab.getAttribute("aria-controls")).toBe("pl");
+    expect(left.getAttribute("aria-labelledby")).toBe("t");
+    expect(right.hasAttribute("aria-labelledby")).toBe(false);
+
+    // The tab moves to the right pane: the left panel loses its label.
+    handle.setPanel("right");
+    expect(tab.getAttribute("aria-controls")).toBe("pr");
+    expect(right.getAttribute("aria-labelledby")).toBe("t");
+    expect(left.hasAttribute("aria-labelledby")).toBe(false);
+
+    // Unshown again: it names the pane a click would fill, which follows the row.
+    handle.setSelected(false);
+    handle.setPanel(null);
+    fills = "left";
+    handle.setPanel(null);
+    expect(tab.getAttribute("aria-controls")).toBe("pl");
+    expect(right.hasAttribute("aria-labelledby")).toBe(false);
+  });
+
+  it("setExpanded writes aria-expanded and null removes it", () => {
+    const panel = document.createElement("div");
+    const ctl = oneRow(panel);
+    const tab = document.createElement("div");
+    const handle = ctl.registerTab(tab);
+    expect(tab.hasAttribute("aria-expanded")).toBe(false);
+    handle.setExpanded(true);
+    expect(tab.getAttribute("aria-expanded")).toBe("true");
+    handle.setExpanded(false);
+    expect(tab.getAttribute("aria-expanded")).toBe("false");
+    handle.setExpanded(null);
+    expect(tab.hasAttribute("aria-expanded")).toBe(false);
+    handle.setExpanded(true);
+    handle.remove();
+    expect(tab.hasAttribute("aria-expanded")).toBe(false);
+  });
+
+  it("setDescription describes the panel through a hidden span beside it, and an empty text removes both", () => {
+    const wrap = document.createElement("div");
+    const panel = document.createElement("div");
+    panel.id = "p";
+    wrap.appendChild(panel);
+    const pane = createPaneTablist(panel);
+    pane.setDescription("Left terminal, selected");
+    const id = panel.getAttribute("aria-describedby");
+    expect(id).toBe("p-description");
+    const span = wrap.querySelector(`#${String(id)}`);
+    expect(span?.textContent).toBe("Left terminal, selected");
+    expect(span?.parentElement).toBe(wrap);
+    expect((span as HTMLElement).style.position).toBe("absolute");
+
+    pane.setDescription("Left terminal");
+    expect(wrap.querySelectorAll("span")).toHaveLength(1);
+    expect(span?.textContent).toBe("Left terminal");
+
+    pane.setDescription("");
+    expect(panel.hasAttribute("aria-describedby")).toBe(false);
+    expect(wrap.querySelector("span")).toBeNull();
   });
 });

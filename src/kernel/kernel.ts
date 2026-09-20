@@ -1,7 +1,3 @@
-// createTerminal: resolve the mount target, refuse a second terminal in a
-// document that holds a live one, and build the shell. A SYNCHRONOUS startup
-// failure gets the same recovery surface an asynchronous one does.
-
 import { fadeOutOverlay, renderFatalStartupInto } from "./fatal.js";
 import { createShell, hasLiveShell } from "./shell.js";
 import type { CreateTerminalOptions, TerminalHandle } from "./types.js";

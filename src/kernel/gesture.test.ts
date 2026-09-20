@@ -23,17 +23,19 @@ describe("gesture boundary", () => {
         <a href="https://example.test" id="anchor"><span id="inside">text</span></a>
         <span id="plain">not a link</span>
       </div>`;
-    expect(isLinkTarget(document.getElementById("linkified"))).toBe(true);
-    expect(isLinkTarget(document.getElementById("anchor"))).toBe(true);
+    expect(isLinkTarget(window, document.getElementById("linkified"))).toBe(true);
+    expect(isLinkTarget(window, document.getElementById("anchor"))).toBe(true);
     // A press lands on the deepest element, so the predicate must climb.
-    expect(isLinkTarget(document.getElementById("inside"))).toBe(true);
-    expect(isLinkTarget(document.getElementById("plain"))).toBe(false);
-    expect(isLinkTarget(document.getElementById("out"))).toBe(false);
+    expect(isLinkTarget(window, document.getElementById("inside"))).toBe(true);
+    expect(isLinkTarget(window, document.getElementById("plain"))).toBe(false);
+    expect(isLinkTarget(window, document.getElementById("out"))).toBe(false);
   });
 
   it("says no for a non-Element target rather than throwing", () => {
     // A pointer event's target can be a text node or null depending on the path.
-    expect(isLinkTarget(null)).toBe(false);
-    expect(isLinkTarget(document.createTextNode("x") as unknown as EventTarget)).toBe(false);
+    expect(isLinkTarget(window, null)).toBe(false);
+    expect(isLinkTarget(window, document.createTextNode("x") as unknown as EventTarget)).toBe(
+      false,
+    );
   });
 });

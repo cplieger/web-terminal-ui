@@ -153,7 +153,7 @@ describe("placeMenuAt: the flip boundary", () => {
 describe("createClickSwallow", () => {
   it("swallows the trailing click for the window after arm()", () => {
     const now = vi.spyOn(performance, "now").mockReturnValue(1000);
-    const swallow = createClickSwallow();
+    const swallow = createClickSwallow(window);
     swallow.arm();
     now.mockReturnValue(1349);
     expect(swallow.swallowing()).toBe(true);
@@ -162,9 +162,59 @@ describe("createClickSwallow", () => {
   it("stops swallowing at exactly the end of the window", () => {
     // A deliberate follow-up tap 350ms after the release must dismiss the menu.
     const now = vi.spyOn(performance, "now").mockReturnValue(1000);
-    const swallow = createClickSwallow();
+    const swallow = createClickSwallow(window);
     swallow.arm();
     now.mockReturnValue(1350);
     expect(swallow.swallowing()).toBe(false);
+  });
+
+  it("reads the clock of the window it was built on, not the importing page's", () => {
+    // A menu in a frame is armed and released on that frame's clock; the
+    // importing page's clock, stubbed far ahead, must not end the window early.
+    vi.spyOn(performance, "now").mockReturnValue(999999);
+    let inner = 1000;
+    const frameWin = { performance: { now: () => inner } } as Pick<Window, "performance">;
+    const swallow = createClickSwallow(frameWin);
+    swallow.arm();
+    inner = 1349;
+    expect(swallow.swallowing()).toBe(true);
+    inner = 1350;
+    expect(swallow.swallowing()).toBe(false);
+  });
+});
+
+describe("placeMenuAt: a menu in a second document", () => {
+  it("clamps to the menu's own window, not the importing one", () => {
+    // A same-origin iframe is a second document with a visual viewport of its own.
+    // The importing window's stub says 800px wide; the frame is 400px, and a menu
+    // near the frame's right edge has to clamp against the frame.
+    fakeVisualViewport({ offsetLeft: 0, offsetTop: 0, width: 800, height: 600 });
+    const frame = document.createElement("iframe");
+    frame.style.width = "400px";
+    frame.style.height = "300px";
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!doc || !win) {
+      throw new Error("no frame document");
+    }
+    try {
+      Object.defineProperty(win, "visualViewport", {
+        configurable: true,
+        value: { offsetLeft: 0, offsetTop: 0, width: 400, height: 300 },
+      });
+      doc.body.style.margin = "0";
+      const menu = doc.createElement("div");
+      Object.defineProperty(menu, "offsetWidth", { value: 100, configurable: true });
+      Object.defineProperty(menu, "offsetHeight", { value: 50, configurable: true });
+      doc.body.appendChild(menu);
+
+      placeMenuAt(menu, 390, 20);
+
+      expect(menu.style.left).toBe("292px"); // 400 - 100 - 8
+      expect(menu.style.top).toBe("20px");
+    } finally {
+      frame.remove();
+    }
   });
 });

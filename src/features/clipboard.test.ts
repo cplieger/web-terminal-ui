@@ -73,6 +73,7 @@ function fakeCtx(): {
       scope.push(release);
     },
     surface: () => surfaceEl,
+    shell: { root: surfaceEl },
     toast,
     paste,
   } as unknown as TerminalContext;

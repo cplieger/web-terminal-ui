@@ -2211,6 +2211,285 @@ describe("the document title is composed from a base and the attention count", (
   });
 });
 
+describe("the built-in features follow the terminal's own document", () => {
+  // A terminal mounted in a same-origin iframe hears THAT document's clicks and
+  // copies, reads THAT window's clipboard, and judges "inside the terminal" by
+  // that realm's own node types; the importing page's events are not its business.
+  interface SecondDocument {
+    readonly doc: Document;
+    readonly win: Window & typeof globalThis;
+    readonly root: HTMLElement;
+  }
+  function secondDocument(): SecondDocument {
+    const frame = document.createElement("iframe");
+    frame.style.width = "500px";
+    frame.style.height = "300px";
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!doc || !win) {
+      throw new Error("no frame document");
+    }
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+    return { doc, win, root };
+  }
+  /** Select the whole of a text node planted in the pane's output, in that
+   *  document's own selection. */
+  function selectInFrame({ doc, win, root }: SecondDocument, text: string): void {
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    const node = doc.createTextNode(text);
+    output.appendChild(node);
+    const range = doc.createRange();
+    range.selectNodeContents(node);
+    const sel = win.getSelection();
+    if (!sel) {
+      throw new Error("no selection");
+    }
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  afterEach(() => {
+    destroyMounted();
+    for (const frame of document.querySelectorAll("iframe")) {
+      frame.remove();
+    }
+  });
+
+  it("copies the frame's selection through the frame's clipboard", async () => {
+    const outerWrite = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { clipboard: { writeText: outerWrite } });
+    const second = secondDocument();
+    const innerWrite = vi.fn(() => Promise.resolve());
+    Object.defineProperty(second.win.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: innerWrite },
+    });
+    await mountTerminal(second.root, { features: () => [clipboard()] });
+    selectInFrame(second, "copy me");
+    const input = second.root.querySelector(".term-input") as HTMLTextAreaElement;
+
+    input.dispatchEvent(
+      new second.win.KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "C",
+        code: "KeyC",
+        ctrlKey: true,
+        shiftKey: true,
+      }),
+    );
+
+    expect(innerWrite).toHaveBeenCalledWith("copy me");
+    expect(outerWrite).not.toHaveBeenCalled();
+  });
+
+  it("toasts a native copy raised in the frame, and not one raised in the importing page", async () => {
+    const second = secondDocument();
+    await mountTerminal(second.root, { features: () => [clipboard()] });
+    selectInFrame(second, "copy me");
+    const toast = second.root.querySelector(".wt-toast");
+
+    document.dispatchEvent(new Event("copy", { bubbles: true }));
+    expect(toast?.textContent).toBe("");
+
+    second.doc.dispatchEvent(new second.win.Event("copy", { bubbles: true }));
+    expect(toast?.textContent).toBe("Copied");
+  });
+
+  it("dismisses the context menu on a click in the frame and keeps it for a click on the menu", async () => {
+    const { contextMenu } = await import("../features/context-menu.js");
+    const second = secondDocument();
+    await mountTerminal(second.root, { features: () => [contextMenu()] });
+    const surface = second.root.querySelector(".term") as HTMLElement;
+    const menu = second.root.querySelector(".wt-ctx-menu") as HTMLElement;
+    const open = (): void => {
+      surface.dispatchEvent(
+        new second.win.MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 20,
+          clientY: 20,
+        }),
+      );
+    };
+
+    open();
+    expect(menu.classList.contains("visible")).toBe(true);
+    // A click on the menu's own box is an item's business, not a click-away, and
+    // the box is a node of the frame's document.
+    menu.dispatchEvent(new second.win.MouseEvent("click", { bubbles: true }));
+    expect(menu.classList.contains("visible")).toBe(true);
+    // A click in the importing page is not a click in this terminal's document.
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(menu.classList.contains("visible")).toBe(true);
+
+    second.doc.body.dispatchEvent(new second.win.MouseEvent("click", { bubbles: true }));
+    expect(menu.classList.contains("visible")).toBe(false);
+  });
+
+  it("keeps a long-press-opened context menu through its release click on the frame's clock", async () => {
+    const { contextMenu } = await import("../features/context-menu.js");
+    const second = secondDocument();
+    await mountTerminal(second.root, { features: () => [contextMenu()] });
+    const surface = second.root.querySelector(".term") as HTMLElement;
+    const menu = second.root.querySelector(".wt-ctx-menu") as HTMLElement;
+    const touch = (type: string, touches: unknown[], timeStamp: number): TouchEvent => {
+      const e = new second.win.Event(type, { bubbles: true }) as unknown as TouchEvent;
+      Object.defineProperty(e, "touches", { value: touches });
+      Object.defineProperty(e, "timeStamp", { value: timeStamp });
+      return e;
+    };
+    // The importing page's clock jumps far ahead between the release and the
+    // click it emits; a swallow armed on that clock would already be over.
+    const outerNow = vi.spyOn(performance, "now").mockReturnValue(1000);
+
+    surface.dispatchEvent(touch("touchstart", [{ clientX: 30, clientY: 40 }], 1000));
+    surface.dispatchEvent(touch("touchend", [], 6000));
+    expect(menu.classList.contains("visible")).toBe(true);
+    outerNow.mockReturnValue(999_999);
+
+    second.doc.body.dispatchEvent(new second.win.MouseEvent("click", { bubbles: true }));
+    expect(menu.classList.contains("visible")).toBe(true);
+  });
+
+  it("treats a focus move inside the frame's terminal as no blur", async () => {
+    const second = secondDocument();
+    await mountTerminal(second.root, { features: () => [] });
+    const termWrap = second.root.querySelector(".term") as HTMLElement;
+    const input = second.root.querySelector(".term-input") as HTMLTextAreaElement;
+    const inside = second.doc.createElement("button");
+    termWrap.appendChild(inside);
+    const outside = second.doc.createElement("button");
+    second.doc.body.appendChild(outside);
+    input.focus();
+    expect(second.doc.activeElement).toBe(input);
+    fake.connection.setClientFocus.mockClear();
+
+    inside.focus();
+    expect(second.doc.activeElement).toBe(inside);
+    expect(fake.connection.setClientFocus).not.toHaveBeenCalledWith(false);
+
+    outside.focus();
+    expect(fake.connection.setClientFocus).toHaveBeenCalledWith(false);
+  });
+
+  it("opens the status stream with the frame's EventSource, not the importing page's", async () => {
+    class FakeSource {
+      static readonly urls: string[] = [];
+      readonly readyState = 0;
+      constructor(url: string) {
+        FakeSource.urls.push(url);
+      }
+      addEventListener(): void {
+        /* the stream's wiring is the engine's to test */
+      }
+      close(): void {
+        /* nothing to close */
+      }
+    }
+    const outerUrls: string[] = [];
+    vi.stubGlobal(
+      "EventSource",
+      class {
+        constructor(url: string) {
+          outerUrls.push(url);
+        }
+      },
+    );
+    const second = secondDocument();
+    Object.defineProperty(second.win, "EventSource", { configurable: true, value: FakeSource });
+    let ctxRef: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "status-probe",
+      scope: "shell",
+      setup(ctx) {
+        ctxRef = ctx;
+        return { api: undefined, teardown: () => undefined };
+      },
+    };
+    await mountTerminal(second.root, { features: () => [probe] });
+    await tick();
+    if (!ctxRef) {
+      throw new Error("the probe feature never ran");
+    }
+    const off = ctxRef.shell.subscribeStatus("/api/sessions/events", { onStatus: () => undefined });
+    expect(FakeSource.urls).toEqual(["/api/sessions/events"]);
+    expect(outerUrls).toEqual([]);
+    off();
+  });
+
+  it("arms the connection banner's grace timers on the frame's clock", async () => {
+    const second = secondDocument();
+    await mountTerminal(second.root, { features: () => [] });
+    const frameTimeouts = vi.spyOn(second.win, "setTimeout");
+    vi.useFakeTimers();
+    try {
+      // A server restart shows "restarted" and arms the timer that clears it.
+      fake.callbacks().onServerRestart?.();
+      expect(frameTimeouts.mock.calls.map((c) => c[1])).toEqual([4000]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      frameTimeouts.mockRestore();
+    }
+  });
+
+  it("runs the scrollback keeper's save timer on the frame's clock, and stops it there", async () => {
+    const second = secondDocument();
+    const frameIntervals = vi.spyOn(second.win, "setInterval");
+    const frameClears = vi.spyOn(second.win, "clearInterval");
+    const pageIntervals = vi.spyOn(window, "setInterval");
+    const storage = {
+      load: () => null,
+      save: () => undefined,
+      drop: () => undefined,
+      saveIntervalMs: 4321,
+    };
+    try {
+      const term = await mountTerminal(second.root, {
+        features: () => [],
+        persistScrollback: storage,
+      });
+      const keeperIntervals = frameIntervals.mock.calls.filter((c) => c[1] === 4321);
+      expect(keeperIntervals).toHaveLength(1);
+      expect(pageIntervals.mock.calls.filter((c) => c[1] === 4321)).toEqual([]);
+      const handle =
+        frameIntervals.mock.results[frameIntervals.mock.calls.indexOf(keeperIntervals[0]!)]?.value;
+      term.destroy();
+      expect(frameClears.mock.calls.map((c) => c[0])).toContain(handle);
+    } finally {
+      frameIntervals.mockRestore();
+      frameClears.mockRestore();
+      pageIntervals.mockRestore();
+    }
+  });
+
+  it("finalises an IME composition on the frame's own clock", async () => {
+    const second = secondDocument();
+    await mountTerminal(second.root, { features: () => [] });
+    const input = second.root.querySelector(".term-input") as HTMLTextAreaElement;
+    const frameTimeouts = vi.spyOn(second.win, "setTimeout");
+    vi.useFakeTimers();
+    try {
+      input.dispatchEvent(new second.win.CompositionEvent("compositionstart", { bubbles: true }));
+      input.value = "日本";
+      input.dispatchEvent(new second.win.CompositionEvent("compositionend", { bubbles: true }));
+      // The importing page's clock never sees the finalizer: nothing to run here.
+      expect(vi.getTimerCount()).toBe(0);
+      expect(frameTimeouts).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+    await new Promise((r) => second.win.setTimeout(r, 0));
+    expect(fake.connection.sendBinary).toHaveBeenCalled();
+    frameTimeouts.mockRestore();
+  });
+});
+
 // --- Helpers for the suites below -------------------------------------------
 
 /** Give a root real geometry. An unstyled root measures 0, and 0 is inside BOTH

@@ -696,3 +696,79 @@ describe("centreChipLabels — teardown releases the window listener it added", 
     expect(released[0]?.[1]).toBe(registered[0]?.[1]);
   });
 });
+
+describe("centreChipLabels — bound to the hosts' own document", () => {
+  // A same-origin iframe is a second document with a window and a font set of
+  // its own. Labels there re-measure on THAT window's resize and THAT document's
+  // font loads; the importing page's are not theirs. The probe's append and
+  // removal is the observable, read synchronously off the observer's queue.
+  let frame: HTMLIFrameElement;
+  let doc: Document;
+  let win: Window & typeof globalThis;
+
+  beforeEach(() => {
+    frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const inner = frame.contentDocument;
+    const view = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!inner || !view) {
+      throw new Error("no frame document");
+    }
+    doc = inner;
+    win = view;
+  });
+  afterEach(() => {
+    frame.remove();
+  });
+
+  function mountIn(): { root: HTMLElement; strip: HTMLElement; switcher: HTMLElement } {
+    const root = doc.createElement("div");
+    const strip = doc.createElement("div");
+    const switcher = doc.createElement("div");
+    root.append(strip, switcher);
+    doc.body.appendChild(root);
+    return { root, strip, switcher };
+  }
+  function probeCount(root: HTMLElement, act: () => void): number {
+    const watch = new win.MutationObserver(() => undefined);
+    watch.observe(root, { childList: true });
+    act();
+    const records = watch.takeRecords();
+    watch.disconnect();
+    return records.filter((r) => r.addedNodes.length > 0).length;
+  }
+
+  it("re-measures on the frame's resize and not on the importing window's", () => {
+    const { root, strip, switcher } = mountIn();
+    const stop = centreChipLabels(root, { strip, switcher });
+
+    expect(
+      probeCount(root, () => {
+        window.dispatchEvent(new Event("resize"));
+      }),
+    ).toBe(0);
+    expect(
+      probeCount(root, () => {
+        win.dispatchEvent(new win.Event("resize"));
+      }),
+    ).toBe(2);
+    stop();
+  });
+
+  it("re-measures when the frame's own fonts finish loading", () => {
+    const { root, strip, switcher } = mountIn();
+    const stop = centreChipLabels(root, { strip, switcher });
+
+    expect(
+      probeCount(root, () => {
+        document.fonts.dispatchEvent(new Event("loadingdone"));
+      }),
+    ).toBe(0);
+    expect(
+      probeCount(root, () => {
+        doc.fonts.dispatchEvent(new win.Event("loadingdone"));
+      }),
+    ).toBe(2);
+    stop();
+  });
+});

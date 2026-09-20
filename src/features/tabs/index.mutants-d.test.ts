@@ -536,7 +536,7 @@ interface DragHarness {
 
 async function mountDrag(
   count: number,
-  opts: { reducedMotion?: boolean } = {},
+  opts: { reducedMotion?: boolean; root?: HTMLElement } = {},
 ): Promise<DragHarness> {
   if (opts.reducedMotion === true) {
     // prefersReduce() is read live on every use, so one stub covers the drag.
@@ -545,8 +545,11 @@ async function mountDrag(
   listBody = ["one", "two", "three", "four"]
     .slice(0, count)
     .map((title, i) => ({ id: `s${String(i + 1)}`, title, createdAt: String(i + 1) }));
-  const root = document.createElement("div");
-  document.body.appendChild(root);
+  let root = opts.root;
+  if (!root) {
+    root = document.createElement("div");
+    document.body.appendChild(root);
+  }
   const feature = tabs();
   term = await mountTerminal(root, { features: () => [feature] });
   await until(() => root.querySelectorAll(".wt-tab").length === count);
@@ -694,6 +697,39 @@ describe("tabs reorder: rest detection", () => {
     h.sweepTo(260 + REORDER_MOVE_EPS_PX);
 
     expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
+  });
+});
+
+describe("tabs reorder: rest detection in a second document", () => {
+  it("measures stillness on the frame's clock, not the importing page's", async () => {
+    // The page's clock is frozen by the harness; only the frame's passes the
+    // stillness window, and that is the reading that opens the slot.
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const inner = frame.contentDocument;
+    const innerWin = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!inner || !innerWin) {
+      throw new Error("no frame document");
+    }
+    innerWin.fetch = fetchMock as unknown as typeof fetch;
+    let frameNow = 100_000;
+    vi.spyOn(innerWin.Date, "now").mockImplementation(() => frameNow);
+    const root = inner.createElement("div");
+    inner.body.appendChild(root);
+    try {
+      const h = await mountDrag(3, { root });
+      h.stubLayout();
+      h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+      h.sweepTo(260);
+      frameNow += REORDER_STILL_MS;
+      h.sweepTo(260);
+
+      expect(idsOf(h.root)).toEqual(["two", "three", "one"]);
+    } finally {
+      term?.destroy();
+      term = undefined;
+      frame.remove();
+    }
   });
 });
 
@@ -1127,5 +1163,54 @@ describe("tabs: the switcher reel and the list's own row motion", () => {
     expect(leaving.isConnected).toBe(true);
     expect(leaving.style.pointerEvents).toBe("none");
     expect(leaving.style.overflow).toBe("hidden");
+  });
+
+  it("teardown during a row's leave motion and a held bar press releases both: no timer, frame or window listener survives", async () => {
+    const h = await mountReel();
+    h.swipeForward();
+    const pressSignals: AbortSignal[] = [];
+    const addSpy = vi.spyOn(window, "addEventListener").mockImplementation((type, fn, options) => {
+      if (type === "pointerup" && typeof options === "object" && options.signal) {
+        pressSignals.push(options.signal);
+      }
+      EventTarget.prototype.addEventListener.call(window, type, fn, options);
+    });
+    vi.useFakeTimers();
+    try {
+      const plus = pick(h.root, ".wt-switcher-new");
+      plus.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+      expect(plus.classList.contains("wt-pressed")).toBe(true);
+      expect(pressSignals).toHaveLength(1);
+      pick(h.row("three"), ".wt-switcher-row-close").click();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      term?.destroy();
+      term = undefined;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(pressSignals[0]?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      addSpy.mockRestore();
+    }
+  });
+
+  it("teardown during a row's enter motion releases it: no frame or timer survives", async () => {
+    const h = await mountReel();
+    vi.useFakeTimers();
+    try {
+      // "+" on the open list: the new tab takes the bar and the tab that held it
+      // enters the list, growing from zero height.
+      pick(h.root, ".wt-switcher-new").click();
+      await vi.advanceTimersByTimeAsync(0);
+      const entering = h.row("one");
+      expect(entering.style.overflow).toBe("hidden");
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      term?.destroy();
+      term = undefined;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -458,6 +458,58 @@ describe("tabs feature", () => {
     ]);
   });
 
+  it("writes the record when the split opens and again when it closes, one PUT each", async () => {
+    layoutBody = { left: "s1", right: null, handle: 0.5, selected: "left", open: false };
+    const root = document.createElement("div");
+    root.style.width = "1000px";
+    root.style.height = "600px";
+    document.body.appendChild(root);
+    term = await mountTerminal(root, { features: () => [tabs()], split: true });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(layoutWrites).toEqual([]);
+
+    expect(term.split?.open()).toBe(true);
+    await until(() => layoutWrites.length > 0);
+    expect(layoutWrites).toEqual([
+      { left: "s1", right: null, handle: 0.5, selected: "left", open: true },
+    ]);
+
+    expect(term.split?.close()).toBe(true);
+    await until(() => layoutWrites.length > 1);
+    expect(layoutWrites).toHaveLength(2);
+    expect(layoutWrites[1]).toEqual({
+      left: "s1",
+      right: null,
+      handle: 0.5,
+      selected: "left",
+      open: false,
+    });
+  });
+
+  it("writes a committed handle share once, and a drag preview never", async () => {
+    layoutBody = { left: "s1", right: null, handle: 0.5, selected: "left", open: false };
+    const root = document.createElement("div");
+    root.style.width = "1000px";
+    root.style.height = "600px";
+    document.body.appendChild(root);
+    term = await mountTerminal(root, { features: () => [tabs()], split: true });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    term.split?.open();
+    await until(() => layoutWrites.length > 0);
+
+    expect(term.split?.setRatio(0.2, false)).toBe(true);
+    expect(term.split?.setRatio(0.3, false)).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(layoutWrites).toHaveLength(1);
+
+    expect(term.split?.setRatio(0.4, true)).toBe(true);
+    await until(() => layoutWrites.length > 1);
+    expect(layoutWrites).toHaveLength(2);
+    expect(layoutWrites[1]?.handle).toBe(0.4);
+    expect(layoutWrites[1]?.open).toBe(true);
+  });
+
   it("restores the saved active tab when the status snapshot wins the boot race", async () => {
     // The test above passes with no activityMonitor, so nothing races the
     // bootstrap. The real app always has one, and it always wins: tabs subscribes
@@ -2139,6 +2191,198 @@ describe("tabs feature: boot race (stream-open reconcile vs bootstrap create)", 
     expect(root.querySelectorAll(".wt-tab").length).toBe(1);
     expect(posts).toBe(1); // no duplicate replacement session
     expect(fetchMock.mock.calls.some((c) => c[1]?.method === "DELETE")).toBe(false);
+  });
+});
+
+// A request the feature started can settle after the terminal is destroyed. Its
+// continuation then owns nothing: no pane to bind, no connection to forget, no
+// toast surface to write (a toast arms a timer on the pane it was torn from).
+describe("tabs feature: a request that settles after teardown", () => {
+  /** A fetch that answers every request at once except the ones `hold` names,
+   *  which wait for the test to settle them. */
+  function heldFetch(hold: (method: string, url: string) => boolean): {
+    settle: (answer: Response | Error) => void;
+    held: () => boolean;
+  } {
+    let pending: ((answer: Response | Error) => void) | null = null;
+    fetchMock.mockImplementation((url: string | URL, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (hold(method, String(url))) {
+        return new Promise<Response>((res, rej) => {
+          pending = (answer) => {
+            if (answer instanceof Error) {
+              rej(answer);
+            } else {
+              res(answer);
+            }
+          };
+        });
+      }
+      if (String(url).endsWith("/layout")) {
+        return Promise.resolve(
+          method === "PUT" ? jsonResponse(null, 204) : jsonResponse(layoutBody),
+        );
+      }
+      if (method === "POST") {
+        return Promise.resolve(
+          jsonResponse({ id: "s-new", title: "", createdAt: "3", status: "idle" }, 201),
+        );
+      }
+      if (method === "DELETE") {
+        return Promise.resolve(jsonResponse(null, 204));
+      }
+      return Promise.resolve(jsonResponse(listBody, 200));
+    });
+    return {
+      settle: (answer) => {
+        pending?.(answer);
+        pending = null;
+      },
+      held: () => pending !== null,
+    };
+  }
+  /** Destroy the terminal, then watch only what the late continuation arms. */
+  function destroyAndWatchTimers(): void {
+    term?.destroy();
+    term = undefined;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  }
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 10; i++) {
+      await vi.advanceTimersByTimeAsync(0);
+    }
+  }
+  /** Enough real turns for a settled request's continuation to run to its end. */
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("adopts nothing from the bootstrap's session list when it lands after destroy", async () => {
+    const list = heldFetch((method, url) => method === "GET" && url.endsWith("/sessions"));
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = await mountTerminal(root, { features: () => [tabs()] });
+    await until(() => list.held());
+
+    term.destroy();
+    term = undefined;
+    const bindsAtDestroy = bind.mock.calls.length;
+    list.settle(jsonResponse(listBody, 200));
+    await settle();
+
+    // Neither listed session was shown: nothing bound the renderer of a pane
+    // that no longer runs.
+    expect(bind.mock.calls.length).toBe(bindsAtDestroy);
+  });
+
+  it("arms no toast when the bootstrap's create fails after destroy", async () => {
+    listBody = []; // nothing live, so the bootstrap creates
+    const post = heldFetch((method) => method === "POST");
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = await mountTerminal(root, { features: () => [tabs()] });
+    await until(() => post.held());
+
+    destroyAndWatchTimers();
+    post.settle(jsonResponse({ error: "boom" }, 500));
+    await flush();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("arms no toast and no retry wait when a '+' create is refused after destroy", async () => {
+    // A 503 is the answer that would otherwise announce the wait on three
+    // surfaces and arm the retry's own timer.
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = await mountTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    const post = heldFetch((method) => method === "POST");
+    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
+    await until(() => post.held());
+
+    destroyAndWatchTimers();
+    post.settle(jsonResponse({ error: "not yet" }, 503, { "Retry-After": "0" }));
+    await flush();
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "POST")).toHaveLength(1);
+  });
+
+  it("adopts nothing from a reconcile's session list when it lands after destroy", async () => {
+    const monitor = fakeMonitor();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = await mountTerminal(root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    // The server now lists a third session; the stream reopen asks, and the
+    // answer is held until after the terminal is gone.
+    listBody = [...listBody, { id: "s3", title: "three", createdAt: "3", status: "idle" }];
+    const list = heldFetch((method, url) => method === "GET" && url.endsWith("/sessions"));
+    monitor.open();
+    await until(() => list.held());
+
+    destroyAndWatchTimers();
+    list.settle(jsonResponse(listBody, 200));
+    await flush();
+
+    // A tab adopted onto the dead feature would animate in on a timer nothing
+    // can cancel any more.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("arms no toast when a tab's close fails after destroy", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = await mountTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    const del = heldFetch((method) => method === "DELETE");
+    root
+      .querySelector<HTMLElement>(".wt-tab")
+      ?.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    await until(() => del.held());
+
+    destroyAndWatchTimers();
+    del.settle(new Error("network down"));
+    await flush();
+
+    expect(vi.getTimerCount()).toBe(0);
+    // The closed tab's neighbour rule found no tab left and asked for none.
+    expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "POST")).toHaveLength(0);
+  });
+
+  it("arms no toast when a bulk close fails after destroy", async () => {
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = await mountTerminal(root, { features: () => [tabs()] });
+    await until(() => root.querySelectorAll(".wt-tab").length === 3);
+    const del = heldFetch((method) => method === "DELETE");
+    root
+      .querySelectorAll<HTMLElement>(".wt-tab")[0]
+      ?.dispatchEvent(new MouseEvent("contextmenu", { clientX: 10, clientY: 10, bubbles: true }));
+    [...root.querySelectorAll<HTMLButtonElement>(".wt-tab-menu button")]
+      .find((b) => b.textContent === "Close others")
+      ?.click();
+    await until(() => del.held());
+
+    destroyAndWatchTimers();
+    del.settle(new Error("network down"));
+    await flush();
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
@@ -4653,5 +4897,363 @@ describe("tabs: closing one tab from its own menu", () => {
       .filter((c) => (c[1]?.method ?? "GET") === "DELETE")
       .map((c) => String(c[0]).split("/").pop());
     expect(deleted).toEqual(["s2"]);
+  });
+});
+
+describe("tabs: in a second document", () => {
+  // The chrome is built in the document of the root it was mounted in, and the
+  // page-level listeners the menu relies on (click-away, confirm) belong to that
+  // document and its window, not to the page that imported the module.
+  interface SecondDocument {
+    readonly doc: Document;
+    readonly win: Window & typeof globalThis;
+    readonly root: HTMLElement;
+  }
+  function secondDocument(): SecondDocument {
+    const frame = document.createElement("iframe");
+    frame.style.width = "800px";
+    frame.style.height = "400px";
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!doc || !win) {
+      throw new Error("no frame document");
+    }
+    // The session API runs on the mounted window's fetch, so the fake server is
+    // installed THERE; the importing page's stub is not this terminal's.
+    win.fetch = fetchMock as unknown as typeof fetch;
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+    return { doc, win, root };
+  }
+  function openTabMenuIn({ win, root }: SecondDocument, index: number): HTMLButtonElement[] {
+    const tab = root.querySelectorAll<HTMLElement>(".wt-tab")[index];
+    tab?.dispatchEvent(
+      new win.MouseEvent("contextmenu", { clientX: 10, clientY: 10, bubbles: true }),
+    );
+    return [...root.querySelectorAll<HTMLButtonElement>(".wt-tab-menu button")];
+  }
+  afterEach(() => {
+    term?.destroy();
+    term = undefined;
+    for (const frame of document.querySelectorAll("iframe")) {
+      frame.remove();
+    }
+  });
+
+  it("lists sessions and reads and writes the layout record through the frame's own fetch, never the importing page's", async () => {
+    const second = secondDocument();
+    const outer = vi.fn(fetchMock.getMockImplementation() ?? (() => Promise.reject(new Error())));
+    vi.stubGlobal("fetch", outer);
+    term = await mountTerminal(second.root, { features: () => [tabs()] });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+    await until(() => layoutWrites.length === 1);
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(urls).toContain("/api/sessions");
+    expect(urls).toContain("/api/sessions/layout");
+    expect(outer).not.toHaveBeenCalled();
+  });
+
+  it("dismisses the tab menu on a click in the frame, not on one in the importing page", async () => {
+    const second = secondDocument();
+    term = await mountTerminal(second.root, { features: () => [tabs()] });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+    const menu = second.root.querySelector(".wt-tab-menu");
+
+    openTabMenuIn(second, 0);
+    expect(menu?.classList.contains("visible")).toBe(true);
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(menu?.classList.contains("visible")).toBe(true);
+
+    second.doc.body.dispatchEvent(new second.win.MouseEvent("click", { bubbles: true }));
+    expect(menu?.classList.contains("visible")).toBe(false);
+  });
+
+  it("reads and follows the frame's own page visibility for the deferred acknowledgement", async () => {
+    const second = secondDocument();
+    second.doc.title = "Inner page";
+    const monitor = fakeMonitor();
+    term = await mountTerminal(second.root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+
+    // The frame is hidden while the importing page stays visible: the cue on the
+    // shown tab raises, because the terminal's own document is out of sight.
+    Object.defineProperty(second.doc, "visibilityState", { value: "hidden", configurable: true });
+    monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
+    expect(second.doc.title).toBe("(1) Inner page");
+
+    // The importing page's visibility change is not this document's.
+    Object.defineProperty(second.doc, "visibilityState", {
+      value: "visible",
+      configurable: true,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(second.doc.title).toBe("(1) Inner page");
+
+    second.doc.dispatchEvent(new second.win.Event("visibilitychange"));
+    expect(second.doc.title).toBe("Inner page");
+  });
+
+  it("swallows a tab drop anywhere in the frame's document, and only there", async () => {
+    const second = secondDocument();
+    term = await mountTerminal(second.root, { features: () => [tabs()] });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+    const dt = fakeDataTransfer();
+    const dragIn = (type: string): Event => {
+      const e = new second.win.Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(e, "dataTransfer", { value: dt });
+      Object.defineProperty(e, "clientX", { value: 0 });
+      Object.defineProperty(e, "clientY", { value: 0 });
+      return e;
+    };
+    second.root.querySelector(".wt-tab")?.dispatchEvent(dragIn("dragstart"));
+
+    // A drop on the importing page is the browser's, not this terminal's.
+    const outer = dragEvent("drop", dt);
+    document.body.dispatchEvent(outer);
+    expect(outer.defaultPrevented).toBe(false);
+
+    const inner = dragIn("drop");
+    second.doc.body.dispatchEvent(inner);
+    expect(inner.defaultPrevented).toBe(true);
+  });
+
+  it("follows a switcher swipe through the frame's window, not the importing one", async () => {
+    const second = secondDocument();
+    term = await mountTerminal(second.root, { features: () => [tabs()] });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+    const current = second.root.querySelector<HTMLElement>(".wt-switcher-current");
+    const inner = second.root.querySelector<HTMLElement>(".wt-switcher-current-inner");
+    const pointer = (type: string, x: number, t: number): MouseEvent => {
+      const e = new second.win.MouseEvent(type, { clientX: x, clientY: 0, bubbles: true });
+      Object.defineProperty(e, "timeStamp", { value: t });
+      Object.defineProperty(e, "pointerId", { value: 1 });
+      return e;
+    };
+    current?.dispatchEvent(pointer("pointerdown", 100, 1000));
+
+    // A finger tracked on the importing window is not this gesture's.
+    const outer = new MouseEvent("pointermove", { clientX: 130, clientY: 0, bubbles: true });
+    Object.defineProperty(outer, "pointerId", { value: 1 });
+    window.dispatchEvent(outer);
+    expect(inner?.style.transform).toBe("");
+
+    second.win.dispatchEvent(pointer("pointermove", 130, 1020));
+    expect(inner?.style.transform).toBe("translateX(30px)");
+    second.win.dispatchEvent(pointer("pointerup", 130, 1040));
+  });
+
+  it("asks the frame's window to confirm a bulk close", async () => {
+    vi.stubGlobal("confirm", () => true);
+    listBody = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const second = secondDocument();
+    second.win.confirm = () => false;
+    term = await mountTerminal(second.root, { features: () => [tabs()] });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 3);
+    fetchMock.mockClear();
+
+    openTabMenuIn(second, 1)
+      .find((b) => b.textContent === "Close others")
+      ?.click();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "DELETE")).toHaveLength(0);
+    expect(second.root.querySelectorAll(".wt-tab").length).toBe(3);
+  });
+
+  /** Give the frame's window a storage of its own, distinct from the importing
+   *  page's, so a write to either is attributable. */
+  function frameStorage(second: SecondDocument): Map<string, string> {
+    const store = new Map<string, string>();
+    const storage = {
+      getItem: (key: string): string | null => store.get(key) ?? null,
+      setItem: (key: string, value: string): void => {
+        store.set(key, value);
+      },
+      removeItem: (key: string): void => {
+        store.delete(key);
+      },
+    };
+    Object.defineProperty(second.win, "localStorage", { configurable: true, value: storage });
+    return store;
+  }
+
+  it("honours a cue dismissal recorded in the frame's storage, and not one in the importing page's", async () => {
+    // The importing page remembers s2's cue as seen; the frame's own storage
+    // holds no such record, so the re-delivered latch is a fresh cue there.
+    localStorage.setItem(CUE_SEEN_KEY, JSON.stringify({ s2: "done" }));
+    const second = secondDocument();
+    const store = frameStorage(second);
+    const monitor = fakeMonitor();
+    term = await mountTerminal(second.root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+    const dot = second.root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+
+    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    expect(dot?.dataset["status"]).toBe("done");
+
+    // The same page, remembering the dismissal: the frame's record silences it.
+    term.destroy();
+    term = undefined;
+    store.set(CUE_SEEN_KEY, JSON.stringify({ s2: "done" }));
+    localStorage.clear();
+    const again = fakeMonitor();
+    term = await mountTerminal(second.root, {
+      features: () => [again.feature, tabs({ activityMonitor: again.feature })],
+    });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+    again.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    expect(
+      second.root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"],
+    ).toBeUndefined();
+  });
+
+  it("records a cue dismissal in the frame's storage, not the importing page's", async () => {
+    const second = secondDocument();
+    const store = frameStorage(second);
+    const monitor = fakeMonitor();
+    term = await mountTerminal(second.root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+
+    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    second.root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
+
+    expect(JSON.parse(store.get(CUE_SEEN_KEY) ?? "{}")).toEqual({ s2: "input" });
+    expect(localStorage.getItem(CUE_SEEN_KEY)).toBeNull();
+  });
+
+  it("greets a coarse-pointer frame with the swipe hint once, remembered in the frame's storage", async () => {
+    // The importing page has been greeted; the frame has not, so the hint shows
+    // there and its record lands in the frame's storage.
+    localStorage.setItem(SWIPE_HINT_KEY, "1");
+    const second = secondDocument();
+    const store = frameStorage(second);
+    Object.defineProperty(second.win, "matchMedia", {
+      configurable: true,
+      value: (query: string): MediaQueryList =>
+        ({
+          matches: query === "(pointer: coarse)",
+          media: query,
+          onchange: null,
+          addEventListener: () => undefined,
+          removeEventListener: () => undefined,
+          addListener: () => undefined,
+          removeListener: () => undefined,
+          dispatchEvent: () => false,
+        }) as unknown as MediaQueryList,
+    });
+    term = await mountTerminal(second.root, { features: () => [tabs()] });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+
+    expect(second.root.querySelector(".wt-toast")?.textContent).toBe("Swipe to switch terminals");
+    expect(store.get(SWIPE_HINT_KEY)).toBe("1");
+  });
+
+  it("keeps a touch-opened tab menu through its release click on the frame's clock", async () => {
+    const second = secondDocument();
+    term = await mountTerminal(second.root, { features: () => [tabs()] });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+    const bar = second.root.querySelector<HTMLElement>(".wt-tab-bar");
+    const tab = second.root.querySelector<HTMLElement>(".wt-tab");
+    const menu = second.root.querySelector(".wt-tab-menu");
+    // The importing page's clock jumps far ahead between the press and its
+    // release; a swallow armed on it would already be over.
+    const outerNow = vi.spyOn(performance, "now").mockReturnValue(1000);
+    const pointer = (type: string): PointerEvent =>
+      new second.win.PointerEvent(type, { bubbles: true, pointerType: "touch" });
+
+    bar?.dispatchEvent(pointer("pointerdown"));
+    tab?.dispatchEvent(
+      new second.win.MouseEvent("contextmenu", { clientX: 10, clientY: 10, bubbles: true }),
+    );
+    expect(menu?.classList.contains("visible")).toBe(true);
+    bar?.dispatchEvent(pointer("pointerup"));
+    outerNow.mockReturnValue(999_999);
+
+    second.doc.body.dispatchEvent(new second.win.MouseEvent("click", { bubbles: true }));
+    expect(menu?.classList.contains("visible")).toBe(true);
+  });
+
+  it("retires the catching-up cue on the frame's clock, not the importing page's", async () => {
+    // The cue's ceiling is measured with Date.now, and the frame's reading is the
+    // one that moves here: the page's real clock advances by milliseconds.
+    const second = secondDocument();
+    let frameNow = 100_000;
+    vi.spyOn(second.win.Date, "now").mockImplementation(() => frameNow);
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextHandle = 1;
+    second.win.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      const h = nextHandle++;
+      frames.set(h, cb);
+      return h;
+    };
+    second.win.cancelAnimationFrame = (h: number): void => {
+      frames.delete(h);
+    };
+    const pumpFrame = (): void => {
+      const due = [...frames.values()];
+      frames.clear();
+      for (const cb of due) {
+        cb(0);
+      }
+    };
+    getHighestIndex.mockReturnValue(0);
+    pendingRowCount.mockReturnValue(401);
+    term = await mountTerminal(second.root, { features: () => [tabs()] });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+    const visible = (): boolean =>
+      second.root.querySelector(".wt-catchup")?.classList.contains("visible") === true;
+
+    second.root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(visible()).toBe(true);
+
+    frameNow += 30_000;
+    pumpFrame();
+    expect(visible()).toBe(true);
+    frameNow += 1;
+    pumpFrame();
+    expect(visible()).toBe(false);
+  });
+
+  it("times a closed tab's tombstone on the frame's clock, not the importing page's", async () => {
+    // A stale listing inside the window is refused; once the FRAME's clock has
+    // passed it, the same listing adopts the session again. The page's clock
+    // moves by milliseconds throughout.
+    const second = secondDocument();
+    let frameNow = 100_000;
+    vi.spyOn(second.win.Date, "now").mockImplementation(() => frameNow);
+    const monitor = fakeMonitor();
+    term = await mountTerminal(second.root, {
+      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
+    const labels = (): string[] =>
+      [...second.root.querySelectorAll<HTMLElement>(".wt-tab-scroll .wt-tab-label")].map(
+        (e) => e.textContent ?? "",
+      );
+
+    openTabMenuIn(second, 1)
+      .find((b) => b.textContent === "Close")
+      ?.click();
+    await until(() => labels().length === 1);
+    monitor.emit({ id: "s2", status: "idle", title: "two", createdAt: "2" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(labels()).toEqual(["one"]);
+
+    frameNow += 15_000;
+    monitor.emit({ id: "s2", status: "idle", title: "two", createdAt: "2" });
+    await until(() => labels().length === 2);
+    expect(labels()).toEqual(["one", "two"]);
   });
 });

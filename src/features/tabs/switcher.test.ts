@@ -49,6 +49,9 @@ function nextFrame(): void {
   vi.advanceTimersByTime(16);
 }
 
+/** An owner that outlives the motion. */
+const live = (): AbortSignal => new AbortController().signal;
+
 describe("animateRowIn", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -61,7 +64,7 @@ describe("animateRowIn", () => {
   it("starts a new row collapsed and transparent so the tray grows into it", () => {
     const row = rowOf(44);
 
-    animateRowIn(row);
+    animateRowIn(row, live());
 
     // The first frame is the "from" state, written with transitions off so it
     // takes effect immediately rather than animating from the row's full height.
@@ -77,7 +80,7 @@ describe("animateRowIn", () => {
   it("animates to the row's measured height on the next frame", () => {
     const row = rowOf(44);
 
-    animateRowIn(row);
+    animateRowIn(row, live());
     nextFrame();
 
     // The flex list's height follows the row, so the tray height animates rather
@@ -91,7 +94,7 @@ describe("animateRowIn", () => {
   it("rounds a fractional measured height up, so the last text line is not clipped", () => {
     const row = rowOf(43.2);
 
-    animateRowIn(row);
+    animateRowIn(row, live());
     nextFrame();
 
     expect(row.style.maxHeight).toBe("44px");
@@ -104,7 +107,7 @@ describe("animateRowIn", () => {
     // entirely is the only safe answer.
     const row = rowOf(0);
 
-    animateRowIn(row);
+    animateRowIn(row, live());
     nextFrame();
 
     expect(row.getAttribute("style")).toBeNull();
@@ -113,7 +116,7 @@ describe("animateRowIn", () => {
 
   it("hands the row back to the stylesheet once the transition has run", () => {
     const row = rowOf(44);
-    animateRowIn(row);
+    animateRowIn(row, live());
     nextFrame();
 
     vi.advanceTimersByTime(CLEANUP_AFTER_MS - 16);
@@ -130,13 +133,106 @@ describe("animateRowIn", () => {
     // The cleanup window has to outlast the transition; clearing at 220ms or
     // earlier drops max-height mid-flight and the row jumps to full size.
     const row = rowOf(44);
-    animateRowIn(row);
+    animateRowIn(row, live());
     nextFrame();
 
     vi.advanceTimersByTime(ROW_ANIM_MS - 16);
 
     expect(row.style.maxHeight).toBe("44px");
     expect(row.style.opacity).toBe("1");
+  });
+});
+
+describe("the owner's signal ends a motion still running", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    document.body.replaceChildren();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("an abort before the frame cancels the frame and the timer, so nothing writes to the row later", () => {
+    const row = rowOf(44);
+    const owner = new AbortController();
+    animateRowIn(row, owner.signal);
+    expect(vi.getTimerCount()).toBe(2);
+
+    owner.abort();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(CLEANUP_AFTER_MS + 16);
+    expect(row.style.maxHeight).toBe("0px");
+    expect(row.style.opacity).toBe("0");
+  });
+
+  it("an abort mid-collapse leaves the row where the owner will remove it, and its timer is gone", () => {
+    const row = rowOf(44);
+    const owner = new AbortController();
+    animateRowOut(row, owner.signal);
+    nextFrame();
+    expect(vi.getTimerCount()).toBe(1);
+
+    owner.abort();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(CLEANUP_AFTER_MS);
+    expect(row.isConnected).toBe(true);
+  });
+
+  it("a timeout that fires before the frame cancels the frame, so nothing writes to the row after the motion ended", () => {
+    // A background tab suspends animation frames while timers keep running, so
+    // the cleanup timer can fire with the "to" frame still queued. The frame is
+    // held back here and released only after the timer, the way a tab regaining
+    // focus would release it.
+    const queued: FrameRequestCallback[] = [];
+    let nextHandle = 1;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      queued.push(cb);
+      return nextHandle++;
+    });
+    const cancelled: number[] = [];
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation((handle) => {
+      cancelled.push(handle);
+      queued.length = 0;
+    });
+    const row = rowOf(44);
+    const owner = new AbortController();
+    animateRowIn(row, owner.signal);
+    expect(queued).toHaveLength(1);
+
+    vi.advanceTimersByTime(CLEANUP_AFTER_MS);
+
+    // The tab regains focus: whatever frame survived the timer runs now.
+    for (const cb of queued.splice(0)) {
+      cb(0);
+    }
+    expect(row.style.maxHeight).toBe("");
+    expect(row.style.opacity).toBe("");
+    expect(cancelled).toEqual([1]);
+    owner.abort();
+    expect(row.style.transition).toBe("");
+  });
+
+  it("a motion that finished first left no listener on the signal: aborting afterwards changes nothing", () => {
+    const row = rowOf(44);
+    const owner = new AbortController();
+    const spy = vi.spyOn(owner.signal, "removeEventListener");
+    animateRowIn(row, owner.signal);
+    nextFrame();
+    vi.advanceTimersByTime(CLEANUP_AFTER_MS);
+    expect(spy).toHaveBeenCalledWith("abort", expect.any(Function));
+    expect(row.style.maxHeight).toBe("");
+    owner.abort();
+    expect(row.style.maxHeight).toBe("");
+  });
+
+  it("an already-aborted owner starts no enter motion and removes a leaving row at once", () => {
+    const entering = rowOf(44);
+    animateRowIn(entering, AbortSignal.abort());
+    expect(entering.getAttribute("style")).toBeNull();
+    const leaving = rowOf(44);
+    animateRowOut(leaving, AbortSignal.abort());
+    expect(leaving.isConnected).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
@@ -152,7 +248,7 @@ describe("animateRowOut", () => {
   it("pins the row at its measured height and stops accepting presses", () => {
     const row = rowOf(44);
 
-    animateRowOut(row);
+    animateRowOut(row, live());
 
     // Collapsing from `auto` does not animate, so the leaving row's height has to
     // be stated before the transition is armed. pointer-events go with it: the
@@ -166,7 +262,7 @@ describe("animateRowOut", () => {
   it("collapses to nothing on the next frame", () => {
     const row = rowOf(44);
 
-    animateRowOut(row);
+    animateRowOut(row, live());
     nextFrame();
 
     expect(row.style.maxHeight).toBe("0px");
@@ -178,7 +274,7 @@ describe("animateRowOut", () => {
     const row = rowOf(44);
     const list = row.parentElement;
 
-    animateRowOut(row);
+    animateRowOut(row, live());
     nextFrame();
     vi.advanceTimersByTime(CLEANUP_AFTER_MS - 16);
 
@@ -191,7 +287,7 @@ describe("animateRowOut", () => {
     // the tray snapping shut rather than closing.
     const row = rowOf(44);
 
-    animateRowOut(row);
+    animateRowOut(row, live());
     nextFrame();
     vi.advanceTimersByTime(ROW_ANIM_MS - 16);
 
@@ -204,11 +300,82 @@ describe("animateRowOut", () => {
     // collapsed tray leaves its row behind forever.
     const row = rowOf(0);
 
-    animateRowOut(row);
+    animateRowOut(row, live());
     nextFrame();
     expect(row.style.maxHeight).toBe("0px");
 
     vi.advanceTimersByTime(CLEANUP_AFTER_MS - 16);
     expect(row.isConnected).toBe(false);
+  });
+});
+
+describe("the row animations run on the row's own window", () => {
+  // A same-origin iframe is a second document with a window and a clock of its
+  // own. A row there animates on that clock: the fake timers below replace only
+  // the importing window's, so a row driven from the importing window would never
+  // finish, while the frame's own timers run for real.
+  let frame: HTMLIFrameElement;
+  let win: Window & typeof globalThis;
+  let doc: Document;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const inner = frame.contentDocument;
+    const view = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!inner || !view) {
+      throw new Error("no frame document");
+    }
+    doc = inner;
+    win = view;
+  });
+  afterEach(() => {
+    frame.remove();
+    vi.useRealTimers();
+  });
+
+  /** A wait on the frame's own clock, which the fake timers do not touch. */
+  const frameWait = (ms: number): Promise<void> =>
+    new Promise((resolve) => {
+      win.setTimeout(resolve, ms);
+    });
+
+  it("removes a leaving row once the frame's own transition window has passed", async () => {
+    const list = doc.createElement("ul");
+    const row = doc.createElement("li");
+    row.style.height = "44px";
+    list.appendChild(row);
+    doc.body.appendChild(list);
+
+    animateRowOut(row, live());
+    await frameWait(CLEANUP_AFTER_MS + 100);
+
+    expect(row.isConnected).toBe(false);
+  });
+
+  it("hands an entering row back to the stylesheet on the frame's own clock", async () => {
+    const list = doc.createElement("ul");
+    const row = doc.createElement("li");
+    row.style.height = "44px";
+    list.appendChild(row);
+    doc.body.appendChild(list);
+
+    animateRowIn(row, live());
+    expect(row.style.maxHeight).toBe("0px");
+    // The frame's next paint is where the row is told its target height.
+    await new Promise<void>((resolve) => {
+      win.requestAnimationFrame(() => {
+        win.requestAnimationFrame(() => {
+          resolve();
+        });
+      });
+    });
+    expect(row.style.maxHeight).toBe("44px");
+    expect(row.style.opacity).toBe("1");
+    await frameWait(CLEANUP_AFTER_MS + 100);
+
+    expect(row.style.maxHeight).toBe("");
+    expect(row.style.opacity).toBe("");
   });
 });

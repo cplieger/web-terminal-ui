@@ -1,39 +1,10 @@
-// Progressive status text for the consumer's pre-JS loading overlay.
-//
-// The problem this solves: the overlay is an opaque full-viewport box the
-// consumer paints before any JS runs, and the kernel only lowers it once the
-// first terminal frame arrives. Every piece of terminal chrome the library could
-// speak through -- the toast layer, the connection banner -- lives inside
-// .wt-root and paints UNDER that overlay, so for as long as startup takes, the
-// library can say nothing a sighted user can see. On a fast boot that does not
-// matter; the overlay is gone in well under a second. On web-terminal-kiro's
-// first boot it matters a lot: the server answers session creation with 503
-// "tools installing" while its tool engine installs, the session owner retries
-// for up to twenty minutes, and the user watched a black screen with an
-// unlabelled sweep bar the whole time, unable to tell a server that is
-// deliberately waiting from an app that has hung.
-//
-// The design, in order of what a user experiences:
-//
-//   1. SILENCE FIRST. Nothing is written for the first few seconds. A message
-//      that flashes up and vanishes on a normal boot is worse than no message,
-//      and most boots never reach the first threshold at all.
-//   2. ONE calm line once the wait is real ("Loading terminal...").
-//   3. After a minute, ROTATING reassurance. A single sentence frozen on screen
-//      for nineteen more minutes reads exactly as hung as no sentence -- the
-//      whole point is to show the system is still alive, so the line changes.
-//   4. A LIVE REASON supersedes all of the above the moment one is known. The
-//      truthful wording for "tools installing" lives on the server, arrives in
-//      the 503 body, and is pushed in by the session owner; it is strictly more
-//      useful than anything this module could guess.
-//
-// Accessibility, and the trap that shapes the DOM here: the overlay is a
-// role="status" live region, so anything written into it is ANNOUNCED. Rotating
-// four messages every twenty seconds for twenty minutes would interrupt a screen
-// reader roughly sixty times to say nothing new. So the visible line is
-// aria-hidden and a separate off-screen live line carries only MEANINGFUL
-// changes -- the first threshold, and each new live reason. Sighted users get
-// motion; assistive tech gets information; neither gets the other's noise.
+// Progressive status text for the consumer's pre-JS loading overlay: the one
+// surface the library can speak through during startup, because the overlay
+// paints over every piece of chrome inside .wt-root until the first frame lands.
+// Silence first, one calm line once the wait is real, rotating reassurance after
+// a minute, and a live reason from the server supersedes all of it.
+
+import { windowOf } from "./realm.js";
 
 /** Wording for the progressive loading status. Every field has a library
  *  default; a consumer overrides only what it wants to reword. */
@@ -91,11 +62,12 @@ export interface LoadingStatus {
 export function attachLoadingStatus(
   overlay: HTMLElement | undefined,
   messages: LoadingMessages = DEFAULT_LOADING_MESSAGES,
-  doc: Document = document,
 ): LoadingStatus {
   if (!overlay) {
     return { reason: () => undefined, stop: () => undefined };
   }
+  const doc = overlay.ownerDocument;
+  const win = windowOf(doc);
 
   // The visible line. aria-hidden because the overlay is a live region and this
   // element's whole job is to CHANGE often; the live line below is what speaks.
@@ -129,17 +101,13 @@ export function attachLoadingStatus(
   let current = ""; // last reason shown, so a repeat call is a no-op
 
   const later = (fn: () => void, ms: number): void => {
-    timers.push(window.setTimeout(fn, ms));
+    timers.push(win.setTimeout(fn, ms));
   };
 
-  // Swap the visible text through a fade so a change reads as deliberate rather
-  // than as a glitch. The first write skips the fade (there is nothing to fade
-  // out) so the line does not arrive half-transparent.
-  //
-  // No `stopped` check, here or in the deferred half below, and that is
-  // deliberate rather than an omission: see stop(), which owns the invariant.
+  // Swap through a fade so a change reads as deliberate. No `stopped` check here
+  // or in the deferred half: stop() owns that invariant.
   const show = (text: string): void => {
-    // First write has nothing to fade out, so it must not arrive half-transparent.
+    // The first write has nothing to fade out, so it must not arrive half-transparent.
     if (visible.textContent === "") {
       visible.textContent = text;
       return;
@@ -165,19 +133,11 @@ export function attachLoadingStatus(
 
   later(() => {
     const waiting = messages.waiting;
-    // `pinned` only. Not `stopped`: this callback is held by `timers`, so stop()
-    // has cancelled it before it could read the flag. That disjunct was here and
-    // was as dead as the ones deleted above — and invisible to the mutation
-    // report, because a mutator works on binary-expression nodes and never
-    // isolates a bare identifier operand, so `pinned || stopped` is mutated as a
-    // pair and the pair is killable through `pinned`.
+    // `pinned` only, not `stopped`: this callback is held by `timers`, so stop()
+    // has cancelled it before it could read the flag.
     if (pinned || waiting.length === 0) {
       return;
     }
-    // showAt reads through an undefined check rather than an index assertion:
-    // under noUncheckedIndexedAccess every element read is `string | undefined`,
-    // and the check is the only form both the assertion-style and
-    // no-non-null-assertion lint rules accept.
     const showAt = (i: number): void => {
       const text = waiting[i];
       if (text !== undefined) {
@@ -187,14 +147,10 @@ export function attachLoadingStatus(
     // Deliberately NOT announced, now or on any rotation: these carry no
     // information a screen-reader user has not already been told once.
     showAt(0);
-    rotation = window.setInterval(() => {
-      // No pinned/stopped guard here: both reason() and stop() clear this
-      // interval, so a tick cannot reach this line after either. The guard that
-      // matters is the `pinned` check on the ENCLOSING timer above, because the
-      // real production sequence puts reason() FIRST -- the server refuses
-      // session creation within a second or two, long before this 60s threshold
-      // -- and without it the rotation would start late and overwrite the
-      // server's own explanation with generic reassurance.
+    rotation = win.setInterval(() => {
+      // No pinned/stopped guard: reason() and stop() both clear this interval.
+      // The `pinned` check on the enclosing timer is the one that matters, since
+      // the server's refusal arrives within seconds, long before this threshold.
       rotateIndex = (rotateIndex + 1) % waiting.length;
       showAt(rotateIndex);
     }, ROTATE_EVERY_MS);
@@ -202,50 +158,36 @@ export function attachLoadingStatus(
 
   return {
     reason(text: string): void {
-      // Idempotent by text, and that is load-bearing rather than an
-      // optimisation: the natural caller is a retry loop that knows the reason
-      // on every tick, and re-writing the announced line would re-announce the
-      // same sentence to a screen reader every few seconds for the whole wait.
-      // Guarding here means a caller may call this as often as it likes.
+      // Idempotent by text: the caller is a retry loop that knows the reason on
+      // every tick, and a re-written live line is re-announced to a screen reader.
       if (stopped || text === "" || text === current) {
         return;
       }
       current = text;
       pinned = true;
       if (rotation !== undefined) {
-        window.clearInterval(rotation);
+        win.clearInterval(rotation);
         rotation = undefined;
       }
       show(text);
       announce(text);
     },
     stop(): void {
-      // THE OWNER of "nothing further happens", and the only one.
-      //
-      // It discharges that by cancelling every callback this controller armed:
-      // `later()` is the sole way to schedule here, everything it schedules is in
-      // `timers`, and the rotation interval is the one handle held separately.
-      // So the only call that can arrive after this line is one from OUTSIDE a
-      // cancellable callback — which is `reason()`, and `reason()` is where
-      // `stopped` is read.
-      //
-      // `show()` and `announce()` used to re-test it as well, and the mutation
-      // pass measured what that was worth: five permanently unkillable mutants,
-      // because no input could reach either function with `stopped` true. They
-      // were not even protecting anything if they had — the two nodes are
-      // detached three lines below, so a late write goes nowhere. The invariant
-      // is pinned by a test instead ("stop() leaves no timer armed"), which,
-      // unlike a guard, fails for the change that would actually break it: a
-      // future timer armed outside `later()`.
+      // The one owner of "nothing further happens": every callback is armed
+      // through later() and lands in `timers`, the rotation is the one handle
+      // held apart, so after this line only reason(), the one entry outside a
+      // cancellable callback, can run, and it is the one reader of `stopped`.
+      // show() and announce() do not re-test it; a timer armed outside later()
+      // is what the "stop() leaves no timer armed" test catches.
       if (stopped) {
         return;
       }
       stopped = true;
       for (const t of timers) {
-        window.clearTimeout(t);
+        win.clearTimeout(t);
       }
       if (rotation !== undefined) {
-        window.clearInterval(rotation);
+        win.clearInterval(rotation);
       }
       visible.remove();
       live.remove();

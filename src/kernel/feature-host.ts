@@ -1,10 +1,7 @@
-// The feature lifecycle one owner (a pane kernel or the shell) runs: setup with
-// a per-feature cleanup scope, the api map behind ctx.use, and the reverse-order
-// teardown. The scope is also the owners' own disposer stack.
-
 import type { FeatureInstance, TerminalContext, TerminalFeature, Unsubscribe } from "./types.js";
 
-/** Everything one feature acquired, released last-in first-out. */
+/** Releases run last-in first-out: what one feature acquired, or what a pane or
+ *  the shell holds. */
 export interface CleanupScope {
   /** Hold `release` until the drain. After the drain it runs at once, so a setup
    *  still running past its owner's teardown cannot leave anything behind. */

@@ -1,11 +1,11 @@
-// contextMenu: the Copy / Select All / Paste menu for the terminal surface. It
-// exists for PASTE: the keyboard target is a 1x1 pointer-events:none textarea,
-// so no platform can attach a native paste item under the pointer. A touch press
-// is classified ONCE, at touchend, when every fact is settled: a stationary
-// single-finger press past the tap ceiling that selected nothing and did not
-// start on a link is a press the platform declined, so it is ours. Deciding at
-// release is what lets the trailing-click swallow start at the release edge.
+// Exists for PASTE: the keyboard target is a 1x1 pointer-events:none textarea, so
+// no platform can attach a native paste item under the pointer. A touch press is
+// classified ONCE, at touchend, when every fact is settled (a stationary
+// single-finger press past the tap ceiling that selected nothing and did not start
+// on a link is one the platform declined), and deciding at release is what lets
+// the trailing-click swallow start at the release edge.
 
+import { windowOf } from "../kernel/realm.js";
 import { selectionTextWithin } from "../kernel/selection.js";
 import type { TerminalFeature } from "../kernel/types.js";
 import { TAP_MAX_MS, TAP_MOVEMENT_PX, isLinkTarget } from "../kernel/gesture.js";
@@ -26,25 +26,16 @@ export interface ContextMenuOptions {
  *  not-yet-registered word selection included, which once left an iPad unable to
  *  select text; everywhere else cancelling keeps the platform's menu from
  *  appearing beside ours. */
-function isAppleTouchDevice(): boolean {
-  // Totality only: a runtime with no navigator binding would throw a
-  // ReferenceError on the reads below. Node and workers both carry one.
-  if (typeof navigator === "undefined") {
-    return false;
-  }
-  const ua = navigator.userAgent || "";
-  const platform = navigator.platform || "";
+function isAppleTouchDevice(nav: Navigator): boolean {
+  const ua = nav.userAgent || "";
+  const platform = nav.platform || "";
   if (/iP(hone|ad|od)/.test(ua) || /iP(hone|ad|od)/.test(platform)) {
     return true;
   }
   // iPadOS Safari's desktop mode reports MacIntel with a touch screen; a
   // trackpad Mac reports maxTouchPoints 0.
-  return platform === "MacIntel" && navigator.maxTouchPoints > 1;
+  return platform === "MacIntel" && nav.maxTouchPoints > 1;
 }
-
-/** A long-press on a link raises the platform's own preview without ever making
- *  a selection, so the selection test alone would not keep us out of its way. */
-const onLink = isLinkTarget;
 
 /** Build the contextMenu feature. Exposes no API. Without the clipboard value of
  *  ContextMenuOptions it degrades to a Select All-only menu. Its items act on the
@@ -55,18 +46,24 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
     name: "contextMenu",
     setup(ctx) {
       const surface = ctx.surface();
-      const menu = document.createElement("div");
+      const doc = ctx.shell.root.ownerDocument;
+      const win = windowOf(doc);
+      const menu = doc.createElement("div");
       menu.className = "wt-ctx-menu";
       ctx.region("overlay", "menu").appendChild(menu);
+      // A long-press on a link raises the platform's own preview without ever
+      // making a selection, so the selection test alone would not keep us out of
+      // its way.
+      const onLink = (target: EventTarget | null): boolean => isLinkTarget(win, target);
 
       // The device that started the current interaction: `contextmenu` fires on a
       // desktop right-click AND on an Android long-press, so its handler branches
       // on this to tell them apart.
       let lastPointerType = "mouse";
       // Computed once: may a touch contextmenu be cancelled (see isAppleTouchDevice).
-      const appleTouch = isAppleTouchDevice();
+      const appleTouch = isAppleTouchDevice(win.navigator);
       // Swallows the trailing click a touch long-press emits on release.
-      const swallow = createClickSwallow();
+      const swallow = createClickSwallow(win);
 
       // The in-flight single-finger press, all of it read at `touchend`.
       // pressLive goes false the moment the gesture stops being a candidate (a
@@ -90,7 +87,7 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
       }
 
       function hide(refocus = true): void {
-        const shouldRefocus = refocus && menu.contains(document.activeElement);
+        const shouldRefocus = refocus && menu.contains(doc.activeElement);
         menu.classList.remove("visible");
         menu.replaceChildren();
         if (shouldRefocus) {
@@ -102,7 +99,7 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
       // NOT refocus the textarea, or Firefox collapses the just-made selection
       // when focus leaves the output.
       function addButton(label: string, onClick: () => void, refocus = true): void {
-        const b = document.createElement("button");
+        const b = doc.createElement("button");
         b.type = "button";
         b.textContent = label;
         b.addEventListener("click", () => {
@@ -126,7 +123,7 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         addButton(
           "Select All",
           () => {
-            const s = window.getSelection();
+            const s = doc.getSelection();
             const output = surface.querySelector(".term-output");
             if (s && output) {
               s.selectAllChildren(output);
@@ -160,12 +157,10 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
           show(e.clientX, e.clientY);
           return;
         }
-        // Touch: our menu never opens from here — the touchend classifier owns
-        // that. The only question left is whether the PLATFORM's menu may
-        // proceed. On WebKit it must (cancelling here cancels the whole gesture's
-        // remaining defaults, the word selection included). Elsewhere (Android
-        // fires contextmenu mid-press) cancel it when the press has nothing of
-        // the platform's own to show, so its menu and ours cannot both appear.
+        // Touch: the touchend classifier owns our menu; the question here is whether
+        // the PLATFORM's may proceed. WebKit must keep it (cancelling cancels the
+        // gesture's remaining defaults, the word selection included); elsewhere it is
+        // cancelled when the press has nothing of the platform's to show.
         if (!appleTouch && !onLink(e.target) && selectionTextWithin(surface) === "") {
           e.preventDefault();
         }
@@ -190,7 +185,7 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         // menu with the correct refocus behaviour (Select All must not refocus
         // the input, or Firefox collapses the selection it just made). Reaching
         // hide() from here as well would override that choice.
-        if (e.target instanceof Node && menu.contains(e.target)) {
+        if (e.target instanceof win.Node && menu.contains(e.target)) {
           return;
         }
         // The release click of the long-press that just opened the menu is that
@@ -200,9 +195,9 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         }
         hide();
       };
-      document.addEventListener("click", onDocClick);
+      doc.addEventListener("click", onDocClick);
       ctx.defer(() => {
-        document.removeEventListener("click", onDocClick);
+        doc.removeEventListener("click", onDocClick);
       });
       // A right-click outside the terminal surface (a tab, its menu, elsewhere,
       // or a native browser menu) dismisses this menu. A right-click on the
@@ -212,9 +207,9 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
           hide();
         }
       };
-      document.addEventListener("contextmenu", onDocContextMenu);
+      doc.addEventListener("contextmenu", onDocContextMenu);
       ctx.defer(() => {
-        document.removeEventListener("contextmenu", onDocContextMenu);
+        doc.removeEventListener("contextmenu", onDocContextMenu);
       });
 
       const onTouchStart = (e: TouchEvent): void => {

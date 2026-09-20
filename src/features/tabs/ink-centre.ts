@@ -1,11 +1,9 @@
-// Optical centring for the three chip labels, measured in the engine rather than
-// predicted from the font's tables. Flex centring centres the LINE BOX, and a
-// font's box reaches further above the baseline than below it, so the text sits
-// low; the correction is the gap from the box's centre to the CAP band's (cap
-// top to baseline, the `text-box-edge: cap alphabetic` edges; a band including
-// descender ink reads high beside the dot and close glyph). Measured, not a
-// constant, because engines round ascent and descent to whole CSS pixels before
-// building the line box, and round differently per engine and platform.
+// Optical centring for the chip labels, MEASURED in the engine: flex centring
+// centres the LINE BOX, whose font reaches further above the baseline than below,
+// so text sits low, and the correction is the gap from the box's centre to the cap
+// band's. Measured because engines round ascent and descent to whole CSS pixels
+// before building the line box, differently per engine and platform.
+import { windowOf } from "../../kernel/realm.js";
 import { fromHTML } from "../dom.js";
 
 /** Ink extents are measured at this size and scaled back to em: WebKit and Blink
@@ -50,18 +48,25 @@ export function inkShiftPx(m: InkMetrics): number {
   return capCentre - m.fontBoxPx / 2;
 }
 
-let ctx2d: CanvasRenderingContext2D | null | undefined;
+// One measuring canvas per document: a canvas resolves font families against
+// its own document's faces, so an outer canvas would not see a face the terminal's
+// document loaded.
+const canvases = new WeakMap<Document, CanvasRenderingContext2D | null>();
 
-function canvas2d(): CanvasRenderingContext2D | null {
-  ctx2d ??= document.createElement("canvas").getContext("2d");
-  return ctx2d;
+function canvas2d(doc: Document): CanvasRenderingContext2D | null {
+  let ctx = canvases.get(doc);
+  if (ctx === undefined) {
+    ctx = doc.createElement("canvas").getContext("2d");
+    canvases.set(doc, ctx);
+  }
+  return ctx;
 }
 
 /** The font's own cap ink, in em. Canvas rather than the DOM because only
  *  TextMetrics reports where the glyphs' ink actually starts and stops; a DOM
  *  rect only ever reports the box around it. */
-function inkExtents(font: string): Pick<InkMetrics, "capInkEm"> | null {
-  const ctx = canvas2d();
+function inkExtents(doc: Document, font: string): Pick<InkMetrics, "capInkEm"> | null {
+  const ctx = canvas2d(doc);
   if (!ctx) {
     return null;
   }
@@ -78,12 +83,13 @@ function inkExtents(font: string): Pick<InkMetrics, "capInkEm"> | null {
  *  sits ON the baseline by definition — the only thing in the DOM that reports
  *  a baseline position. */
 function lineBox(label: HTMLElement): Pick<InkMetrics, "fontBoxPx" | "baselinePx"> | null {
-  const line = document.createElement("span");
+  const doc = label.ownerDocument;
+  const line = doc.createElement("span");
   line.style.position = "absolute";
   line.style.whiteSpace = "pre";
   line.style.font = "inherit";
   line.textContent = PROBE_TEXT;
-  const strut = document.createElement("span");
+  const strut = doc.createElement("span");
   strut.style.display = "inline-block";
   strut.style.width = "0";
   strut.style.height = "0";
@@ -99,37 +105,32 @@ function lineBox(label: HTMLElement): Pick<InkMetrics, "fontBoxPx" | "baselinePx
 }
 
 /** Measures one site and returns its shift plus the font signature it belongs
- *  to. Returns null when the resolved font is unchanged since `cached` (the
- *  resize path, which then does no ink or line-box work at all) and when the
- *  site cannot be measured at all (no layout, no canvas, a display: none
- *  probe) — callers leave the CSS default in place either way rather than
- *  writing a wrong number.
- *
- *  The probe lives only for the duration of this synchronous call, deliberately.
- *  Keeping a permanent hidden one would save a DOM mutation per resize, and it
- *  would also put a second `.wt-tab` inside the root forever — which the strip's
- *  test suite counts as a tab (`root.querySelectorAll(".wt-tab")`). Transient
- *  means no other code, and no assertion, can ever observe it. */
+ *  to; null when the resolved font is unchanged since `cached` or the site
+ *  cannot be measured (no layout, no canvas, a display: none probe), and callers
+ *  then leave the CSS default in place. The probe lives only for this
+ *  synchronous call: a permanent hidden one would be a second `.wt-tab` inside
+ *  the root that every `querySelectorAll(".wt-tab")` counts. */
 function measureSite(
   varRoot: HTMLElement,
   probeHTML: string,
   cached: string | undefined,
 ): { shiftPx: number; signature: string } | null {
-  const wrap = document.createElement("div");
+  const doc = varRoot.ownerDocument;
+  const wrap = doc.createElement("div");
   wrap.setAttribute("aria-hidden", "true");
   wrap.style.position = "absolute";
   wrap.style.top = "0";
   wrap.style.left = "0";
   wrap.style.visibility = "hidden";
   wrap.style.pointerEvents = "none";
-  wrap.appendChild(fromHTML(probeHTML));
+  wrap.appendChild(fromHTML(doc, probeHTML));
   varRoot.appendChild(wrap);
   try {
     const label = wrap.querySelector<HTMLElement>(`.${PROBE_CLASS}`);
     if (!label) {
       return null;
     }
-    const cs = getComputedStyle(label);
+    const cs = windowOf(doc).getComputedStyle(label);
     const signature = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
     if (signature === cached) {
       return null;
@@ -138,7 +139,7 @@ function measureSite(
     if (!(fontSizePx > 0)) {
       return null;
     }
-    const ink = inkExtents(`${cs.fontStyle} ${cs.fontWeight} ${REF_PX}px ${cs.fontFamily}`);
+    const ink = inkExtents(doc, `${cs.fontStyle} ${cs.fontWeight} ${REF_PX}px ${cs.fontFamily}`);
     const box = lineBox(label);
     if (!ink || !box) {
       return null;
@@ -162,26 +163,14 @@ interface Site {
   readonly probeHTML: string;
 }
 
-/**
- * Writes a measured --label-ink-shift onto the tab strip and the mobile
- * switcher, and keeps it current.
- *
- * Re-measures on two kinds of event, which need two different policies:
- *
- * - A font finishing (or failing) to load. The first pass can run inside
- *   `font-display: block`, where the line box is still the fallback's, and the
- *   real face can change every number here. These FORCE a re-measure, because
- *   the signature below cannot see them: computed style reports the DECLARED
- *   font-family list whether or not the webfont ever arrived, so a cached
- *   signature would match and pin the fallback's shift permanently. (It did,
- *   until scripts/verify-chip-geometry.mjs caught it.)
- * - A resize. rem-relative label sizes move with Safari's per-site page zoom,
- *   and a new size means new rounding; but most resizes change neither, so this
- *   path keeps the signature check and costs one computed-style read per site
- *   when nothing moved.
- *
- * @returns teardown that drops the listeners and the written properties.
- */
+/** Writes a measured --label-ink-shift onto the tab strip and the mobile
+ *  switcher, and keeps it current. A font load or failure FORCES a re-measure:
+ *  the first pass can run inside `font-display: block` on the fallback's line
+ *  box, and computed style reports the DECLARED font-family list either way, so
+ *  a cached signature would pin the fallback's shift for good. A resize keeps
+ *  the signature check (rem sizes move with Safari's per-site zoom, but most
+ *  resizes change nothing) and costs one computed-style read per site.
+ *  @returns teardown that drops the listeners and the written properties. */
 export function centreChipLabels(
   varRoot: HTMLElement,
   hosts: { readonly strip: HTMLElement; readonly switcher: HTMLElement },
@@ -219,20 +208,22 @@ export function centreChipLabels(
   };
 
   remeasure(false);
+  const doc = varRoot.ownerDocument;
+  const win = windowOf(doc);
   // The DOM lib types document.fonts as always present; an engine without the CSS
   // Font Loading API ships no FontFaceSet at all, so the honest type is the
   // optional one.
-  const fonts = document.fonts as FontFaceSet | undefined;
+  const fonts = doc.fonts as FontFaceSet | undefined;
   // `ready` settles the initial load (including a failed one); `loadingdone`
   // covers a face the host page adds afterwards, which `ready` never reports.
   void fonts?.ready.then(onFontsDone);
   fonts?.addEventListener("loadingdone", onFontsDone);
-  window.addEventListener("resize", onResize);
+  win.addEventListener("resize", onResize);
 
   return () => {
     disposed = true;
     fonts?.removeEventListener("loadingdone", onFontsDone);
-    window.removeEventListener("resize", onResize);
+    win.removeEventListener("resize", onResize);
     for (const site of sites) {
       site.host.style.removeProperty("--label-ink-shift");
     }

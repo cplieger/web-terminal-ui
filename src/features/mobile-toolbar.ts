@@ -1,4 +1,5 @@
 import { toolbar } from "@cplieger/web-terminal-engine";
+import { windowOf } from "../kernel/realm.js";
 import type { TerminalFeature } from "../kernel/types.js";
 import { fromHTML } from "./dom.js";
 
@@ -50,7 +51,8 @@ export function mobileToolbar(opts: MobileToolbarOptions = {}): TerminalFeature<
     setup(ctx) {
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
-      const toolbar = fromHTML(TOOLBAR_HTML);
+      const win = windowOf(ctx.shell.root.ownerDocument);
+      const toolbar = fromHTML(ctx.shell.root.ownerDocument, TOOLBAR_HTML);
       if (opts.externalToggle) {
         toolbar.classList.add("wt-toolbar-external");
       }
@@ -85,13 +87,13 @@ export function mobileToolbar(opts: MobileToolbarOptions = {}): TerminalFeature<
       });
 
       // Two frames without the slide transition, so the first paint cannot flash.
-      let settleFrame = requestAnimationFrame(() => {
-        settleFrame = requestAnimationFrame(() => {
+      let settleFrame = win.requestAnimationFrame(() => {
+        settleFrame = win.requestAnimationFrame(() => {
           toolbar.classList.remove("no-transition");
         });
       });
       ctx.defer(() => {
-        cancelAnimationFrame(settleFrame);
+        win.cancelAnimationFrame(settleFrame);
       });
 
       return {

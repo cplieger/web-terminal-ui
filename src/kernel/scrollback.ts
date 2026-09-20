@@ -21,6 +21,14 @@ export interface SessionEpochs {
   serverEpochOf(sessionId: string): number;
 }
 
+/** The timers and clock the keeper runs on: the mounted window's, so the save
+ *  cadence and the age check follow the terminal's own clock. */
+export interface ScrollbackClock {
+  setInterval(handler: () => void, ms: number): number;
+  clearInterval(id: number): void;
+  readonly Date: Pick<DateConstructor, "now">;
+}
+
 /** Newest lines persisted per session when the consumer names no bound. Not the
  *  store's cap: a write happens on every backgrounding and on a timer while
  *  output advances, and 200 lines serialise in under a millisecond (~24 K
@@ -108,6 +116,7 @@ export function createScrollbackKeeper(
   cfg: ScrollbackPersistence,
   storeCap: number | undefined,
   epochs: SessionEpochs,
+  clock: ScrollbackClock,
 ): ScrollbackKeeper {
   const lines = positiveIntOption(cfg.lines, DEFAULT_PERSIST_LINES, "persistScrollback.lines");
   const maxAgeMs = positiveIntOption(
@@ -171,7 +180,7 @@ export function createScrollbackKeeper(
 
     // Distance in either direction: a clock that moved backwards would otherwise
     // leave an entry whose age never reaches the bound.
-    if (Math.abs(Date.now() - entry.savedAt) > maxAgeMs) {
+    if (Math.abs(clock.Date.now() - entry.savedAt) > maxAgeMs) {
       drop(sessionId);
       return null;
     }
@@ -220,7 +229,7 @@ export function createScrollbackKeeper(
       return;
     }
     try {
-      cfg.save(sessionId, { savedAt: Date.now(), snapshot });
+      cfg.save(sessionId, { savedAt: clock.Date.now(), snapshot });
     } catch {
       // No watermark: recording one here made the background pass skip a session
       // whose store never reached disk until its output advanced again.
@@ -253,7 +262,7 @@ export function createScrollbackKeeper(
     }
   }
 
-  const timer = setInterval(saveAdvanced, saveIntervalMs);
+  const timer = clock.setInterval(saveAdvanced, saveIntervalMs);
 
   return {
     storeFor(sessionId) {
@@ -301,7 +310,7 @@ export function createScrollbackKeeper(
     },
     stop() {
       stopped = true;
-      clearInterval(timer);
+      clock.clearInterval(timer);
       tracked.clear();
       savedThrough.clear();
     },
