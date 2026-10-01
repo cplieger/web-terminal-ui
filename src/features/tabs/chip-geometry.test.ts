@@ -384,17 +384,14 @@ function gradientStopsPx(image: string, radiusPx: number): number[] {
   });
 }
 
-// The working state's breath overlay, measured as GEOMETRY. That the beat is
-// declared, reads the shared period and has a peak is text, and
-// css-contract.node.test.ts owns all three; whether it has anything to SHOW is a
-// rendered question, and a text assertion structurally cannot see it. This exists
-// because 7.3.1 shipped the beat running, correctly keyframed and correctly masked
-// with its bright core ending 0.05px INSIDE the mask's opaque edge — the two never
-// intersected, and 4 pixels of a 9x9 mark moved between trough and peak against
-// the reference's 20. Every number here is derived from --wt-mark-size and
-// --wt-mark-band read off the element, because the defect WAS two hard-coded
-// numbers that stopped agreeing with them.
-describe("the working mark's breath overlay", () => {
+// The working state's closing overlay, measured as GEOMETRY. That the close is
+// declared and reads the shared period is text, and css-contract.node.test.ts owns
+// it; whether the hole is fully open at rest, shuts at the peak, and is covered by
+// the box at every scale is a rendered question. Every number is derived from
+// --wt-mark-size, --wt-mark-band and --wt-mark-close read off the element, because
+// this overlay's first port shipped running with nothing visible to show when two
+// hard-coded numbers stopped agreeing with them.
+describe("the working mark's closing overlay", () => {
   it.each(SITES)("derives $name's overlay geometry from the mark's own box", (site) => {
     mount(true);
     const mark = markOf(site);
@@ -403,48 +400,41 @@ describe("the working mark's breath overlay", () => {
     const size = Number.parseFloat(own.getPropertyValue("--wt-mark-size"));
     const band = Number.parseFloat(own.getPropertyValue("--wt-mark-band"));
     const cs = getComputedStyle(mark, "::before");
+    const close = Number.parseFloat(cs.getPropertyValue("--wt-mark-close"));
+    const hole = size / 2 - band;
 
     // The premises, because a pseudo-element has no box to notice the absence of:
     // the reduced-motion block sets `content: none` and re-points the band, either
-    // of which would leave the three relations below comparing NaN and passing.
+    // of which would leave the relations below comparing NaN and passing.
     expect(cs.content, `${site.name} overlay is painted`).toBe('""');
     expect(size, `${site.name} resolves --wt-mark-size`).toBeGreaterThan(0);
     expect(band, `${site.name} resolves --wt-mark-band`).toBeGreaterThan(0);
+    expect(close, `${site.name} resolves --wt-mark-close`).toBeGreaterThan(0);
+    expect(close, `${site.name} closes by shrinking`).toBeLessThan(1);
 
-    // 1. The overlay IS the mark's border box. box-sizing puts a positioned
-    //    child's containing block INSIDE the band, so filling the mark is the
-    //    inset stating the band; a literal is right at one size only.
-    const overlay = Number.parseFloat(cs.width);
-    expect.soft(overlay, `${site.name} overlay width fills the mark`).toBe(size);
-    expect.soft(Number.parseFloat(cs.height), `${site.name} overlay height`).toBe(size);
+    // 1. The parent clips the overlays to its own outline, so the ink never
+    //    reaches the page; over the band it paints the band's own colour.
+    expect.soft(own.clipPath, `${site.name} clips the overlays`).toContain("inset(0");
 
-    // 2. The solid core reaches the hole's CORNER radius, which is the whole
-    //    visible effect: the corners light up and the hole reads as morphing
-    //    between a square and its inscribed circle. Stop short of it and the core
-    //    lands entirely under the mask's transparent middle.
-    const core = gradientStopsPx(cs.backgroundImage, overlay / 2)[1];
+    // 2. The overlay is centred on the hole and, scaled to the peak, still covers
+    //    it: otherwise the box's own edge would show inside the ring as it closes.
+    const width = Number.parseFloat(cs.width);
+    expect.soft(Number.parseFloat(cs.height), `${site.name} overlay is square`).toBe(width);
     expect
-      .soft(core, `${site.name} core stop reaches the hole's corner (${cs.backgroundImage})`)
-      .toBeGreaterThanOrEqual(Math.SQRT2 * (size / 2 - band) - 0.001);
-
-    // 2b. AND THE CORNER IS REACHABLE AT ALL. Case 2 reads the stop the rule
-    //     declares, and the rule declares that same expression, so the two move
-    //     together and neither can see the corner being clipped away by the
-    //     overlay's own `border-radius: 50%` circle at size/2. That needs a band of
-    //     at least size/2 * (1 - 1/sqrt(2)) — 1.32px on a 9px mark, against 2px.
-    //     Re-point this state's band to the 1px `waiting` uses and the corner moves
-    //     outside the clip, amplitude drops, and case 2 stays green.
+      .soft(Number.parseFloat(cs.left) + width / 2, `${site.name} overlay is centred on the hole`)
+      .toBeCloseTo(hole, 3);
     expect
-      .soft(Math.SQRT2 * (size / 2 - band), `${site.name} the hole's corner is inside the overlay`)
-      .toBeLessThanOrEqual(size / 2);
+      .soft((width / 2) * close, `${site.name} overlay covers the hole at the peak`)
+      .toBeGreaterThan(hole);
 
-    // 3. The mask's hole is the ring's INRADIUS — the half that was already right,
-    //    pinned because it is what keeps the beat off the hole itself, and a fill
-    //    there collapses the ring-vs-disc silhouette this mark shares with the dot.
-    const hole = gradientStopsPx(cs.maskImage, overlay / 2)[1];
+    // 3. Open at rest out to the hole's CORNER, so the ring reads exactly as a ring
+    //    between beats, and shut to under half a pixel at the peak.
+    const stops = gradientStopsPx(cs.backgroundImage, width / 2);
+    const open = stops[stops.length - 2] ?? Number.NaN;
     expect
-      .soft(hole, `${site.name} mask hole is the inradius (${cs.maskImage})`)
-      .toBeCloseTo(size / 2 - band, 3);
+      .soft(open, `${site.name} hole is open to its corner (${cs.backgroundImage})`)
+      .toBeGreaterThanOrEqual(Math.SQRT2 * hole - 0.001);
+    expect.soft(open * close, `${site.name} hole shuts at the peak`).toBeLessThan(0.5);
   });
 });
 
