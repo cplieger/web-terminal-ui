@@ -17,3 +17,6 @@ node_modules/@cplieger/web-terminal/
 # Stryker mutation-testing artifacts (weekly-stryker.yaml / local npx stryker run)
 reports/
 .stryker-tmp/
+
+# Agent workflow scratch
+.agents/
