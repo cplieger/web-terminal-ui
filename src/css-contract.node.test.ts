@@ -1065,7 +1065,7 @@ describe("secondary activity mark (the host's background-activity channel)", () 
   });
 
   it("keeps the breath's ceiling below the dot's, so a busy strip is one pulse", () => {
-    // 0.55 is vibekit's number for the same mark (12-tabs.css). The dot can afford 1
+    // 0.55 is marotte's number for the same mark (12-tabs.css). The dot can afford 1
     // because its overlay lifts a solid disc of its own hue and has almost no headroom
     // above its own backdrop; this one is masked onto a 2px band over the page and has
     // all of it, so the same ceiling reads as a flash rather than a breath.

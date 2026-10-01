@@ -231,7 +231,7 @@ describe("loading overlay status text", () => {
   });
 
   it("is inert when the consumer supplies no overlay", () => {
-    // vibekit's shape: an embedded panel with no pre-JS overlay at all. The
+    // marotte's shape: an embedded panel with no pre-JS overlay at all. The
     // kernel attaches unconditionally, so the no-overlay case must be a working
     // controller rather than something every caller has to null-check.
     status = attachLoadingStatus(undefined);

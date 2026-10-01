@@ -254,7 +254,7 @@ createTerminal("#terminal", {
 });
 ```
 
-All three reference apps (web-terminal-kiro, web-terminal-server, vibekit's shell
+All three reference apps (web-terminal-kiro, web-terminal-server, marotte's shell
 panel) enable it that way; web-terminal-server additionally exposes an operator
 opt-out, because it runs a command its operator chooses.
 
@@ -626,7 +626,7 @@ The web-terminal family:
 
 Consumers that ship this UI:
 
-- [`vibekit`](https://github.com/cplieger/vibekit)
+- [`marotte`](https://github.com/cplieger/marotte)
 - [`web-terminal-kiro`](https://github.com/cplieger/web-terminal-kiro)
 
 ## Contributing
@@ -649,3 +649,5 @@ Apache-2.0 work, and its licence travels with the FONT FILE — which this packa
 does not ship, it only names the URL. So no new obligation lands on an npm or JSR
 consumer; the obligation is the serving host's, which is why the full-page host
 notes above ask for the font's `LICENSE` and `NOTICE` beside the `.woff2`.
+
+Third-party attributions are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
