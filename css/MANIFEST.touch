@@ -1,6 +1,6 @@
 # Component bundle for presetTouch() compositions (single + the mobile key
 # toolbar). Library styles only — root-scoped, no page-level rules; the host
-# page owns its own reset/fonts (vibekit's embedded panel serves exactly this).
+# page owns its own reset/fonts (marotte's embedded panel serves exactly this).
 # Files concatenate in declared order; the order IS the cascade.
 00-tokens.css
 01-scope.css

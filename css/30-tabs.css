@@ -1082,7 +1082,7 @@
    what a reader sees is the hole morphing between a square and the circle inscribed
    in it — the ring survives the peak.
 
-   EVERY NUMBER HERE IS A RELATION, and the port that copied vibekit's LITERALS is
+   EVERY NUMBER HERE IS A RELATION, and the port that copied marotte's LITERALS is
    what left this rule running with nothing visible to show. Two of them were
    arithmetic for an 8px mark with a 2px band: `inset: -1px` put the overlay on that
    mark's own border box, and the core stop `70%` is where the core reaches the
@@ -1090,10 +1090,10 @@
    and 2px the same relation is 78.57%, so the copied 70% ended the solid core at
    2.45px while the mask opens only at 2.5px: core and visible mask did not
    intersect at all, the beat lit nothing the mask kept, and 4 pixels of a 9x9 mark
-   moved between trough and peak against vibekit's 20 (measured at dpr 1, both
+   moved between trough and peak against marotte's 20 (measured at dpr 1, both
    marks, sRGB). Written as relations they survive any size: the inset IS the band,
    the core stop IS the hole's corner radius, the mask's hole IS its inradius. So
-   port vibekit's `.tab-run-dot` (`12-tabs.css`, "THE GLOW BEAT") — the same mark
+   port marotte's `.tab-run-dot` (`12-tabs.css`, "THE GLOW BEAT") — the same mark
    solving the same problem, with the mask from the start — by its relations, never
    by its numbers. sqrt(2) is spelled to four decimals because the synced stylelint
    sets `number-max-precision: 4` outside colour functions.
@@ -1209,7 +1209,7 @@
    keyframe here would reintroduce the per-frame repaint this shape exists to avoid.
 
    The dot's glow ENVELOPE, at a lower CEILING, and the ceiling is where the two
-   deliberately part. 0.55 rather than 1 is vibekit's number for the same mark
+   deliberately part. 0.55 rather than 1 is marotte's number for the same mark
    (`12-tabs.css`), and it is what keeps a strip of busy tabs reading as one pulse
    instead of a row of flashes — the dot can afford 1 because its overlay lifts a
    solid disc of its own hue and has almost no headroom above its own backdrop,

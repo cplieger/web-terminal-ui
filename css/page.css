@@ -3,7 +3,7 @@
    owns when the terminal IS the page (web-terminal-server, web-terminal-kiro,
    scaffold/index.html). The component bundle (00-10) never touches the host
    document; everything here is deliberately page-scoped. An embedding consumer
-   (vibekit) serves a per-preset manifest instead and owns its own page.
+   (marotte) serves a per-preset manifest instead and owns its own page.
    Concatenated FIRST by the reference MANIFEST. */
 
 *,
