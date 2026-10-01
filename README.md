@@ -488,15 +488,17 @@ Three ways in, all in the tab chrome, none a key chord:
   Shift+F10 on the focused tab, where the browser raises the menu event; Safari
   binds no key to it, so a keyboard-only person there reaches the menu through
   an assistive technology's own command). A snapped tab shows on the named side
-  and its pane is selected. A tab the other pane shows trades places with the
-  tab on the named side, so both stay on screen (into an empty pane it simply
-  moves); any other tab there becomes an ordinary tab. Snapping a tab onto the
-  side that already shows it changes nothing.
+  and its pane is selected. When the snap opens the split, the other pane keeps
+  the tab the single view showed (or, when that is the tab being moved, its
+  split partner), so neither pane opens empty. A tab the other pane shows trades
+  places with the tab on the named side, so both stay on screen (into an empty
+  pane it simply moves); any other tab there becomes an ordinary tab. Snapping a
+  tab onto the side that already shows it changes nothing.
 - **Dragging a tab** out of the row onto either pane of the terminal area,
   following the same rule. While the drag lasts the pane under the pointer is
-  highlighted; the two highlights match the panes' widths at the divider's
-  position (the two halves while the split is closed), and a release decides
-  by the divider's centre.
+  highlighted; each highlight covers that pane's terminal area at the divider's
+  position (the two halves while the split is closed), inset a little with the
+  tab chips' rounded border, and a release decides by the divider's centre.
 
 A tab click follows one rule: an empty pane fills first, otherwise the selected
 pane's tab is replaced. A new tab ("+") also fills an empty pane first, but with

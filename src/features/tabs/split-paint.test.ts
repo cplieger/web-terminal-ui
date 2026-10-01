@@ -434,36 +434,105 @@ describe("the tab strip's own height", () => {
   });
 });
 
+function highlightBox(
+  root: HTMLElement,
+  pseudo: "::before" | "::after",
+): { top: number; bottom: number; left: number; right: number } {
+  const s = getComputedStyle(root, pseudo);
+  const rect = root.getBoundingClientRect();
+  // width/height here already resolve to the BORDER box (the visible edges the
+  // highlight draws), and left/top are the border-box origin for an abs-pos box
+  // with no margin.
+  const left = rect.left + parseFloat(s.left);
+  const top = rect.top + parseFloat(s.top);
+  return { top, bottom: top + parseFloat(s.height), left, right: left + parseFloat(s.width) };
+}
 function highlightSpan(root: HTMLElement, pseudo: "::before" | "::after"): [number, number] {
-  const style = getComputedStyle(root, pseudo);
-  const start = root.getBoundingClientRect().left + parseFloat(style.left);
-  return [start, start + parseFloat(style.width)];
+  const { left, right } = highlightBox(root, pseudo);
+  return [left, right];
 }
 function paneSpan(root: HTMLElement, side: "left" | "right"): [number, number] {
   const r = paneRoot(root, side).getBoundingClientRect();
   return [r.left, r.right];
 }
 
+const INSET = 8;
+
 describe("the drop highlights", () => {
-  it("cover each pane's own width at the current divider share", async () => {
+  it("cover the terminal area above the tab strip, inset from the pane's edges", async () => {
+    const root = rootIn(1000, 600);
+    await mountTabbed(root, server);
+    // Headless env() is 0, so --safe-bottom must be set explicitly to model an
+    // iPad's bottom safe-area inset. Each pane is itself a .wt-root that
+    // re-declares --safe-bottom from env(), so a real device's uniform inset
+    // needs the same value on every root.
+    for (const el of [root, ...root.querySelectorAll<HTMLElement>(".wt-root")]) {
+      el.style.setProperty("--safe-bottom", "20px");
+    }
+    await settle();
+    const dt = fakeDataTransfer();
+    const chip = chipOf(root, "two");
+    const { left, width } = root.getBoundingClientRect();
+    const tabBar = root.querySelector<HTMLElement>(".wt-tab-bar");
+    if (!tabBar) {
+      throw new Error("no tab bar");
+    }
+
+    dragAt("dragstart", dt, chip, left + width * 0.25);
+    dragAt("dragover", dt, root, left + width * 0.25);
+    expect(root.classList.contains("wt-drop-left")).toBe(true);
+    const box = highlightBox(root, "::before");
+    const term = termOf(paneRoot(root, "left"));
+    const termRect = term.getBoundingClientRect();
+    expect(box.top).toBe(termRect.top + INSET);
+    expect(box.bottom).toBe(termRect.bottom - INSET);
+    expect(box.bottom).toBeLessThanOrEqual(tabBar.getBoundingClientRect().top);
+    expect([box.left, box.right]).toEqual([left + INSET, left + (width - 10) / 2 - INSET]);
+    dragAt("dragend", dt, chip, left + width * 0.25);
+  });
+
+  it("draw the active tab chip's border width, colour and corner", async () => {
+    const root = rootIn();
+    await mountTabbed(root, server);
+    await settle();
+    const dt = fakeDataTransfer();
+    const chip = chipOf(root, "two");
+    const { left, width } = root.getBoundingClientRect();
+    const active = root.querySelector<HTMLElement>(".wt-tab.wt-tab-active");
+    if (!active) {
+      throw new Error("no active chip");
+    }
+    const chipStyle = getComputedStyle(active);
+
+    dragAt("dragstart", dt, chip, left + width * 0.25);
+    dragAt("dragover", dt, root, left + width * 0.25);
+    const style = getComputedStyle(root, "::before");
+    expect(style.borderTopWidth).toBe(chipStyle.borderTopWidth);
+    expect(style.borderTopWidth).toBe("1px");
+    expect(style.borderTopColor).toBe(chipStyle.borderTopColor);
+    expect(style.borderTopLeftRadius).toBe(chipStyle.borderTopLeftRadius);
+    dragAt("dragend", dt, chip, left + width * 0.25);
+  });
+
+  it("cover each pane's own width at the current divider share, inset", async () => {
     const root = rootIn(1280);
     const { term } = await mountTabbed(root, server);
     term.split?.open();
     expect(term.split?.setRatio(0.3, true)).toBe(true);
     const dt = fakeDataTransfer();
     const chip = chipOf(root, "two");
-    const [, leftEnd] = paneSpan(root, "left");
+    const [leftStart, leftEnd] = paneSpan(root, "left");
     const [rightStart, rightEnd] = paneSpan(root, "right");
     expect(leftEnd).toBe(root.getBoundingClientRect().left + 381);
 
     dragAt("dragstart", dt, chip, leftEnd - 5);
     dragAt("dragover", dt, root, leftEnd - 5);
     expect(root.classList.contains("wt-drop-left")).toBe(true);
-    expect(highlightSpan(root, "::before")).toEqual(paneSpan(root, "left"));
+    expect(highlightSpan(root, "::before")).toEqual([leftStart + INSET, leftEnd - INSET]);
 
     dragAt("dragover", dt, root, rightStart + 5);
     expect(root.classList.contains("wt-drop-right")).toBe(true);
-    expect(highlightSpan(root, "::after")).toEqual([rightStart, rightEnd]);
+    expect(highlightSpan(root, "::after")).toEqual([rightStart + INSET, rightEnd - INSET]);
     dragAt("dragend", dt, chip, rightStart + 5);
   });
 
@@ -486,15 +555,18 @@ describe("the drop highlights", () => {
       dragAt("dragstart", dt, chip, left + leftEnd + 4);
       dragAt("dragover", dt, root, left + leftEnd + 4);
       expect(root.classList.contains("wt-drop-left")).toBe(true);
-      expect(highlightSpan(root, "::before")).toEqual([left, left + leftEnd]);
+      expect(highlightSpan(root, "::before")).toEqual([left + INSET, left + leftEnd - INSET]);
       dragAt("dragover", dt, root, left + leftEnd + 5);
       expect(root.classList.contains("wt-drop-right")).toBe(true);
-      expect(highlightSpan(root, "::after")).toEqual([left + leftEnd + 10, left + 1000]);
+      expect(highlightSpan(root, "::after")).toEqual([
+        left + leftEnd + 10 + INSET,
+        left + 1000 - INSET,
+      ]);
       dragAt("dragend", dt, chip, left + leftEnd + 5);
     },
   );
 
-  it("cover the two halves an open would give while the split is closed", async () => {
+  it("cover the two halves an open would give while the split is closed, inset", async () => {
     const root = rootIn();
     await mountTabbed(root, server);
     const dt = fakeDataTransfer();
@@ -503,9 +575,15 @@ describe("the drop highlights", () => {
 
     dragAt("dragstart", dt, chip, left + 100);
     dragAt("dragover", dt, root, left + 100);
-    expect(highlightSpan(root, "::before")).toEqual([left, left + (width - 10) / 2]);
+    expect(highlightSpan(root, "::before")).toEqual([
+      left + INSET,
+      left + (width - 10) / 2 - INSET,
+    ]);
     dragAt("dragover", dt, root, left + width - 100);
-    expect(highlightSpan(root, "::after")).toEqual([left + (width + 10) / 2, left + width]);
+    expect(highlightSpan(root, "::after")).toEqual([
+      left + (width + 10) / 2 + INSET,
+      left + width - INSET,
+    ]);
     dragAt("dragend", dt, chip, left + width - 100);
   });
 });
