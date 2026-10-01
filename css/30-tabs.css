@@ -225,6 +225,22 @@
   background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 22%);
 }
 
+/* This rest rule outranks the plain active hover, so it carries its own hover and
+   press rungs. */
+:where(.wt-root) .wt-tab-active.wt-tab-selected {
+  background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 10%);
+}
+
+@media (any-hover: hover) {
+  :where(.wt-root) .wt-tab-active.wt-tab-selected:hover {
+    background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 20%);
+  }
+}
+
+:where(.wt-root) .wt-tab-active.wt-tab-selected:active {
+  background: color-mix(in oklch, var(--tab-active-bg), var(--tab-active-fg) 30%);
+}
+
 /* Centres the label's INK (cap top to baseline), not its line box; the shift is
    measured per site by features/tabs/ink-centre.ts, which owns why. Not
    `text-box: trim-both` (Firefox lacks it; a gate is two geometries, one
@@ -454,6 +470,60 @@
   }
 }
 
+:where(.wt-root) .wt-tab-split[aria-expanded="true"] {
+  background: var(--tab-hover-bg);
+  color: var(--tab-active-fg);
+}
+
+/* The split glyph (both split buttons) is filled, never stroked: a stroke is
+   centred on its outline, so its edges sit half a stroke off the shape's.
+   20px is a whole number of device px at 1, 1.25, 1.5 and 2 dppx, and at 1.25
+   and 1.5 the shapes move to that DPR's device grid, written as device px over
+   the ratio (25 and 30 across, both mirrored about the centre). */
+:where(.wt-root) .wt-btn > .wt-split-icon {
+  width: 20px;
+  height: 20px;
+  fill: currentcolor;
+  stroke: none;
+}
+
+@media (resolution: 1.25dppx) {
+  :where(.wt-root) .wt-split-icon-left {
+    x: calc(1px / 1.25);
+    width: calc(8px / 1.25);
+  }
+
+  :where(.wt-root) .wt-split-icon-divider {
+    x: calc(11px / 1.25);
+    y: calc(2px / 1.25);
+    width: calc(3px / 1.25);
+    height: calc(21px / 1.25);
+    rx: calc(1.5px / 1.25);
+  }
+
+  :where(.wt-root) .wt-split-icon-right {
+    x: calc(16px / 1.25);
+    width: calc(8px / 1.25);
+  }
+}
+
+@media (resolution: 1.5dppx) {
+  :where(.wt-root) .wt-split-icon-left {
+    x: calc(2px / 1.5);
+    width: calc(9px / 1.5);
+  }
+
+  :where(.wt-root) .wt-split-icon-divider {
+    x: calc(14px / 1.5);
+    width: calc(2px / 1.5);
+  }
+
+  :where(.wt-root) .wt-split-icon-right {
+    x: calc(19px / 1.5);
+    width: calc(9px / 1.5);
+  }
+}
+
 /* ===== Reorder drop slot (tabs feature, desktop drag) =====
    The dragged chip stays in the strip's flow for the whole gesture and renders as
    the SLOT it will land in: an empty dashed outline in the accent over a faint
@@ -624,31 +694,14 @@
   background: var(--border);
 }
 
-/* Pull the terminal surface up off the docked BOTTOM tab strip so it does not
-   overlap the last rows (a mirror of the old top offset). The tabs feature
-   marks the surface (.wt-with-tabbar) and keeps the measured strip height in
-   --wt-tabbar-h; the surface is absolute inset:0, so a bottom offset clears it.
-   Applies whenever the desktop strip is shown — a fine pointer OR a root that
-   is not narrow (an iPad) — the complement of the narrow-coarse switcher gate
-   in css/31-switcher.css. On the narrow-coarse phone the strip is hidden and
-   the mobile switcher's inset is applied through viewport.ts
-   (--wt-reserve-bottom) instead. Two rules because the class half cannot mix
-   into a media condition; they set the same declaration.
-
-   The clearance is the strip's height PLUS --safe-bottom, because that is where
-   the strip is: .wt-tab-bar sits at `bottom: var(--safe-bottom)`, so the band it
-   occupies runs from --safe-bottom to --safe-bottom + --wt-tabbar-h. Clearing
-   the height alone left the surface reaching exactly env(safe-area-inset-bottom)
-   past the strip's top edge — 0 on a desktop, 20px in iPad Safari (viewport-fit
-   is cover, so the insets are live), where the terminal grew one extra row that
-   rendered behind the strip. --wt-tabbar-h is the bar's OWN height and must stay
-   that: the wide-touchscreen key grid (31-switcher.css) already adds the inset to
-   it itself, and folding the inset into the variable would double-count there.
-   The mobile switcher reaches the same total from the other direction, measuring
-   `innerHeight - rect.top` so the inset rides along inside --wt-reserve-bottom.
-   --kb-inset is deliberately absent: viewport.ts owns the keyboard case by
-   writing an inline bottom on the surface, which outranks this rule entirely. */
-@media (pointer: fine) {
+/* The surface clears the docked strip wherever the strip shows: any pointer but
+   a coarse one, or a root that is not narrow, the exact complement of the
+   switcher's gate in 31-switcher.css (two rules, since a class cannot join a
+   media condition). The strip sits at `bottom: var(--safe-bottom)`, hence the
+   added inset; --wt-tabbar-h stays the bar's own height, because the key grid
+   in 31-switcher.css adds the inset to it too. An inline bottom written by
+   viewport.ts (keyboard, switcher reserve) outranks both rules. */
+@media not (pointer: coarse) {
   :where(.wt-root) .term.wt-with-tabbar {
     bottom: calc(var(--wt-tabbar-h, 44px) + var(--safe-bottom, 0px));
   }

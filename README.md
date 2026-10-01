@@ -466,37 +466,55 @@ feature, because everything that drives it lives there: the shared tab row, the
 split button, the snap items and the layout record. Your root becomes the shell
 root holding one root per pane and the shared chrome; each pane is a complete
 terminal with its own engine, so an open split holds up to two WebSocket
-connections, one per shown pane. Opening, closing and resizing the split
-is a display re-arrangement only: no tab or session is ever created or closed by
-it, and a tab that leaves a pane stays in the row as an ordinary tab.
+connections, one per shown pane. Closing and resizing the split is a display
+re-arrangement only: no tab or session is ever created or closed by it, and a tab
+that leaves a pane stays in the row as an ordinary tab. Opening it is one too,
+except from the split button with a single tab, which creates the second tab.
 
 Three ways in, all in the tab chrome, none a key chord:
 
 - **The split button** at the right edge of the tab row (and in the mobile
-  switcher bar on a touchscreen) toggles the split. Opening puts the shown tab in
-  the left pane with the right pane empty; the next tab clicked, or the next "+",
-  fills the empty pane. Closing keeps the SELECTED pane's tab and hides the
-  other pane. It is an ordinary button: Tab reaches it, Enter or Space toggles
-  it, `aria-expanded` is its state.
+  switcher bar on a touchscreen) toggles the split, and never opens an empty
+  pane. The current tab stays in the left pane and selected, and the right pane
+  shows the tab used before it, or with no such tab the next one in the row, else
+  the previous one. With a single tab it creates a new tab and shows it on the
+  right, selected; the split opens once the new tab exists. Closing keeps the
+  SELECTED pane's tab and hides the other pane. Opening slides the divider in
+  from the right edge and closing slides it toward the hidden side, both instant
+  under reduced motion. It is an ordinary button: Tab
+  reaches it, Enter or Space toggles it, `aria-expanded` is its state.
 - **"Snap to left" and "Snap to right"** in a tab's context menu, on a
   right-click, a touch long-press, or the keyboard (the context-menu key or
   Shift+F10 on the focused tab, where the browser raises the menu event; Safari
   binds no key to it, so a keyboard-only person there reaches the menu through
-  an assistive technology's own command). A snapped tab shows on the named side,
-  whatever was there becomes an ordinary tab, and the tab's old side is left
-  empty.
-- **Dragging a tab** out of the row onto the left or right half of the terminal
-  area, which highlights the half under the pointer while the drag lasts.
+  an assistive technology's own command). A snapped tab shows on the named side
+  and its pane is selected. A tab the other pane shows trades places with the
+  tab on the named side, so both stay on screen (into an empty pane it simply
+  moves); any other tab there becomes an ordinary tab. Snapping a tab onto the
+  side that already shows it changes nothing.
+- **Dragging a tab** out of the row onto either pane of the terminal area,
+  following the same rule. While the drag lasts the pane under the pointer is
+  highlighted; the two highlights match the panes' widths at the divider's
+  position (the two halves while the split is closed), and a release decides
+  by the divider's centre.
 
 A tab click follows one rule: an empty pane fills first, otherwise the selected
-pane's tab is replaced. The selected pane is the one that receives typing, the
-last one clicked, touched or typed in. The grip handle between the panes shows
-it: a 6 px pill in the 10 px gutter whose accent edge faces the selected pane,
-and the selected pane keeps the filled blinking cursor while the other pane's is
-hollow and steady. The tab row does not change for selection; both shown tabs
-render identically active. A screen reader hears "Left terminal selected" or
-"Right terminal selected" as a polite announcement, and each pane's tabpanel is
-described by its side and whether it is selected.
+pane's tab is replaced. A new tab ("+") also fills an empty pane first, but with
+both panes showing a tab it replaces the UNSELECTED pane's tab and its pane
+becomes the selected one, so the tab typed in before stays on screen. A session
+created in another browser lands the same way while the split is open; with the
+split closed it joins the row as an ordinary tab. Closing a
+shown tab closes the split: the other pane's tab fills the view and is selected,
+or, when the other pane was empty, the neighbouring tab is shown as it is with
+one pane. The selected pane is the one that receives typing, the
+last one clicked, touched or typed in. The divider between the panes shows it:
+an 8 px bar in the 10 px gutter holding a short accent pill that sits against
+the selected pane's side and slides across when the selection changes (it jumps
+under reduced motion). The selected pane keeps the filled blinking cursor while
+the other pane's is hollow and steady, and in the tab row both shown tabs render
+active, the selected pane's a step brighter. A screen reader hears "Left
+terminal selected" or "Right terminal selected" as a polite announcement, and
+each pane's tabpanel is described by its side and whether it is selected.
 
 While the split is open each shown pane's input is a stop in the Tab order, so
 Tab runs left pane, divider, right pane, then the tab row; an empty pane adds no
@@ -505,10 +523,14 @@ from outside the terminal lands on the tab row.
 
 The handle is a focusable `role="separator"` with `aria-valuenow`, `aria-valuemin`
 and `aria-valuemax` as percentages of the left share. Dragging it (mouse or
-touch, a 24 px hit area) resizes both panes as the pointer moves; the shells are
-told their new size at most every 100 ms and once on release. A pane squeezed
-under 360 px dims, and releasing there closes that pane; releasing above 360 px
-after such a dip snaps the handle back to where the drag started. From the
+touch; the hit area is 24 px wide for a fine pointer and 44 px for a coarse one,
+overlapping the pane edges) resizes both panes as the pointer moves; the shells
+are told their new size at most every 100 ms and once on release. Past the
+360 px minimum the pane holds at exactly 360 px for 120 px of further pointer
+travel, and a release there leaves it at 360 px. Beyond that the pane follows
+the pointer again and dims, and releasing there closes it; coming back above
+360 px after such a trip and releasing snaps the handle back to where the drag
+started. From the
 keyboard ArrowLeft and ArrowRight nudge the divider by 16 px and Home and End take
 it to the bounds, and every key stops AT the 360 px minimum rather than closing a
 pane; the record is written when the key is released. The default is 50/50.

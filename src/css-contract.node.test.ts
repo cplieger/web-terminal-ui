@@ -321,8 +321,8 @@ describe("bottom-strip clearance contract (the safe-area pairing)", () => {
 
   it.each([
     [
-      "the fine-pointer rule",
-      /@media \(pointer: fine\) \{\n\s*:where\(\.wt-root\) \.term\.wt-with-tabbar \{([^}]*)\}/,
+      "the rule for every pointer but a coarse one",
+      /@media not \(pointer: coarse\) \{\n\s*:where\(\.wt-root\) \.term\.wt-with-tabbar \{([^}]*)\}/,
     ],
     [
       "the non-narrow rule",
@@ -335,6 +335,17 @@ describe("bottom-strip clearance contract (the safe-area pairing)", () => {
     // Both terms, not just the height: the height alone is the defect this guards.
     expect(/var\(--wt-tabbar-h/.test(body), "clears the strip's own height").toBe(true);
     expect(/var\(--safe-bottom/.test(body), "AND the safe area it is lifted by").toBe(true);
+  });
+
+  // The strip hides only under a coarse pointer, so a device with no pointer at
+  // all (pointer: none) shows it on a narrow root as well as a wide one.
+  it("lifts the scroll-to-bottom button above the strip under every pointer but a coarse one", () => {
+    const rule =
+      /@media not \(pointer: coarse\) \{\n\s*:where\(\.wt-root\.wt-tabbed\) \.wt-scroll-bottom \{([^}]*)\}/.exec(
+        scrollToBottomCss,
+      );
+    expect(rule, "the strip-side rule exists in 21-scroll-to-bottom.css").not.toBeNull();
+    expect(/var\(--wt-tabbar-h/.test(rule![1]!), "it clears the strip's height").toBe(true);
   });
 
   it("keeps --wt-tabbar-h meaning the strip's own height, so no consumer double-counts", () => {

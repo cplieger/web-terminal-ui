@@ -6,7 +6,7 @@ import {
   type TerminalEngine,
 } from "@cplieger/web-terminal-engine";
 import { createComposition } from "../composition.js";
-import { createViewport } from "../viewport.js";
+import { createViewport, type KeyboardInsets } from "../viewport.js";
 import { INPUT_PLACEHOLDER, resetToPlaceholder } from "../input-placeholder.js";
 import { createBus } from "./bus.js";
 import { TAP_MAX_MS, TAP_MOVEMENT_PX, isLinkTarget } from "./gesture.js";
@@ -143,6 +143,9 @@ export interface PaneServices {
   /** The narrow classification for this pane (the shell root's width, this
    *  pane's height). */
   narrowProbe(): boolean;
+  /** The document's keyboard geometry, published on the shell root, which this
+   *  pane's root inherits rather than publishes. */
+  readonly keyboardInsets: KeyboardInsets;
   /** This pane's base title (the served `<title>`, or its program's OSC 0/2). */
   titleBase(text: string): void;
   readonly loading: PaneLoading;
@@ -209,6 +212,9 @@ export interface PaneKernel extends PaneHandle {
    *  from the moment the split closes rather than from the class the display
    *  gets when the closing transition ends. */
   setHidden(value: boolean): void;
+  /** The shell is about to slide this pane's box: nothing it measures from now
+   *  until its viewport settles is final, and the settle sends the size. */
+  holdGeometry(): void;
   /** Whether this pane's input is a stop in the document's Tab order. On while
    *  the split is open and the pane shows a tab, so Tab runs left input, divider,
    *  right input, chrome; off otherwise, where typing or a click enters the one
@@ -216,6 +222,13 @@ export interface PaneKernel extends PaneHandle {
   setTabStop(value: boolean): void;
   /** `cleanupRuntime()` plus the root's classes and children. */
   destroy(): void;
+}
+
+/** Whether `win` has a fine pointer, and with it a hardware keyboard. Read as
+ *  `any-pointer: fine` rather than from pointerType because iPadOS reports a
+ *  COARSE primary pointer even with a trackpad attached. */
+export function hasFinePointer(win: Window): boolean {
+  return typeof win.matchMedia === "function" && win.matchMedia("(any-pointer: fine)").matches;
 }
 
 /** The consumer's theme as custom properties on `root`, so the whole subtree
@@ -456,7 +469,9 @@ function buildPaneInto(
     termWrap.classList.toggle("wt-mouse-app", engine.modes.getMouseMode() !== 0);
   }
   function measurableSize(): { cols: number; rows: number } | null {
-    if (!fontsLoaded || viewport.isInTransition()) {
+    // A pane hidden by a closed split is `display: none`: the cell width it would
+    // measure is 0, and the first render after a reveal would lay out on it.
+    if (!fontsLoaded || hidden || viewport.isInTransition()) {
       return null;
     }
     engine.renderer.updateFontMetrics();
@@ -764,10 +779,7 @@ function buildPaneInto(
 
   // On touch the output is the native text-selection surface, so this does the
   // MINIMUM: it opens the keyboard on a clean tap and otherwise gets out of the
-  // browser's way. `any-pointer: fine` rather than pointerType because iPadOS
-  // reports a COARSE primary pointer even with a trackpad attached.
-  const hasFinePointer = (): boolean =>
-    typeof win.matchMedia === "function" && win.matchMedia("(any-pointer: fine)").matches;
+  // browser's way.
   let lastPointerType = "mouse";
   let pointerDownX = 0;
   let pointerDownY = 0;
@@ -827,7 +839,7 @@ function buildPaneInto(
       const sel = doc.getSelection();
       if (sel && !sel.isCollapsed) {
         sel.removeAllRanges();
-        if (hasFinePointer()) {
+        if (hasFinePointer(win)) {
           focusTerminal();
         }
         return;
@@ -843,7 +855,7 @@ function buildPaneInto(
         // Cancel the synthetic mousedown after a touch tap so iOS keeps the
         // keyboard up, except with a fine pointer, where suppressing it defeated
         // the native focus.
-        if (!hasFinePointer()) {
+        if (!hasFinePointer(win)) {
           e.preventDefault();
         }
         return;
@@ -872,7 +884,7 @@ function buildPaneInto(
         win.open(link.href, "_blank", "noopener,noreferrer");
         return;
       }
-      if (lastPointerType === "touch" && !hasFinePointer()) {
+      if (lastPointerType === "touch" && !hasFinePointer(win)) {
         return;
       }
       const sel = doc.getSelection();
@@ -956,9 +968,9 @@ function buildPaneInto(
 
   const viewport = createViewport({
     termWrap,
-    root,
+    box: root,
+    keyboard: services.keyboardInsets,
     scroll: engine.scroll,
-    suppressKeyboardInset: hasFinePointer,
     onSettled() {
       // The settle is the one resize a keyboard slide or rotation should cost;
       // sendResize deduplicates.
@@ -1157,10 +1169,13 @@ function buildPaneInto(
       return;
     }
     detachSession();
+    if (activeSession !== null) {
+      services.noteEpoch(activeSession.id, engine.connection.serverEpochOf(activeSession.id));
+    }
     activeSession = session;
-    // A session another pane forgot arrives with the epoch that pane knew, or the
-    // first resumeAck has nothing to compare against and a server restart between
-    // the two attaches goes undetected.
+    // A session that left another pane, emptied or replaced, arrives with the epoch
+    // that pane knew, or the first resumeAck has nothing to compare against and a
+    // server restart between the two attaches goes undetected.
     const epoch = services.knownEpoch(session.id);
     if (epoch !== 0) {
       engine.connection.adoptPersistedEpoch(session.id, epoch);
@@ -1397,6 +1412,11 @@ function buildPaneInto(
     },
     setHidden(value) {
       hidden = value;
+    },
+    holdGeometry() {
+      if (!destroyed) {
+        viewport.beginTransition();
+      }
     },
     setTabStop(value) {
       input.tabIndex = value ? 0 : -1;

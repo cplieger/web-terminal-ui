@@ -16,7 +16,9 @@ import {
   announced,
   chipOf,
   chips,
+  dragAt,
   engineOn as engineOnPane,
+  fakeDataTransfer,
   gate,
   fakeMonitor,
   fakeServer,
@@ -135,40 +137,6 @@ function stubMedia(answers: Record<string, boolean>): void {
     })),
   );
 }
-interface FakeDataTransfer {
-  effectAllowed: string;
-  dropEffect: string;
-  data: Record<string, string>;
-  setData(type: string, value: string): void;
-  setDragImage(): void;
-}
-function fakeDataTransfer(): FakeDataTransfer {
-  return {
-    effectAllowed: "",
-    dropEffect: "",
-    data: {},
-    setData(type, value) {
-      this.data[type] = value;
-    },
-    setDragImage() {
-      /* the ghost is not under test */
-    },
-  };
-}
-function dragAt(
-  type: string,
-  dt: FakeDataTransfer,
-  target: Element,
-  clientX: number,
-  clientY = 300,
-): Event {
-  const e = new Event(type, { bubbles: true, cancelable: true });
-  Object.defineProperty(e, "dataTransfer", { value: dt });
-  Object.defineProperty(e, "clientX", { value: clientX });
-  Object.defineProperty(e, "clientY", { value: clientY });
-  target.dispatchEvent(e);
-  return e;
-}
 
 describe("the split button", () => {
   it("is an ordinary button in the strip after the '+', labelled 'Split view' with aria-expanded, and absent without the option", async () => {
@@ -192,7 +160,7 @@ describe("the split button", () => {
     expect(plain.querySelector(".wt-switcher-split")).toBeNull();
   });
 
-  it("a click opens the split with the shown tab on the left and an empty right pane, and a second click closes it onto the selected pane", async () => {
+  it("a click opens the split with the current tab on the left, still selected, and another tab on the right; a second click closes it onto the selected pane", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     const btn = stripSplit(root);
@@ -203,10 +171,12 @@ describe("the split button", () => {
     expect(root.classList.contains("wt-split-open")).toBe(true);
     expect(paneRoots(root)).toHaveLength(2);
     expect(shown(ctx, "left")).toBe("s1");
-    expect(ctx.shell.pane("right")?.state()).toBe("empty");
-    expect(paneRoot(root, "right").hasAttribute("inert")).toBe(true);
+    expect(shown(ctx, "right")).toBe("s2");
+    expect(paneRoot(root, "right").hasAttribute("inert")).toBe(false);
     expect(ctx.shell.selected()).toBe("left");
+    expect(activeLabels(root)).toEqual(["one", "two"]);
     expect(btn.getAttribute("aria-expanded")).toBe("true");
+    expect(server.posts()).toBe(0);
     // The new pane's surface clears the strip like the first one's.
     expect(
       paneRoot(root, "right").querySelector(".term")?.classList.contains("wt-with-tabbar"),
@@ -214,8 +184,7 @@ describe("the split button", () => {
     await announced();
     expect(politeText(root)).toBe("Split open");
 
-    // Fill the right pane, select it, then close from the button: the selected
-    // pane's tab fills the view and the other pane's tab becomes ordinary.
+    // A close from the button keeps the selected pane's tab; the other becomes ordinary.
     chipOf(root, "two").click();
     expect(shown(ctx, "right")).toBe("s2");
     expect(ctx.shell.selected()).toBe("right");
@@ -246,6 +215,171 @@ describe("the split button", () => {
     expect(engineOn(root, "left")).toBe(survivor);
     await announced();
     expect(politeText(root)).toBe("Split closed");
+  });
+
+  it("with one tab a click creates a tab and opens the split only once it exists, the new tab on the right and selected", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    const held = gate();
+    server.postGate = held;
+
+    stripSplit(root).click();
+    await until(() => server.posts() === 1);
+    expect(term.split?.isOpen()).toBe(false);
+    expect(paneRoots(root)).toHaveLength(1);
+
+    held.resolve();
+    await until(() => shown(ctx, "right") === "s-new");
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(ctx.shell.selected()).toBe("right");
+    expect(chips(root)).toHaveLength(2);
+    expect(server.posts()).toBe(1);
+  });
+
+  it("with one tab a click while a '+' create is in flight shares its one POST, and the new tab opens on the right and selected", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    const held = gate();
+    server.postGate = held;
+    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
+    await until(() => server.posts() === 1);
+
+    stripSplit(root).click();
+    expect(term.split?.isOpen()).toBe(false);
+
+    held.resolve();
+    await until(() => shown(ctx, "left") === "s-new" || shown(ctx, "right") === "s-new");
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s-new");
+    expect(ctx.shell.selected()).toBe("right");
+    expect(chips(root)).toHaveLength(2);
+    expect(server.posts()).toBe(1);
+  });
+
+  it("with one tab a '+' while the button's create is in flight shares its one POST and still opens the split", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    const held = gate();
+    server.postGate = held;
+    stripSplit(root).click();
+    await until(() => server.posts() === 1);
+
+    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
+    held.resolve();
+    await until(() => shown(ctx, "left") === "s-new" || shown(ctx, "right") === "s-new");
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s-new");
+    expect(ctx.shell.selected()).toBe("right");
+    expect(server.posts()).toBe(1);
+  });
+
+  it("a later '+' with the split closed stays in the single view after the button's create opened it", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    stripSplit(root).click();
+    await until(() => shown(ctx, "right") === "s-new");
+    stripSplit(root).click();
+    expect(term.split?.isOpen()).toBe(false);
+    const answer = server.fetch.getMockImplementation();
+    if (answer === undefined) {
+      throw new Error("the fake server has no fetch");
+    }
+    server.fetch.mockImplementation((url, init) =>
+      init?.method === "POST"
+        ? Promise.resolve(
+            jsonResponse({ id: "s-later", title: "", createdAt: "10", status: "idle" }, 201),
+          )
+        : answer(url, init),
+    );
+
+    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
+    await until(() => shown(ctx, "left") === "s-later" || shown(ctx, "right") === "s-later");
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s-later");
+    expect(chips(root)).toHaveLength(3);
+  });
+
+  it("with one tab a failing create leaves the single view as it was", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    server.postStatus = 500;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+
+    stripSplit(root).click();
+    await until(() => server.posts() === 1);
+    await tick();
+    await tick();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(chips(root)).toHaveLength(1);
+  });
+
+  it("shows on the right the tab used before the current one, not its row neighbour", async () => {
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = rootIn();
+    const { ctx } = await mountTabbed(root, server);
+    chipOf(root, "three").click();
+    expect(shown(ctx, "left")).toBe("s3");
+
+    stripSplit(root).click();
+    expect(shown(ctx, "left")).toBe("s3");
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(ctx.shell.selected()).toBe("left");
+  });
+
+  it("with no tab used before the current one, shows the next tab in row order, else the previous", async () => {
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    server.layout = { left: "s2", right: null, handle: 0.5, selected: "left", open: false };
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    expect(shown(ctx, "left")).toBe("s2");
+    stripSplit(root).click();
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(shown(ctx, "right")).toBe("s3");
+    term.destroy();
+
+    fake.reset();
+    server.layout = { left: "s3", right: null, handle: 0.5, selected: "left", open: false };
+    const root2 = rootIn();
+    const second = await mountTabbed(root2, server);
+    expect(shown(second.ctx, "left")).toBe("s3");
+    stripSplit(root2).click();
+    expect(shown(second.ctx, "left")).toBe("s3");
+    expect(shown(second.ctx, "right")).toBe("s2");
+  });
+
+  it("passes over a tab used earlier that has since closed", async () => {
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = rootIn();
+    const { ctx } = await mountTabbed(root, server);
+    chipOf(root, "three").click();
+    chipOf(root, "one").querySelector<HTMLElement>(".wt-tab-close")?.click();
+    await until(() => server.deletes().includes("s1"));
+    await tick();
+
+    stripSplit(root).click();
+    expect(shown(ctx, "left")).toBe("s3");
+    expect(shown(ctx, "right")).toBe("s2");
   });
 
   it("carries hidden under 730 px of row width, open or closed, and loses it at 730 px", async () => {
@@ -285,7 +419,8 @@ describe("the split button", () => {
     expect(term.split?.isOpen()).toBe(true);
     expect(sw.getAttribute("aria-expanded")).toBe("true");
     expect(stripSplit(root).getAttribute("aria-expanded")).toBe("true");
-    expect(ctx.shell.pane("right")?.state()).toBe("empty");
+    expect(shown(ctx, "right")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("left");
     sw.click();
     expect(term.split?.isOpen()).toBe(false);
     expect(sw.getAttribute("aria-expanded")).toBe("false");
@@ -384,8 +519,8 @@ describe("the split button", () => {
 
   it("with the split open, Tab runs left input, divider, right input, then the chrome; an empty right pane adds no stop", async () => {
     const root = rootIn();
-    const { ctx } = await mountTabbed(root, server);
-    stripSplit(root).click();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
     await tick();
     let stops = tabStops(paneRoot(root, "left"), 5);
     expect(stops[0]).toBe(textareaOf(root, "left"));
@@ -408,23 +543,22 @@ describe("the split button", () => {
 
   it("a pane input leaves the Tab order when its pane empties and when the split closes, even without inert", async () => {
     const root = rootIn();
-    const { ctx, api } = await mountTabbed(root, server);
-    stripSplit(root).click();
+    const { term, ctx, api } = await mountTabbed(root, server);
+    term.split?.open();
     await tick();
-    chipOf(root, "two").click();
-    await until(() => shown(ctx, "right") === "s2");
-    expect(textareaOf(root, "right").tabIndex).toBe(0);
+    expect(textareaOf(root, "left").tabIndex).toBe(0);
 
-    api.snap("s2", "left");
-    await until(() => shown(ctx, "right") === null);
-    paneRoot(root, "right").removeAttribute("inert");
-    expect(textareaOf(root, "right").tabIndex).toBe(-1);
-    expect(tabStops(separatorOf(root), 1)[0]).toBe(chipOf(root, "two"));
-
-    stripSplit(root).click();
-    await tick();
+    api.snap("s1", "right");
+    await until(() => shown(ctx, "left") === null);
+    paneRoot(root, "left").removeAttribute("inert");
     expect(textareaOf(root, "left").tabIndex).toBe(-1);
-    expect(tabStops(paneRoot(root, "left"), 1)[0]).toBe(chipOf(root, "two"));
+    expect(tabStops(paneRoot(root, "left"), 1)[0]).toBe(separatorOf(root));
+
+    stripSplit(root).click();
+    await tick();
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(textareaOf(root, "left").tabIndex).toBe(-1);
+    expect(tabStops(paneRoot(root, "left"), 1)[0]).toBe(chipOf(root, "one"));
   });
 });
 
@@ -464,14 +598,16 @@ describe("the tab-click rule", () => {
     expect(shown(ctx, "right")).toBe("s2");
   });
 
-  it("'+' follows the same rule: the empty pane first, else the selected pane", async () => {
+  it("a new tab fills the empty pane first; with both panes shown it replaces the UNSELECTED pane and is selected", async () => {
+    stubMedia({ "(any-pointer: fine)": true });
     const root = rootIn();
-    const { term, ctx, api } = await mountTabbed(root, server);
+    const { term, ctx } = await mountTabbed(root, server);
+    const plus = root.querySelector<HTMLElement>(".wt-tab-new");
     term.split?.open();
 
-    await api.create();
+    plus?.click();
+    await until(() => shown(ctx, "right") === "s-new");
     expect(shown(ctx, "left")).toBe("s1");
-    expect(shown(ctx, "right")).toBe("s-new");
     expect(ctx.shell.selected()).toBe("right");
 
     ctx.shell.select("left");
@@ -481,10 +617,152 @@ describe("the tab-click rule", () => {
         jsonResponse({ id: "s-later", title: "", createdAt: "10", status: "idle" }, 201),
       ),
     );
-    await api.create();
-    expect(shown(ctx, "left")).toBe("s-later");
-    expect(shown(ctx, "right")).toBe("s-new");
+    plus?.click();
+    await until(() => shown(ctx, "right") === "s-later");
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(ctx.shell.selected()).toBe("right");
+    expect(document.activeElement).toBe(textareaOf(root, "right"));
+    expect(activeLabels(root)).toEqual(["one", "New tab"]);
     expect(chips(root)).toHaveLength(4);
+
+    server.fetch.mockImplementationOnce(() =>
+      Promise.resolve(
+        jsonResponse({ id: "s-last", title: "", createdAt: "11", status: "idle" }, 201),
+      ),
+    );
+    plus?.click();
+    await until(() => shown(ctx, "left") === "s-last");
+    expect(shown(ctx, "right")).toBe("s-later");
+    expect(ctx.shell.selected()).toBe("left");
+  });
+
+  it("a session created in another browser fills the empty pane first; with both panes shown it replaces the UNSELECTED pane and is selected", async () => {
+    stubMedia({ "(any-pointer: fine)": true });
+    const monitor = fakeMonitor();
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server, {
+      tabsOpts: { activityMonitor: monitor.feature },
+      before: [monitor.feature],
+    });
+    term.split?.open();
+
+    monitor.emit({ id: "s7", title: "seven", createdAt: "7", status: "idle" });
+    await tick();
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s7");
+    expect(ctx.shell.selected()).toBe("right");
+
+    ctx.shell.select("left");
+    monitor.emit({ id: "s8", title: "eight", createdAt: "8", status: "idle" });
+    await tick();
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s8");
+    expect(ctx.shell.selected()).toBe("right");
+    expect(document.activeElement).toBe(textareaOf(root, "right"));
+    expect(activeLabels(root)).toEqual(["one", "eight"]);
+    expect(chips(root)).toHaveLength(4);
+  });
+
+  it("while the split is closed, a session created in another browser joins the row and the single view keeps its tab", async () => {
+    const monitor = fakeMonitor();
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server, {
+      tabsOpts: { activityMonitor: monitor.feature },
+      before: [monitor.feature],
+    });
+
+    monitor.emit({ id: "s7", title: "seven", createdAt: "7", status: "idle" });
+    await tick();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(activeLabels(root)).toEqual(["one"]);
+    expect(chips(root)).toHaveLength(3);
+  });
+
+  it("the sessions the stream reports before the bootstrap has listed are not new tabs: an open split's panes are left to the bootstrap", async () => {
+    const monitor = fakeMonitor();
+    const listed = gate();
+    const answer = server.fetch.getMockImplementation();
+    if (answer === undefined) {
+      throw new Error("the fake server has no fetch");
+    }
+    server.fetch.mockImplementation(async (url, init) => {
+      if ((init?.method ?? "GET") === "GET" && !String(url).endsWith("/layout")) {
+        await listed.promise;
+      }
+      return answer(url, init);
+    });
+    const root = rootIn();
+    let ctxRef: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "shell-probe",
+      scope: "shell",
+      setup(ctx) {
+        ctxRef = ctx;
+        return { api: undefined, teardown: () => undefined };
+      },
+    };
+    const term = await mountTerminal(root, {
+      split: true,
+      features: () => [probe, monitor.feature, tabs({ activityMonitor: monitor.feature })],
+    });
+    expect(term.split?.open()).toBe(true);
+
+    monitor.emit({ id: "s1", title: "one", createdAt: "1", status: "idle" });
+    monitor.emit({ id: "s2", title: "two", createdAt: "2", status: "idle" });
+    await tick();
+    listed.resolve();
+    await until(() => ctxRef?.shell.panes().some((p) => p.state() === "shown") === true);
+    await tick();
+    if (!ctxRef) {
+      throw new Error("no shell context");
+    }
+    expect(shown(ctxRef, "left")).toBe("s1");
+    expect(shown(ctxRef, "right")).toBeNull();
+    expect(chips(root)).toHaveLength(2);
+  });
+
+  it("this client's own new session, reported by the stream before its create answers, is placed once; another browser's, reported meanwhile, is placed after it", async () => {
+    const monitor = fakeMonitor();
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server, {
+      tabsOpts: { activityMonitor: monitor.feature },
+      before: [monitor.feature],
+    });
+    term.split?.open();
+    chipOf(root, "two").click();
+    ctx.shell.select("left");
+    const held = gate();
+    server.postGate = held;
+    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
+    await until(() => server.posts() === 1);
+
+    monitor.emit({ id: "s-new", title: "", createdAt: "9", status: "idle" });
+    monitor.emit({ id: "s7", title: "seven", createdAt: "7", status: "idle" });
+    await tick();
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s2");
+
+    held.resolve();
+    await until(() => shown(ctx, "left") === "s7");
+    await tick();
+    expect(shown(ctx, "right")).toBe("s-new");
+    expect(ctx.shell.selected()).toBe("left");
+  });
+
+  it("with no physical keyboard, a new tab in the other pane takes the keyboard from the input that held it", async () => {
+    stubMedia({ "(any-pointer: fine)": false });
+    const root = rootIn();
+    const { ctx } = await mountTabbed(root, server);
+    stripSplit(root).click();
+    expect(shown(ctx, "right")).toBe("s2");
+    textareaOf(root, "left").focus();
+    expect(ctx.shell.selected()).toBe("left");
+
+    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
+    await until(() => shown(ctx, "right") === "s-new");
+    expect(ctx.shell.selected()).toBe("right");
+    expect(document.activeElement).toBe(textareaOf(root, "right"));
   });
 
   it("while collapsed an empty hidden pane is still filled first and becomes the visible pane; with both shown the visible pane's tab is replaced", async () => {
@@ -600,18 +878,31 @@ describe("the snap items", () => {
     ]);
   });
 
-  it("with both panes shown, snapping the right tab to the left leaves the right pane empty rather than swapping", async () => {
+  it("with both panes shown, snapping the right tab to the left swaps the two views and selects the left pane", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     term.split?.open();
     chipOf(root, "two").click();
     expect(shown(ctx, "right")).toBe("s2");
+    const calls: string[] = [];
+    for (const side of ["left", "right"] as const) {
+      const e = engineOn(root, side);
+      e.connection.forgetSession.mockImplementation((id: string) => {
+        calls.push(`${side}:forget:${id}`);
+      });
+      e.connection.setSession.mockImplementation((id: string) => {
+        calls.push(`${side}:set:${id}`);
+      });
+    }
 
     menuItem(openTabMenu(root, "two"), "Snap to left").click();
     expect(shown(ctx, "left")).toBe("s2");
-    expect(shown(ctx, "right")).toBeNull();
+    expect(shown(ctx, "right")).toBe("s1");
     expect(ctx.shell.selected()).toBe("left");
-    expect(activeLabels(root)).toEqual(["two"]);
+    expect(activeLabels(root)).toEqual(["one", "two"]);
+    expect(paneRoot(root, "right").hasAttribute("inert")).toBe(false);
+    // A session is never attached in two panes at once.
+    expect(calls).toEqual(["right:forget:s2", "left:set:s2", "right:set:s1"]);
   });
 
   it("disables both items while the row is under 730 px, open or closed, and snap() refuses then", async () => {
@@ -645,22 +936,42 @@ describe("the snap items", () => {
     expect(server.writes).toEqual([]);
   });
 
-  it("a snap of a tab onto the side that already shows it selects that side and returns true", async () => {
+  it("a snap of a tab onto the side that already shows it changes nothing, selection included, and returns true", async () => {
     const root = rootIn();
     const { term, ctx, api } = await mountTabbed(root, server);
     term.split?.open();
     chipOf(root, "two").click();
     expect(ctx.shell.selected()).toBe("right");
+    await until(() => server.writes.length > 0);
+    await tick();
+    const writes = server.writes.length;
     for (const e of fake.engines) {
       e.connection.setSession.mockClear();
+      e.connection.forgetSession.mockClear();
     }
+
     expect(api.snap("s1", "left")).toBe(true);
-    expect(ctx.shell.selected()).toBe("left");
-    for (const e of fake.engines) {
-      expect(e.connection.setSession).not.toHaveBeenCalled();
-    }
+    expect(ctx.shell.selected()).toBe("right");
     expect(shown(ctx, "left")).toBe("s1");
     expect(shown(ctx, "right")).toBe("s2");
+    for (const e of fake.engines) {
+      expect(e.connection.setSession).not.toHaveBeenCalled();
+      expect(e.connection.forgetSession).not.toHaveBeenCalled();
+    }
+    await tick();
+    expect(server.writes).toHaveLength(writes);
+  });
+
+  it("a snap of the single view's tab onto the left keeps the split closed", async () => {
+    const root = rootIn();
+    const { term, ctx, api } = await mountTabbed(root, server);
+    expect(term.split?.isOpen()).toBe(false);
+
+    expect(api.snap("s1", "left")).toBe(true);
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    await tick();
+    expect(server.writes).toEqual([]);
   });
 
   it("a keyboard-opened menu offers the snap items enabled, and Enter on one snaps with focus landing in the snapped pane", async () => {
@@ -739,6 +1050,40 @@ describe("the snap items", () => {
     menuItem(openTabMenu(root, "one"), "Snap to right").click();
     expect(shown(ctx, "right")).toBe("s1");
     expect(calls).toEqual(["right:adopt:s1:4242", "right:set:s1"]);
+  });
+
+  it("a swap hands each tab's server epoch to the pane it moves into before it attaches", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    const left = engineOn(root, "left");
+    const right = engineOn(root, "right");
+    // Each connection knows only the epoch of the session it shows.
+    left.connection.serverEpochOf.mockImplementation((id: string) => (id === "s1" ? 1111 : 0));
+    right.connection.serverEpochOf.mockImplementation((id: string) => (id === "s2" ? 2222 : 0));
+    const calls: string[] = [];
+    for (const [side, e] of [
+      ["left", left],
+      ["right", right],
+    ] as const) {
+      e.connection.adoptPersistedEpoch.mockImplementation((id: string, epoch: number) => {
+        calls.push(`${side}:adopt:${id}:${String(epoch)}`);
+      });
+      e.connection.setSession.mockImplementation((id: string) => {
+        calls.push(`${side}:set:${id}`);
+      });
+    }
+
+    menuItem(openTabMenu(root, "two"), "Snap to left").click();
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(calls).toEqual([
+      "left:adopt:s2:2222",
+      "left:set:s2",
+      "right:adopt:s1:1111",
+      "right:set:s1",
+    ]);
   });
 });
 
@@ -820,6 +1165,101 @@ describe("drag and drop onto a half", () => {
     expect(term.split?.isOpen()).toBe(false);
   });
 
+  it("a shown tab dropped on the other half, which shows a tab, swaps the two views", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    ctx.shell.select("left");
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const rightX = rect.left + rect.width * 0.75;
+
+    dragAt("dragstart", dt, chip, rightX);
+    dragAt("dragover", dt, root, rightX);
+    dragAt("drop", dt, root, rightX);
+    dragAt("dragend", dt, chip, rightX);
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("right");
+  });
+
+  it("with no physical keyboard, a tab moved out of the pane whose input held the keyboard takes it along, into an empty pane or a swap", async () => {
+    stubMedia({ "(any-pointer: fine)": false });
+    const root = rootIn();
+    const { term, ctx, api } = await mountTabbed(root, server);
+    term.split?.open();
+    textareaOf(root, "left").focus();
+
+    expect(api.snap("s1", "right")).toBe(true);
+    expect(shown(ctx, "left")).toBeNull();
+    await tick();
+    expect(document.activeElement).toBe(textareaOf(root, "right"));
+
+    api.switchTo("s2");
+    expect(shown(ctx, "left")).toBe("s2");
+    textareaOf(root, "right").focus();
+    expect(ctx.shell.selected()).toBe("right");
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const leftX = rect.left + rect.width * 0.25;
+    dragAt("dragstart", dt, chip, leftX);
+    dragAt("dragover", dt, root, leftX);
+    dragAt("drop", dt, root, leftX);
+    dragAt("dragend", dt, chip, leftX);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s2");
+    await tick();
+    expect(document.activeElement).toBe(textareaOf(root, "left"));
+  });
+
+  it("a shown tab dropped on its own half changes nothing: the single view's tab on the left keeps the split closed", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const leftX = rect.left + rect.width * 0.25;
+
+    dragAt("dragstart", dt, chip, leftX);
+    dragAt("dragover", dt, root, leftX);
+    const drop = dragAt("drop", dt, root, leftX);
+    dragAt("dragend", dt, chip, leftX);
+    expect(drop.defaultPrevented).toBe(true);
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    await tick();
+    expect(server.writes).toEqual([]);
+  });
+
+  it("decides the side at the centre of the divider as drawn, not at the row's middle", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
+    expect(term.split?.setRatio(0.3, true)).toBe(true);
+    // The 1000 px row draws 0.3 at the 360 px minimum: the gutter spans 360..370.
+    expect(term.split?.state().ratio).toBe(360 / 990);
+    const left = root.getBoundingClientRect().left;
+    const chip = chipOf(root, "two");
+    const dt = fakeDataTransfer();
+
+    dragAt("dragstart", dt, chip, left + 363);
+    dragAt("dragover", dt, root, left + 363);
+    expect(root.classList.contains("wt-drop-left")).toBe(true);
+    dragAt("dragover", dt, root, left + 367);
+    expect(root.classList.contains("wt-drop-right")).toBe(true);
+    expect(root.classList.contains("wt-drop-left")).toBe(false);
+    // Left of the row's middle and still the right pane.
+    dragAt("dragover", dt, root, left + 450);
+    expect(root.classList.contains("wt-drop-right")).toBe(true);
+    dragAt("drop", dt, root, left + 450);
+    dragAt("dragend", dt, chip, left + 450);
+    expect(shown(ctx, "right")).toBe("s2");
+    expect(shown(ctx, "left")).toBe("s1");
+  });
+
   it("destroy() during a drag leaves the consumer's root with the classes it came with, the drop highlight included", async () => {
     const root = rootIn();
     root.className = "host";
@@ -840,7 +1280,7 @@ describe("drag and drop onto a half", () => {
 });
 
 describe("the closing rules while the split is open", () => {
-  it("(1) closing the selected pane's tab while the other shows one empties the pane, promotes nothing, creates nothing and selects the other", async () => {
+  it("(1) closing the selected pane's tab while the other shows one closes the split onto the other pane's tab, selected, creating nothing", async () => {
     stubMedia({ "(any-pointer: fine)": true });
     server.list = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
@@ -855,18 +1295,21 @@ describe("the closing rules while the split is open", () => {
     ctx.shell.select("left");
     clearForgets();
     const postsBefore = server.posts();
+    // Read before the close reassigns the sides.
+    const closed = engineOn(root, "left");
+    const kept = engineOn(root, "right");
 
     chipOf(root, "one").querySelector<HTMLElement>(".wt-tab-close")?.click();
     await until(() => server.deletes().includes("s1"));
     await tick();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(engineOn(root, "left")).toBe(kept);
     // Exactly one forget per connection: the showing pane's through its own
     // emptying, the other pane's through dropSessionExcept.
-    expect(forgets(root)).toEqual({ left: ["s1"], right: ["s1"] });
-    expect(shown(ctx, "left")).toBeNull();
-    expect(ctx.shell.pane("left")?.state()).toBe("empty");
-    expect(shown(ctx, "right")).toBe("s2");
-    expect(ctx.shell.selected()).toBe("right");
-    expect(term.split?.isOpen()).toBe(true);
+    expect(closed.connection.forgetSession.mock.calls).toEqual([["s1"]]);
+    expect(kept.connection.forgetSession.mock.calls).toEqual([["s1"]]);
+    expect(ctx.shell.selected()).toBe("left");
     expect(server.posts()).toBe(postsBefore);
     expect(chips(root).map((c) => c.querySelector(".wt-tab-label")?.textContent)).toEqual([
       "two",
@@ -874,30 +1317,97 @@ describe("the closing rules while the split is open", () => {
       "four",
     ]);
     expect(activeLabels(root)).toEqual(["two"]);
-    expect(document.activeElement).toBe(textareaOf(root, "right"));
+    expect(document.activeElement).toBe(textareaOf(root, "left"));
   });
 
-  it("(2) closing the shown tab while the other pane is empty promotes no ordinary tab: one create lands the new tab in the other pane", async () => {
+  it("with no physical keyboard, closing the shown tab whose input held the keyboard hands it to the other pane's tab, which fills the view", async () => {
+    stubMedia({ "(any-pointer: fine)": false });
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+    ];
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     term.split?.open();
-    expect(ctx.shell.pane("right")?.state()).toBe("empty");
-    const postsBefore = server.posts();
-
-    chipOf(root, "one").querySelector<HTMLElement>(".wt-tab-close")?.click();
-    await until(() => shown(ctx, "right") === "s-new");
-    expect(server.posts()).toBe(postsBefore + 1);
-    expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBe("s-new");
+    chipOf(root, "two").click();
+    textareaOf(root, "right").focus();
     expect(ctx.shell.selected()).toBe("right");
-    expect(chips(root).map((c) => c.querySelector(".wt-tab-label")?.textContent)).toEqual([
-      "two",
-      "New tab",
-    ]);
-    expect(server.deletes()).toEqual(["s1"]);
+
+    chipOf(root, "two").querySelector<HTMLElement>(".wt-tab-close")?.click();
+    await until(() => server.deletes().includes("s2"));
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(document.activeElement).toBe(textareaOf(root, "left"));
   });
 
-  it("(2b) a failing create leaves both panes empty with the row's tabs untouched, and the next tab click fills the left pane", async () => {
+  it("with no physical keyboard, closing the shown tab whose input held the keyboard beside an empty pane hands it to the neighbor the single view shows", async () => {
+    stubMedia({ "(any-pointer: fine)": false });
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    chipOf(root, "two").click();
+    term.split?.open();
+    textareaOf(root, "left").focus();
+    expect(ctx.shell.pane("right")?.state()).toBe("empty");
+
+    chipOf(root, "two").querySelector<HTMLElement>(".wt-tab-close")?.click();
+    await until(() => server.deletes().includes("s2"));
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s3");
+    expect(document.activeElement).toBe(textareaOf(root, "left"));
+  });
+
+  it("with no physical keyboard and the keyboard outside the terminal, closing a shown tab leaves it there", async () => {
+    stubMedia({ "(any-pointer: fine)": false });
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+    ];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+
+    chipOf(root, "two").querySelector<HTMLElement>(".wt-tab-close")?.click();
+    await until(() => server.deletes().includes("s2"));
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("(2) closing the shown tab while the other pane is empty closes the split, and the one-pane neighbor rule picks the tab, creating nothing", async () => {
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    chipOf(root, "two").click();
+    term.split?.open();
+    expect(ctx.shell.pane("right")?.state()).toBe("empty");
+
+    chipOf(root, "two").querySelector<HTMLElement>(".wt-tab-close")?.click();
+    await until(() => server.deletes().includes("s2"));
+    await tick();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s3");
+    expect(ctx.shell.selected()).toBe("left");
+    expect(server.posts()).toBe(0);
+    expect(chips(root).map((c) => c.querySelector(".wt-tab-label")?.textContent)).toEqual([
+      "one",
+      "three",
+    ]);
+  });
+
+  it("(2b) closing the only tab while the other pane is empty keeps it, and the split as it was, when its replacement cannot be created", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     term.split?.open();
@@ -905,23 +1415,17 @@ describe("the closing rules while the split is open", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     chipOf(root, "one").querySelector<HTMLElement>(".wt-tab-close")?.click();
-    await until(() => server.deletes().includes("s1"));
-    await tick();
     await until(() => server.posts() === 1);
     await tick();
-    expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBeNull();
+    await tick();
+    expect(server.deletes()).toEqual([]);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(ctx.shell.pane("right")?.state()).toBe("empty");
     expect(term.split?.isOpen()).toBe(true);
-    expect(chips(root).map((c) => c.querySelector(".wt-tab-label")?.textContent)).toEqual(["two"]);
-    expect(activeLabels(root)).toEqual([]);
-
-    chipOf(root, "two").click();
-    expect(shown(ctx, "left")).toBe("s2");
-    expect(shown(ctx, "right")).toBeNull();
-    expect(ctx.shell.selected()).toBe("left");
+    expect(chips(root)).toHaveLength(1);
   });
 
-  it("(3) closing the only tab overall while the other pane is empty creates once and lands the new tab in the other pane", async () => {
+  it("(3) closing the only tab overall while the other pane is empty creates once, and the new tab ends alone in the single view", async () => {
     server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
@@ -932,9 +1436,9 @@ describe("the closing rules while the split is open", () => {
     await until(() => server.deletes().includes("s1"));
     await tick();
     expect(server.posts()).toBe(postsBefore + 1);
-    expect(shown(ctx, "right")).toBe("s-new");
-    expect(shown(ctx, "left")).toBeNull();
-    expect(ctx.shell.selected()).toBe("right");
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s-new");
+    expect(ctx.shell.selected()).toBe("left");
     expect(chips(root)).toHaveLength(1);
   });
 
@@ -985,37 +1489,43 @@ describe("the closing rules while the split is open", () => {
     expect(forgets(root)).toEqual({ left: ["s3"], right: ["s3"] });
     clearForgets();
 
+    const closed = engineOn(root, "left");
+    const kept = engineOn(root, "right");
     monitor.emit({ id: "s1", title: "one", createdAt: "1", status: "idle", removed: true });
     await tick();
-    expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBe("s2");
-    expect(ctx.shell.selected()).toBe("right");
-    expect(forgets(root)).toEqual({ left: ["s1"], right: ["s1"] });
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(engineOn(root, "left")).toBe(kept);
+    expect(ctx.shell.selected()).toBe("left");
+    expect(closed.connection.forgetSession.mock.calls).toEqual([["s1"]]);
+    expect(kept.connection.forgetSession.mock.calls).toEqual([["s1"]]);
     expect(server.deletes()).toEqual([]);
     expect(server.posts()).toBe(0);
   });
 
-  it("(6) a status event never refills a pane the closing rules emptied, and does show the first live tab after a bootstrap that showed nothing", async () => {
+  it("(6) a status event never refills a view the closing rules emptied, and does show the first live tab after a bootstrap that showed nothing", async () => {
     const monitor = fakeMonitor();
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server, {
       tabsOpts: { activityMonitor: monitor.feature },
       before: [monitor.feature],
     });
-    term.split?.open();
+    stripSplit(root).click();
+    expect(shown(ctx, "right")).toBe("s2");
     server.postStatus = 500;
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    chipOf(root, "one").querySelector<HTMLElement>(".wt-tab-close")?.click();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    menuItem(openTabMenu(root, "one"), "Close all").click();
     await until(() => server.posts() === 1);
     await tick();
+    expect(term.split?.isOpen()).toBe(false);
     expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBeNull();
+    expect(chips(root)).toHaveLength(0);
 
-    monitor.emit({ id: "s2", title: "two", createdAt: "2", status: "idle" });
     monitor.emit({ id: "s5", title: "five", createdAt: "5", status: "idle" });
+    monitor.emit({ id: "s6", title: "six", createdAt: "6", status: "idle" });
     await tick();
-    expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBeNull();
+    expect(ctx.shell.panes().some((p) => p.state() === "shown")).toBe(false);
     expect(chips(root)).toHaveLength(2);
     term.destroy();
 
@@ -1074,66 +1584,57 @@ describe("the closing rules while the split is open", () => {
     ctx.shell.select("left");
     server.deleteGate = gate();
 
-    // Case 1: the other pane shows a tab, so selection moves to it at once.
+    // Case 1: the other pane shows a tab, so the split closes onto it at once.
     chipOf(root, "one").querySelector<HTMLElement>(".wt-tab-close")?.click();
     await until(() => server.deletes().includes("s1"));
-    expect(ctx.shell.selected()).toBe("right");
-    expect(ctx.shell.pane("left")?.state()).toBe("empty");
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("left");
     expect(server.posts()).toBe(0);
 
-    // Case 2: the other pane is empty, so the replacement's POST goes out while
-    // the DELETE is still pending.
-    chipOf(root, "two").querySelector<HTMLElement>(".wt-tab-close")?.click();
-    await until(() => server.deletes().includes("s2"));
-    await tick();
-    expect(server.posts()).toBe(1);
-    expect(server.deleteGate).not.toBeNull();
-    await until(() => shown(ctx, "left") === "s-new");
-    expect(ctx.shell.selected()).toBe("left");
-
-    // The closed split follows the one-pane rule the same way.
+    // Case 2: the other pane is empty, so the split closes and the neighbor is
+    // shown while the DELETE is still pending.
     server.deleteGate.resolve();
     await tick();
-    term.split?.close();
+    term.split?.open();
     server.deleteGate = gate();
-    void api.close("s-new");
-    await until(() => server.deletes().includes("s-new"));
+    void api.close("s2");
+    await until(() => server.deletes().includes("s2"));
+    expect(term.split?.isOpen()).toBe(false);
     expect(shown(ctx, "left")).toBe("s3");
+    expect(server.posts()).toBe(0);
     server.deleteGate.resolve();
   });
 
-  it("while the replacement's POST is held, selection, the handle's edge and the facade already face the pane the new tab is headed for", async () => {
+  it("while the last tab's replacement POST is held, that tab stays shown and selected with the split open; no moment shows both panes empty", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     term.split?.open();
     expect(ctx.shell.pane("right")?.state()).toBe("empty");
     const held = gate();
     server.postGate = held;
-    const changes = vi.fn();
-    term.split?.onChange(changes);
+    const bothEmpty = vi.fn();
+    term.split?.onChange(() => {
+      if (ctx.shell.panes().every((p) => p.state() !== "shown")) {
+        bothEmpty();
+      }
+    });
 
     chipOf(root, "one").querySelector<HTMLElement>(".wt-tab-close")?.click();
     await until(() => server.posts() === 1);
-    expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBeNull();
-    expect(ctx.shell.pane("left")?.state()).toBe("empty");
-    // Both panes are empty and the POST has not answered: the one state in which
-    // selection rests on an empty pane, and it is the pane the tab is headed for.
-    expect(ctx.shell.selected()).toBe("right");
-    expect(term.split?.state().selected).toBe("right");
-    expect(separatorOf(root).getAttribute("data-faces")).toBe("right");
-    expect(paneRoot(root, "right").classList.contains("wt-pane-selected")).toBe(true);
-    expect(paneRoot(root, "left").classList.contains("wt-pane-selected")).toBe(false);
-    expect(ctx.surface()).toBe(paneRoot(root, "right").querySelector(".term"));
-    expect(changes.mock.calls[changes.mock.calls.length - 1]?.[0]).toMatchObject({
-      selected: "right",
-    });
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(ctx.shell.selected()).toBe("left");
+    expect(term.split?.isOpen()).toBe(true);
+    expect(server.deletes()).toEqual([]);
 
     held.resolve();
-    await until(() => shown(ctx, "right") === "s-new");
-    expect(shown(ctx, "left")).toBeNull();
-    expect(ctx.shell.selected()).toBe("right");
-    expect(separatorOf(root).getAttribute("data-faces")).toBe("right");
+    await until(() => server.deletes().includes("s1"));
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s-new");
+    expect(ctx.shell.selected()).toBe("left");
+    expect(separatorOf(root).getAttribute("data-faces")).toBe("left");
+    expect(bothEmpty).not.toHaveBeenCalled();
   });
 
   it("closing the split from the handle's side hands the only shown tab to the survivor", async () => {
@@ -1161,7 +1662,7 @@ describe("the closing rules while the split is open", () => {
     expect(engineOn(root, "left")).toBe(survivor);
   });
 
-  it("'Close others' while split empties the other pane and keeps the split", async () => {
+  it("'Close others' on a shown tab closes the split onto it", async () => {
     server.list = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
       { id: "s2", title: "two", createdAt: "2", status: "idle" },
@@ -1176,15 +1677,14 @@ describe("the closing rules while the split is open", () => {
     menuItem(openTabMenu(root, "two"), "Close others").click();
     await until(() => server.deletes().length === 2);
     await tick();
-    expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBe("s2");
-    expect(ctx.shell.selected()).toBe("right");
-    expect(term.split?.isOpen()).toBe(true);
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("left");
     expect(chips(root)).toHaveLength(1);
     expect(server.posts()).toBe(0);
   });
 
-  it("'Close others' on an ordinary tab that closes both shown tabs promotes nothing and creates once", async () => {
+  it("'Close others' on an ordinary tab that closes both shown tabs closes the split and shows the tab kept, creating nothing", async () => {
     server.list = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
       { id: "s2", title: "two", createdAt: "2", status: "idle" },
@@ -1199,14 +1699,13 @@ describe("the closing rules while the split is open", () => {
 
     menuItem(openTabMenu(root, "three"), "Close others").click();
     await until(() => server.deletes().length === 2);
-    await until(() => shown(ctx, "left") === "s-new");
-    expect(server.posts()).toBe(1);
-    expect(shown(ctx, "left")).toBe("s-new");
-    expect(shown(ctx, "right")).toBeNull();
-    expect(term.split?.isOpen()).toBe(true);
+    await tick();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s3");
+    expect(ctx.shell.selected()).toBe("left");
+    expect(server.posts()).toBe(0);
     expect(chips(root).map((c) => c.querySelector(".wt-tab-label")?.textContent)).toEqual([
       "three",
-      "New tab",
     ]);
   });
 });
@@ -1279,7 +1778,7 @@ describe("a failed second pane", () => {
     await tick();
     expect(fake.createTerminalEngine).toHaveBeenCalledTimes(3);
     expect(seen).toHaveLength(1);
-    expect(ctx.shell.pane("right")?.state()).toBe("empty");
+    expect(shown(ctx, "right")).toBe("s2");
   });
 
   it("that held the only shown tab hands it to the empty survivor before failing, which is selected and receives the typing", async () => {
@@ -1400,7 +1899,7 @@ describe("a failed second pane", () => {
     expect(fake.createTerminalEngine).toHaveBeenCalledTimes(3);
     expect(seen).toHaveLength(1);
     expect(ctx.shell.pane("left")?.session.id).toBe("s1");
-    expect(ctx.shell.pane("right")?.state()).toBe("empty");
+    expect(shown(ctx, "right")).toBe("s2");
   });
 
   it("that fails while hidden by a closed split is discarded in place, and the next open builds afresh", async () => {
@@ -1417,7 +1916,7 @@ describe("a failed second pane", () => {
     });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     stripSplit(root).click();
-    expect(ctx.shell.pane("right")?.state()).toBe("empty");
+    expect(shown(ctx, "right")).toBe("s2");
     const hiddenRoot = paneRoot(root, "right");
     // The primary stays selected, so the close hides the pending pane.
     stripSplit(root).click();
@@ -1443,7 +1942,7 @@ describe("a failed second pane", () => {
     await tick();
     expect(term.split?.isOpen()).toBe(true);
     expect(fake.createTerminalEngine).toHaveBeenCalledTimes(3);
-    expect(ctx.shell.pane("right")?.state()).toBe("empty");
+    expect(shown(ctx, "right")).toBe("s2");
   });
 
   it("that showed an UNSELECTED tab keeps that tab's server epoch: the survivor is seeded before it attaches, and a save is filed under it", async () => {
@@ -1519,7 +2018,7 @@ describe("a failed second pane", () => {
       panes: () => [boom()],
     });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    stripSplit(root).click();
+    term.split?.open();
     await tick();
     expect(ctx.shell.pane("right")?.state()).toBe("failed");
     const writes = server.writes.length;

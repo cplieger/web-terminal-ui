@@ -1088,16 +1088,18 @@ describe("close(): the selected pane fills the view", () => {
     ctx.notifySwitch({ id: "b" });
     ctx.shell.select("left");
     const [left, right] = paneRoots(root);
-    const changes = vi.fn();
-    const panes = vi.fn();
-    split.onChange(changes);
-    ctx.shell.onPanesChange(panes);
     await viewportSettled();
     const [leftEngine, rightEngine] = fake.engines;
     for (const e of fake.engines) {
       e.connection.forgetSession.mockClear();
       e.connection.sendResize.mockClear();
     }
+    // Subscribed after the wait: the shell root's first ResizeObserver delivery
+    // may land inside it, reporting a resize of the open split.
+    const changes = vi.fn();
+    const panes = vi.fn();
+    split.onChange(changes);
+    ctx.shell.onPanesChange(panes);
 
     expect(split.close()).toBe(true);
 

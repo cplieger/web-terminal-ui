@@ -60,7 +60,9 @@ afterEach(() => {
 const panelId = (root: HTMLElement, side: "left" | "right"): string =>
   paneRoot(root, side).querySelector('[role="tabpanel"]')?.id ?? "";
 const attrsOf = (el: HTMLElement): string =>
-  `${el.className}|${Array.from(el.attributes)
+  `${Array.from(el.classList)
+    .filter((c) => c !== "wt-tab-selected")
+    .join(" ")}|${Array.from(el.attributes)
     .filter((a) => a.name !== "class")
     .map((a) => `${a.name}=${a.value}`)
     .sort()
@@ -71,8 +73,8 @@ const describedBy = (root: HTMLElement, side: "left" | "right"): string => {
   return id === null || id === undefined ? "" : (root.querySelector(`#${id}`)?.textContent ?? "");
 };
 
-describe("both shown tabs render alike", () => {
-  it("lights both chips identically, marks the row multiselectable, and points each chip at its pane", async () => {
+describe("both shown tabs render active", () => {
+  it("lights both chips active, marks the selected pane's, makes the row multiselectable, and points each chip at its pane", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     stripSplit(root).click();
@@ -87,7 +89,10 @@ describe("both shown tabs render alike", () => {
       expect(chip?.getAttribute("aria-selected")).toBe("true");
       expect(chip?.getAttribute("aria-expanded")).toBe("true");
     }
+    expect(one?.classList.contains("wt-tab-selected")).toBe(false);
+    expect(two?.classList.contains("wt-tab-selected")).toBe(true);
     expect(three?.classList.contains("wt-tab-active")).toBe(false);
+    expect(three?.classList.contains("wt-tab-selected")).toBe(false);
     expect(three?.getAttribute("aria-selected")).toBe("false");
     expect(three?.getAttribute("aria-expanded")).toBe("false");
     expect(root.querySelector('[role="tablist"]')?.getAttribute("aria-multiselectable")).toBe(
@@ -107,13 +112,16 @@ describe("both shown tabs render alike", () => {
       paneRoot(root, "right").querySelector('[role="tabpanel"]')?.getAttribute("aria-labelledby"),
     ).toBe(two?.id);
 
-    // Selection is not a property of the row: the shown chips do not change (the
+    // Selection moves the mark and nothing else about the shown chips (the
     // unshown chip's aria-controls follows the pane a click would fill, below).
     const before = chips(root).slice(0, 2).map(attrsOf);
     expect(ctx.shell.select("left")).toBe(true);
+    expect(one?.classList.contains("wt-tab-selected")).toBe(true);
+    expect(two?.classList.contains("wt-tab-selected")).toBe(false);
     expect(chips(root).slice(0, 2).map(attrsOf)).toEqual(before);
 
     term.split?.close();
+    expect(chips(root).some((c) => c.classList.contains("wt-tab-selected"))).toBe(false);
     expect(root.querySelector('[role="tablist"]')?.hasAttribute("aria-multiselectable")).toBe(
       false,
     );

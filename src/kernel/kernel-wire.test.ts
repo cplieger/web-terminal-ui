@@ -73,15 +73,11 @@ afterEach(() => {
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-/** Waits out the viewport settle window that every mount opens.
- *
- *  viewport.init() observes the terminal wrap with a ResizeObserver, and a real
- *  one delivers its FIRST observation asynchronously after observe(), so mounting
- *  a terminal always starts a transition. `measurableSize()` declines while one
- *  is in flight, which is a SECOND reason for a null size on top of the fonts
- *  gate — so a fonts assertion that skips this can pass for the viewport's
- *  reason instead of its own. 400ms clears viewport.ts's 350ms settle. The
- *  viewport gate has its own test, on fake timers. */
+/** Waits out the settle every mount opens: the viewport's ResizeObserver
+ *  delivers its first observation after observe(), which starts a transition,
+ *  and `measurableSize()` declines during one. That is a second reason for a
+ *  null size beside the fonts gate, so a fonts assertion that skips this can
+ *  pass for the viewport's reason. 400ms clears viewport.ts's 350ms settle. */
 const viewportSettled = (): Promise<void> => new Promise((r) => setTimeout(r, 400));
 
 /** Advances FAKE timers a settle window at a time until `done()` holds.

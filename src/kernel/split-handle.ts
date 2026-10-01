@@ -9,6 +9,9 @@ const DRAG_START_PX = 8;
 const RESIZE_INTERVAL_MS = 100;
 /** One arrow press moves the divider this far: two fallback cells of 8 px. */
 const KEY_STEP_PX = 16;
+/** Pointer travel past a pane's minimum width that holds the pane AT the
+ *  minimum, so a drag can set it; only past this does a release close. */
+const GRACE_PX = 120;
 
 const NUDGE_KEYS: ReadonlySet<string> = new Set(["ArrowLeft", "ArrowRight", "Home", "End"]);
 
@@ -31,10 +34,18 @@ interface Drag {
   readonly span: number;
   /** Whether the pointer has travelled DRAG_START_PX yet. */
   moving: boolean;
-  /** The pane under the minimum right now: dimmed, and closed on release. */
+  /** The pane past the grace zone right now: dimmed, and closed on release. */
   squeezed: PaneSide | null;
-  /** Whether any move of this drag put a pane under the minimum. */
+  /** Whether the divider is held at a pane's minimum right now. */
+  held: boolean;
+  /** Whether any move of this drag went past the grace zone. */
   dipped: boolean;
+}
+
+interface Placement {
+  readonly ratio: number;
+  readonly squeezed: PaneSide | null;
+  readonly held: boolean;
 }
 
 function clamp01(value: number): number {
@@ -107,12 +118,22 @@ export function createSplitHandle(shell: SplitHandleShell): SplitHandle {
     announceNow();
   }
 
-  function squeezedAt(ratio: number, span: number): PaneSide | null {
-    const leftPx = ratio * span;
-    if (leftPx < MIN_PANE_PX) {
-      return "left";
+  function placement(leftPx: number, span: number): Placement {
+    const leftPast = MIN_PANE_PX - leftPx;
+    const rightPast = MIN_PANE_PX - (span - leftPx);
+    if (leftPast > GRACE_PX) {
+      return { ratio: clamp01(leftPx / span), squeezed: "left", held: false };
     }
-    return span - leftPx < MIN_PANE_PX ? "right" : null;
+    if (rightPast > GRACE_PX) {
+      return { ratio: clamp01(leftPx / span), squeezed: "right", held: false };
+    }
+    if (leftPast > 0) {
+      return { ratio: MIN_PANE_PX / span, squeezed: null, held: true };
+    }
+    if (rightPast > 0) {
+      return { ratio: (span - MIN_PANE_PX) / span, squeezed: null, held: true };
+    }
+    return { ratio: leftPx / span, squeezed: null, held: false };
   }
   function paintSqueezed(side: PaneSide | null): void {
     for (const s of ["left", "right"] as const) {
@@ -156,6 +177,7 @@ export function createSplitHandle(shell: SplitHandleShell): SplitHandle {
       span,
       moving: false,
       squeezed: null,
+      held: false,
       dipped: false,
     };
     el.classList.add("wt-handle-held");
@@ -177,9 +199,10 @@ export function createSplitHandle(shell: SplitHandleShell): SplitHandle {
       }
       d.moving = true;
     }
-    const ratio = clamp01((d.startLeftPx + dx) / d.span);
+    const { ratio, squeezed, held } = placement(d.startLeftPx + dx, d.span);
     split.setRatio(ratio, false);
-    d.squeezed = squeezedAt(ratio, d.span);
+    d.squeezed = squeezed;
+    d.held = held;
     if (d.squeezed !== null) {
       d.dipped = true;
     }
@@ -200,11 +223,12 @@ export function createSplitHandle(shell: SplitHandleShell): SplitHandle {
     if (d.squeezed !== null && split.closeSide(d.squeezed)) {
       return;
     }
-    // A drag that dipped under the minimum was a close gesture, so releasing
-    // above it, or a close the split refuses, cancels the drag rather than
-    // committing a share at or past the threshold.
+    // A drag that went past the grace zone was a close gesture, so releasing
+    // above the minimum, or a close the split refuses, cancels the drag rather
+    // than committing a share at or past the threshold. A release held at the
+    // minimum sets it.
     const state = split.state();
-    split.setRatio(d.dipped ? state.committedRatio : state.ratio, true);
+    split.setRatio(d.dipped && !d.held ? state.committedRatio : state.ratio, true);
     announceNow();
   }
   let nudgePending = false;

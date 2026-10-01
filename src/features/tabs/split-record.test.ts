@@ -139,7 +139,25 @@ describe("the writes", () => {
     expect(server.deletes()).toEqual([]);
   });
 
-  it("closing the selected pane's tab while the other is empty writes nothing until the replacement exists, then once", async () => {
+  it("a swap writes the traded sides once, with no empty side in between", async () => {
+    server.layout = { open: true, left: "s1", right: "s2", handle: 0.5, selected: "right" };
+    const root = rootIn();
+    const { ctx } = await mountTabbed(root, server);
+    await tick();
+    expect(server.writes).toEqual([]);
+
+    menuItem(openTabMenu(root, "two"), "Snap to left").click();
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(shown(ctx, "right")).toBe("s1");
+    await until(() => server.writes.length > 0);
+    await tick();
+    expect(server.writes).toEqual([
+      { left: "s2", right: "s1", handle: 0.5, selected: "left", open: true },
+    ]);
+  });
+
+  it("closing the only tab while the other pane is empty writes nothing until the replacement exists, then the closed split once", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     term.split?.open();
@@ -148,26 +166,26 @@ describe("the writes", () => {
     server.postGate = held;
 
     menuItem(openTabMenu(root, "one"), "Close").click();
-    await until(() => server.deletes().includes("s1"));
     await until(() => server.posts() === 1);
-    expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBeNull();
+    await tick();
     await tick();
     expect(server.writes).toHaveLength(1);
 
     held.resolve();
-    await until(() => shown(ctx, "right") === "s-new");
+    await until(() => shown(ctx, "left") === "s-new");
     await until(() => server.writes.length === 2);
+    await tick();
+    expect(server.writes).toHaveLength(2);
     expect(server.writes[1]).toEqual({
-      left: null,
-      right: "s-new",
+      left: "s-new",
+      right: null,
       handle: 0.5,
-      selected: "right",
-      open: true,
+      selected: "left",
+      open: false,
     });
   });
 
-  it("closing the UNSELECTED pane's shown tab writes the emptied side once, selection unchanged", async () => {
+  it("closing the UNSELECTED pane's shown tab writes the closed split once, the selected tab alone in it", async () => {
     const root = rootIn();
     const { ctx } = await mountTabbed(root, server);
     menuItem(openTabMenu(root, "two"), "Snap to right").click();
@@ -179,19 +197,19 @@ describe("the writes", () => {
     await until(() => server.deletes().includes("s1"));
     await until(() => server.writes.length === 2);
     await tick();
-    expect(shown(ctx, "left")).toBeNull();
-    expect(ctx.shell.selected()).toBe("right");
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("left");
     expect(server.writes).toHaveLength(2);
     expect(server.writes[1]).toEqual({
-      left: null,
-      right: "s2",
+      left: "s2",
+      right: null,
       handle: 0.5,
-      selected: "right",
-      open: true,
+      selected: "left",
+      open: false,
     });
   });
 
-  it("'Close others' removing the UNSELECTED pane's shown tab writes the emptied side once, selection unchanged", async () => {
+  it("'Close others' removing the UNSELECTED pane's shown tab writes the closed split once, the selected tab alone in it", async () => {
     server.list = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
       { id: "s2", title: "two", createdAt: "2", status: "idle" },
@@ -209,21 +227,20 @@ describe("the writes", () => {
     await until(() => server.deletes().length === 2);
     await until(() => server.writes.length === 2);
     await tick();
-    expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBe("s2");
-    expect(ctx.shell.selected()).toBe("right");
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("left");
     expect(server.posts()).toBe(0);
     expect(server.writes).toHaveLength(2);
     expect(server.writes[1]).toEqual({
-      left: null,
-      right: "s2",
+      left: "s2",
+      right: null,
       handle: 0.5,
-      selected: "right",
-      open: true,
+      selected: "left",
+      open: false,
     });
   });
 
-  it("a removed status for the UNSELECTED pane's shown tab writes the emptied side once, with no DELETE", async () => {
+  it("a removed status for the UNSELECTED pane's shown tab writes the closed split once, with no DELETE", async () => {
     const monitor = fakeMonitor();
     const root = rootIn();
     const { ctx } = await mountTabbed(root, server, {
@@ -237,16 +254,15 @@ describe("the writes", () => {
     monitor.emit({ id: "s1", title: "one", createdAt: "1", status: "idle", removed: true });
     await until(() => server.writes.length === 2);
     await tick();
-    expect(shown(ctx, "left")).toBeNull();
-    expect(shown(ctx, "right")).toBe("s2");
+    expect(shown(ctx, "left")).toBe("s2");
     expect(server.deletes()).toEqual([]);
     expect(server.writes).toHaveLength(2);
     expect(server.writes[1]).toEqual({
-      left: null,
-      right: "s2",
+      left: "s2",
+      right: null,
       handle: 0.5,
-      selected: "right",
-      open: true,
+      selected: "left",
+      open: false,
     });
   });
 
@@ -285,16 +301,16 @@ describe("the writes", () => {
   it("closing the split while no pane shows a tab writes nothing; the record resumes with the next shown tab", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
-    term.split?.open();
+    menuItem(openTabMenu(root, "two"), "Snap to right").click();
     await until(() => server.writes.length === 1);
     const held = gate();
     server.postGate = held;
+    vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    menuItem(openTabMenu(root, "one"), "Close").click();
+    menuItem(openTabMenu(root, "one"), "Close all").click();
     await until(() => server.posts() === 1);
-    expect(ctx.shell.panes().every((p) => p.state() === "empty")).toBe(true);
-
-    expect(term.split?.close()).toBe(true);
+    expect(term.split?.isOpen()).toBe(false);
+    expect(ctx.shell.panes().some((p) => p.state() === "shown")).toBe(false);
     await tick();
     await tick();
     expect(server.writes).toHaveLength(1);

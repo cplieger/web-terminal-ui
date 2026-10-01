@@ -6,6 +6,7 @@ import {
 import {
   applyTheme,
   buildPane,
+  hasFinePointer,
   type PaneKernel,
   type PaneServices,
   type StoreRegistry,
@@ -28,6 +29,7 @@ import { createRegions, type Regions } from "./regions.js";
 import { createAnnouncer, createTablist, type Announcer, type PaneTablist } from "./a11y.js";
 import { createSplitHandle, type SplitHandle } from "./split-handle.js";
 import { windowOf } from "./realm.js";
+import { createKeyboardInsets } from "../viewport.js";
 import type {
   AttentionOptions,
   AttentionReporter,
@@ -132,16 +134,19 @@ type PaneFailure =
   | { readonly phase: "kernel-init"; readonly cause: unknown }
   | { readonly phase: "feature-setup"; readonly feature: string; readonly cause: unknown };
 
-/** A close whose columns are still sliding: the model is closed already and the
- *  display finishes when the transition ends, on the fallback timer, or on
- *  `settle()`. */
-interface ClosingTransition {
+/** An open or a close whose columns are still sliding: the model is in its new
+ *  state already and the display finishes when the transition ends, on the
+ *  fallback timer, or on `settle()`. */
+interface Slide {
+  /** Finish the display now. */
+  readonly settle: () => void;
+  /** Drop the pending finish without running it. */
+  readonly abort: () => void;
+}
+
+interface ClosingTransition extends Slide {
   /** The ratio the columns slide to: 1 when the left pane survives, 0 when the right does. */
   readonly toward: 0 | 1;
-  /** Finish the display now. */
-  settle(): void;
-  /** Drop the pending finish without running it. */
-  abort(): void;
 }
 
 /** A shell-scoped feature's registration on every built pane and on every pane
@@ -246,6 +251,7 @@ function createShellInto(
         "wt-narrow",
         "wt-split-open",
         "wt-split-collapsed",
+        "wt-split-opening",
         "wt-split-closing",
       );
       shellRoot.style.removeProperty("--wt-split-ratio");
@@ -263,6 +269,17 @@ function createShellInto(
     });
   }
   const paneOpts: CreateTerminalOptions = splitEnabled ? { ...opts, layout: "container" } : opts;
+  // The visual viewport is the document's, so its geometry is read once and
+  // published on the outermost root, which the shell's chrome and every pane
+  // inherit; published on a pane root it would never reach the chrome beside
+  // the panes.
+  const keyboardInsets = createKeyboardInsets({
+    root: shellRoot,
+    suppressKeyboardInset: () => hasFinePointer(win),
+  });
+  held.push(() => {
+    keyboardInsets.teardown();
+  });
 
   const loadingStatus = attachLoadingStatus(opts.loading, {
     ...DEFAULT_LOADING_MESSAGES,
@@ -308,9 +325,11 @@ function createShellInto(
   const selectionListeners = new Set<(side: PaneSide) => void>();
   const panesListeners = new Set<() => void>();
   let closing: ClosingTransition | null = null;
+  let opening: Slide | null = null;
   held.push(() => {
     closing?.abort();
     closing = null;
+    opening?.abort();
   });
   const selectedPane = (): PaneKernel => {
     const p = paneAt(selectedSide) ?? slots[0]?.kernel ?? undefined;
@@ -420,20 +439,18 @@ function createShellInto(
   function applyRatioVar(): void {
     shellRoot.style.setProperty("--wt-split-ratio", String(closing?.toward ?? effectiveRatio()));
   }
-  /** How long a close slides, from the same token the stylesheet's transition
-   *  reads; 0 without `wt-animate`, and the change is then instant. */
-  function closingDurationMs(): number {
+  /** How long an open or a close slides, from the same token the stylesheet's
+   *  transition reads; 0 without `wt-animate`, and the change is then instant. */
+  function slideDurationMs(): number {
     if (!shellRoot.classList.contains("wt-animate")) {
       return 0;
     }
     return cssTimeMs(win.getComputedStyle(shellRoot).getPropertyValue("--dur-standard"));
   }
-  function beginClosing(toward: 0 | 1, durationMs: number, tail: () => void): void {
-    shellRoot.classList.add("wt-split-closing");
+  function slideFor(durationMs: number, tail: () => void): Slide {
     const stop = (): void => {
       win.clearTimeout(timer);
       shellRoot.removeEventListener("transitionend", onEnd);
-      closing = null;
     };
     const settle = (): void => {
       stop();
@@ -447,7 +464,52 @@ function createShellInto(
     shellRoot.addEventListener("transitionend", onEnd);
     // An engine that applies a track-list change at once fires no transitionend.
     const timer = win.setTimeout(settle, durationMs);
-    closing = { toward, settle, abort: stop };
+    return { settle, abort: stop };
+  }
+  function beginClosing(toward: 0 | 1, durationMs: number, tail: () => void): void {
+    shellRoot.classList.add("wt-split-closing");
+    const slide = slideFor(durationMs, () => {
+      closing = null;
+      tail();
+    });
+    closing = {
+      toward,
+      settle: slide.settle,
+      abort: () => {
+        slide.abort();
+        closing = null;
+      },
+    };
+  }
+  /** The divider comes in from the row's right edge to the share the model
+   *  already holds, and the sizes were announced at that share: the slide's
+   *  start shows the new pane 0 px wide, so the panes hold their geometry until
+   *  it is over, or a socket opening meanwhile would size its PTY to that. */
+  function beginOpening(durationMs: number): void {
+    for (const p of builtPanes()) {
+      p.holdGeometry();
+    }
+    shellRoot.style.setProperty("--wt-split-ratio", "1");
+    // The read commits the start as a style of its own; without it the slide
+    // would start from the closed view's single column.
+    shellRoot.getBoundingClientRect();
+    shellRoot.classList.add("wt-split-opening");
+    const slide = slideFor(durationMs, () => {
+      opening = null;
+      shellRoot.classList.remove("wt-split-opening");
+      for (const p of builtPanes()) {
+        p.announceSize();
+      }
+    });
+    opening = {
+      settle: slide.settle,
+      abort: () => {
+        slide.abort();
+        opening = null;
+        shellRoot.classList.remove("wt-split-opening");
+      },
+    };
+    applyRatioVar();
   }
   function fireSplitChange(): void {
     if (changeListeners.size === 0) {
@@ -745,6 +807,9 @@ function createShellInto(
       knownEpoch.delete(sessionId);
       keeper?.forget(sessionId);
     },
+    chromeResized() {
+      keyboardInsets.refresh();
+    },
     attention,
     subscribeStatus: (path, callbacks) => statusShare.subscribe(path, callbacks),
     notifications,
@@ -775,6 +840,7 @@ function createShellInto(
       managed,
       scrollbackLines,
       narrowProbe: () => isNarrow(shellRoot.clientWidth, slot.root.clientHeight),
+      keyboardInsets,
       titleBase(text) {
         slot.baseTitle = text;
         paintTitle();
@@ -1053,6 +1119,10 @@ function createShellInto(
     for (const p of builtPanes()) {
       p.announceSize();
     }
+    const slideMs = collapsed ? 0 : slideDurationMs();
+    if (slideMs > 0) {
+      beginOpening(slideMs);
+    }
     announcer?.announce("Split open");
     firePanesChange();
     fireSplitChange();
@@ -1065,7 +1135,10 @@ function createShellInto(
     keepFocusOn(survivor, (el) => leaving.root.contains(el) || isHandle(el));
     leaving.kernel?.clearActiveSession();
     leaving.kernel?.setHidden(true);
-    const durationMs = leaving.failed || collapsed ? 0 : closingDurationMs();
+    // The closing class carries the same transition, so a close during the
+    // open's slide turns it around from where the columns are.
+    opening?.abort();
+    const durationMs = leaving.failed || collapsed ? 0 : slideDurationMs();
     const tail = (): void => {
       if (leaving.failed) {
         teardownSlot(leaving);
@@ -1131,6 +1204,8 @@ function createShellInto(
     if (!isRatio(ratio) || !splitOpen || collapsed || destroyed) {
       return false;
     }
+    // A drag or a key moves the divider at once, not through the open's slide.
+    opening?.settle();
     if (commit) {
       committedRatio = ratio;
       previewRatio = null;

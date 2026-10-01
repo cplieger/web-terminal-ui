@@ -11,6 +11,24 @@ import { defineConfig } from "vitest/config";
 // snapshots cost time on every browser test and CI has nowhere to publish them.
 const traceView = process.env["VITEST_TRACE"] === "1";
 
+const launchOptions = {
+  channel: "chromium",
+  // Chromium delivers animation frames at ~60Hz, so each frame a test awaits
+  // costs it ~16.7ms; this removes the cap.
+  args: ["--disable-frame-rate-limit"],
+};
+const browserCommon = {
+  enabled: true,
+  headless: true,
+  traceView,
+  // Fixed viewport so layout-dependent assertions are reproducible;
+  // a real browser computes real boxes.
+  viewport: { width: 1280, height: 720 },
+  // A failure screenshot per failing test is noise in CI and cannot
+  // be read from a job log; the assertion diff is the artifact.
+  screenshotFailures: false,
+};
+
 export default defineConfig({
   test: {
     ...(traceView ? { reporters: ["default", ["html", { singleFile: true }]] as const } : {}),
@@ -36,26 +54,34 @@ export default defineConfig({
         test: {
           name: "browser",
           include: ["src/**/*.test.ts"],
-          exclude: ["src/**/*.node.test.ts", "node_modules/**", "**/.stryker-tmp/**"],
+          exclude: [
+            "src/**/*.node.test.ts",
+            "src/**/*.touch.test.ts",
+            "node_modules/**",
+            "**/.stryker-tmp/**",
+          ],
           browser: {
-            enabled: true,
-            headless: true,
-            traceView,
-            provider: playwright({
-              launchOptions: {
-                channel: "chromium",
-                // Chromium delivers animation frames at ~60Hz, so each frame a test awaits
-                // costs it ~16.7ms; this removes the cap.
-                args: ["--disable-frame-rate-limit"],
-              },
-            }),
+            ...browserCommon,
+            provider: playwright({ launchOptions }),
             instances: [{ browser: "chromium" }],
-            // Fixed viewport so layout-dependent assertions are reproducible;
-            // a real browser computes real boxes.
-            viewport: { width: 1280, height: 720 },
-            // A failure screenshot per failing test is noise in CI and cannot
-            // be read from a job log; the assertion diff is the artifact.
-            screenshotFailures: false,
+          },
+        },
+      },
+      // A test needing a coarse pointer runs here, in pages that are touch devices
+      // from creation. Touch emulation cannot be undone inside a page: switching
+      // it off restores the platform's pointer (none, headless) rather than the
+      // mouse Playwright's launch flags give a page, and every later file run in
+      // that page would inherit it.
+      {
+        extends: true,
+        test: {
+          name: "browser-touch",
+          include: ["src/**/*.touch.test.ts"],
+          exclude: ["node_modules/**", "**/.stryker-tmp/**"],
+          browser: {
+            ...browserCommon,
+            provider: playwright({ launchOptions, contextOptions: { hasTouch: true } }),
+            instances: [{ browser: "chromium" }],
           },
         },
       },
