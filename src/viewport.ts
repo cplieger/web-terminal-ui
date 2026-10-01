@@ -11,58 +11,168 @@ import { windowOf } from "./kernel/realm.js";
 // and reflow.
 const SETTLE_MS = 350;
 
+/** The visual viewport against the layout viewport, in whole CSS px. */
+interface KeyboardGeometry {
+  /** How far the visual viewport is scrolled down the layout viewport. */
+  readonly top: number;
+  /** How much of the layout viewport's bottom the soft keyboard covers. */
+  readonly bottom: number;
+}
+
+export interface KeyboardInsetsOptions {
+  /** The outermost terminal root: receives --kb-inset and --vv-top, which every
+   *  pane and chrome element beneath it inherits, so they scope to the terminal
+   *  subtree instead of leaking onto the host document. */
+  root: HTMLElement;
+  /** Ignore the visualViewport keyboard geometry (a hardware-keyboard device
+   *  has no soft keyboard to accommodate). */
+  suppressKeyboardInset?: () => boolean;
+}
+
+/** The document's one reading of its visual viewport. */
+export interface KeyboardInsets {
+  /** The latest geometry; zero where the window has no visual viewport. */
+  current(): KeyboardGeometry;
+  /** Call `fn` with the geometry on every visual-viewport resize and scroll, on
+   *  every window focus and bfcache restore, and on every `refresh()`; returns
+   *  the release. */
+  onChange(fn: (geometry: KeyboardGeometry) => void): () => void;
+  /** Read again and call every `onChange` subscriber. A no-op after teardown. */
+  refresh(): void;
+  /** Release every listener and clear the CSS vars published on the root. */
+  teardown(): void;
+}
+
 export interface ViewportOptions {
   termWrap: HTMLElement;
-  /** The terminal root: receives the geometry CSS vars the sibling chrome reads
-   *  (--kb-inset, --vv-top), so they scope to the terminal subtree instead of
-   *  leaking onto the host document. */
-  root?: HTMLElement;
+  /** The box termWrap is pinned within, observed in its place: termWrap's
+   *  insets follow chrome measured in ResizeObserver callbacks on boxes deeper
+   *  than termWrap, and an observed box resized from such a callback is a
+   *  ResizeObserver loop. So a caller that moves termWrap's insets other than
+   *  through `keyboard` calls `keyboard.refresh()`, which pins again and starts
+   *  a transition. */
+  box: HTMLElement;
+  /** The document's keyboard geometry, which pins the term wrap over the visible
+   *  area. */
+  keyboard: KeyboardInsets;
   /** This pane's scroll controller, read at settle. */
   scroll: Pick<ScrollController, "isUserScrolledUp" | "stickToBottom">;
   onSettled: (wasAtBottom: boolean) => void;
-  /** Ignore the visualViewport keyboard geometry (a hardware-keyboard device
-   *  has no soft keyboard to accommodate); only reserved bottom chrome insets
-   *  the terminal. */
-  suppressKeyboardInset?: () => boolean;
 }
 
 /** One pane's viewport tracker. */
 export interface Viewport {
   /** Whether a transition is in flight, so geometry measured now is provisional. */
   isInTransition(): boolean;
-  /** Release every listener and observer, stop the settle timer, and clear the
-   *  CSS vars published on the root. */
+  /** Start a transition as a resize would, for a box about to move that has not
+   *  moved yet; it settles SETTLE_MS after the last resize, as any other does. */
+  beginTransition(): void;
+  /** Release every listener and observer and stop the settle timer. */
   teardown(): void;
 }
 
-export function createViewport(opts: ViewportOptions): Viewport {
-  const { termWrap, scroll } = opts;
-  const varTarget = opts.root ?? opts.termWrap;
+// The release is pushed as the listener is acquired, so a registration that
+// throws drains what came before it.
+function listenInto(
+  cleanup: (() => void)[],
+  target: EventTarget,
+  type: string,
+  handler: () => void,
+): void {
+  target.addEventListener(type, handler);
+  cleanup.push(() => {
+    target.removeEventListener(type, handler);
+  });
+}
+
+function drain(cleanup: (() => void)[]): void {
+  while (cleanup.length > 0) {
+    cleanup.pop()?.();
+  }
+}
+
+export function createKeyboardInsets(opts: KeyboardInsetsOptions): KeyboardInsets {
+  const { root } = opts;
   const suppressKeyboardInset = opts.suppressKeyboardInset ?? ((): boolean => false);
-  // The terminal's own window: its viewport, its keyboard and its rotation, not
-  // the importing page's.
+  // The terminal's own window: its viewport and its keyboard, not the importing
+  // page's.
+  const win = windowOf(root.ownerDocument);
+  const vv = win.visualViewport;
+  const subscribers = new Set<(geometry: KeyboardGeometry) => void>();
+  let geometry: KeyboardGeometry = { top: 0, bottom: 0 };
+  let live = true;
+  const cleanup: (() => void)[] = [];
+  function release(): void {
+    live = false;
+    drain(cleanup);
+    subscribers.clear();
+    root.style.removeProperty("--kb-inset");
+    root.style.removeProperty("--vv-top");
+  }
+
+  function update(): void {
+    // iPadOS has been seen to report a keyboard-sized shrink with no keyboard
+    // shown and pin it, which is what suppressKeyboardInset defends against.
+    geometry =
+      !vv || suppressKeyboardInset()
+        ? { top: 0, bottom: 0 }
+        : {
+            top: Math.max(0, Math.round(vv.offsetTop)),
+            bottom: Math.max(0, Math.round(win.innerHeight - vv.offsetTop - vv.height)),
+          };
+    root.style.setProperty("--kb-inset", `${geometry.bottom}px`);
+    root.style.setProperty("--vv-top", `${geometry.top}px`);
+    for (const fn of [...subscribers]) {
+      fn(geometry);
+    }
+  }
+
+  try {
+    if (vv) {
+      listenInto(cleanup, vv, "resize", update);
+      listenInto(cleanup, vv, "scroll", update);
+      // Recompute on focus and bfcache restore, so a one-off bad visualViewport
+      // reading clears on the next natural interaction instead of at reload.
+      listenInto(cleanup, win, "focus", update);
+      listenInto(cleanup, win, "pageshow", update);
+    }
+    update();
+  } catch (err) {
+    release();
+    throw err;
+  }
+
+  return {
+    current: () => geometry,
+    onChange(fn) {
+      subscribers.add(fn);
+      return () => {
+        subscribers.delete(fn);
+      };
+    },
+    refresh() {
+      if (live) {
+        update();
+      }
+    },
+    teardown: release,
+  };
+}
+
+export function createViewport(opts: ViewportOptions): Viewport {
+  const { termWrap, keyboard, scroll } = opts;
+  // The terminal's own window: its viewport and its rotation, not the importing
+  // page's.
   const win = windowOf(termWrap.ownerDocument);
   let inTransition = false;
   let settleTimer: number | null = null;
-  // Every listener and the observer push their release as they are acquired,
-  // so a registration that throws drains what came before it.
   const cleanup: (() => void)[] = [];
-  function listen(target: EventTarget, type: string, handler: () => void): void {
-    target.addEventListener(type, handler);
-    cleanup.push(() => {
-      target.removeEventListener(type, handler);
-    });
-  }
   function release(): void {
-    while (cleanup.length > 0) {
-      cleanup.pop()?.();
-    }
+    drain(cleanup);
     if (settleTimer !== null) {
       win.clearTimeout(settleTimer);
       settleTimer = null;
     }
-    varTarget.style.removeProperty("--kb-inset");
-    varTarget.style.removeProperty("--vv-top");
     inTransition = false;
   }
 
@@ -86,57 +196,39 @@ export function createViewport(opts: ViewportOptions): Viewport {
     }, SETTLE_MS);
   }
 
-  function keyboardInsets(vv: VisualViewport): void {
-    const onChange = (): void => {
-      // iOS shrinks (and can offset) the visual viewport without resizing the
-      // layout viewport, so a `position: fixed; inset: 0` box keeps the
-      // full-screen height behind the keyboard; driving top and bottom from
-      // visualViewport keeps the terminal over the visible area everywhere.
-      // iPadOS has been seen to report a keyboard-sized shrink with no keyboard
-      // shown and pin it, which is what suppressKeyboardInset defends against.
-      const offsetTop = suppressKeyboardInset() ? 0 : Math.max(0, Math.round(vv.offsetTop));
-      const bottomInset = suppressKeyboardInset()
-        ? 0
-        : Math.max(0, Math.round(win.innerHeight - vv.offsetTop - vv.height));
-      // A feature sets --wt-reserve-bottom (px) on the root for bottom chrome the
-      // content must clear; it is measured with the keyboard closed, so adding it
-      // to the keyboard inset does not double-count.
-      const rawReserve = Math.max(
-        0,
-        Math.round(
-          parseFloat(win.getComputedStyle(termWrap).getPropertyValue("--wt-reserve-bottom")) || 0,
-        ),
-      );
-      // The reserve is a tab bar, tens of px; a value near half the screen is a
-      // bad measurement that would strand the lower half of the terminal black.
-      const reserve = Math.min(rawReserve, Math.round(win.innerHeight / 3));
-      const bottom = bottomInset + reserve;
-      termWrap.style.top = offsetTop > 0 ? `${offsetTop}px` : "";
-      termWrap.style.bottom = bottom > 0 ? `${bottom}px` : "";
-      varTarget.style.setProperty("--kb-inset", `${bottomInset}px`);
-      varTarget.style.setProperty("--vv-top", `${offsetTop}px`);
-      startTransition();
-    };
-    listen(vv, "resize", onChange);
-    listen(vv, "scroll", onChange);
-    // Recompute on focus and bfcache restore, so a one-off bad visualViewport
-    // reading clears on the next natural interaction instead of at reload.
-    listen(win, "focus", onChange);
-    listen(win, "pageshow", onChange);
-    onChange();
+  // iOS shrinks (and can offset) the visual viewport without resizing the layout
+  // viewport, so a `position: fixed; inset: 0` box keeps the full-screen height
+  // behind the keyboard; driving top and bottom from the keyboard geometry keeps
+  // the terminal over the visible area everywhere.
+  function pin(geometry: KeyboardGeometry): void {
+    // A feature sets --wt-reserve-bottom (px) on the root for bottom chrome the
+    // content must clear; it is measured with the keyboard closed, so adding it
+    // to the keyboard inset does not double-count.
+    const rawReserve = Math.max(
+      0,
+      Math.round(
+        parseFloat(win.getComputedStyle(termWrap).getPropertyValue("--wt-reserve-bottom")) || 0,
+      ),
+    );
+    // The reserve is a tab bar, tens of px; a value near half the screen is a
+    // bad measurement that would strand the lower half of the terminal black.
+    const reserve = Math.min(rawReserve, Math.round(win.innerHeight / 3));
+    const bottom = geometry.bottom + reserve;
+    termWrap.style.top = geometry.top > 0 ? `${geometry.top}px` : "";
+    termWrap.style.bottom = bottom > 0 ? `${bottom}px` : "";
+    startTransition();
   }
 
   try {
-    if (win.visualViewport) {
-      keyboardInsets(win.visualViewport);
-    }
+    cleanup.push(keyboard.onChange(pin));
+    pin(keyboard.current());
 
     const ro = new win.ResizeObserver(startTransition);
     cleanup.push(() => {
       ro.disconnect();
     });
-    ro.observe(termWrap);
-    listen(win, "resize", startTransition);
+    ro.observe(opts.box);
+    listenInto(cleanup, win, "resize", startTransition);
 
     // iOS Safari often emits window.resize late or not at all on rotation while
     // screen.orientation.change survives; older Safari has only the deprecated
@@ -144,9 +236,9 @@ export function createViewport(opts: ViewportOptions): Viewport {
     const orientation = (win.screen as Screen & { orientation?: ScreenOrientation }).orientation;
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime guard for older Safari without screen.orientation
     if (orientation) {
-      listen(orientation, "change", startTransition);
+      listenInto(cleanup, orientation, "change", startTransition);
     } else if ("onorientationchange" in win) {
-      listen(win, "orientationchange", startTransition);
+      listenInto(cleanup, win, "orientationchange", startTransition);
     }
   } catch (err) {
     release();
@@ -155,6 +247,7 @@ export function createViewport(opts: ViewportOptions): Viewport {
 
   return {
     isInTransition: () => inTransition,
+    beginTransition: startTransition,
     teardown: release,
   };
 }

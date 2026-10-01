@@ -1,15 +1,23 @@
 :where(.wt-root.wt-split) {
   --wt-split-gutter: 10px;
   --wt-split-ratio: 0.5;
+  /* The left pane's width. Its 100% resolves where it is used, against the shell
+     root in both the grid track and the drop highlights. Rounded because Blink
+     scales the percentage in single precision and truncates a length to 1/64 px
+     (LayoutUnit, https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/platform/geometry/layout_unit.h):
+     the share of a 360 px pane on a 1280 px row drew 359.98 px, a column short. */
+  --wt-split-left: round(
+    nearest,
+    calc((100% - var(--wt-split-gutter)) * var(--wt-split-ratio)),
+    1px
+  );
 
   display: grid;
   grid-template-columns: minmax(0, 1fr);
 }
 
 :where(.wt-root.wt-split.wt-split-open) {
-  grid-template-columns:
-    calc((100% - var(--wt-split-gutter)) * var(--wt-split-ratio)) var(--wt-split-gutter)
-    minmax(0, 1fr);
+  grid-template-columns: var(--wt-split-left) var(--wt-split-gutter) minmax(0, 1fr);
 }
 
 /* Two panes given the same column (the collapse) would otherwise be auto-placed
@@ -83,6 +91,14 @@
   display: none;
 }
 
+/* The handle ends where the panes' content does: above the tab bar, or above
+   the switcher bar and the soft keyboard, the two values viewport.ts insets the
+   panes by. Its box is composited, and Blink promotes a bar overlapping it to a
+   layer of its own (kOverlap,
+   https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/platform/graphics/compositing_reasons.cc),
+   whose origin is off the device grid wherever the bar's height times the DPR
+   is fractional (61px at 1.5 dppx), so everything in the bar draws half a
+   device pixel off. */
 :where(.wt-root.wt-split.wt-split-open) > .wt-split-handle {
   display: block;
   grid-column: 2;
@@ -91,28 +107,53 @@
   justify-self: center;
   inline-size: 24px;
   margin-inline: -7px;
+  margin-block-end: max(
+    calc(var(--wt-tabbar-h, 0px) + var(--safe-bottom, 0px)),
+    calc(var(--wt-reserve-bottom, 0px) + var(--kb-inset, 0px))
+  );
   cursor: col-resize;
   touch-action: none;
   z-index: 4;
 }
 
+@media (pointer: coarse) {
+  :where(.wt-root.wt-split.wt-split-open) > .wt-split-handle {
+    inline-size: 44px;
+    margin-inline: -17px;
+  }
+}
+
 :where(.wt-root.wt-split) .wt-split-handle::before {
   content: "";
   position: absolute;
-  inset-inline-start: 9px;
-  inline-size: 6px;
-  inset-block: 12px calc(var(--wt-tabbar-h, 0px) + 12px);
-  border-radius: 3px;
+  inset-inline: 0;
+  margin-inline: auto;
+  inline-size: 8px;
+  inset-block: 12px;
+  border-radius: 4px;
   background: var(--tab-bg);
   border-inline: 1px solid var(--border);
 }
 
-:where(.wt-root.wt-split) .wt-split-handle[data-faces="left"]::before {
-  border-inline-start: 2px solid var(--accent);
+/* The pill's 3px is half the 8px bar less its 1px edge, and its 4px of travel
+   reaches the other inner edge: change the bar and these follow. */
+:where(.wt-root.wt-split) .wt-split-handle::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: calc(50% - 3px);
+  inline-size: 2px;
+  block-size: 48px;
+  inset-block-start: calc((100% - 48px) / 2);
+  border-radius: 1px;
+  background: var(--accent);
 }
 
-:where(.wt-root.wt-split) .wt-split-handle[data-faces="right"]::before {
-  border-inline-end: 2px solid var(--accent);
+:where(.wt-root.wt-split) .wt-split-handle[data-faces="right"]::after {
+  translate: 4px 0;
+}
+
+:where(.wt-root.wt-split.wt-animate) .wt-split-handle::after {
+  transition: translate var(--dur-standard) var(--ease-standard);
 }
 
 :where(.wt-root.wt-split) .wt-split-handle.wt-handle-held::before {
@@ -157,7 +198,6 @@
   content: "";
   position: absolute;
   inset-block: 0 var(--wt-tabbar-h, 0);
-  inline-size: 50%;
   background: color-mix(in oklch, var(--accent) 12%, transparent);
   pointer-events: none;
   z-index: 5;
@@ -165,12 +205,14 @@
 
 :where(.wt-root.wt-split.wt-drop-left)::before {
   inset-inline-start: 0;
+  inline-size: var(--wt-split-left);
 }
 
 :where(.wt-root.wt-split.wt-drop-right)::after {
-  inset-inline-start: 50%;
+  inset-inline: calc(var(--wt-split-left) + var(--wt-split-gutter)) 0;
 }
 
+:where(.wt-root.wt-split.wt-animate.wt-split-opening),
 :where(.wt-root.wt-split.wt-animate.wt-split-closing) {
   transition: grid-template-columns var(--dur-standard) var(--ease-standard);
 }

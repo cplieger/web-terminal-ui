@@ -60,9 +60,9 @@
   }
 }
 
-/* Desktop + tabbed: the tab strip docks at the bottom, so lift the button above
-   it with a clear gap. */
-@media (pointer: fine) {
+/* Above the docked strip, which shows under every pointer but a coarse one, no
+   pointer at all included: the gate is not `(pointer: fine)`. */
+@media not (pointer: coarse) {
   :where(.wt-root.wt-tabbed) .wt-scroll-bottom {
     bottom: calc(var(--wt-tabbar-h, 44px) + var(--sp-3));
   }

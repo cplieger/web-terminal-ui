@@ -199,7 +199,9 @@ export interface SplitController {
   isOpen(): boolean;
   /** Enabled, closed, and the pane row is wide enough for two panes. */
   canOpen(): boolean;
-  /** True when the split is now open at a 50/50 share; false when nothing changed. */
+  /** True when the split is now open at a 50/50 share; false when nothing changed.
+   *  The state is open at once; with `wt-animate` on the shell root the divider
+   *  slides in from the right edge over `--dur-standard`. */
   open(): boolean;
   /** The selected pane fills the view; false when nothing changed. The state is
    *  closed at once; with `wt-animate` on the shell root the grid columns slide
@@ -303,6 +305,11 @@ export interface ShellContext {
    *  built pane's connection other than `side` (whose own `clearActiveSession()`
    *  already did it), and the scrollback keeper's forget. */
   dropSessionExcept(sessionId: string, side: PaneSide): void;
+  /** Call after changing what the panes' term wraps clear at the bottom (the
+   *  `--wt-tabbar-h` or `--wt-reserve-bottom` set on `root`): every pane re-pins
+   *  its term wrap and sends its size once it settles. Nothing observes a term
+   *  wrap, so this call is how such a change reaches the panes. */
+  chromeResized(): void;
   /** Bind the page's attention surfaces (the document-title prefix, the app
    *  badge, the icon links) and get the reporter that drives them. The terminal
    *  is the only writer of `document.title`: a program's OSC 0/2 title replaces

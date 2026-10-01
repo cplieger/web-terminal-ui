@@ -544,18 +544,99 @@ describe("the drag", () => {
     expect(handle.getAttribute("aria-valuenow")).toBe("51");
   });
 
-  it("dims the left pane squeezed under 360 px and closes it on release, the right pane filling the view", async () => {
+  it("holds the left pane at exactly 360 px for 120 px of travel past the minimum, undimmed, and follows the pointer again from 121 px", async () => {
+    const { root, split, handle } = await openWithTwoTabs(1000);
+    const [left] = paneRoots(root);
+    // The press at 500 grips the divider at 495, so the pointer at x puts the
+    // left pane's edge at x - 5: the 360 px line is x = 365.
+    press(handle, 500);
+
+    moveTo(365);
+    expect(ratioVar(root)).toBe(String(360 / 990));
+    moveTo(364);
+    expect(ratioVar(root)).toBe(String(360 / 990));
+    moveTo(246);
+    expect(ratioVar(root)).toBe(String(360 / 990));
+    expect(left?.classList.contains("wt-pane-closing")).toBe(false);
+    moveTo(245);
+    expect(ratioVar(root)).toBe(String(360 / 990));
+    expect(left?.classList.contains("wt-pane-closing")).toBe(false);
+
+    moveTo(244);
+    expect(ratioVar(root)).toBe(String(239 / 990));
+    expect(left?.classList.contains("wt-pane-closing")).toBe(true);
+    expect(split.isOpen()).toBe(true);
+  });
+
+  it("holds the right pane at 360 px through the same zone", async () => {
+    const { root, handle } = await openWithTwoTabs(1000);
+    const [, right] = paneRoots(root);
+    // The right pane is 990 - (x - 5) wide: 360 px at x = 635, 240 px at x = 755.
+    press(handle, 500);
+
+    moveTo(700);
+    expect(ratioVar(root)).toBe(String(630 / 990));
+    moveTo(755);
+    expect(ratioVar(root)).toBe(String(630 / 990));
+    expect(right?.classList.contains("wt-pane-closing")).toBe(false);
+
+    moveTo(756);
+    expect(ratioVar(root)).toBe(String(751 / 990));
+    expect(right?.classList.contains("wt-pane-closing")).toBe(true);
+  });
+
+  it("a release inside the grace zone sets the pane to exactly 360 px", async () => {
+    const { root, split, handle } = await openWithTwoTabs(1000);
+
+    press(handle, 500);
+    moveTo(300);
+    release(300);
+
+    expect(split.isOpen()).toBe(true);
+    expect(split.state()).toMatchObject({ ratio: 360 / 990, committedRatio: 360 / 990 });
+    expect(ratioVar(root)).toBe(String(360 / 990));
+    expect(handle.getAttribute("aria-valuenow")).toBe(handle.getAttribute("aria-valuemin"));
+  });
+
+  it("a release inside the grace zone after a trip past it still sets 360 px", async () => {
+    const { root, split, handle } = await openWithTwoTabs(1000);
+    const [left] = paneRoots(root);
+
+    press(handle, 500);
+    moveTo(150);
+    expect(left?.classList.contains("wt-pane-closing")).toBe(true);
+    moveTo(300);
+    expect(left?.classList.contains("wt-pane-closing")).toBe(false);
+    release(300);
+
+    expect(split.isOpen()).toBe(true);
+    expect(split.state()).toMatchObject({ ratio: 360 / 990, committedRatio: 360 / 990 });
+    expect(ratioVar(root)).toBe(String(360 / 990));
+  });
+
+  it("a drag that only entered the grace zone commits where it is released above the minimum", async () => {
+    const { split, handle } = await openWithTwoTabs(1000);
+
+    press(handle, 500);
+    moveTo(300);
+    moveTo(455);
+    release(455);
+
+    expect(split.state()).toMatchObject({ ratio: 450 / 990, committedRatio: 450 / 990 });
+  });
+
+  it("dims the left pane past the grace zone and closes it on release, the right pane filling the view", async () => {
     const { root, ctx, split, handle } = await openWithTwoTabs(1000);
     const [left, right] = paneRoots(root);
 
     press(handle, 500);
-    moveTo(305);
-    expect(ratioVar(root)).toBe(String(300 / 990));
+    moveTo(244);
+    expect(ratioVar(root)).toBe(String(239 / 990));
     expect(left?.classList.contains("wt-pane-closing")).toBe(true);
     expect(right?.classList.contains("wt-pane-closing")).toBe(false);
     expect(split.isOpen()).toBe(true);
 
-    release(305);
+    release(244);
 
     expect(split.isOpen()).toBe(false);
     expect(handle.classList.contains("wt-handle-held")).toBe(false);
@@ -567,15 +648,15 @@ describe("the drag", () => {
     expect(ratioVar(root)).toBe("0.5");
   });
 
-  it("dims the right pane squeezed under 360 px and closes that side", async () => {
+  it("dims the right pane past the grace zone and closes that side", async () => {
     const { root, ctx, split, handle } = await openWithTwoTabs(1000);
     const [left, right] = paneRoots(root);
 
     press(handle, 500);
-    moveTo(695);
+    moveTo(756);
     expect(right?.classList.contains("wt-pane-closing")).toBe(true);
     expect(left?.classList.contains("wt-pane-closing")).toBe(false);
-    release(695);
+    release(756);
 
     expect(split.isOpen()).toBe(false);
     expect(right?.classList.contains("wt-pane-closing")).toBe(false);
@@ -583,15 +664,16 @@ describe("the drag", () => {
     expect(ctx.shell.pane("right")?.state()).toBe("hidden");
   });
 
-  it("a dip under the minimum that comes back snaps the divider to where it was and commits nothing", async () => {
+  it("a trip past the grace zone that comes back above the minimum snaps the divider to where it was and commits nothing", async () => {
     const { root, split, handle } = await openWithTwoTabs(1000);
     split.setRatio(0.4, true);
     const [left] = paneRoots(root);
     const changes = vi.fn<(state: SplitState) => void>();
     split.onChange(changes);
 
+    // The divider starts at 396, so the pointer at x puts it at x - 104.
     press(handle, 500);
-    moveTo(404);
+    moveTo(343);
     expect(left?.classList.contains("wt-pane-closing")).toBe(true);
     moveTo(554);
     expect(ratioVar(root)).toBe(String(450 / 990));
@@ -605,7 +687,7 @@ describe("the drag", () => {
     expect(changes.mock.calls.every(([state]) => state.committedRatio === 0.4)).toBe(true);
   });
 
-  it("a release under the minimum whose close the split refuses (the survivor has failed) snaps the divider back and closes nothing", async () => {
+  it("a release past the grace zone whose close the split refuses (the survivor has failed) snaps the divider back and closes nothing", async () => {
     let setups = 0;
     const boom = (): TerminalFeature<void> => ({
       name: "boom",
@@ -632,10 +714,10 @@ describe("the drag", () => {
     const [left] = paneRoots(root);
 
     press(handle, 500);
-    moveTo(305);
-    expect(ratioVar(root)).toBe(String(300 / 990));
+    moveTo(244);
+    expect(ratioVar(root)).toBe(String(239 / 990));
     expect(left?.classList.contains("wt-pane-closing")).toBe(true);
-    release(305);
+    release(244);
 
     expect(split.isOpen()).toBe(true);
     expect(ctx.shell.pane("left")?.session.id).toBe("a");
@@ -668,7 +750,7 @@ describe("the drag", () => {
   it("a split closed under the pointer ends the drag: no dim, no resize, and the release decides nothing", async () => {
     const { root, split, handle } = await openWithTwoTabs(1000);
     press(handle, 500);
-    moveTo(300);
+    moveTo(200);
     const [left] = paneRoots(root);
     expect(left?.classList.contains("wt-pane-closing")).toBe(true);
 

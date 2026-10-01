@@ -302,6 +302,11 @@
   display: none;
 }
 
+:where(.wt-root) .wt-switcher-split[aria-expanded="true"] {
+  background: var(--tab-hover-bg);
+  color: var(--tab-active-fg);
+}
+
 /* Tab-switcher button: toggles the list open/closed, sitting between the
    keyboard and "+" buttons. position: relative anchors its notification dot,
    absolutely placed in the top-right corner. It only earns its place with ≥2

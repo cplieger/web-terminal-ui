@@ -57,6 +57,7 @@
     "--wt-mark-ink",
     "--wt-mark-size",
     "--wt-split-gutter",
+    "--wt-split-left",
     "--wt-split-ratio",
     "--wt-switcher-h"
   ],
@@ -116,7 +117,9 @@
     "--wt-mark-gap",
     "--wt-mark-ink",
     "--wt-mark-size",
+    "--wt-reserve-bottom",
     "--wt-split-gutter",
+    "--wt-split-left",
     "--wt-split-ratio",
     "--wt-switcher-h",
     "--wt-tabbar-h"

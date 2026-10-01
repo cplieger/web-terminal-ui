@@ -373,3 +373,35 @@ export function menuItem(items: HTMLElement[], label: string): HTMLButtonElement
   }
   return b;
 }
+export interface FakeDataTransfer {
+  effectAllowed: string;
+  dropEffect: string;
+  data: Record<string, string>;
+  setData(type: string, value: string): void;
+  setDragImage(): void;
+}
+export function fakeDataTransfer(): FakeDataTransfer {
+  return {
+    effectAllowed: "",
+    dropEffect: "",
+    data: {},
+    setData(type, value) {
+      this.data[type] = value;
+    },
+    setDragImage: () => undefined,
+  };
+}
+export function dragAt(
+  type: string,
+  dt: FakeDataTransfer,
+  target: Element,
+  clientX: number,
+  clientY = 300,
+): Event {
+  const e = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(e, "dataTransfer", { value: dt });
+  Object.defineProperty(e, "clientX", { value: clientX });
+  Object.defineProperty(e, "clientY", { value: clientY });
+  target.dispatchEvent(e);
+  return e;
+}

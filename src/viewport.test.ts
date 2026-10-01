@@ -1,11 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
-import { createViewport, type Viewport } from "./viewport.js";
+import {
+  createKeyboardInsets,
+  createViewport,
+  type KeyboardInsets,
+  type Viewport,
+} from "./viewport.js";
 
 const SETTLE_MS = 350;
 const isUserScrolledUp = vi.fn<() => boolean>(() => false);
 const stickToBottom = vi.fn();
 const scroll = { isUserScrolledUp, stickToBottom };
 let viewport: Viewport;
+let keyboard: KeyboardInsets;
 let termWrap: HTMLElement;
 let onSettled: Mock<(wasAtBottom: boolean) => void>;
 
@@ -43,14 +49,16 @@ beforeEach(() => {
   termWrap = document.createElement("div");
   document.body.replaceChildren(termWrap);
   onSettled = vi.fn<(wasAtBottom: boolean) => void>();
-  viewport = createViewport({ termWrap, scroll, onSettled });
-  // Flush any transition started by the construction-time visualViewport onChange.
+  keyboard = createKeyboardInsets({ root: termWrap });
+  viewport = createViewport({ termWrap, box: document.body, keyboard, scroll, onSettled });
+  // Flush any transition started by the construction-time pin to the keyboard.
   vi.advanceTimersByTime(SETTLE_MS + 50);
   onSettled.mockClear();
   stickToBottom.mockClear();
 });
 afterEach(() => {
   viewport.teardown();
+  keyboard.teardown();
   vi.useRealTimers();
 });
 
@@ -115,13 +123,31 @@ describe("viewport: settle lifecycle", () => {
     expect(viewport.isInTransition()).toBe(false);
   });
 
+  it("begins a transition on request, before anything has moved, and settles it like a resize", () => {
+    viewport.beginTransition();
+    expect(viewport.isInTransition()).toBe(true);
+    vi.advanceTimersByTime(200);
+    window.dispatchEvent(new Event("resize"));
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    expect(onSettled).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(viewport.isInTransition()).toBe(false);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps two panes' settle lifecycles apart", () => {
     // Two viewports over two term wraps: a window resize reaches both, and each
     // reports its own settle to its own callback exactly once.
     const otherWrap = document.createElement("div");
     document.body.appendChild(otherWrap);
     const otherSettled = vi.fn<(wasAtBottom: boolean) => void>();
-    const other = createViewport({ termWrap: otherWrap, scroll, onSettled: otherSettled });
+    const other = createViewport({
+      termWrap: otherWrap,
+      box: document.body,
+      keyboard,
+      scroll,
+      onSettled: otherSettled,
+    });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     otherSettled.mockClear();
     onSettled.mockClear();
@@ -138,9 +164,12 @@ describe("viewport: settle lifecycle", () => {
 
 describe("viewport: visualViewport keyboard inset", () => {
   let inner: Viewport | null = null;
+  let innerKeyboard: KeyboardInsets | null = null;
   afterEach(() => {
     inner?.teardown();
     inner = null;
+    innerKeyboard?.teardown();
+    innerKeyboard = null;
     undoShadow();
   });
 
@@ -156,7 +185,14 @@ describe("viewport: visualViewport keyboard inset", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    inner = createViewport({ termWrap: tw, root, scroll, onSettled: vi.fn() });
+    innerKeyboard = createKeyboardInsets({ root });
+    inner = createViewport({
+      termWrap: tw,
+      box: root,
+      keyboard: innerKeyboard,
+      scroll,
+      onSettled: vi.fn(),
+    });
     // .term is pinned to the visual viewport: top = offsetTop (30); the bottom
     // inset is the gap from the layout bottom to the keyboard top
     // (innerHeight - offsetTop - vv.height = innerHeight - 30 - (innerHeight - 200) = 170).
@@ -178,7 +214,14 @@ describe("viewport: visualViewport keyboard inset", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    inner = createViewport({ termWrap: tw, root, scroll, onSettled: vi.fn() });
+    innerKeyboard = createKeyboardInsets({ root });
+    inner = createViewport({
+      termWrap: tw,
+      box: root,
+      keyboard: innerKeyboard,
+      scroll,
+      onSettled: vi.fn(),
+    });
     expect(tw.style.top).toBe("");
     expect(tw.style.bottom).toBe("");
     expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
@@ -202,12 +245,13 @@ describe("viewport: visualViewport keyboard inset", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
+    innerKeyboard = createKeyboardInsets({ root, suppressKeyboardInset: () => true });
     inner = createViewport({
       termWrap: tw,
-      root,
+      box: root,
+      keyboard: innerKeyboard,
       scroll,
       onSettled: vi.fn(),
-      suppressKeyboardInset: () => true,
     });
     expect(tw.style.top).toBe("");
     expect(tw.style.bottom).toBe("");
@@ -219,12 +263,15 @@ describe("viewport: visualViewport keyboard inset", () => {
 describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
   const realInnerHeight = window.innerHeight;
   let inner: Viewport | null = null;
+  let innerKeyboard: KeyboardInsets | null = null;
   beforeEach(() => {
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
   });
   afterEach(() => {
     inner?.teardown();
     inner = null;
+    innerKeyboard?.teardown();
+    innerKeyboard = null;
     undoShadow();
     Object.defineProperty(window, "innerHeight", { configurable: true, value: realInnerHeight });
   });
@@ -242,7 +289,14 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    inner = createViewport({ termWrap: tw, root, scroll, onSettled: vi.fn() });
+    innerKeyboard = createKeyboardInsets({ root });
+    inner = createViewport({
+      termWrap: tw,
+      box: root,
+      keyboard: innerKeyboard,
+      scroll,
+      onSettled: vi.fn(),
+    });
     // Keyboard closed (vv.height == innerHeight, offsetTop 0) so bottomInset is 0;
     // the 48px reserve (< innerHeight/3 == 300) is the whole bottom offset.
     expect(tw.style.bottom).toBe("48px");
@@ -264,8 +318,90 @@ describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
     const root = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    inner = createViewport({ termWrap: tw, root, scroll, onSettled: vi.fn() });
+    innerKeyboard = createKeyboardInsets({ root });
+    inner = createViewport({
+      termWrap: tw,
+      box: root,
+      keyboard: innerKeyboard,
+      scroll,
+      onSettled: vi.fn(),
+    });
     expect(tw.style.bottom).toBe("300px");
+  });
+
+  it("still folds the reserve in where the window has no visual viewport", () => {
+    restoreShadow = shadowOwn(window, "visualViewport", undefined);
+    const tw = document.createElement("div");
+    tw.style.setProperty("--wt-reserve-bottom", "48px");
+    const root = document.createElement("div");
+    root.appendChild(tw);
+    document.body.replaceChildren(root);
+    innerKeyboard = createKeyboardInsets({ root });
+    inner = createViewport({
+      termWrap: tw,
+      box: root,
+      keyboard: innerKeyboard,
+      scroll,
+      onSettled: vi.fn(),
+    });
+    expect(tw.style.bottom).toBe("48px");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
+  });
+});
+
+describe("viewport: a refresh re-pins to chrome that nothing observes", () => {
+  let root: HTMLElement;
+  let tw: HTMLElement;
+  beforeEach(() => {
+    viewport.teardown();
+    keyboard.teardown();
+    root = document.createElement("div");
+    tw = document.createElement("div");
+    root.appendChild(tw);
+    document.body.replaceChildren(root);
+  });
+  afterEach(() => {
+    undoShadow();
+  });
+
+  function mount(): void {
+    keyboard = createKeyboardInsets({ root });
+    viewport = createViewport({ termWrap: tw, box: root, keyboard, scroll, onSettled });
+    vi.advanceTimersByTime(SETTLE_MS + 50);
+    onSettled.mockClear();
+  }
+
+  it("re-reads the reserve and settles, so the pane re-sends its size", () => {
+    mount();
+    root.style.setProperty("--wt-reserve-bottom", "60px");
+
+    keyboard.refresh();
+    expect(tw.style.bottom).toBe("60px");
+    vi.advanceTimersByTime(SETTLE_MS);
+
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("does the same where the window has no visual viewport", () => {
+    restoreShadow = shadowOwn(window, "visualViewport", undefined);
+    mount();
+    root.style.setProperty("--wt-reserve-bottom", "60px");
+
+    keyboard.refresh();
+    expect(tw.style.bottom).toBe("60px");
+    vi.advanceTimersByTime(SETTLE_MS);
+
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes nothing once the reading is torn down", () => {
+    mount();
+    keyboard.teardown();
+
+    keyboard.refresh();
+
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("");
+    expect(root.style.getPropertyValue("--vv-top")).toBe("");
   });
 });
 
@@ -307,16 +443,19 @@ function liveVisualViewport(
 describe("viewport: the visual-viewport wiring reacts after construction", () => {
   let vv: ReturnType<typeof liveVisualViewport>;
   let root: HTMLElement;
+  let tw: HTMLElement;
 
   beforeEach(() => {
-    viewport.teardown(); // drop the outer instance's window listeners first
+    viewport.teardown(); // drop the outer instances' window listeners first
+    keyboard.teardown();
     vv = liveVisualViewport(window.innerHeight, 0);
     restoreShadow = shadowOwn(window, "visualViewport", vv);
     root = document.createElement("div");
-    const tw = document.createElement("div");
+    tw = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    viewport = createViewport({ termWrap: tw, root, scroll, onSettled });
+    keyboard = createKeyboardInsets({ root });
+    viewport = createViewport({ termWrap: tw, box: root, keyboard, scroll, onSettled });
   });
 
   afterEach(() => {
@@ -352,23 +491,52 @@ describe("viewport: the visual-viewport wiring reacts after construction", () =>
     window.dispatchEvent(new Event("pageshow"));
     expect(root.style.getPropertyValue("--kb-inset")).toBe("140px");
   });
+
+  it("pins every term wrap beneath the root to the one keyboard reading", () => {
+    const otherWrap = document.createElement("div");
+    root.appendChild(otherWrap);
+    const other = createViewport({
+      termWrap: otherWrap,
+      box: root,
+      keyboard,
+      scroll,
+      onSettled: vi.fn(),
+    });
+    vv.height = window.innerHeight - 250;
+    vv.fire("resize");
+    expect(tw.style.bottom).toBe("250px");
+    expect(otherWrap.style.bottom).toBe("250px");
+    other.teardown();
+  });
+
+  it("stops pinning a torn-down term wrap while the keyboard reading carries on", () => {
+    viewport.teardown();
+    vv.height = window.innerHeight - 250;
+    vv.fire("resize");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("250px");
+    expect(tw.style.bottom).toBe("");
+    expect(viewport.isInTransition()).toBe(false);
+  });
 });
 
-describe("viewport: teardown releases every listener it attached", () => {
+describe("viewport and keyboard insets: teardown releases every listener they attached", () => {
   let vv: ReturnType<typeof liveVisualViewport>;
   let root: HTMLElement;
 
   beforeEach(() => {
     viewport.teardown();
+    keyboard.teardown();
     vv = liveVisualViewport(window.innerHeight - 200, 0);
     restoreShadow = shadowOwn(window, "visualViewport", vv);
     root = document.createElement("div");
     const tw = document.createElement("div");
     root.appendChild(tw);
     document.body.replaceChildren(root);
-    viewport = createViewport({ termWrap: tw, root, scroll, onSettled });
+    keyboard = createKeyboardInsets({ root });
+    viewport = createViewport({ termWrap: tw, box: root, keyboard, scroll, onSettled });
     expect(root.style.getPropertyValue("--kb-inset")).toBe("200px");
     viewport.teardown();
+    keyboard.teardown();
   });
 
   afterEach(() => {
@@ -417,10 +585,10 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
     viewport.teardown();
     const orientation = liveVisualViewport(0, 0); // reused as a bare event target
     restoreShadow = shadowOwn(screen, "orientation", orientation);
-    viewport = createViewport({ termWrap, scroll, onSettled });
-    // Construction reads the real visualViewport and publishes its geometry, which
-    // starts a transition of its own; flush it so the rotation below is the only
-    // signal under test (the outer beforeEach does the same after its construction).
+    viewport = createViewport({ termWrap, box: document.body, keyboard, scroll, onSettled });
+    // Construction pins to the real visualViewport's geometry, which starts a
+    // transition of its own; flush it so the rotation below is the only signal
+    // under test (the outer beforeEach does the same after its construction).
     vi.advanceTimersByTime(SETTLE_MS + 50);
     expect(viewport.isInTransition()).toBe(false);
     orientation.fire("change");
@@ -440,7 +608,7 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
     // The other half of "lacks it": this browser genuinely has no
     // onorientationchange, so the else-if condition is false on its own merits.
     expect("onorientationchange" in window).toBe(false);
-    viewport = createViewport({ termWrap, scroll, onSettled });
+    viewport = createViewport({ termWrap, box: document.body, keyboard, scroll, onSettled });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     expect(viewport.isInTransition()).toBe(false);
     window.dispatchEvent(new Event("orientationchange"));
@@ -454,7 +622,7 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
     viewport.teardown();
     const orientation = liveVisualViewport(0, 0); // reused as a bare event target
     restoreShadow = shadowOwn(screen, "orientation", orientation);
-    viewport = createViewport({ termWrap, scroll, onSettled });
+    viewport = createViewport({ termWrap, box: document.body, keyboard, scroll, onSettled });
 
     viewport.teardown();
     orientation.fire("change");
@@ -465,11 +633,11 @@ describe("viewport: rotation is a re-measure signal on both Safari generations",
 
 // A ResizeObserver whose callback a test can actually fire. The real one only
 // reports a size change it observed, on a later frame of its own choosing, so
-// nothing a test does reaches the term-wrap observation construction makes on a
+// nothing a test does reaches the box observation construction makes on a
 // schedule it can assert against — and that observation is the signal that
-// catches a font load, a devtools dock, and an embedder resizing its panel, none
-// of which raise a window resize event. `disconnect()` is modelled faithfully
-// because teardown's release of the observer is half of what is under test.
+// catches an embedder resizing its panel, which raises no window resize event.
+// `disconnect()` is modelled faithfully because teardown's release of the
+// observer is half of what is under test.
 interface FakeObserver {
   callback: ResizeObserverCallback;
   targets: Element[];
@@ -509,15 +677,18 @@ function fireResize(target: Element): number {
   return watching.length;
 }
 
-describe("viewport: the term wrap's own size is a re-measure signal", () => {
+describe("viewport: the size of the box the term wrap is pinned within is a re-measure signal", () => {
+  let box: HTMLElement;
   let tw: HTMLElement;
 
   beforeEach(() => {
     viewport.teardown(); // drop the outer instance's window listeners first
     stubResizeObserver();
+    box = document.createElement("div");
     tw = document.createElement("div");
-    document.body.replaceChildren(tw);
-    viewport = createViewport({ termWrap: tw, scroll, onSettled });
+    box.appendChild(tw);
+    document.body.replaceChildren(box);
+    viewport = createViewport({ termWrap: tw, box, keyboard, scroll, onSettled });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     onSettled.mockClear();
     stickToBottom.mockClear();
@@ -527,17 +698,20 @@ describe("viewport: the term wrap's own size is a re-measure signal", () => {
     vi.unstubAllGlobals();
   });
 
-  it("observes the term wrap, so a font load or a panel resize settles like any other change", () => {
-    // A window resize is not the only way the terminal's box changes: a webfont
-    // arriving, devtools docking, or an embedder resizing its own panel move it
-    // with no window event at all.
+  it("observes the box, so a panel resize settles like any other change", () => {
+    // A window resize is not the only way the terminal's box changes: an
+    // embedder resizing its own panel moves it with no window event at all.
     expect(viewport.isInTransition()).toBe(false);
 
-    expect(fireResize(tw)).toBe(1);
+    expect(fireResize(box)).toBe(1);
 
     expect(viewport.isInTransition()).toBe(true);
     vi.advanceTimersByTime(SETTLE_MS);
     expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not observe the term wrap, whose insets other observers' callbacks write", () => {
+    expect(fireResize(tw)).toBe(0);
   });
 
   it("disconnects that observer on teardown, so a destroyed terminal stops re-measuring", () => {
@@ -545,7 +719,7 @@ describe("viewport: the term wrap's own size is a re-measure signal", () => {
     // ends up with two of them driving one settle lifecycle.
     viewport.teardown();
 
-    expect(fireResize(tw)).toBe(0);
+    expect(fireResize(box)).toBe(0);
     expect(viewport.isInTransition()).toBe(false);
     vi.advanceTimersByTime(SETTLE_MS + 50);
     expect(onSettled).not.toHaveBeenCalled();
@@ -565,7 +739,7 @@ describe("viewport: rotation on older Safari (the deprecated window event)", () 
     viewport.teardown();
     restoreOrientation = shadowOwn(screen, "orientation", undefined);
     restoreShadow = shadowOwn(window, "onorientationchange", null);
-    viewport = createViewport({ termWrap, scroll, onSettled });
+    viewport = createViewport({ termWrap, box: document.body, keyboard, scroll, onSettled });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     onSettled.mockClear();
   });
@@ -599,14 +773,16 @@ describe("viewport: rotation on older Safari (the deprecated window event)", () 
 describe("viewport: teardown and a settle already in flight", () => {
   // Driven through the fake ResizeObserver rather than a window event, so the
   // signal reaches exactly this instance.
-  let tw: HTMLElement;
+  let box: HTMLElement;
 
   beforeEach(() => {
     viewport.teardown();
     stubResizeObserver();
-    tw = document.createElement("div");
-    document.body.replaceChildren(tw);
-    viewport = createViewport({ termWrap: tw, scroll, onSettled });
+    box = document.createElement("div");
+    const tw = document.createElement("div");
+    box.appendChild(tw);
+    document.body.replaceChildren(box);
+    viewport = createViewport({ termWrap: tw, box, keyboard, scroll, onSettled });
     vi.advanceTimersByTime(SETTLE_MS + 50);
     onSettled.mockClear();
     stickToBottom.mockClear();
@@ -620,7 +796,7 @@ describe("viewport: teardown and a settle already in flight", () => {
     // destroy() during an iOS keyboard slide is ordinary (a tab close mid-slide),
     // and the settle callback drives the engine's scroll controller. Firing it
     // after teardown pins a terminal that no longer exists to the bottom.
-    expect(fireResize(tw)).toBe(1);
+    expect(fireResize(box)).toBe(1);
     expect(viewport.isInTransition()).toBe(true);
 
     viewport.teardown();
@@ -649,10 +825,12 @@ describe("viewport: bound to the terminal's own document", () => {
   // Real timers: the frame's clock is not the one vi.useFakeTimers() replaces.
   let frame: HTMLIFrameElement;
   let win: Window & typeof globalThis;
+  let frameRoot: HTMLElement;
   let tw: HTMLElement;
 
   beforeEach(async () => {
     viewport.teardown();
+    keyboard.teardown();
     vi.useRealTimers();
     frame = document.createElement("iframe");
     frame.style.width = "400px";
@@ -664,10 +842,13 @@ describe("viewport: bound to the terminal's own document", () => {
       throw new Error("no frame document");
     }
     win = view as Window & typeof globalThis;
+    frameRoot = doc.createElement("div");
     tw = doc.createElement("div");
-    doc.body.appendChild(tw);
-    viewport = createViewport({ termWrap: tw, scroll, onSettled });
-    // Construction publishes the frame's viewport geometry, which starts a
+    frameRoot.appendChild(tw);
+    doc.body.appendChild(frameRoot);
+    keyboard = createKeyboardInsets({ root: frameRoot });
+    viewport = createViewport({ termWrap: tw, box: frameRoot, keyboard, scroll, onSettled });
+    // Construction pins to the frame's keyboard geometry, which starts a
     // transition; let it settle so each case starts from rest.
     await vi.waitFor(() => {
       expect(viewport.isInTransition()).toBe(false);
@@ -702,7 +883,7 @@ describe("viewport: bound to the terminal's own document", () => {
 
     vv.dispatchEvent(new win.Event("resize"));
 
-    expect(tw.style.getPropertyValue("--kb-inset")).toBe("0px");
+    expect(frameRoot.style.getPropertyValue("--kb-inset")).toBe("0px");
     expect(tw.style.bottom).toBe("40px");
   });
 

@@ -10,12 +10,13 @@ import type {
   TerminalFeature,
   Unsubscribe,
 } from "../../kernel/types.js";
-import { isPaneSide, MIN_SPLIT_AREA_PX } from "../../kernel/layout-policy.js";
+import { isPaneSide, MIN_SPLIT_AREA_PX, SPLIT_GUTTER_PX } from "../../kernel/layout-policy.js";
 import { windowOf } from "../../kernel/realm.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { fromHTML, holdFocusOnPress } from "../dom.js";
 import { createClickSwallow, placeMenuAt } from "../menu-position.js";
+import { snapToDevicePixels } from "./device-snap.js";
 import { centreChipLabels } from "./ink-centre.js";
 import { SWITCH_ANIMATIONS, SWITCH_CLASSES } from "./switch-anim.js";
 import type { CueStatus, PaneLayout, SessionInfo, StatusRecord, Tab } from "./model.js";
@@ -94,19 +95,22 @@ const TAB_DRAG_TYPE = "application/x-web-terminal-tab";
  *  an in-flight create, so a duplicate activation opens one terminal. `list` is a
  *  snapshot of display data, not a live view. */
 export interface TabsApi {
-  /** Spawn a fresh session and show it where a tab click would land it. Calls
-   *  made while a create is in flight share that create, so one gesture opens
-   *  exactly one terminal. */
+  /** Spawn a fresh session and show it in the first empty pane, else (both
+   *  panes showing a tab) in the unselected one, and select its pane. Calls made
+   *  while a create is in flight share that create, so one gesture opens exactly
+   *  one terminal. */
   create(): Promise<void>;
   /** Close a session (kills its process) and drop its tab + cache. */
   close(id: string): Promise<void>;
   /** Show a tab: in the first empty pane, else in the selected pane; a tab a
    *  pane already shows has that pane selected instead. */
   switchTo(id: string): void;
-  /** Show a tab on one side of the split, opening it when closed; whatever that
-   *  side showed becomes an ordinary tab, the tab's old side is emptied, and the
-   *  tab's pane is selected. False when refused: an unknown id, an invalid side,
-   *  or a split the pane row is too narrow to open. */
+  /** Show a tab on one side of the split, opening it when closed, and select its
+   *  pane. A tab the other pane shows trades places with the tab on that side
+   *  (or leaves its pane empty when the side showed none); any other tab there
+   *  becomes ordinary. A tab already shown on that side changes nothing. False
+   *  when refused: an unknown id, an invalid side, or a split the pane row is too
+   *  narrow to open. */
   snap(id: string, side: PaneSide): boolean;
   /** The current tabs, first-to-last by creation; `active` marks a tab a pane
    *  shows. */
@@ -257,6 +261,12 @@ async function createSessionHonouringRetry(
   }
 }
 
+interface ShowOptions {
+  readonly dir?: "next" | "prev" | undefined;
+  /** Leave the selection where it is, unless the selected pane shows nothing. */
+  readonly keepSelection?: boolean;
+}
+
 function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
   if (ev.ctrlKey || ev.metaKey || ev.altKey) {
     return true;
@@ -362,12 +372,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const btn = fromHTML(doc, splitButtonHTML(cls));
         ctx.defer(holdFocusOnPress(btn));
         btn.addEventListener("click", () => {
-          const split = ctx.shell.split;
-          if (split.isOpen()) {
-            split.close();
-          } else {
-            split.open();
-          }
+          toggleSplit();
         });
         splitButtons.push(btn);
         return btn;
@@ -464,6 +469,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const varRoot = ctx.shell.root;
       const barResize = new win.ResizeObserver(() => {
         varRoot.style.setProperty("--wt-tabbar-h", `${String(bar.offsetHeight)}px`);
+        ctx.shell.chromeResized();
       });
       barResize.observe(bar);
       ctx.defer(() => {
@@ -650,6 +656,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // engine produced for THIS font at THIS size, rather than the em constant
       // in 00-tokens.css that can only be right at one size (see ink-centre.ts).
       ctx.defer(centreChipLabels(varRoot, { strip: bar, switcher }));
+      for (const b of splitButtons) {
+        const icon = b.querySelector("svg");
+        if (icon) {
+          ctx.defer(snapToDevicePixels(icon, ctx.shell.root));
+        }
+      }
 
       // Mark the root so the CSS lifts the bottom-anchored chrome (banner, toast,
       // scroll-to-bottom, key grid) above the switcher bar on a coarse pointer.
@@ -661,13 +673,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // the root). Measure the bar row (not the expandable list, which just
       // overlays content). innerHeight - rect.top captures the row plus the
       // safe-area beneath it; the RO fires with the keyboard closed, so the value
-      // excludes the keyboard lift (viewport.ts adds that separately). The
-      // synthetic visualViewport resize makes viewport.ts recompute immediately.
+      // excludes the keyboard lift (viewport.ts adds that separately).
       const swReserve = new win.ResizeObserver(() => {
         const rect = swBar.getBoundingClientRect();
         const px = rect.height > 0 ? Math.max(0, Math.round(win.innerHeight - rect.top)) : 0;
         varRoot.style.setProperty("--wt-reserve-bottom", `${String(px)}px`);
-        win.visualViewport?.dispatchEvent(new win.Event("resize"));
+        ctx.shell.chromeResized();
       });
       swReserve.observe(swBar);
       ctx.defer(() => {
@@ -745,6 +756,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       /** The tab that receives typing: the selected pane's. */
       const selectedId = (): string | null => shownIn(ctx.shell.selected());
       const otherSide = (side: PaneSide): PaneSide => (side === "left" ? "right" : "left");
+      /** Tabs the selected pane has shown, most recent first; fed from
+       *  `syncChrome`, which every change of the selected tab ends in. */
+      const recent: string[] = [];
+      function noteSelected(): void {
+        const id = selectedId();
+        if (id === null || recent[0] === id) {
+          return;
+        }
+        const older = recent.filter((r) => r !== id && tabList.some((t) => t.id === r));
+        recent.splice(0, recent.length, id, ...older);
+      }
       // Set by a bootstrap that showed nothing, cleared by the first showIn: the
       // one case a status event may pick a tab to show.
       let bootShowedNothing = false;
@@ -905,32 +927,49 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const active = doc.activeElement;
         return active !== null && (bar.contains(active) || switcher.contains(active));
       }
+      function keyboardInPaneInput(): boolean {
+        const active = doc.activeElement;
+        return (
+          active !== null &&
+          active.classList.contains("term-input") &&
+          ctx.shell.panes().some((p) => p.root.contains(active))
+        );
+      }
+      function keyboardInOtherPane(): boolean {
+        return keyboardInPaneInput() && doc.activeElement !== termInput();
+      }
 
       // The keyboard goes to the terminal input when a physical keyboard is likely
-      // (on a keyboard-less touchscreen every switch would pop the soft keyboard)
-      // or when the press behind this switch parked it on the chrome, where the
-      // strip's own keydown handling would eat every keystroke; restoring what the
-      // press displaced pops no keyboard. Never while a rename field is open.
+      // (on a keyboard-less touchscreen every switch would pop the soft keyboard),
+      // when the press behind this switch parked it on the chrome, where the
+      // strip's own keydown handling would eat every keystroke, or when it sits in
+      // the other pane's input, which would keep the typing; moving it from one
+      // input to another pops no keyboard. Never while a rename field is open.
       function focusAfterSwitch(): void {
         if (editingId !== null) {
           return;
         }
-        if (physicalKeyboardLikely() || (inputFocusedAtPress && keyboardParkedOnChrome())) {
+        if (
+          physicalKeyboardLikely() ||
+          (inputFocusedAtPress && keyboardParkedOnChrome()) ||
+          keyboardInOtherPane()
+        ) {
           focusInput();
         }
       }
 
-      // Every shown chip renders active, with no difference between the two panes'
-      // (selection is the handle's and the cursor's to show). The selected pane's
-      // chip is revealed in the scroller only when THAT TAB CHANGES, so a user
-      // browsing a scrolled strip is never yanked back by an unrelated repaint.
+      // The selected pane's chip is revealed in the scroller only when THAT TAB
+      // CHANGES, so a user browsing a scrolled strip is never yanked back by an
+      // unrelated repaint.
       let lastRevealedActive = "";
       function paintActive(): void {
         const open = ctx.shell.split.isOpen();
+        const selectedSide = open ? ctx.shell.selected() : null;
         for (const t of tabList) {
           const side = sideOf(t.id);
           const on = side !== null;
           t.el.classList.toggle("wt-tab-active", on);
+          t.el.classList.toggle("wt-tab-selected", on && side === selectedSide);
           t.aria.setPanel(side);
           t.aria.setExpanded(open ? on : null);
           // setSelected would undo setEditing(true) on the chip hosting the rename
@@ -1158,6 +1197,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       // syncChrome refreshes every surface after any state change. Idempotent.
       function syncChrome(): void {
+        noteSelected();
         relabelAll();
         paintActive();
         syncMobile();
@@ -1518,9 +1558,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       /** Show `id` in the pane on `side`: the pane's current tab becomes an
        *  ordinary tab, a pane elsewhere showing `id` is emptied first (a session is
-       *  never shown twice), and the pane is selected. False when `side` names no
-       *  pane that can show a tab (absent, failed or hidden) or `id` no tab. */
-      function showIn(side: PaneSide, id: string, dir?: "next" | "prev"): boolean {
+       *  never shown twice), and the pane is selected unless `keepSelection` holds
+       *  it on a pane that shows a tab. False when `side` names no pane that can
+       *  show a tab (absent, failed or hidden) or `id` no tab. */
+      function showIn(side: PaneSide, id: string, how: ShowOptions = {}): boolean {
         const pane = ctx.shell.pane(side);
         const next = tabList.find((t) => t.id === id);
         if (pane === null || !next) {
@@ -1550,7 +1591,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         // A later tab slides in from the right, an earlier one from the left, so a
         // desktop switch feels like the mobile swipe.
-        let slide = dir;
+        let slide = how.dir;
         const fromIdx = curId === null ? -1 : tabList.findIndex((t) => t.id === curId);
         const toIdx = tabList.findIndex((t) => t.id === id);
         if (slide === undefined && fromIdx >= 0) {
@@ -1581,6 +1622,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // the user just looked at.
         acknowledgeSwitchNotify(next.id);
         markCueSeen(next.id, next.dot.dataset["status"] ?? "");
+        const moveSelection = how.keepSelection !== true || selectedId() === null;
         // The view goes in WITH the bind, which makes the swap atomic: the pane's
         // follow flag is one per renderer, so a bind without it gated the first
         // flush on the state of the tab we LEFT and the cached screen rendered
@@ -1591,7 +1633,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // add/remove row animation (the reel owns row motion here); set before the
         // selection change, whose listener reconciles the list too.
         reelReconcile = playReel !== undefined;
-        ctx.shell.select(side);
+        if (moveSelection) {
+          ctx.shell.select(side);
+        }
         scheduleLayoutWrite();
         // Only when the user is about to wait: a revisited tab with a warm store
         // paints from cache in one frame and must not flash a cue at every switch.
@@ -1605,8 +1649,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         syncChrome(); // reconciles the expanded list into the new order
         reelReconcile = false;
         playReel?.(); // FLIP the rows so the reorder reads as a rotation, not a reload
-        ctx.announce(`Switched to ${next.display}`);
-        focusAfterSwitch();
+        if (moveSelection) {
+          ctx.announce(`Switched to ${next.display}`);
+          focusAfterSwitch();
+        }
         return true;
       }
 
@@ -1619,21 +1665,58 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           focusAfterSwitch();
           return;
         }
-        showIn(ctx.shell.targetFor(id), id, dir);
+        showIn(ctx.shell.targetFor(id), id, { dir });
       }
 
-      // The one rule every split entry point reduces to: the named side shows the
-      // tab, whatever was there becomes an ordinary tab, the tab's old side becomes
-      // empty, and the tab's pane is selected.
+      // The one rule every split entry point reduces to (`TabsApi.snap`).
       function snap(id: string, side: PaneSide): boolean {
         if (!isPaneSide(side) || !tabList.some((t) => t.id === id)) {
           return false;
+        }
+        const from = sideOf(id);
+        if (from === side) {
+          return true;
         }
         const split = ctx.shell.split;
         if (!split.isOpen() && (!split.canOpen() || !split.open())) {
           return false;
         }
-        return showIn(side, id);
+        // Emptying the tab's old pane drops a keyboard its input held to the body.
+        const typing = keyboardInPaneInput();
+        const displaced = from === null ? null : shownIn(side);
+        if (!showIn(side, id)) {
+          return false;
+        }
+        if (from !== null && displaced !== null) {
+          showIn(from, displaced, { keepSelection: true });
+        }
+        if (typing) {
+          focusInput();
+        }
+        return true;
+      }
+
+      function toggleSplit(): void {
+        const split = ctx.shell.split;
+        if (split.isOpen()) {
+          split.close();
+          return;
+        }
+        const partner = splitPartner();
+        if (partner === null) {
+          void create(true);
+        } else if (split.open()) {
+          showIn("right", partner, { keepSelection: true });
+        }
+      }
+      function splitPartner(): string | null {
+        const current = selectedId();
+        const used = recent.find((id) => id !== current && tabList.some((t) => t.id === id));
+        if (used !== undefined) {
+          return used;
+        }
+        const at = tabList.findIndex((t) => t.id === current);
+        return (tabList[at + 1] ?? tabList[at - 1])?.id ?? null;
       }
 
       // A switched-into tab's cached screen is stale until its resume delta lands,
@@ -2233,6 +2316,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (after) {
           scroller.insertBefore(tab.el, after.el);
         }
+        if (started) {
+          showCreatedElsewhere(tab.id);
+        }
       }
 
       // The runtime repair for a bootstrap whose list AND create both failed: the
@@ -2255,21 +2341,45 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // promise needs no threshold: a duplicate lands while the POST is open and
       // collapses into it, while a deliberate second tap still opens a second
       // terminal. It also stops "+" mashing from queueing sessions across the
-      // server's retry window. The coalesced second caller's target is ignored.
+      // server's retry window. Any coalesced caller asking for the split gets it.
       let creating: Promise<void> | null = null;
-      function create(target?: PaneSide): Promise<void> {
-        creating ??= openNewSession(target).finally(() => {
-          creating = null;
-        });
+      let createIntoSplit = false;
+      function create(intoSplit = false): Promise<void> {
+        if (creating === null) {
+          createIntoSplit = intoSplit;
+          creating = openNewSession().finally(() => {
+            creating = null;
+          });
+        } else {
+          createIntoSplit ||= intoSplit;
+        }
         return creating;
       }
 
-      async function openNewSession(target?: PaneSide): Promise<void> {
-        // The handle faces the pane the new tab is headed for from the start,
-        // not from the POST's answer.
-        if (target !== undefined && ctx.shell.split.isOpen() && !anyShown()) {
-          ctx.shell.select(target);
+      function showNewTab(id: string): void {
+        const side = ctx.shell.targetFor(id);
+        const other = otherSide(side);
+        // Suppress the swipe reel for a new tab: the list should grow and fade the
+        // new row in (animateRowIn) rather than rotate.
+        creatingTab = true;
+        showIn(shownIn(side) !== null && shownIn(other) !== null ? other : side, id);
+        creatingTab = false;
+      }
+      // This client's own new session can reach the stream before its POST
+      // answers, so the placement waits until a create in flight has shown its tab.
+      function showCreatedElsewhere(id: string): void {
+        if (creating !== null) {
+          void creating.then(() => {
+            showCreatedElsewhere(id);
+          });
+          return;
         }
+        if (!tornDown() && ctx.shell.split.isOpen() && sideOf(id) === null) {
+          showNewTab(id);
+        }
+      }
+
+      async function openNewSession(): Promise<void> {
         let info: SessionInfo;
         try {
           info = await createSessionHonouringRetry(api, ctx, lifetime.signal);
@@ -2295,18 +2405,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           tab = addTabChrome(info);
           tabList.push(tab);
         }
-        // Suppress the swipe reel for a create: the list should grow and fade the
-        // new row in (animateRowIn) rather than rotate. showIn still slides the
-        // terminal content and updates the shown chip.
-        creatingTab = true;
-        // The asked-for side holds only while that pane is still empty: the split
-        // may have closed or the pane been filled during the round trip.
-        const side =
-          target !== undefined && ctx.shell.pane(target)?.state() === "empty"
-            ? target
-            : ctx.shell.targetFor(tab.id);
-        showIn(side, tab.id);
-        creatingTab = false;
+        // Opened once the tab exists, so a failed create leaves the single view
+        // as it was rather than an empty pane.
+        if (createIntoSplit && !ctx.shell.split.isOpen()) {
+          ctx.shell.split.open();
+        }
+        showNewTab(tab.id);
       }
 
       // dropTab removes a tab's chrome + cache and, for a shown tab, decides what
@@ -2321,10 +2425,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         // Closing the only remaining tab: spawn its replacement BEFORE removing
         // this one, so the strip never empties and the "+" never teleports to the
-        // far left while the create POST is in flight. The replacement lands where
-        // a click would (the other pane, while the split is open), and dropping
-        // the old tab is then an ordinary non-last close, so this intercept does
-        // not re-fire. A user close only.
+        // far left while the create POST is in flight. The replacement lands as any
+        // new tab does, and dropping the old tab is then an ordinary non-last
+        // close, so this intercept does not re-fire. A user close only.
         if (remote && tabList.length === 1 && tabList[0]?.id === id) {
           await create();
           // A failed create adds nothing (and toasts): keep the existing tab
@@ -2338,6 +2441,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // anything moves.
         const side = sideOf(id);
         const splitOpen = ctx.shell.split.isOpen();
+        // Emptying a pane makes it inert, which drops a keyboard it held to the
+        // body before the view moves; the keyboard follows the view instead.
+        const typing = splitOpen && side !== null && keyboardInPaneInput();
         const [tab] = tabList.splice(idx, 1);
         if (!tab) {
           return;
@@ -2387,26 +2493,22 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // What the panes show next is decided here, before the server's answer:
         // selection must not sit on an emptied pane for a DELETE round trip.
         let replacement: Promise<void> | undefined;
-        if (side !== null && !splitOpen) {
-          // One pane: switch to a neighbor, or spawn a fresh session if this was
-          // the last.
+        if (side !== null && splitOpen && shownIn(otherSide(side)) !== null) {
+          ctx.shell.split.closeSide(side);
+          focusAfterSwitch();
+        } else if (side !== null) {
+          if (splitOpen) {
+            ctx.shell.split.close();
+          }
           const neighbor = tabList[idx] ?? tabList[idx - 1];
           if (neighbor) {
             switchTo(neighbor.id);
           } else {
             replacement = create();
           }
-        } else if (side !== null) {
-          // While the split is open the pane stays empty and a new tab lands in
-          // the other pane, so a close never promotes a tab nobody clicked.
-          const other = otherSide(side);
-          if (shownIn(other) !== null) {
-            ctx.shell.select(other);
-            focusAfterSwitch();
-          } else if (!anyShown()) {
-            replacement = create(other);
-          }
-          scheduleLayoutWrite();
+        }
+        if (typing) {
+          focusInput();
         }
         if (remote) {
           try {
@@ -2467,25 +2569,26 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
         }
         // Re-home before the DELETEs: selection must not sit on an emptied pane for
-        // a round trip. Split open, the emptied panes stay empty (no promotion).
-        if (!splitOpen && closingSelected && tabList[0]) {
+        // a round trip.
+        let needsTab = !splitOpen && closingSelected;
+        if (emptiedPane) {
+          const keep = ctx.shell.panes().find((p) => p.state() === "shown")?.side;
+          if (keep === undefined) {
+            ctx.shell.split.close();
+            needsTab = true;
+          } else {
+            ctx.shell.split.closeSide(otherSide(keep));
+          }
+        }
+        if (needsTab && tabList[0]) {
           switchTo(tabList[0].id);
         } else {
           syncChrome();
-          if (splitOpen && closingSelected) {
-            const shownSide = ctx.shell.panes().find((p) => p.state() === "shown")?.side;
-            if (shownSide !== undefined) {
-              ctx.shell.select(shownSide);
-            }
-          }
-          if (emptiedPane) {
-            scheduleLayoutWrite();
-          }
         }
-        // One terminal always stays open, and an open split always shows one tab.
+        // One terminal always stays open.
         let replacement: Promise<void> | undefined;
-        if (tabList.length === 0 || (splitOpen && !anyShown())) {
-          replacement = create(ctx.shell.panes().find((p) => p.state() === "empty")?.side);
+        if (tabList.length === 0) {
+          replacement = create();
         }
         // The person asked for these closes, so every DELETE still goes out past a
         // teardown; only what the page shows for them stops.
@@ -3233,10 +3336,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           endRestNet();
         }
       });
-      // The half of the pane row a drag is over, or null off the row, over the
-      // switcher, or while the row is too narrow for two panes (the strip is the
-      // caller's early return). An empty pane is `inert`, so a tab dragged over it
-      // hits the shell root underneath.
+      // The left width rounds as `--wt-split-left` does in 32-split.css, so the
+      // boundary is the one the highlights draw.
       function dropHalf(e: DragEvent): PaneSide | null {
         const root = ctx.shell.root;
         const target = e.target as Node;
@@ -3248,8 +3349,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ) {
           return null;
         }
-        const rect = root.getBoundingClientRect();
-        return e.clientX < rect.left + rect.width / 2 ? "left" : "right";
+        const { left, width } = root.getBoundingClientRect();
+        const leftPane = Math.round((width - SPLIT_GUTTER_PX) * ctx.shell.split.state().ratio);
+        return e.clientX < left + leftPane + SPLIT_GUTTER_PX / 2 ? "left" : "right";
       }
       function paintDropHalf(half: PaneSide | null): void {
         ctx.shell.root.classList.toggle("wt-drop-left", half === "left");
