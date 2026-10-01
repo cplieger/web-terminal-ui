@@ -993,7 +993,8 @@
    three states the channel is BAND WIDTH, in a deliberate 2:1 ratio, because
    waiting and input share one ink.
 
-   A literal 3px radius, not --radius-sm: the smallest token rung is 4px, which on
+   A 3px radius of its own (--wt-mark-radius, which the working state's clip reads
+   too), not --radius-sm: the smallest token rung is 4px, which on
    a 9px box reads as a circle and defeats the silhouette.
 
    It costs ZERO layout while no state is set. The footprint cancel is a negative
@@ -1010,12 +1011,13 @@
   /* waiting and input both speak through this ink and separate by band alone;
      working overrides it. */
   --wt-mark-ink: var(--status-input);
+  --wt-mark-radius: 3px;
 
   width: var(--wt-mark-size);
   height: var(--wt-mark-size);
   flex: none;
   position: relative;
-  border-radius: 3px;
+  border-radius: var(--wt-mark-radius);
   /* Zero-width at rest, so the ring is drawn entirely by a state's band. The
      colour rides --wt-mark-ink here rather than in each state, so a state sets
      one variable and one width. */
@@ -1051,86 +1053,64 @@
     opacity var(--dur-enter) var(--ease-enter) var(--dur-standard);
 }
 
-/* Working: the heavier bare band, plus a breathing glow. Its own compositing
-   layer for the reason the status dot's rule records — a nested overlay layer
-   snaps to device pixels independently of a fractional parent position, which at
-   this size reads as an off-centre pulse. */
+/* Working: the heavier bare band, plus a hole that closes on the beat. Its own
+   compositing layer so the overlay layers snap against the ring rather than the
+   page: their offset from it is whole pixels (the rounded inset below), so the
+   closing circle stays centred however the chip centres a 9px mark (17.5px down). */
 :where(.wt-root) .wt-activity-mark[data-activity="working"] {
   --wt-mark-ink: var(--status-working);
-  /* The band, named because the MASK below has to know it: the overlay's hole is
-     the mark's inradius less this. Paired with the declaration it describes so the
-     two cannot drift apart on width. */
+  /* The band, named because the closing overlay below derives the hole from it. */
   --wt-mark-band: 2px;
 
   border-width: var(--wt-mark-band);
   transform: translateZ(0);
+  /* The overlays' clip. `overflow` clips at the padding box, which under border-box
+     sizing IS the hole; where supported the clip is the mark's own outline instead,
+     because the hole's rounded inner corners as a clip edge leave an anti-aliased
+     seam against the band's own (measured at dpr 2: four pixels 15% dark at the
+     peak). Over the band the ink paints the band's own colour. */
+  overflow: hidden;
 }
 
-/* The breath: a pre-painted radial animating OPACITY only, never colours, so the
-   beat costs compositing rather than a repaint per frame for as long as a
-   background task runs (the battery reason the dot's glow overlay records).
+@supports (clip-path: inset(0 round 1px)) {
+  :where(.wt-root) .wt-activity-mark[data-activity="working"] {
+    overflow: visible;
+    clip-path: inset(0 round var(--wt-mark-radius));
+  }
+}
 
-   PLUS A MASK, which is the one thing a ring needs and a disc does not, and whose
-   absence was a real defect rather than a missing nicety. Over a solid disc the
-   overlay's bright core has almost no headroom above its own backdrop; over a
-   ring's transparent HOLE it has all of it, so an unmasked core FILLED the hole at
-   the peak and the mark rendered as a solid rounded square. That is the one thing
-   this element may never be: the mark and the activity dot 8px away share their ink
-   at zero hue distance, so the ring-against-disc silhouette is the entire WCAG
-   1.4.1 channel between them, and a fill collapses it for the brightest third of
-   every cycle. Masked, the beat lights the BAND and the hole's four corners, so
-   what a reader sees is the hole morphing between a square and the circle inscribed
-   in it — the ring survives the peak.
-
-   EVERY NUMBER HERE IS A RELATION, and the port that copied marotte's LITERALS is
-   what left this rule running with nothing visible to show. Two of them were
-   arithmetic for an 8px mark with a 2px band: `inset: -1px` put the overlay on that
-   mark's own border box, and the core stop `70%` is where the core reaches the
-   hole's CORNER there — sqrt(2) * (size / 2 - band) / (size / 2) = 70.71%. At 9px
-   and 2px the same relation is 78.57%, so the copied 70% ended the solid core at
-   2.45px while the mask opens only at 2.5px: core and visible mask did not
-   intersect at all, the beat lit nothing the mask kept, and 4 pixels of a 9x9 mark
-   moved between trough and peak against marotte's 20 (measured at dpr 1, both
-   marks, sRGB). Written as relations they survive any size: the inset IS the band,
-   the core stop IS the hole's corner radius, the mask's hole IS its inradius. So
-   port marotte's `.tab-run-dot` (`12-tabs.css`, "THE GLOW BEAT") — the same mark
-   solving the same problem, with the mask from the start — by its relations, never
-   by its numbers. sqrt(2) is spelled to four decimals because the synced stylelint
-   sets `number-max-precision: 4` outside colour functions.
-
-   NOTHING HERE EXTENDS PAST THE MARK. `box-sizing: border-box` (01-scope.css) puts
-   the padding box — an absolutely positioned child's containing block — INSIDE the
-   band, so `inset: calc(-1 * var(--wt-mark-band))` grows the overlay back out to
-   exactly the mark's own border box and no further. Read it as "fill the mark", not
-   as "overhang it": a larger inset would reach outside, where a feathered edge's
-   visible radius moves with the beat and renders differently at every pixel
-   density. `border-radius: 50%` is the same discipline on the last literal, and it
-   is inert BY CONSTRUCTION rather than by measurement, which is why no assertion
-   pins it: for side S and radius r the clip's 45° boundary is (S/2 - r) * sqrt(2) + r,
-   monotonically decreasing in r, so the inscribed circle is the WORST case for
-   reaching the hole's corners — and it still clears them for any band at or above
-   S/2 * (1 - 1/sqrt(2)), 1.32px here against 2px. Do not assert it, and do not drop
-   it either: it is what keeps a literal radius out of a rule whose whole defect was
-   literals. */
+/* The close: the square hole fills from its corners, passes through its inscribed
+   circle and shrinks to nothing, then reopens. Compositor-only: ::before is ink
+   around a transparent circle of the hole's corner radius sqrt(2) * h, scaled down
+   to --wt-mark-close and clipped by the parent; half-size (h + 1px) /
+   --wt-mark-close keeps its edge under the band at the peak (a 71px layer, ~20 KB
+   at dpr 1). Scaling leaves a 0.35px pinhole that reads as a dark pixel, so ::after
+   fades a fill over the hole as the scale bottoms out. Every length is a relation to
+   --wt-mark-size and --wt-mark-band (sqrt(2) to the stylelint's 4 decimals). */
 :where(.wt-root) .wt-activity-mark[data-activity="working"]::before {
+  --wt-mark-hole: calc(var(--wt-mark-size) / 2 - var(--wt-mark-band));
+  --wt-mark-close: 0.1;
+
   content: "";
   position: absolute;
-  inset: calc(-1 * var(--wt-mark-band));
-  border-radius: 50%;
+  inset: round(down, var(--wt-mark-hole) - (var(--wt-mark-hole) + 1px) / var(--wt-mark-close), 1px);
   background: radial-gradient(
-    closest-side,
-    color-mix(in oklch, var(--wt-mark-ink) 78%, #fff) 0
-      calc(1.4142 * (var(--wt-mark-size) / 2 - var(--wt-mark-band))),
-    transparent 92%
+    circle,
+    transparent 0 calc(1.4142 * var(--wt-mark-hole)),
+    var(--wt-mark-ink) calc(1.4142 * var(--wt-mark-hole) + 0.5px)
   );
-  opacity: 0;
   animation: wt-activity-breath var(--dot-beat-dur) ease-in-out infinite;
+  will-change: transform;
+}
+
+:where(.wt-root) .wt-activity-mark[data-activity="working"]::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  background: var(--wt-mark-ink);
+  opacity: 0;
+  animation: wt-activity-seal var(--dot-beat-dur) ease-in-out infinite;
   will-change: opacity;
-  mask: radial-gradient(
-    closest-side,
-    transparent 0 calc(var(--wt-mark-size) / 2 - var(--wt-mark-band)),
-    #000 calc(var(--wt-mark-size) / 2 - var(--wt-mark-band))
-  );
 }
 
 /* Waiting: the thin band plus a static halo. Stopped and resumable, nobody being
@@ -1205,25 +1185,30 @@
   }
 }
 
-/* The activity mark's breath: rest, one swell, rest. Opacity only — a colour
-   keyframe here would reintroduce the per-frame repaint this shape exists to avoid.
-
-   The dot's glow ENVELOPE, at a lower CEILING, and the ceiling is where the two
-   deliberately part. 0.55 rather than 1 is marotte's number for the same mark
-   (`12-tabs.css`), and it is what keeps a strip of busy tabs reading as one pulse
-   instead of a row of flashes — the dot can afford 1 because its overlay lifts a
-   solid disc of its own hue and has almost no headroom above its own backdrop,
-   while this one is masked onto a 2px band over the page and has all of it. Used by
-   the mark alone, so the value moves nothing else. */
+/* The activity mark's close: open, shut, open, on the dot glow's envelope so the
+   hole shuts as the disc beside it peaks. Transform only, so it never repaints. */
 @keyframes wt-activity-breath {
   0%,
   70%,
+  100% {
+    transform: scale(1);
+  }
+
+  35% {
+    transform: scale(var(--wt-mark-close));
+  }
+}
+
+@keyframes wt-activity-seal {
+  0%,
+  20%,
+  50%,
   100% {
     opacity: 0;
   }
 
   35% {
-    opacity: 0.55;
+    opacity: 1;
   }
 }
 
@@ -1270,13 +1255,14 @@
      by band alone (3px bare / 1px halo / 2px halo).
 
      Re-pointing --wt-mark-band rather than declaring `border-width` keeps the number
-     in the one place the state's own rule reads it from, the mask's divisor included
+     in the one place the state's own rule reads it from, the overlay's hole included
      — which is moot here only because the overlay is gone one rule below. */
   :where(.wt-root) .wt-activity-mark[data-activity="working"] {
     --wt-mark-band: 3px;
   }
 
-  :where(.wt-root) .wt-activity-mark[data-activity="working"]::before {
+  :where(.wt-root) .wt-activity-mark[data-activity="working"]::before,
+  :where(.wt-root) .wt-activity-mark[data-activity="working"]::after {
     content: none;
   }
 }

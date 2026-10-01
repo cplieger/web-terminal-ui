@@ -164,7 +164,7 @@ are importable from `…/features/<name>` (`clipboard`, `context-menu`,
   background activity that outlives a turn (a workflow run, in the
   `web-terminal-kiro` case). It is a rounded-square ring rather than a disc, so
   it does not read as another status dot, and band width carries its three
-  states: a 2px band with a breathing glow while a background task is running, a
+  states: a 2px band whose centre closes and reopens while a background task is running, a
   1px band with a halo while one is paused and resumable, and a 2px band with
   that same halo while one is blocked on the user. The state and the count are
   announced in the tab's accessible name and repeated as the mark's hover

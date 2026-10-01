@@ -958,7 +958,7 @@ describe("secondary activity mark (the host's background-activity channel)", () 
   };
   /** A rule's band width in px, however that rule spells it: `border-width`
    *  directly, or the `--wt-mark-band` variable the working state routes it through
-   *  so the breath's mask divisor reads the same number the band does. */
+   *  so the closing overlay's hole reads the same number the band does. */
   const band = (body: string): number => {
     const m = /(?:border-width|--wt-mark-band):\s*([\d.]+)px/.exec(body);
     expect(m, "the rule declares a band width").not.toBeNull();
@@ -992,8 +992,9 @@ describe("secondary activity mark (the host's background-activity channel)", () 
     // above the smallest token rung (4px) reads as a circle on a 9px box, and a
     // background would make it a disc rather than a ring.
     const body = base![1]!;
-    const radius = /border-radius:\s*([\d.]+)px/.exec(body);
-    expect(radius, "the mark declares a literal radius").not.toBeNull();
+    expect(body).toContain("border-radius: var(--wt-mark-radius)");
+    const radius = /--wt-mark-radius:\s*([\d.]+)px/.exec(body);
+    expect(radius, "the mark declares its own px radius").not.toBeNull();
     expect(Number.parseFloat(radius![1]!)).toBeLessThan(4);
     expect(body).toContain("background: transparent");
     expect(body).toContain("border: 0 solid var(--wt-mark-ink)");
@@ -1025,7 +1026,7 @@ describe("secondary activity mark (the host's background-activity channel)", () 
     expect(stateRule("input")).toContain(halo);
   });
 
-  it("animates working's breath by OPACITY only, and defines the keyframes it names", () => {
+  it("animates working's close by TRANSFORM only, and defines the keyframes it names", () => {
     const overlay = /\.wt-activity-mark\[data-activity="working"\]::before \{([\s\S]*?)\n\}/.exec(
       tabs,
     );
@@ -1037,43 +1038,31 @@ describe("secondary activity mark (the host's background-activity channel)", () 
       tabs,
     );
     expect(beat, `@keyframes ${named![1]!} is defined under exactly that name`).not.toBeNull();
-    expect(beat![1]!).toContain("opacity");
+    expect(beat![1]!).toContain("transform: scale(var(--wt-mark-close))");
     expect(beat![1]!, "never a paint property").not.toContain("background");
     expect(beat![1]!, "never a paint property").not.toContain("border");
   });
 
-  it("masks the breath off the ring's hole, so its peak never reads as a disc", () => {
-    // The ring-against-disc silhouette IS the WCAG 1.4.1 channel against the activity
-    // dot 8px away, because the two share an ink at zero hue distance. The rounded-
-    // SQUARE test above asserts `background: transparent` on the ELEMENT, and that is
-    // only half the question: the overlay is a second way to fill this mark, and
-    // unmasked its opaque core covered the hole for the brightest third of every
-    // cycle — so the mark rendered as a solid square and the channel collapsed. That
-    // blind spot is why the defect shipped, so this case is the other half.
+  it("closes the ring's hole, clipped to the ring, so the ring is all that is ever painted", () => {
+    // The overlay is ink around a transparent hole; scaling it down closes the hole.
+    // Without the parent's clip that ink would paint over the band and past the mark,
+    // and without the derived hole radius the ring would not be fully open at rest.
+    expect(stateRule("working"), "the parent clips the overlays").toContain("overflow: hidden");
+    // Where supported the clip is the mark's own outline, read from the same radius
+    // the border uses, so the overlays meet no rounded clip edge inside the ring.
+    expect(tabs).toContain("clip-path: inset(0 round var(--wt-mark-radius))");
     const overlay = /\.wt-activity-mark\[data-activity="working"\]::before \{([\s\S]*?)\n\}/.exec(
       tabs,
     );
     expect(overlay, "the working ::before overlay exists").not.toBeNull();
-    const mask = /mask:\s*radial-gradient\(([\s\S]*?)\);/.exec(overlay![1]!);
-    expect(mask, "the overlay masks its own centre").not.toBeNull();
-    // The divisor is the ARITHMETIC rather than a literal: both terms are variables
-    // (the second one named for exactly this reader), so a literal would be correct
-    // until either moved.
-    expect(mask![1]!, "the hole is hidden from 0 outward").toContain("transparent 0 calc(");
-    expect(mask![1]!, "derived from the mark's own size").toContain("var(--wt-mark-size)");
-    expect(mask![1]!, "less the band the state declares").toContain("var(--wt-mark-band)");
-  });
-
-  it("keeps the breath's ceiling below the dot's, so a busy strip is one pulse", () => {
-    // 0.55 is marotte's number for the same mark (12-tabs.css). The dot can afford 1
-    // because its overlay lifts a solid disc of its own hue and has almost no headroom
-    // above its own backdrop; this one is masked onto a 2px band over the page and has
-    // all of it, so the same ceiling reads as a flash rather than a breath.
-    const beat = /@keyframes\s+wt-activity-breath(?![\w-])\s*\{([\s\S]*?)\n\}/.exec(tabs);
-    expect(beat, "@keyframes wt-activity-breath is defined").not.toBeNull();
-    const peak = /opacity:\s*([\d.]+)\s*;?\s*\}\s*$/.exec(beat![1]!.trimEnd());
-    expect(peak, "the envelope declares a peak").not.toBeNull();
-    expect(Number.parseFloat(peak![1]!)).toBeLessThan(1);
+    const body = overlay![1]!;
+    expect(body, "the hole is derived from the mark's own size and band").toContain(
+      "--wt-mark-hole: calc(var(--wt-mark-size) / 2 - var(--wt-mark-band))",
+    );
+    expect(body, "open at rest out to the hole's corner").toContain(
+      "transparent 0 calc(1.4142 * var(--wt-mark-hole))",
+    );
+    expect(body, "the box outlives the smallest scale").toContain("/ var(--wt-mark-close)");
   });
 
   it("replaces working's motion with the heaviest band under reduced motion", () => {
@@ -1096,8 +1085,11 @@ describe("secondary activity mark (the host's background-activity channel)", () 
     const working = /\.wt-activity-mark\[data-activity="working"\] \{([^}]*)\}/.exec(body);
     expect(working, "working degrades to a static band").not.toBeNull();
     expect(band(working![1]!)).toBe(3);
-    const overlay = /\.wt-activity-mark\[data-activity="working"\]::before \{([^}]*)\}/.exec(body);
-    expect(overlay, "the breath overlay is removed outright").not.toBeNull();
+    const overlay =
+      /\.wt-activity-mark\[data-activity="working"\]::before,\s*:where\(\.wt-root\) \.wt-activity-mark\[data-activity="working"\]::after \{([^}]*)\}/.exec(
+        body,
+      );
+    expect(overlay, "the closing overlay and its seal are removed outright").not.toBeNull();
     expect(overlay![1]!).toContain("content: none");
   });
 
