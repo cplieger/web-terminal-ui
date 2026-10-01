@@ -106,10 +106,12 @@ export interface TabsApi {
    *  pane already shows has that pane selected instead. */
   switchTo(id: string): void;
   /** Show a tab on one side of the split, opening it when closed, and select its
-   *  pane. A tab the other pane shows trades places with the tab on that side
-   *  (or leaves its pane empty when the side showed none); any other tab there
-   *  becomes ordinary. A tab already shown on that side changes nothing. False
-   *  when refused: an unknown id, an invalid side, or a split the pane row is too
+   *  pane. Opening the split keeps the single view's tab on the other side — or,
+   *  when the moved tab IS it, its split partner — so neither pane opens empty. A
+   *  tab the other pane shows trades places with the tab on that side (or leaves
+   *  its pane empty when the side showed none); any other tab there becomes
+   *  ordinary. A tab already shown on that side changes nothing. False when
+   *  refused: an unknown id, an invalid side, or a split the pane row is too
    *  narrow to open. */
   snap(id: string, side: PaneSide): boolean;
   /** The current tabs, first-to-last by creation; `active` marks a tab a pane
@@ -1678,17 +1680,27 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return true;
         }
         const split = ctx.shell.split;
-        if (!split.isOpen() && (!split.canOpen() || !split.open())) {
+        const opening = !split.isOpen();
+        if (opening && (!split.canOpen() || !split.open())) {
           return false;
         }
         // Emptying the tab's old pane drops a keyboard its input held to the body.
         const typing = keyboardInPaneInput();
-        const displaced = from === null ? null : shownIn(side);
+        const displaced = shownIn(side);
         if (!showIn(side, id)) {
           return false;
         }
-        if (from !== null && displaced !== null) {
-          showIn(from, displaced, { keepSelection: true });
+        // Opening pairs the moved tab with the single view's tab, or its partner
+        // when they are one, so no pane opens empty; an open split only re-homes
+        // the displaced tab, into a pane the move emptied.
+        const back = displaced ?? (opening ? splitPartner(id) : null);
+        if (
+          (from !== null || opening) &&
+          back !== null &&
+          back !== id &&
+          shownIn(otherSide(side)) === null
+        ) {
+          showIn(otherSide(side), back, { keepSelection: true });
         }
         if (typing) {
           focusInput();
@@ -1702,20 +1714,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           split.close();
           return;
         }
-        const partner = splitPartner();
+        const partner = splitPartner(selectedId());
         if (partner === null) {
           void create(true);
         } else if (split.open()) {
           showIn("right", partner, { keepSelection: true });
         }
       }
-      function splitPartner(): string | null {
-        const current = selectedId();
-        const used = recent.find((id) => id !== current && tabList.some((t) => t.id === id));
+      function splitPartner(of: string | null): string | null {
+        const used = recent.find((id) => id !== of && tabList.some((t) => t.id === id));
         if (used !== undefined) {
           return used;
         }
-        const at = tabList.findIndex((t) => t.id === current);
+        const at = tabList.findIndex((t) => t.id === of);
         return (tabList[at + 1] ?? tabList[at - 1])?.id ?? null;
       }
 

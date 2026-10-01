@@ -11,6 +11,12 @@
     calc((100% - var(--wt-split-gutter)) * var(--wt-split-ratio)),
     1px
   );
+  /* Content's bottom edge: tab bar plus safe area, or switcher reserve plus
+     keyboard, whichever is lower. Shared by the divider and the drop halves. */
+  --wt-split-bottom: max(
+    calc(var(--wt-tabbar-h, 0px) + var(--safe-bottom, 0px)),
+    calc(var(--wt-reserve-bottom, 0px) + var(--kb-inset, 0px))
+  );
 
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -107,10 +113,7 @@
   justify-self: center;
   inline-size: 24px;
   margin-inline: -7px;
-  margin-block-end: max(
-    calc(var(--wt-tabbar-h, 0px) + var(--safe-bottom, 0px)),
-    calc(var(--wt-reserve-bottom, 0px) + var(--kb-inset, 0px))
-  );
+  margin-block-end: var(--wt-split-bottom);
   cursor: col-resize;
   touch-action: none;
   z-index: 4;
@@ -193,23 +196,30 @@
   pointer-events: none;
 }
 
+/* Confined to each pane's terminal box (--vv-top to --wt-split-bottom) so
+   neither half runs under the translucent strip. The --sp-2 inset is the
+   strip's own chip padding; the border reuses the active chip's tokens because
+   a half means "this pane will show the tab". */
 :where(.wt-root.wt-split.wt-drop-left)::before,
 :where(.wt-root.wt-split.wt-drop-right)::after {
   content: "";
   position: absolute;
-  inset-block: 0 var(--wt-tabbar-h, 0);
+  box-sizing: border-box;
+  inset-block: calc(var(--vv-top, 0px) + var(--sp-2)) calc(var(--wt-split-bottom) + var(--sp-2));
   background: color-mix(in oklch, var(--accent) 12%, transparent);
+  border: 1px solid var(--tab-active-border);
+  border-radius: var(--radius-inner);
   pointer-events: none;
   z-index: 5;
 }
 
 :where(.wt-root.wt-split.wt-drop-left)::before {
-  inset-inline-start: 0;
-  inline-size: var(--wt-split-left);
+  inset-inline-start: var(--sp-2);
+  inline-size: calc(var(--wt-split-left) - 2 * var(--sp-2));
 }
 
 :where(.wt-root.wt-split.wt-drop-right)::after {
-  inset-inline: calc(var(--wt-split-left) + var(--wt-split-gutter)) 0;
+  inset-inline: calc(var(--wt-split-left) + var(--wt-split-gutter) + var(--sp-2)) var(--sp-2);
 }
 
 :where(.wt-root.wt-split.wt-animate.wt-split-opening),

@@ -860,7 +860,7 @@ describe("the snap items", () => {
     expect(paneRoot(root, "left").hasAttribute("inert")).toBe(true);
   });
 
-  it("snapping an unshown tab while closed opens the split and shows it on the named side, replacing what was there", async () => {
+  it("snapping an unshown tab while closed opens the split and shows it on the named side and keeps the single view's tab on the other", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     expect(term.split?.isOpen()).toBe(false);
@@ -868,13 +868,13 @@ describe("the snap items", () => {
     menuItem(openTabMenu(root, "two"), "Snap to left").click();
     expect(term.split?.isOpen()).toBe(true);
     expect(shown(ctx, "left")).toBe("s2");
-    expect(shown(ctx, "right")).toBeNull();
+    expect(shown(ctx, "right")).toBe("s1");
     expect(ctx.shell.selected()).toBe("left");
-    expect(activeLabels(root)).toEqual(["two"]);
+    expect(activeLabels(root)).toEqual(["one", "two"]);
     expect(chips(root)).toHaveLength(2);
     await until(() => server.writes.length > 0);
     expect(server.writes).toEqual([
-      { left: "s2", right: null, handle: 0.5, selected: "left", open: true },
+      { left: "s2", right: "s1", handle: 0.5, selected: "left", open: true },
     ]);
   });
 
@@ -1000,7 +1000,7 @@ describe("the snap items", () => {
     expect(root.querySelector(".wt-tab-menu")?.classList.contains("visible")).toBe(false);
     expect(term.split?.isOpen()).toBe(true);
     expect(shown(ctx, "right")).toBe("s1");
-    expect(shown(ctx, "left")).toBeNull();
+    expect(shown(ctx, "left")).toBe("s2");
     expect(ctx.shell.selected()).toBe("right");
     expect(document.activeElement).toBe(textareaOf(root, "right"));
   });
@@ -1085,9 +1085,104 @@ describe("the snap items", () => {
       "right:set:s1",
     ]);
   });
+
+  it("snapping the single view's tab to the right while closed shows its split partner on the left", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    chipOf(root, "two").click();
+    chipOf(root, "one").click();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+
+    menuItem(openTabMenu(root, "one"), "Snap to right").click();
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("right");
+    expect(activeLabels(root)).toEqual(["one", "two"]);
+  });
+
+  it("fills the side a snap did not land on with the recently used tab, not the row neighbour", async () => {
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+      { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    ];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    // Boot shows s1, so showing s3 makes the recency order [s3, s1]; s3's row
+    // neighbour is s2.
+    chipOf(root, "three").click();
+    expect(shown(ctx, "left")).toBe("s3");
+
+    menuItem(openTabMenu(root, "three"), "Snap to right").click();
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "right")).toBe("s3");
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(ctx.shell.selected()).toBe("right");
+  });
+
+  it("snapping an unshown tab onto the side the single view fills hands the kept tab's epoch to the other pane before it attaches", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    // The right pane's kernel exists only once a split has opened; close keeps it
+    // hidden, and the single view then holds whatever tab is shown next.
+    term.split?.open();
+    term.split?.close();
+    chipOf(root, "two").click();
+    await until(() => shown(ctx, "left") === "s2");
+    const left = engineOn(root, "left");
+    const right = engineOn(root, "right");
+    // Only the left connection, where s2 lives, knows its epoch.
+    left.connection.serverEpochOf.mockImplementation((id: string) => (id === "s2" ? 2222 : 0));
+    const calls: string[] = [];
+    for (const [side, e] of [
+      ["left", left],
+      ["right", right],
+    ] as const) {
+      e.connection.adoptPersistedEpoch.mockImplementation((id: string, epoch: number) => {
+        calls.push(`${side}:adopt:${id}:${String(epoch)}`);
+      });
+      e.connection.setSession.mockImplementation((id: string) => {
+        calls.push(`${side}:set:${id}`);
+      });
+    }
+
+    menuItem(openTabMenu(root, "one"), "Snap to left").click();
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s2");
+    expect(calls).toEqual(["left:set:s1", "right:adopt:s2:2222", "right:set:s2"]);
+  });
 });
 
 describe("drag and drop onto a half", () => {
+  it("opens the split with the dragged tab on the dropped half and keeps the single view's tab on the other", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    chipOf(root, "two").click();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s2");
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const leftX = rect.left + rect.width * 0.25;
+
+    dragAt("dragstart", dt, chip, leftX);
+    dragAt("dragover", dt, root, leftX);
+    dragAt("drop", dt, root, leftX);
+    dragAt("dragend", dt, chip, leftX);
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("left");
+    expect(activeLabels(root)).toEqual(["one", "two"]);
+    await until(() => server.writes.length > 0);
+    await tick();
+    expect(server.writes).toEqual([
+      { left: "s1", right: "s2", handle: 0.5, selected: "left", open: true },
+    ]);
+  });
+
   it("highlights the half under the pointer during a drag, snaps on drop and clears the highlight; the strip preview reverts", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
@@ -1784,11 +1879,14 @@ describe("a failed second pane", () => {
   it("that held the only shown tab hands it to the empty survivor before failing, which is selected and receives the typing", async () => {
     const root = rootIn();
     const late = lateRejecting();
-    const { ctx, api } = await mountTabbed(root, server, {
+    const { term, ctx, api } = await mountTabbed(root, server, {
       opts: { onFatalError: () => true },
       panes: () => [late.feature()],
     });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // Opening first makes this a swap into the empty right pane, which leaves the
+    // left empty; a snap that OPENS the split instead fills the far pane.
+    term.split?.open();
     expect(api.snap("s1", "right")).toBe(true);
     expect(shown(ctx, "left")).toBeNull();
     expect(shown(ctx, "right")).toBe("s1");
