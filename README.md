@@ -469,7 +469,8 @@ terminal with its own engine, so an open split holds up to two WebSocket
 connections, one per shown pane. Closing and resizing the split is a display
 re-arrangement only: no tab or session is ever created or closed by it, and a tab
 that leaves a pane stays in the row as an ordinary tab. Opening it is one too,
-except from the split button with a single tab, which creates the second tab.
+except with a single tab: the split button, a snap or a drop that opens it then
+creates the second tab.
 
 Three ways in, all in the tab chrome, none a key chord:
 
@@ -490,12 +491,17 @@ Three ways in, all in the tab chrome, none a key chord:
   an assistive technology's own command). A snapped tab shows on the named side
   and its pane is selected. When the snap opens the split, the other pane keeps
   the tab the single view showed (or, when that is the tab being moved, its
-  split partner), so neither pane opens empty. A tab the other pane shows trades
-  places with the tab on the named side, so both stay on screen (into an empty
-  pane it simply moves); any other tab there becomes an ordinary tab. Snapping a
-  tab onto the side that already shows it changes nothing.
+  split partner), so neither pane opens empty. With a single tab, a snap that
+  opens the split creates a new tab for the other pane, and the split opens
+  once that tab exists; a failed create leaves the single view as it was. A tab
+  the other pane shows trades places with the tab on the named side, so both
+  stay on screen (into an empty pane it simply moves); any other tab there
+  becomes an ordinary tab. In an open split, snapping a tab onto the side that
+  already shows it changes nothing.
 - **Dragging a tab** out of the row onto either pane of the terminal area,
-  following the same rule. While the drag lasts the pane under the pointer is
+  following the same rule. By touch or pen, hold the tab still for a moment
+  before moving it; a swipe that moves straight away scrolls the row. While
+  the drag lasts the pane under the pointer is
   highlighted; each highlight covers that pane's terminal area at the divider's
   position (the two halves while the split is closed), inset a little with the
   tab chips' rounded border, and a release decides by the divider's centre.

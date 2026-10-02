@@ -154,11 +154,10 @@
   white-space: nowrap;
   -webkit-user-select: none;
   user-select: none;
-  /* Kills the 300ms double-tap-to-zoom delay, which is what makes a double-TAP
-     usable as the touch rename entry: on iPadOS a long-press on this chip starts
-     a reorder drag (it is draggable), so the context menu is unreachable by touch
-     and the double-tap is the only path in. Also removes the tap delay for the
-     ordinary switch tap. */
+  /* Kills the 300ms double-tap-to-zoom delay, which keeps a double-TAP usable as
+     the touch rename entry and removes the tap delay for the ordinary switch
+     tap. Panning stays allowed, so a swipe along the strip scrolls it; a touch
+     reorder cancels the pan itself once its hold has lifted the chip. */
   touch-action: manipulation;
 }
 
@@ -616,15 +615,13 @@
 }
 
 /* The drag preview clone (setDragGhost): a full-opacity copy of the chip parked
-   under .wt-root — OUTSIDE the bar's backdrop-filter (embedded wt-container
-   roots only, since 5.3.0; the full-page bar no longer carries one), which is
-   what stops WebKit from rendering the automatic drag image (webkit.org/b/22787)
-   — and laid exactly
-   over the real chip via inline left/top/width/height. It exists for less than a
-   frame (the browser snapshots it, then a rAF removes it), so it must not be
-   hidden (an invisible element makes no snapshot) and must not intercept the
-   pointer. z-index clears the bar so the copy, not the dimmed original, is what
-   would show if it ever painted. */
+   under .wt-root, outside any backdrop-filter on the bar, which would stop WebKit
+   rendering the drag image (webkit.org/b/22787), and laid over the real chip via
+   inline left/top/width/height. A native drag snapshots it within a frame, so it
+   must not be hidden (an invisible element makes no snapshot); a touch or pen
+   drag keeps it under the finger and hit-tests the point beneath, so it must
+   never intercept the pointer. z-index clears the bar so the copy, not the
+   dimmed original, is what shows. */
 :where(.wt-root) .wt-tab-ghost {
   position: absolute;
   z-index: 16;

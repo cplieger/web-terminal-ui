@@ -3770,17 +3770,17 @@ describe("tabs reorder preview", () => {
   });
 
   it("commits on release without waiting for the rest window at all", async () => {
-    // A release is a decision, so dropping mid-sweep lands the tab where the lean said
-    // it would rather than discarding the gesture.
+    // A release is a decision, so dropping mid-sweep lands the tab under the pointer
+    // rather than discarding the gesture.
     const h = await mountDragLaidOut(2);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
     h.sweepTo(h.pastEnd);
     expect(idsOf(h.root)).toEqual(["one", "two"]);
 
-    // Released at the position the sweep last reported, which is what the lean was
-    // showing: dragEvent releases at clientX 0 and the drop commits the slot under
-    // the POINTER, so the coordinate has to come with it.
+    // Released at the position the sweep last reported: dragEvent releases at
+    // clientX 0 and the drop commits the slot under the POINTER, so the coordinate
+    // has to come with it.
     dragged?.dispatchEvent(dragAt("drop", h.dt, h.pastEnd));
 
     expect(idsOf(h.root)).toEqual(["two", "one"]);
@@ -3916,8 +3916,7 @@ describe("tabs reorder preview", () => {
     vi.advanceTimersByTime(150);
     expect(h.live()).toBe("Drop position 2");
 
-    // The completed move is announced once, by the release — at the pointer, which
-    // is the slot the lean is showing.
+    // The completed move is announced once, by the release at the pointer.
     dragged?.dispatchEvent(dragAt("drop", h.dt, h.pastEnd));
     vi.advanceTimersByTime(150);
     expect(h.live()).toBe("Moved one to position 2");
@@ -3925,7 +3924,7 @@ describe("tabs reorder preview", () => {
 
   it("previews nothing when the candidate is the slot the tab already holds", async () => {
     // Dragging the LAST tab past the end of the strip: the candidate is "after
-    // everything", which is where it already is. No lean, no rest, no announcement —
+    // everything", which is where it already is. No slide, no rest, no announcement —
     // the cheap idempotent path every dragover takes when the pointer has not
     // actually chosen anything new.
     const h = await mountDragLaidOut(3);
@@ -3942,8 +3941,8 @@ describe("tabs reorder preview", () => {
 
   it("survives the pending target being closed from another window", async () => {
     // insertBefore throws NotFoundError on a reference node that is no longer a child,
-    // which would abandon the reorder half-done and leave the lean stranded — the rest
-    // net has already been dropped by then, so nothing else would clear it.
+    // which would abandon the commit half-done with its slide stranded — the rest net
+    // has already been dropped by then, so nothing else would clear it.
     const h = await mountDrag(3);
     const dragged = h.chips()[0];
     dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
@@ -3985,8 +3984,8 @@ describe("tabs reorder preview", () => {
   });
 
   it("writes no inline transition at all under reduced motion", async () => {
-    // The lean and the slide are inline transitions, so no stylesheet gate can reach
-    // them: .wt-animate and the scoped prefers-reduced-motion reset in 01-scope.css both
+    // The slide is an inline transition, so no stylesheet gate can reach it:
+    // .wt-animate and the scoped prefers-reduced-motion reset in 01-scope.css both
     // govern CSS only. The reorder has to check the preference itself, and it has to
     // still REORDER — motion is what the user opted out of, not the feature.
     const h = await mountDragLaidOut(3, { reducedMotion: true });

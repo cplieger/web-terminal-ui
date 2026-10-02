@@ -796,9 +796,9 @@ describe("the tab-click rule", () => {
 });
 
 describe("the snap items", () => {
-  it("lists Snap to left and Snap to right after Move right, a separator before Close, and disables the side a tab is shown on", async () => {
+  it("lists Snap to left and Snap to right after Move right, a separator before Close, and disables the side a tab is shown on in an open split", async () => {
     const root = rootIn();
-    const { ctx } = await mountTabbed(root, server);
+    const { term, ctx } = await mountTabbed(root, server);
     const items = openTabMenu(root, "one");
     const labels = items.map((el) => (el instanceof HTMLButtonElement ? el.textContent : "---"));
     expect(labels).toEqual([
@@ -816,7 +816,8 @@ describe("the snap items", () => {
       "Close to the left",
       "Close all",
     ]);
-    expect(menuItem(items, "Snap to left").disabled).toBe(true);
+    // The single view's tab may snap either way: either side opens the split.
+    expect(menuItem(items, "Snap to left").disabled).toBe(false);
     expect(menuItem(items, "Snap to right").disabled).toBe(false);
     expect(menuItem(items, "Snap to right").getAttribute("role")).toBe("menuitem");
 
@@ -825,6 +826,11 @@ describe("the snap items", () => {
     expect(menuItem(other, "Snap to left").disabled).toBe(false);
     expect(menuItem(other, "Snap to right").disabled).toBe(false);
     expect(shown(ctx, "left")).toBe("s1");
+
+    term.split?.open();
+    const open = openTabMenu(root, "one");
+    expect(menuItem(open, "Snap to left").disabled).toBe(true);
+    expect(menuItem(open, "Snap to right").disabled).toBe(false);
   });
 
   it("snapping the selected pane's tab to the right empties the left, shows it on the right and selects the right, forgetting before attaching", async () => {
@@ -962,16 +968,22 @@ describe("the snap items", () => {
     expect(server.writes).toHaveLength(writes);
   });
 
-  it("a snap of the single view's tab onto the left keeps the split closed", async () => {
+  it("a snap of the single view's tab onto the left opens the split with its partner on the right", async () => {
     const root = rootIn();
     const { term, ctx, api } = await mountTabbed(root, server);
     expect(term.split?.isOpen()).toBe(false);
 
     expect(api.snap("s1", "left")).toBe(true);
-    expect(term.split?.isOpen()).toBe(false);
+    expect(term.split?.isOpen()).toBe(true);
     expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("left");
+    await until(() => server.writes.length > 0);
     await tick();
-    expect(server.writes).toEqual([]);
+    expect(server.writes).toEqual([
+      { left: "s1", right: "s2", handle: 0.5, selected: "left", open: true },
+    ]);
+    expect(server.posts()).toBe(0);
   });
 
   it("a keyboard-opened menu offers the snap items enabled, and Enter on one snaps with focus landing in the snapped pane", async () => {
@@ -992,7 +1004,7 @@ describe("the snap items", () => {
     expect(labels.indexOf("Snap to right")).toBe(labels.indexOf("Snap to left") + 1);
     const right = menuItem(items, "Snap to right");
     expect(right.disabled).toBe(false);
-    expect(menuItem(items, "Snap to left").disabled).toBe(true);
+    expect(menuItem(items, "Snap to left").disabled).toBe(false);
     expect(right.tabIndex).toBe(0);
 
     right.focus();
@@ -1181,6 +1193,196 @@ describe("drag and drop onto a half", () => {
     expect(server.writes).toEqual([
       { left: "s1", right: "s2", handle: 0.5, selected: "left", open: true },
     ]);
+    expect(server.posts()).toBe(0);
+  });
+
+  it("with one tab, a drop on the right half creates a tab for the left pane and opens the split only once it exists", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    const held = gate();
+    server.postGate = held;
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const rightX = rect.left + rect.width * 0.75;
+
+    dragAt("dragstart", dt, chip, rightX);
+    dragAt("dragover", dt, root, rightX);
+    dragAt("drop", dt, root, rightX);
+    dragAt("dragend", dt, chip, rightX);
+    await until(() => server.posts() === 1);
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+
+    held.resolve();
+    await until(() => shown(ctx, "left") === "s-new");
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(shown(ctx, "left")).toBe("s-new");
+    expect(ctx.shell.selected()).toBe("right");
+    expect(chips(root)).toHaveLength(2);
+    expect(server.posts()).toBe(1);
+  });
+
+  it("with one tab a failing create leaves the single view as it was after a drop", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    server.postStatus = 500;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const rightX = rect.left + rect.width * 0.75;
+
+    dragAt("dragstart", dt, chip, rightX);
+    dragAt("dragover", dt, root, rightX);
+    dragAt("drop", dt, root, rightX);
+    dragAt("dragend", dt, chip, rightX);
+    await until(() => server.posts() === 1);
+    await tick();
+    await tick();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(chips(root)).toHaveLength(1);
+  });
+
+  it("with one tab a drop while a '+' create is in flight shares its one POST and still opens the split", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    const held = gate();
+    server.postGate = held;
+    root.querySelector<HTMLElement>(".wt-tab-new")?.click();
+    await until(() => server.posts() === 1);
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const rightX = rect.left + rect.width * 0.75;
+
+    dragAt("dragstart", dt, chip, rightX);
+    dragAt("dragover", dt, root, rightX);
+    dragAt("drop", dt, root, rightX);
+    dragAt("dragend", dt, chip, rightX);
+    expect(term.split?.isOpen()).toBe(false);
+
+    held.resolve();
+    await until(() => shown(ctx, "left") === "s-new" || shown(ctx, "right") === "s-new");
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(shown(ctx, "left")).toBe("s-new");
+    expect(server.posts()).toBe(1);
+  });
+
+  it("with one tab, a drop on the left half keeps the tab on the left and creates a tab for the right pane", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    const held = gate();
+    server.postGate = held;
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const leftX = rect.left + rect.width * 0.25;
+
+    dragAt("dragstart", dt, chip, leftX);
+    dragAt("dragover", dt, root, leftX);
+    dragAt("drop", dt, root, leftX);
+    dragAt("dragend", dt, chip, leftX);
+    await until(() => server.posts() === 1);
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+
+    held.resolve();
+    await until(() => shown(ctx, "right") === "s-new");
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(ctx.shell.selected()).toBe("left");
+    expect(chips(root)).toHaveLength(2);
+    expect(server.posts()).toBe(1);
+  });
+
+  it("with one tab under 730 px a snap is refused and creates nothing", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { term, api } = await mountTabbed(root, server);
+    root.style.width = "720px";
+    await settle();
+
+    expect(api.snap("s1", "right")).toBe(false);
+    await tick();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(server.posts()).toBe(0);
+  });
+
+  it("with one tab a drop-initiated create waits out a 503 like any other", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    const answer = server.fetch.getMockImplementation();
+    if (answer === undefined) {
+      throw new Error("the fake server has no fetch");
+    }
+    let refused = false;
+    server.fetch.mockImplementation((url, init) => {
+      if (init?.method !== "POST" || refused) {
+        return answer(url, init);
+      }
+      refused = true;
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? "0" : null) },
+        json: () => Promise.resolve({ error: "installing tools" }),
+      } as unknown as Response);
+    });
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const rightX = rect.left + rect.width * 0.75;
+
+    dragAt("dragstart", dt, chip, rightX);
+    dragAt("dragover", dt, root, rightX);
+    dragAt("drop", dt, root, rightX);
+    dragAt("dragend", dt, chip, rightX);
+    await until(() => shown(ctx, "left") === "s-new");
+    expect(server.posts()).toBe(2);
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(shown(ctx, "left")).toBe("s-new");
+  });
+
+  it("with one tab, a dropped tab the server removes before the create answers leaves the new tab alone in the single view", async () => {
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const monitor = fakeMonitor();
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server, {
+      tabsOpts: { activityMonitor: monitor.feature },
+      before: [monitor.feature],
+    });
+    const held = gate();
+    server.postGate = held;
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const rightX = rect.left + rect.width * 0.75;
+
+    dragAt("dragstart", dt, chip, rightX);
+    dragAt("dragover", dt, root, rightX);
+    dragAt("drop", dt, root, rightX);
+    dragAt("dragend", dt, chip, rightX);
+    await until(() => server.posts() === 1);
+    monitor.emit({ id: "s1", title: "one", createdAt: "1", status: "idle", removed: true });
+    await tick();
+
+    held.resolve();
+    await until(() => shown(ctx, "left") === "s-new" || shown(ctx, "right") === "s-new");
+    await tick();
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s-new");
+    expect(chips(root)).toHaveLength(1);
+    expect(server.posts()).toBe(1);
   });
 
   it("highlights the half under the pointer during a drag, snaps on drop and clears the highlight; the strip preview reverts", async () => {
@@ -1310,7 +1512,7 @@ describe("drag and drop onto a half", () => {
     expect(document.activeElement).toBe(textareaOf(root, "left"));
   });
 
-  it("a shown tab dropped on its own half changes nothing: the single view's tab on the left keeps the split closed", async () => {
+  it("the single view's tab dropped on the left half opens the split with its partner on the right", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     const chip = chipOf(root, "one");
@@ -1323,10 +1525,35 @@ describe("drag and drop onto a half", () => {
     const drop = dragAt("drop", dt, root, leftX);
     dragAt("dragend", dt, chip, leftX);
     expect(drop.defaultPrevented).toBe(true);
-    expect(term.split?.isOpen()).toBe(false);
+    expect(term.split?.isOpen()).toBe(true);
     expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s2");
+    expect(ctx.shell.selected()).toBe("left");
     await tick();
-    expect(server.writes).toEqual([]);
+    expect(server.posts()).toBe(0);
+  });
+
+  it("a shown tab dropped on its own half of an open split changes nothing", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    await until(() => server.writes.length > 0);
+    await tick();
+    const writes = server.writes.length;
+    const chip = chipOf(root, "one");
+    const dt = fakeDataTransfer();
+    const rect = root.getBoundingClientRect();
+    const leftX = rect.left + rect.width * 0.25;
+
+    dragAt("dragstart", dt, chip, leftX);
+    dragAt("dragover", dt, root, leftX);
+    dragAt("drop", dt, root, leftX);
+    dragAt("dragend", dt, chip, leftX);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s2");
+    await tick();
+    expect(server.writes).toHaveLength(writes);
   });
 
   it("decides the side at the centre of the divider as drawn, not at the row's middle", async () => {
