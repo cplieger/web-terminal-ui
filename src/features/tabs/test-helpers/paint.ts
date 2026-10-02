@@ -10,6 +10,9 @@ declare global {
   }
 }
 
+// Vite reads import.meta.glob's arguments statically, so this module must stay
+// outside Stryker's `mutate` set: an instrumented options object makes Vite's
+// dependency pre-scan fail for the whole browser project.
 const MANIFESTS = import.meta.glob("../../../../css/MANIFEST*", {
   query: "?raw",
   import: "default",
