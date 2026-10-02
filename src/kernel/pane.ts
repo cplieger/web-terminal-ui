@@ -36,6 +36,8 @@ import type {
 
 const { mapKeyboardEvent, bracketTextForPaste, prepareTextForTerminal } = keyboard;
 
+type GridSize = ReturnType<TerminalEngine["renderer"]["computeSize"]>;
+
 const DEFAULT_WS_PATH = "/ws";
 // The family that carries the CELL METRICS, alone, never --font-mono's list:
 // WebKit settles load() over a list as soon as the FIRST family covering the
@@ -468,7 +470,7 @@ function buildPaneInto(
   function updateMousePointer(): void {
     termWrap.classList.toggle("wt-mouse-app", engine.modes.getMouseMode() !== 0);
   }
-  function measurableSize(): { cols: number; rows: number } | null {
+  function measurableSize(): GridSize | null {
     // A pane hidden by a closed split is `display: none`: the cell width it would
     // measure is 0, and the first render after a reveal would lay out on it.
     if (!fontsLoaded || hidden || viewport.isInTransition()) {
@@ -477,11 +479,25 @@ function buildPaneInto(
     engine.renderer.updateFontMetrics();
     return engine.renderer.computeSize();
   }
+  let announced: GridSize | null = null;
+  let heldGrow = false;
+  function announce(size: GridSize): void {
+    announced = size;
+    heldGrow = false;
+    engine.connection.sendResize();
+  }
+  function releaseHeldGrow(): void {
+    const size = measurableSize();
+    if (size !== null) {
+      announce(size);
+    }
+  }
   function maybeSendFirstResize(): void {
-    if (!wsOpen || measurableSize() === null) {
+    const size = wsOpen ? measurableSize() : null;
+    if (size === null) {
       return;
     }
-    engine.connection.sendResize();
+    announce(size);
   }
 
   const engine: TerminalEngine = createTerminalEngine({
@@ -496,6 +512,9 @@ function buildPaneInto(
     },
     onUserScrollChange: (scrolledUp) => {
       bus.emit("scroll:state", { scrolledUp });
+      if (heldGrow && !scrolledUp) {
+        releaseHeldGrow();
+      }
     },
     callbacks: {
       computeSize: () => engine.renderer.computeSize(),
@@ -512,6 +531,11 @@ function buildPaneInto(
           firstFrameRendered = true;
           if (fontsLoaded) {
             markReady();
+          }
+          // The engine applies a frame to the bound store before this callback,
+          // and the alternate screen has no scrollback to hold a size for.
+          if (heldGrow && engine.renderer.boundStore().isAlt()) {
+            releaseHeldGrow();
           }
           bus.emit("wire:screen", msg);
         } else if (msg.type === "title") {
@@ -971,11 +995,24 @@ function buildPaneInto(
     box: root,
     keyboard: services.keyboardInsets,
     scroll: engine.scroll,
-    onSettled() {
+    onSettled(wasAtBottom) {
       // The settle is the one resize a keyboard slide or rotation should cost;
       // sendResize deduplicates.
-      if (measurableSize() !== null) {
-        engine.connection.sendResize();
+      const size = measurableSize();
+      if (size !== null) {
+        // A program repaints on resize, and that repaint can erase or reflow the
+        // scrollback being read, so a taller box waits until the reader follows.
+        if (
+          !wasAtBottom &&
+          announced !== null &&
+          size.cols === announced.cols &&
+          size.rows > announced.rows &&
+          !engine.renderer.boundStore().isAlt()
+        ) {
+          heldGrow = true;
+        } else {
+          announce(size);
+        }
       }
       composition.positionCompositionView();
     },
@@ -1039,10 +1076,11 @@ function buildPaneInto(
       // The gate opened on fallback metrics and the swap period is infinite, so
       // one corrective announce once the bytes land; sendResize deduplicates.
       void doc.fonts.ready.then(() => {
-        if (destroyed || measurableSize() === null) {
+        const size = destroyed ? null : measurableSize();
+        if (size === null) {
           return;
         }
-        engine.connection.sendResize();
+        announce(size);
       });
     }, onFontSettled);
   } catch (err) {
@@ -1353,7 +1391,7 @@ function buildPaneInto(
     clearActiveSession,
     announceSize() {
       if (!destroyed && fontsLoaded) {
-        engine.connection.sendResize();
+        announce(engine.renderer.computeSize());
       }
     },
     focus: focusTerminal,

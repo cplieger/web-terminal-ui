@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
+import { createScrollController, type ScrollController } from "@cplieger/web-terminal-engine";
 import {
   createKeyboardInsets,
   createViewport,
@@ -517,6 +518,96 @@ describe("viewport: the visual-viewport wiring reacts after construction", () =>
     expect(tw.style.bottom).toBe("");
     expect(viewport.isInTransition()).toBe(false);
   });
+});
+
+describe("viewport: a keyboard close leaves a scrolled-up reader where they were", () => {
+  let vv: ReturnType<typeof liveVisualViewport>;
+  let wrap: HTMLElement;
+  let reader: ScrollController;
+  let sheet: HTMLStyleElement;
+
+  const settled = (): Promise<void> => new Promise((r) => setTimeout(r, SETTLE_MS + 70));
+  const frame = (): Promise<void> =>
+    new Promise((r) => {
+      requestAnimationFrame(() => {
+        r();
+      });
+    });
+
+  beforeEach(() => {
+    viewport.teardown();
+    keyboard.teardown();
+    // Scroll events and the controller's follow tracking need real frames.
+    vi.useRealTimers();
+    vv = liveVisualViewport(window.innerHeight, 0);
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
+    // Through a stylesheet, not inline: the pin clears an inline top and bottom
+    // when the keyboard closes, which would leave the box sized by its content.
+    sheet = document.createElement("style");
+    sheet.textContent =
+      ".vp-reader-root { position: fixed; inset: 0; }" +
+      ".vp-reader-wrap { position: absolute; inset: 0; overflow: hidden auto; }";
+    document.head.appendChild(sheet);
+    const root = document.createElement("div");
+    root.className = "vp-reader-root";
+    wrap = document.createElement("div");
+    wrap.className = "vp-reader-wrap";
+    const content = document.createElement("div");
+    content.style.height = `${String(500 * 17)}px`;
+    wrap.appendChild(content);
+    root.appendChild(wrap);
+    document.body.replaceChildren(root);
+    reader = createScrollController({ scrollEl: wrap });
+    keyboard = createKeyboardInsets({ root });
+    viewport = createViewport({
+      termWrap: wrap,
+      box: root,
+      keyboard,
+      scroll: reader,
+      onSettled,
+    });
+  });
+
+  afterEach(() => {
+    reader.dispose();
+    sheet.remove();
+    undoShadow();
+  });
+
+  it("keeps the offset of a reader 1200px up through the keyboard closing", async () => {
+    reader.scrollToBottom();
+    await settled();
+    vv.height = window.innerHeight - 300;
+    vv.fire("resize");
+    await settled();
+    wrap.scrollTop -= 1200;
+    await frame();
+    await frame();
+    expect(reader.isUserScrolledUp()).toBe(true);
+    const offset = wrap.scrollTop;
+
+    vv.height = window.innerHeight;
+    vv.fire("resize");
+    await settled();
+
+    expect(wrap.scrollTop).toBe(offset);
+    expect(reader.isUserScrolledUp()).toBe(true);
+  }, 5000);
+
+  it("ends a following reader at the bottom after the keyboard closes", async () => {
+    reader.scrollToBottom();
+    await settled();
+    vv.height = window.innerHeight - 300;
+    vv.fire("resize");
+    await settled();
+
+    vv.height = window.innerHeight;
+    vv.fire("resize");
+    await settled();
+
+    expect(reader.isUserScrolledUp()).toBe(false);
+    expect(wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight).toBeLessThanOrEqual(1);
+  }, 5000);
 });
 
 describe("viewport and keyboard insets: teardown releases every listener they attached", () => {
