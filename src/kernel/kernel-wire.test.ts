@@ -26,7 +26,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
+import { LineStore } from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
+import { softKeyboard, type SoftKeyboard } from "../features/tabs/test-helpers/paint.js";
 import type {
   CreateTerminalOptions,
   TerminalContext,
@@ -914,6 +916,181 @@ describe("the settle after a viewport transition", () => {
     await vi.advanceTimersByTimeAsync(500);
 
     expect(sendResize).not.toHaveBeenCalled();
+  });
+});
+
+describe("a viewport grow while the reader is scrolled up", () => {
+  // A program redraws on every resize it is told about, and a full-screen redraw
+  // can erase or reflow the scrollback a reader is on. So a soft keyboard closing
+  // under someone reading history holds the taller size until they follow again.
+
+  let kb: SoftKeyboard;
+
+  beforeEach(() => {
+    // The kernel reads window.visualViewport once, when it builds.
+    kb = softKeyboard();
+  });
+
+  afterEach(() => {
+    kb.restore();
+  });
+
+  /** Mounts at the 80x24 baseline, then opens the keyboard to 80x14 and waits for
+   *  that announce, so each test starts with a keyboard up and nothing pending. */
+  async function keyboardOpen(): Promise<void> {
+    vi.useFakeTimers();
+    await mount({ features: () => [] });
+    await vi.advanceTimersByTimeAsync(0);
+    await settleUntil(() => sendResize.mock.calls.length > 0);
+    fake.renderer.computeSize.mockReturnValue({ cols: 80, rows: 14 });
+    sendResize.mockClear();
+    kb.open(300);
+    await settleUntil(() => sendResize.mock.calls.length > 0);
+  }
+
+  function altScreenFrame(): Engine.ScreenMessage {
+    return { type: "screen", rows: [[]], base: 0, cursor: [0, 0], changed: [0], altActive: true };
+  }
+
+  function readerScrollsUp(): void {
+    fake.scroll.isUserScrolledUp.mockReturnValue(true);
+    fake.options().onUserScrollChange?.(true);
+  }
+
+  function readerFollows(): void {
+    fake.scroll.isUserScrolledUp.mockReturnValue(false);
+    fake.options().onUserScrollChange?.(false);
+  }
+
+  /** Closes the keyboard onto `size` and waits for the settle to measure it. The
+   *  measure is the positive proof the settle ran, so a "nothing was announced"
+   *  assertion after it cannot pass for want of a settle. */
+  async function keyboardCloses(size: { cols: number; rows: number }): Promise<void> {
+    fake.renderer.computeSize.mockReturnValue(size);
+    sendResize.mockClear();
+    updateFontMetrics.mockClear();
+    kb.open(0);
+    await settleUntil(() => updateFontMetrics.mock.calls.length > 0);
+  }
+
+  it("holds the taller size while the reader is scrolled up, and announces it when they follow", async () => {
+    await keyboardOpen();
+    readerScrollsUp();
+
+    await keyboardCloses({ cols: 80, rows: 24 });
+    expect(sendResize).not.toHaveBeenCalled();
+
+    readerFollows();
+    expect(sendResize).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces the close at the settle for a reader who is following", async () => {
+    await keyboardOpen();
+
+    await keyboardCloses({ cols: 80, rows: 24 });
+
+    expect(sendResize).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces a width change at once, scrolled up or not", async () => {
+    await keyboardOpen();
+    readerScrollsUp();
+
+    await keyboardCloses({ cols: 120, rows: 24 });
+
+    expect(sendResize).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces a keyboard that reopens over a held size, and releases nothing twice", async () => {
+    await keyboardOpen();
+    readerScrollsUp();
+    await keyboardCloses({ cols: 80, rows: 24 });
+    expect(sendResize).not.toHaveBeenCalled();
+
+    fake.renderer.computeSize.mockReturnValue({ cols: 80, rows: 14 });
+    kb.open(300);
+    await settleUntil(() => sendResize.mock.calls.length > 0);
+    expect(sendResize).toHaveBeenCalledTimes(1);
+
+    readerFollows();
+    expect(sendResize).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces the grow at once on the alternate screen, which has no scrollback to hold", async () => {
+    await keyboardOpen();
+    const altStore = new LineStore();
+    altStore.applyScreen({
+      type: "screen",
+      rows: [[]],
+      base: 0,
+      cursor: [0, 0],
+      changed: [0],
+      altActive: true,
+    });
+    expect(altStore.isAlt()).toBe(true);
+    fake.renderer.boundStore.mockReturnValue(altStore);
+    readerScrollsUp();
+
+    await keyboardCloses({ cols: 80, rows: 24 });
+
+    expect(sendResize).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces a held size when a full-screen program takes the alternate screen", async () => {
+    await keyboardOpen();
+    readerScrollsUp();
+    await keyboardCloses({ cols: 80, rows: 24 });
+    expect(sendResize).not.toHaveBeenCalled();
+
+    const altFrame = altScreenFrame();
+    // The engine applies a frame to the bound store before the kernel sees it.
+    const altStore = new LineStore();
+    altStore.applyScreen(altFrame);
+    expect(altStore.isAlt()).toBe(true);
+    fake.renderer.boundStore.mockReturnValue(altStore);
+    wire().onMessage(altFrame);
+    expect(sendResize).toHaveBeenCalledTimes(1);
+
+    readerFollows();
+    expect(sendResize).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps holding through main-screen frames", async () => {
+    await keyboardOpen();
+    readerScrollsUp();
+    await keyboardCloses({ cols: 80, rows: 24 });
+
+    wire().onMessage(screenFrame());
+
+    expect(sendResize).not.toHaveBeenCalled();
+  });
+
+  it("does not re-measure on alternate-screen frames when nothing is held", async () => {
+    await keyboardOpen();
+    const altFrame = altScreenFrame();
+    const altStore = new LineStore();
+    altStore.applyScreen(altFrame);
+    fake.renderer.boundStore.mockReturnValue(altStore);
+    updateFontMetrics.mockClear();
+    sendResize.mockClear();
+
+    wire().onMessage(altFrame);
+
+    expect(updateFontMetrics).not.toHaveBeenCalled();
+    expect(sendResize).not.toHaveBeenCalled();
+  });
+
+  it("lets a socket open supersede a held size, so following again sends nothing more", async () => {
+    await keyboardOpen();
+    readerScrollsUp();
+    await keyboardCloses({ cols: 80, rows: 24 });
+    expect(sendResize).not.toHaveBeenCalled();
+
+    wire().onOpen();
+    expect(sendResize).toHaveBeenCalledTimes(1);
+
+    readerFollows();
+    expect(sendResize).toHaveBeenCalledTimes(1);
   });
 });
 
