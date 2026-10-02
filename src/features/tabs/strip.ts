@@ -14,11 +14,12 @@ import { activityPhrase, normalizeActivity, statusPhrase, statusRevealsDot } fro
 // motion is spelled in — index.ts owns the mechanism, strip.ts owns the values,
 // the same split switcher.ts keeps for the mobile swipe.
 
-/** How long (ms) the pointer must have been un-moved before a stationary `dragover` is
- *  believed as "stopped". Small, because a `dragover` at an UNCHANGED position is
- *  positive evidence of rest (the drag loop keeps delivering events while the pointer
- *  is held still); this only filters the coincidence where one event of a sweep lands
- *  within REORDER_MOVE_EPS_PX of the previous one. */
+// Twin of marotte static-src/tabs-drag.ts's constants; change both or neither.
+/** How long (ms) the pointer must have been un-moved before a position report at an
+ *  unchanged position (a `dragover`, or the pointer path's re-report on this tick) is
+ *  believed as "stopped". Small, because such a report is positive evidence of rest;
+ *  this only filters the coincidence where one report of a sweep lands within
+ *  REORDER_MOVE_EPS_PX of the previous one. */
 export const REORDER_STILL_MS = 50;
 
 /** Fallback guard (ms): commit the pending slot this long after the last MOVEMENT, for
@@ -34,11 +35,85 @@ export const REORDER_REST_MS = 450;
  *  sweep would keep pushing the commit out for as long as someone held the tab. */
 export const REORDER_MOVE_EPS_PX = 3;
 
-/** The one transition both preview stages use (the lean, and the slide that
- *  commits it): --dur-standard and --ease-standard as literals, since JS-driven
- *  motion here reads no token back out of the cascade (mirror a token edit by
- *  hand). The property is `translate`, NOT `transform`: declarations from a
- *  running CSS animation out-rank inline style, so a chip mid `wt-slot-in` or
+/** The last position seen along the strip's axis, and when it last moved by more than
+ *  REORDER_MOVE_EPS_PX. */
+export interface RestState {
+  at: number | null;
+  movedAt: number;
+}
+
+/** Folds one position report into `rest` and answers whether the pointer has now been
+ *  still for REORDER_STILL_MS. */
+export function noteRestSample(rest: RestState, pos: number, now: number): boolean {
+  const moved = rest.at === null || Math.abs(pos - rest.at) > REORDER_MOVE_EPS_PX;
+  rest.at = pos;
+  if (moved) {
+    rest.movedAt = now;
+  }
+  return !moved && now - rest.movedAt >= REORDER_STILL_MS;
+}
+
+/** How long a press must hold, and how far it may stray meanwhile, to become a drag. */
+export interface DragActivation {
+  readonly holdMs: number;
+  readonly slopPx: number;
+}
+
+// 8px is Android's touch slop; 150ms clears its 100ms tap window and wins the race
+// against the platform long press. Source:
+// https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/view/ViewConfiguration.java
+export const TOUCH_DRAG: DragActivation = { holdMs: 150, slopPx: 8 };
+export const PEN_DRAG: DragActivation = { holdMs: 150, slopPx: 8 };
+
+/** How a press on a chip becomes a drag, by `PointerEvent.pointerType`. A mouse
+ *  keeps native drag-and-drop and its own drag threshold (null). Touch, pen and an
+ *  unknown type hold `holdMs` without straying past `slopPx` (exceedsSlop): past
+ *  the slop first, the gesture is a scroll and stays the browser's. */
+export function pointerDragActivation(pointerType: string): DragActivation | null {
+  if (pointerType === "mouse") {
+    return null;
+  }
+  return pointerType === "pen" ? PEN_DRAG : TOUCH_DRAG;
+}
+
+/** Whether travel `(dx, dy)` from the press point is past `rule`'s slop: Euclidean,
+ *  strictly greater, so a tremor of exactly the slop still holds. */
+export function exceedsSlop(dx: number, dy: number, rule: DragActivation): boolean {
+  return Math.hypot(dx, dy) > rule.slopPx;
+}
+
+/** The visible viewport's box, under the VisualViewport API's own field names. */
+export interface ViewportBox {
+  readonly offsetLeft: number;
+  readonly offsetTop: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/** Read `win`'s box now, falling back to the layout viewport where the API is absent. */
+export function viewportBox(win: Window): ViewportBox {
+  const vv = win.visualViewport;
+  return vv === null
+    ? { offsetLeft: 0, offsetTop: 0, width: win.innerWidth, height: win.innerHeight }
+    : { offsetLeft: vv.offsetLeft, offsetTop: vv.offsetTop, width: vv.width, height: vv.height };
+}
+
+/** Whether two boxes differ by a pixel or more on any field: enough to have moved a
+ *  stationary pointer's coordinates, which a raised iOS keyboard or a pinch-zoom pan
+ *  does without the finger moving. Sub-pixel jitter is absorbed. */
+export function viewportMoved(a: ViewportBox, b: ViewportBox): boolean {
+  return (
+    Math.abs(a.height - b.height) >= 1 ||
+    Math.abs(a.offsetTop - b.offsetTop) >= 1 ||
+    Math.abs(a.width - b.width) >= 1 ||
+    Math.abs(a.offsetLeft - b.offsetLeft) >= 1
+  );
+}
+
+/** The commit slide's transition: --dur-standard and --ease-standard as literals,
+ *  since JS-driven motion here reads no token back out of the cascade (mirror a
+ *  token edit by hand). The property is `translate`, NOT `transform`: declarations
+ *  from a running CSS animation out-rank inline style, so a chip mid `wt-slot-in` or
  *  `wt-tab-in` (both animate `transform: scale`) would ignore an inline
  *  `transform`; `translate` composes with it instead of competing for it. */
 export const REORDER_SHIFT_TRANS = "translate 0.2s cubic-bezier(0.2, 0, 0, 1)";

@@ -50,21 +50,28 @@ import {
   tabAccessibleName,
 } from "./model.js";
 import {
-  REORDER_MOVE_EPS_PX,
   REORDER_REST_MS,
   REORDER_STILL_MS,
   REORDER_SETTLE_MS,
   REORDER_SHIFT_TRANS,
   REORDER_SLOT_FADE_MS,
   TAB_HTML,
+  exceedsSlop,
   kbButtonHTML,
   newButtonHTML,
+  noteRestSample,
   paintActivityMark,
   paintProgress,
   paintStatusDot,
   pick,
+  pointerDragActivation,
   splitButtonHTML,
   switchButtonHTML,
+  viewportBox,
+  viewportMoved,
+  type DragActivation,
+  type RestState,
+  type ViewportBox,
 } from "./strip.js";
 import {
   AXIS_LOCK_PX,
@@ -106,13 +113,12 @@ export interface TabsApi {
    *  pane already shows has that pane selected instead. */
   switchTo(id: string): void;
   /** Show a tab on one side of the split, opening it when closed, and select its
-   *  pane. Opening the split keeps the single view's tab on the other side — or,
-   *  when the moved tab IS it, its split partner — so neither pane opens empty. A
-   *  tab the other pane shows trades places with the tab on that side (or leaves
-   *  its pane empty when the side showed none); any other tab there becomes
-   *  ordinary. A tab already shown on that side changes nothing. False when
-   *  refused: an unknown id, an invalid side, or a split the pane row is too
-   *  narrow to open. */
+   *  pane. Opening keeps the single view's tab, or the moved tab's split partner,
+   *  on the other side; with no other tab, one is created and the split opens
+   *  once it exists. A tab the other pane shows trades places with the one on
+   *  that side; any other tab there becomes ordinary. In an open split, a tab
+   *  already shown on that side changes nothing. False when refused: an unknown
+   *  id, an invalid side, or a split the pane row is too narrow to open. */
   snap(id: string, side: PaneSide): boolean;
   /** The current tabs, first-to-last by creation; `active` marks a tab a pane
    *  shows. */
@@ -268,6 +274,12 @@ interface ShowOptions {
   /** Leave the selection where it is, unless the selected pane shows nothing. */
   readonly keepSelection?: boolean;
 }
+
+/** How a create opens the split once its tab exists. `button`: the single view
+ *  keeps its tab and the new tab fills the other pane, selected. `snap`: `id`
+ *  lands on `side`, selected, and the new tab fills the other pane. */
+type SplitOpening =
+  { readonly by: "button" } | { readonly by: "snap"; readonly id: string; readonly side: PaneSide };
 
 function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
   if (ev.ctrlKey || ev.metaKey || ev.altKey) {
@@ -781,6 +793,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // The record is read once and never written back by a read.
       let applyingRecord = false;
       let warnedLayout = false;
+      // Twin of marotte static-src/tabs-drag.ts; when changing drag behaviour or its
+      // constants, check the other app. Both judge a live drag's viewport against the
+      // PRESS-time frame, so a move a hold lifted across still ends the drag.
       let draggingEl: HTMLElement | null = null;
       // The chips currently carrying an inline displacement from the commit slide.
       // A set plus one settle function, so whatever a slide wrote can always be handed
@@ -789,18 +804,35 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let shiftTimer: number | null = null;
       // The no-events fallback timer. It carries its own target, so there is
       // deliberately NO pending-slot field here: one was the cause of the reorder
-      // dropping commits (see trackRest). restX is the last pointer position seen, which
-      // is how movement is told from stillness.
+      // dropping commits (see trackRest). `rest` is how movement is told from
+      // stillness.
       let restTimer: number | null = null;
-      let restX: number | null = null;
-      // When the pointer last actually MOVED. A stationary dragover this long after it
-      // is believed as a stop (see trackRest).
-      let restMovedAt = 0;
+      const rest: RestState = { at: null, movedAt: 0 };
       // Whether a `drop` fired for the drag in flight. It is the exact signal for
       // "the user released deliberately" as opposed to "the drag was abandoned":
       // Escape and a refused release fire dragend with no drop at all. dragend
       // without it reverts the preview, which is the cancel this reorder never had.
       let dropped = false;
+      // A touch or pen press on a chip, from pointerdown to the gesture's end.
+      // `live` once the hold lifted it into a drag; `moved` once it then left the
+      // slop, which is what makes the release a drop rather than a tap.
+      interface PointerPress {
+        readonly id: number;
+        readonly el: HTMLElement;
+        readonly x0: number;
+        readonly y0: number;
+        readonly rule: DragActivation;
+        readonly frame: ViewportBox;
+        readonly draggable: boolean;
+        readonly off: AbortController;
+        x: number;
+        y: number;
+        hold: number | null;
+        tick: number | null;
+        live: boolean;
+        moved: boolean;
+      }
+      let press: PointerPress | null = null;
       // The chip mid slot-fade, and the timer that ends it.
       let slotFadeEl: HTMLElement | null = null;
       let slotFadeTimer: number | null = null;
@@ -1419,9 +1451,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
           switchTo(tab.id);
         });
-        // Also the TOUCH rename path: a long-press on a draggable chip starts a
-        // reorder drag on iPadOS instead of opening the menu. The chip's
-        // touch-action: manipulation keeps iOS from reading the second tap as a zoom.
+        // Also the TOUCH rename path. The chip's touch-action: manipulation keeps
+        // iOS from reading the second tap as a zoom.
         el.addEventListener("dblclick", (e) => {
           if ((e.target as HTMLElement).closest(".wt-tab-close")) {
             return;
@@ -1503,10 +1534,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             void close_(tab.id);
           }
         });
-        // Right-click opens the tab context menu (desktop). preventDefault stops
-        // the browser's own menu; the strip is hidden on a coarse pointer, so
-        // this is desktop-only in practice.
+        // Right-click opens the tab context menu, and so does a touch long-press
+        // that has not dragged anywhere; one that has is a drop in progress, so
+        // the platform's menu is refused and ours stays shut.
         el.addEventListener("contextmenu", (e) => {
+          if (press?.moved === true) {
+            e.preventDefault();
+            return;
+          }
+          cancelPointerPress();
           if (editingId === tab.id) {
             // Let the browser's own text menu open: it is where Paste, Select All
             // and Undo live, and the tab menu would offer Close and Move mid-edit.
@@ -1517,20 +1553,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         });
         // Drag-and-drop reorder on the desktop strip. The bar's dragover arms a
         // slot, the hold (or a drop) commits it, and drop/dragend commit the
-        // resulting order into tabList. See the reorder-preview block below.
+        // resulting order into tabList. See the reorder-preview block below. A
+        // touch or pen press takes the pointer path instead (beginPointerPress),
+        // so the platform's own drag must not start as well.
         el.draggable = true;
         el.addEventListener("dragstart", (e) => {
-          if (editingId === tab.id) {
-            e.preventDefault(); // renaming: a drag would fight caret selection
+          if (editingId === tab.id || press !== null) {
+            e.preventDefault(); // a rename owns the caret; a pointer press owns the drag
             return;
           }
-          endReorderPreview(); // no residue from a previous drag
-          endShift(); // ...and nothing mid-slide, so this gesture starts from rest
-          dropped = false;
-          draggingEl = el;
           // Snapshot the preview from the PRISTINE chip, before the slot class.
-          setDragGhost(e, el);
-          el.classList.add("wt-tab-dragging");
+          startTabDrag(el, () => {
+            setDragGhost(e, el);
+          });
           if (e.dataTransfer) {
             e.dataTransfer.effectAllowed = "move";
             // Firefox requires drag data to be set for the drag to start; the
@@ -1538,22 +1573,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             // TAB_DRAG_TYPE).
             e.dataTransfer.setData(TAB_DRAG_TYPE, tab.id);
           }
-          hideTabMenu();
         });
         el.addEventListener("dragend", () => {
-          el.classList.remove("wt-tab-dragging");
-          paintDropHalf(null);
-          if (!dropped) {
-            // No drop fired, so the drag was abandoned: Escape, or a release the
-            // browser refused. Put the strip back — tabList still holds the order
-            // the gesture started from, because only a drop writes to it.
-            revertPreview();
-          }
-          draggingEl = null;
-          // The gesture's state goes; a slide started by the revert above is left to
-          // finish under its own settle timer (see endReorderPreview).
-          endReorderPreview();
-          clearDragGhost(); // belt-and-braces: the rAF normally got there first
+          endTabDrag(el);
         });
         return tab;
       }
@@ -1675,13 +1697,22 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!isPaneSide(side) || !tabList.some((t) => t.id === id)) {
           return false;
         }
-        const from = sideOf(id);
-        if (from === side) {
-          return true;
-        }
         const split = ctx.shell.split;
         const opening = !split.isOpen();
-        if (opening && (!split.canOpen() || !split.open())) {
+        const from = sideOf(id);
+        if (from === side && !opening) {
+          return true;
+        }
+        if (opening && !split.canOpen()) {
+          return false;
+        }
+        // Nothing to pair the moved tab with: the split opens once a created tab
+        // can fill the other pane.
+        if (opening && splitPartner(id) === null) {
+          void create({ by: "snap", id, side });
+          return true;
+        }
+        if (opening && !split.open()) {
           return false;
         }
         // Emptying the tab's old pane drops a keyboard its input held to the body.
@@ -1693,13 +1724,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Opening pairs the moved tab with the single view's tab, or its partner
         // when they are one, so no pane opens empty; an open split only re-homes
         // the displaced tab, into a pane the move emptied.
-        const back = displaced ?? (opening ? splitPartner(id) : null);
-        if (
-          (from !== null || opening) &&
-          back !== null &&
-          back !== id &&
-          shownIn(otherSide(side)) === null
-        ) {
+        const kept = displaced === id ? null : displaced;
+        const back = kept ?? (opening ? splitPartner(id) : null);
+        if ((from !== null || opening) && back !== null && shownIn(otherSide(side)) === null) {
           showIn(otherSide(side), back, { keepSelection: true });
         }
         if (typing) {
@@ -1716,7 +1743,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         const partner = splitPartner(selectedId());
         if (partner === null) {
-          void create(true);
+          void create({ by: "button" });
         } else if (split.open()) {
           showIn("right", partner, { keepSelection: true });
         }
@@ -2016,12 +2043,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!dragged) {
           return;
         }
-        const now = win.Date.now();
-        const moved = restX === null || Math.abs(clientX - restX) > REORDER_MOVE_EPS_PX;
-        restX = clientX;
-        if (moved) {
-          restMovedAt = now;
-        }
+        const still = noteRestSample(rest, clientX, win.Date.now());
         // Recomputed from THIS event, never a stored pending target: a stored one
         // was nulled by the already-there branch on the way past, so a stop after it
         // committed NOTHING until the mouse was jiggled.
@@ -2030,9 +2052,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           endRestNet();
           return;
         }
-        // The elapsed check filters one event of a sweep landing within the epsilon
-        // of the previous (a reversal, or a mostly vertical frame).
-        if (!moved && now - restMovedAt >= REORDER_STILL_MS) {
+        if (still) {
           endRestNet();
           commitSlot(before);
           return;
@@ -2188,8 +2208,35 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // revert snap home instead of run. dragstart and teardown call endShift().
       function endReorderPreview(): void {
         endRestNet();
-        restX = null;
+        rest.at = null;
         endSlotFade();
+      }
+
+      // The lift both drag paths share. `ghost` builds the preview copy, and runs
+      // before the slot class so it copies the pristine chip.
+      function startTabDrag(el: HTMLElement, ghost: () => void): void {
+        endReorderPreview(); // no residue from a previous drag
+        endShift(); // ...and nothing mid-slide, so this gesture starts from rest
+        dropped = false;
+        draggingEl = el;
+        ghost();
+        el.classList.add("wt-tab-dragging");
+        hideTabMenu();
+      }
+      function endTabDrag(el: HTMLElement): void {
+        el.classList.remove("wt-tab-dragging");
+        paintDropHalf(null);
+        if (!dropped) {
+          // No drop fired, so the drag was abandoned: Escape, or a release the
+          // browser refused. Put the strip back — tabList still holds the order
+          // the gesture started from, because only a drop writes to it.
+          revertPreview();
+        }
+        draggingEl = null;
+        // The gesture's state goes; a slide started by the revert above is left to
+        // finish under its own settle timer (see endReorderPreview).
+        endReorderPreview();
+        clearDragGhost(); // belt-and-braces: the rAF normally got there first
       }
 
       // For every site that REMOVES a chip while a drag may be open. A browser is
@@ -2197,6 +2244,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // pointing at a detached node would make the document-level guard
       // preventDefault every unrelated file or text drop from then on.
       function abortReorderFor(removed: HTMLElement): void {
+        if (press?.el === removed) {
+          endPointerPress();
+        }
         if (removed !== draggingEl) {
           return;
         }
@@ -2253,21 +2303,22 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // transform (webkit.org/b/22787), and the strip's backdrop-filter is one, so
       // the preview came out as broken white geometry on iPadOS. The clone is
       // parked under .wt-root, outside the filtered subtree but inside the styling
-      // boundary, laid exactly over the chip, and dropped on the next frame, by
-      // which time the browser has snapshotted it.
+      // boundary, and laid exactly over the chip. A native drag drops it on the
+      // next frame, by which time the browser has snapshotted it; the pointer path
+      // keeps it under the finger for the whole drag.
       let dragGhost: HTMLElement | null = null;
       function clearDragGhost(): void {
         dragGhost?.remove();
         dragGhost = null;
       }
-      function setDragGhost(e: DragEvent, el: HTMLElement): void {
+      function placeDragGhost(el: HTMLElement): { ghost: HTMLElement; rect: DOMRect } {
         clearDragGhost();
         const rect = el.getBoundingClientRect();
         const rootRect = varRoot.getBoundingClientRect();
         const ghost = el.cloneNode(true) as HTMLElement;
         ghost.classList.add("wt-tab-ghost");
-        // A duplicated role="tab" must not reach assistive tech for the frame the
-        // clone exists (CSS keeps it non-interactive).
+        // A duplicated role="tab" must not reach assistive tech while the clone
+        // exists (CSS keeps it non-interactive).
         ghost.setAttribute("aria-hidden", "true");
         ghost.style.left = `${String(rect.left - rootRect.left)}px`;
         ghost.style.top = `${String(rect.top - rootRect.top)}px`;
@@ -2277,6 +2328,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ghost.style.height = `${String(rect.height)}px`;
         varRoot.appendChild(ghost);
         dragGhost = ghost;
+        return { ghost, rect };
+      }
+      function setDragGhost(e: DragEvent, el: HTMLElement): void {
+        const { ghost, rect } = placeDragGhost(el);
         // Offset from the chip's own box, not e.offsetX/offsetY: those are
         // relative to the event TARGET, which is the label or the close button
         // when the drag starts on one of them.
@@ -2352,17 +2407,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // promise needs no threshold: a duplicate lands while the POST is open and
       // collapses into it, while a deliberate second tap still opens a second
       // terminal. It also stops "+" mashing from queueing sessions across the
-      // server's retry window. Any coalesced caller asking for the split gets it.
+      // server's retry window. The first coalesced caller asking for the split
+      // decides how it opens.
       let creating: Promise<void> | null = null;
-      let createIntoSplit = false;
-      function create(intoSplit = false): Promise<void> {
+      let createOpening: SplitOpening | null = null;
+      function create(opening: SplitOpening | null = null): Promise<void> {
         if (creating === null) {
-          createIntoSplit = intoSplit;
+          createOpening = opening;
           creating = openNewSession().finally(() => {
             creating = null;
           });
         } else {
-          createIntoSplit ||= intoSplit;
+          createOpening ??= opening;
         }
         return creating;
       }
@@ -2417,9 +2473,28 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           tabList.push(tab);
         }
         // Opened once the tab exists, so a failed create leaves the single view
-        // as it was rather than an empty pane.
-        if (createIntoSplit && !ctx.shell.split.isOpen()) {
-          ctx.shell.split.open();
+        // as it was rather than an empty pane. A snap whose tab closed meanwhile
+        // has nothing left to pair, so the new tab takes the single view.
+        const opening = createOpening;
+        const split = ctx.shell.split;
+        if (opening?.by === "button" && !split.isOpen()) {
+          split.open();
+        } else if (
+          opening?.by === "snap" &&
+          !split.isOpen() &&
+          tabList.some((t) => t.id === opening.id) &&
+          split.open()
+        ) {
+          const typing = keyboardInPaneInput();
+          if (showIn(opening.side, opening.id)) {
+            creatingTab = true;
+            showIn(otherSide(opening.side), tab.id, { keepSelection: true });
+            creatingTab = false;
+            if (typing) {
+              focusInput();
+            }
+            return;
+          }
         }
         showNewTab(tab.id);
       }
@@ -2951,7 +3026,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           moveTab(id, 1);
         });
         if (ctx.shell.split.enabled) {
-          const shownOn = sideOf(id);
+          const shownOn = ctx.shell.split.isOpen() ? sideOf(id) : null;
           const fits = rowFitsSplit();
           tabMenuItem("Snap to left", !fits || shownOn === "left", () => {
             snap(id, "left");
@@ -3321,18 +3396,24 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // drop is to LOAD the payload as a URL, so dropping a tab on iPadOS
       // navigated the page to /<session-id>.
       bar.addEventListener("drop", (e) => {
+        if (!draggingEl) {
+          return;
+        }
+        e.preventDefault();
+        dropOnStrip(e.clientX);
+      });
+      function dropOnStrip(clientX: number): void {
         const moved = draggingEl;
         if (!moved) {
           return;
         }
-        e.preventDefault();
         dropped = true;
         // A release decides by POSITION, not by whatever slot a timer had pending.
         endRestNet();
-        commitSlot(dropTargetBefore(e.clientX));
+        commitSlot(dropTargetBefore(clientX));
         syncOrderFromDom();
         announceMoved(moved);
-      });
+      }
       // The strip is docked at the viewport EDGE, so a pointer can leave it by
       // leaving the window, and then no document dragover fires to withdraw the
       // pending slot; the rest window would open a slot the pointer abandoned.
@@ -3349,9 +3430,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       });
       // The left width rounds as `--wt-split-left` does in 32-split.css, so the
       // boundary is the one the highlights draw.
-      function dropHalf(e: DragEvent): PaneSide | null {
+      function dropHalf(clientX: number, target: Node): PaneSide | null {
         const root = ctx.shell.root;
-        const target = e.target as Node;
         if (
           !ctx.shell.split.enabled ||
           !rowFitsSplit() ||
@@ -3362,7 +3442,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         const { left, width } = root.getBoundingClientRect();
         const leftPane = Math.round((width - SPLIT_GUTTER_PX) * ctx.shell.split.state().ratio);
-        return e.clientX < left + leftPane + SPLIT_GUTTER_PX / 2 ? "left" : "right";
+        return clientX < left + leftPane + SPLIT_GUTTER_PX / 2 ? "left" : "right";
       }
       function paintDropHalf(half: PaneSide | null): void {
         ctx.shell.root.classList.toggle("wt-drop-left", half === "left");
@@ -3381,35 +3461,283 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           paintDropHalf(null);
           return;
         }
-        const half = dropHalf(e);
+        const half = dropHalf(e.clientX, e.target as Node);
         if (e.type === "drop") {
-          // A release off the strip CANCELS the reorder: `dropped` stays false and
-          // dragend runs the revert. Committing a slot here would persist an
-          // arrangement chosen at a position the user visibly left, and would
-          // depend on whether the browser emitted `drop` at all.
-          endRestNet();
-          paintDropHalf(null);
-          if (half !== null) {
-            const id = tabList.find((t) => t.el === draggingEl)?.id;
-            if (id !== undefined) {
-              snap(id, half);
-            }
-          }
+          dropOffStrip(half);
           return;
         }
         if (e.dataTransfer && half !== null) {
           e.dataTransfer.dropEffect = "move";
         }
+        overOffStrip(half);
+      };
+      // A release off the strip CANCELS the reorder: `dropped` stays false and
+      // the drag's end runs the revert. Committing a slot here would persist an
+      // arrangement chosen at a position the user visibly left, and would depend
+      // on whether the browser emitted `drop` at all.
+      function dropOffStrip(half: PaneSide | null): void {
+        endRestNet();
+        paintDropHalf(null);
+        if (half !== null) {
+          const id = tabList.find((t) => t.el === draggingEl)?.id;
+          if (id !== undefined) {
+            snap(id, half);
+          }
+        }
+      }
+      function overOffStrip(half: PaneSide | null): void {
         paintDropHalf(half);
         // No candidate slot exists off the strip; a COMMITTED slot stays put.
         endRestNet();
-      };
+      }
       doc.addEventListener("dragover", onDocTabDrop);
       doc.addEventListener("drop", onDocTabDrop);
       ctx.defer(() => {
         doc.removeEventListener("dragover", onDocTabDrop);
         doc.removeEventListener("drop", onDocTabDrop);
       });
+
+      // Touch and pen reorder by Pointer Events: a native drag on those lifts only
+      // at the platform's long press, which page script cannot shorten. A short
+      // hold inside the slop lifts the chip (pointerDragActivation); leaving the
+      // slop first leaves the gesture to the strip's own scroll. From the lift on,
+      // every position runs through the handlers the native drag uses.
+      bar.addEventListener("pointerdown", beginPointerPress, { passive: true });
+      // Capture routes events but does not stop a pan, and touch-action is fixed
+      // when the gesture starts, so only a cancelled touchmove keeps the strip
+      // still under a lifted chip. Registered up front: Safari ignores a
+      // non-passive listener added mid-gesture.
+      bar.addEventListener(
+        "touchmove",
+        (e) => {
+          if (press?.live === true) {
+            e.preventDefault();
+          }
+        },
+        { passive: false },
+      );
+      // The release of a drop that moved is not a tap on whatever lies under it.
+      const dropSwallow = createClickSwallow(win);
+      let dropClickPending = false;
+      bar.addEventListener(
+        "click",
+        (e) => {
+          if (dropClickPending && dropSwallow.swallowing()) {
+            e.preventDefault();
+            e.stopPropagation();
+          }
+          dropClickPending = false;
+        },
+        { capture: true },
+      );
+      ctx.defer(endPointerPress);
+      function beginPointerPress(e: PointerEvent): void {
+        const rule = pointerDragActivation(e.pointerType);
+        const el =
+          e.target instanceof win.Element ? e.target.closest<HTMLElement>(".wt-tab") : null;
+        if (rule === null || !e.isPrimary || press !== null || el?.parentNode !== scroller) {
+          return;
+        }
+        const tab = tabList.find((t) => t.el === el);
+        if (!tab || editingId === tab.id) {
+          return;
+        }
+        dropClickPending = false;
+        const off = new AbortController();
+        press = {
+          id: e.pointerId,
+          el,
+          x0: e.clientX,
+          y0: e.clientY,
+          rule,
+          frame: viewportBox(win),
+          draggable: el.draggable,
+          off,
+          x: e.clientX,
+          y: e.clientY,
+          hold: win.setTimeout(liftPointerPress, rule.holdMs),
+          tick: null,
+          live: false,
+          moved: false,
+        };
+        el.draggable = false;
+        const opts = { capture: true, signal: off.signal };
+        win.addEventListener("pointermove", onPressMove, opts);
+        win.addEventListener("pointerup", onPressUp, opts);
+        win.addEventListener("pointercancel", onPressCancel, opts);
+        win.addEventListener("pointerdown", onPressSecond, opts);
+        win.addEventListener("keydown", onPressKey, opts);
+        win.addEventListener("blur", cancelPointerPress, { signal: off.signal });
+        doc.addEventListener("visibilitychange", onPressVisibility, { signal: off.signal });
+        bar.addEventListener("lostpointercapture", onPressLostCapture, { signal: off.signal });
+        scroller.addEventListener("scroll", onPressScroll, { passive: true, signal: off.signal });
+        win.visualViewport?.addEventListener("resize", onPressViewport, { signal: off.signal });
+        win.visualViewport?.addEventListener("scroll", onPressViewport, { signal: off.signal });
+        win.addEventListener("resize", onPressViewport, { signal: off.signal });
+      }
+      function liftPointerPress(): void {
+        const p = press;
+        if (p === null) {
+          return;
+        }
+        p.hold = null;
+        p.live = true;
+        startTabDrag(p.el, () => {
+          placeDragGhost(p.el);
+        });
+        try {
+          bar.setPointerCapture(p.id);
+        } catch {
+          // An inactive pointer refuses capture; the window listeners still see it.
+        }
+      }
+      function onPressMove(e: PointerEvent): void {
+        const p = press;
+        if (p?.id !== e.pointerId) {
+          return;
+        }
+        p.x = e.clientX;
+        p.y = e.clientY;
+        const away = exceedsSlop(p.x - p.x0, p.y - p.y0, p.rule);
+        if (!p.live) {
+          // A viewport event waits for the next rendering step, so this move can read
+          // the moved geometry before it arrives.
+          if (away || viewportMoved(viewportBox(win), p.frame)) {
+            cancelPointerPress();
+          }
+          return;
+        }
+        if (dragGhost) {
+          dragGhost.style.translate = `${String(p.x - p.x0)}px ${String(p.y - p.y0)}px`;
+        }
+        if (!p.moved && away) {
+          p.moved = true;
+          // A still pointer delivers no pointermove, so the position is re-reported
+          // on a drag loop's cadence: that repeat is how trackRest sees a stop.
+          p.tick = win.setInterval(() => {
+            pointerDragAt(p.x, p.y, false);
+          }, REORDER_STILL_MS);
+        }
+        if (p.moved) {
+          pointerDragAt(p.x, p.y, false);
+        }
+      }
+      function onPressUp(e: PointerEvent): void {
+        const p = press;
+        if (p?.id !== e.pointerId) {
+          return;
+        }
+        if (p.moved) {
+          pointerDragAt(e.clientX, e.clientY, true);
+          dropClickPending = true;
+          dropSwallow.arm();
+        }
+        endPointerPress();
+        // Unmoved, the release is a tap: no drop, nothing to revert, and the click
+        // that follows activates the tab as any tap does.
+        if (p.live) {
+          endTabDrag(p.el);
+        }
+      }
+      function onPressCancel(e: PointerEvent): void {
+        if (press?.id === e.pointerId) {
+          cancelPointerPress();
+        }
+      }
+      function onPressSecond(e: PointerEvent): void {
+        if (press !== null && press.id !== e.pointerId) {
+          cancelPointerPress();
+        }
+      }
+      // lostpointercapture bubbles, and the chip's implicit touch capture ending
+      // when the bar takes it over is not a loss.
+      function onPressLostCapture(e: PointerEvent): void {
+        if (e.target === bar && press?.id === e.pointerId) {
+          cancelPointerPress();
+        }
+      }
+      function onPressScroll(): void {
+        if (press?.live === false) {
+          cancelPointerPress();
+        }
+      }
+      // A TRIGGER, not a decision: visualViewport fires `scroll` on an ordinary page
+      // scroll with nothing moved. A press whose frame did move can no longer be
+      // verified (the chip under the finger may not be under it now), so it ends and
+      // the reader presses again.
+      function onPressViewport(): void {
+        if (press !== null && viewportMoved(viewportBox(win), press.frame)) {
+          cancelPointerPress();
+        }
+      }
+      function onPressVisibility(): void {
+        if (doc.visibilityState === "hidden") {
+          cancelPointerPress();
+        }
+      }
+      // Capture on the window, ahead of the terminal's own keydown, so the Escape
+      // that ends a lifted drag is not also typed into the shell.
+      function onPressKey(e: KeyboardEvent): void {
+        if (e.key !== "Escape" || press === null) {
+          return;
+        }
+        if (press.live) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        cancelPointerPress();
+      }
+      // The position decides as a native dragover or drop at it would.
+      function pointerDragAt(x: number, y: number, release: boolean): void {
+        if (!draggingEl) {
+          return;
+        }
+        const target = doc.elementFromPoint(x, y);
+        if (target !== null && bar.contains(target)) {
+          paintDropHalf(null);
+          if (release) {
+            dropOnStrip(x);
+          } else {
+            trackRest(x);
+          }
+          return;
+        }
+        const half = target === null ? null : dropHalf(x, target);
+        if (release) {
+          dropOffStrip(half);
+        } else {
+          overOffStrip(half);
+        }
+      }
+      function cancelPointerPress(): void {
+        const p = press;
+        if (p === null) {
+          return;
+        }
+        endPointerPress();
+        if (p.live) {
+          endTabDrag(p.el);
+        }
+      }
+      function endPointerPress(): void {
+        const p = press;
+        if (p === null) {
+          return;
+        }
+        press = null;
+        p.off.abort();
+        if (p.hold !== null) {
+          win.clearTimeout(p.hold);
+        }
+        if (p.tick !== null) {
+          win.clearInterval(p.tick);
+        }
+        if (bar.hasPointerCapture(p.id)) {
+          bar.releasePointerCapture(p.id);
+        }
+        const editing = tabList.find((t) => t.el === p.el)?.id === editingId;
+        p.el.draggable = p.draggable && !editing;
+      }
       // Active-row close (x): closes the current tab (mirrors a listed row's x).
       // stopPropagation so it is not read as a tap/swipe on the row surface.
       swClose.addEventListener("click", (e) => {
@@ -3980,7 +4308,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       return {
         api: {
-          create,
+          create: () => create(),
           close: close_,
           switchTo,
           snap,

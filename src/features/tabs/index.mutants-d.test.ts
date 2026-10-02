@@ -850,8 +850,8 @@ describe("tabs reorder: the slide", () => {
   });
 
   it("rearranges under reduced motion and animates none of it", async () => {
-    // The lean and the slide are INLINE transitions, so no stylesheet gate can
-    // reach them. Motion is what the user opted out of, not the feature — with
+    // The slide is an INLINE transition, so no stylesheet gate can reach it.
+    // Motion is what the user opted out of, not the feature — with
     // real geometry in place the reorder must still happen and still write
     // nothing.
     const h = await mountDrag(3, { reducedMotion: true });
