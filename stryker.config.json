@@ -5,9 +5,10 @@
     "related": false
   },
   "checkers": ["typescript"],
-  "tsconfigFile": "tsconfig.json",
+  "tsconfigFile": "tsconfig.stryker.json",
   "typescriptChecker": {
-    "prioritizePerformanceOverAccuracy": false
+    "prioritizePerformanceOverAccuracy": false,
+    "experimentalNativePreview": true
   },
   "mutate": ["src/**/*.ts", "!src/**/*.test.ts", "!src/**/*-setup.ts", "!src/**/test-helpers/**"],
   "mutator": {
