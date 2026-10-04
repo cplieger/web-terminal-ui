@@ -4035,7 +4035,7 @@ describe("tabs reorder preview", () => {
 });
 
 // A query-aware matchMedia. The feature asks three different questions of it
-// ("(any-pointer: fine)" for a physical keyboard, "(pointer: coarse)" for the
+// ("(pointer: fine)" for a physical keyboard, "(pointer: coarse)" for the
 // mobile switcher layout, "(prefers-reduced-motion: reduce)" for the animation
 // gate) and they mean opposite things, so a blanket true/false stub answers the
 // wrong one and the test proves something other than what it claims.
@@ -4052,17 +4052,11 @@ function stubMedia(answers: Record<string, boolean>): void {
 }
 
 describe("tabs: physical-keyboard detection", () => {
-  // Whether a tab switch focuses the terminal input is decided by whether a
-  // physical keyboard is likely. On a keyboard-less touchscreen it must not, or
-  // every switch pops the soft keyboard; with a keyboard attached it must, so the
-  // user can switch and type. A trackpad-less keyboard folio matches no pointer
-  // media query at all, so the only evidence available is a keydown that the iOS
-  // on-screen keyboard cannot produce — which is what looksLikeHardwareKey reads.
-  //
-  // These cases run with NO fine pointer, so the latch is the only thing that can
-  // turn focus-on-switch on, and the switch is driven by a bare click (no
-  // pointerdown) so the unrelated "put the keyboard back where the press took it
-  // from" rule cannot supply the focus instead.
+  // A switch focuses the input only when a physical keyboard is likely, or every
+  // switch on a bare touchscreen pops the soft keyboard. These cases run with NO
+  // fine pointer, so only the shell's latch can turn it on, and switch with a
+  // bare click (no pointerdown) so the "put the keyboard back where the press
+  // took it from" rule cannot supply the focus instead.
   interface KeyHarness {
     input: HTMLElement;
     chips: () => NodeListOf<HTMLElement>;
@@ -4070,8 +4064,8 @@ describe("tabs: physical-keyboard detection", () => {
     switchAndReportFocus: (index: number) => boolean;
   }
 
-  async function mountCoarse(): Promise<KeyHarness> {
-    stubMedia({}); // no fine pointer, no coarse pointer, no reduced motion
+  async function mountCoarse(media: Record<string, boolean> = {}): Promise<KeyHarness> {
+    stubMedia(media); // by default no fine pointer, no coarse pointer, no reduced motion
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = await mountTerminal(root, { features: () => [tabs()] });
@@ -4104,7 +4098,7 @@ describe("tabs: physical-keyboard detection", () => {
     expect(h.switchAndReportFocus(1)).toBe(false);
     // An arrow key cannot come from the iOS on-screen keyboard, so it is proof a
     // real keyboard is attached.
-    h.press({ key: "ArrowUp" });
+    h.press({ key: "ArrowUp", code: "ArrowUp" });
     expect(h.switchAndReportFocus(0)).toBe(true);
   });
 
@@ -4112,7 +4106,7 @@ describe("tabs: physical-keyboard detection", () => {
     const h = await mountCoarse();
     // A letter is exactly what the on-screen keyboard sends, so it proves nothing
     // and focus-on-switch must stay off.
-    h.press({ key: "a" });
+    h.press({ key: "a", code: "KeyA" });
     expect(h.switchAndReportFocus(1)).toBe(false);
   });
 
@@ -4120,7 +4114,7 @@ describe("tabs: physical-keyboard detection", () => {
     const h = await mountCoarse();
     // Ctrl+C: the on-screen keyboard has no modifier keys at all, so the modifier
     // alone settles it — "c" is not in the key list and never needs to be.
-    h.press({ key: "c", ctrlKey: true });
+    h.press({ key: "c", code: "KeyC", ctrlKey: true });
     expect(h.switchAndReportFocus(1)).toBe(true);
   });
 
@@ -4128,8 +4122,17 @@ describe("tabs: physical-keyboard detection", () => {
     const h = await mountCoarse();
     // F12, not F1: the range is F1–F12, and a single-digit pattern would miss the
     // top of it.
-    h.press({ key: "F12" });
+    h.press({ key: "F12", code: "F12" });
     expect(h.switchAndReportFocus(1)).toBe(true);
+  });
+
+  it("reads a fine primary pointer as a keyboard, and a fine secondary one as nothing", async () => {
+    const h = await mountCoarse({ "(any-pointer: fine)": true });
+    expect(h.switchAndReportFocus(1)).toBe(false);
+    term?.destroy();
+    document.body.replaceChildren();
+    const desktop = await mountCoarse({ "(pointer: fine)": true });
+    expect(desktop.switchAndReportFocus(1)).toBe(true);
   });
 });
 
@@ -4383,7 +4386,7 @@ describe("tabs: the swipe-to-switch hint", () => {
   it("stays quiet on a fine-pointer layout, which has no swipe bar", async () => {
     // The desktop strip is what a fine pointer gets; telling that user to swipe
     // names a gesture their UI does not have.
-    const root = await mountHinted({ "(any-pointer: fine)": true });
+    const root = await mountHinted({ "(pointer: fine)": true });
     expect(toastText(root)).not.toBe(HINT);
   });
 

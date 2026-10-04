@@ -280,11 +280,20 @@ export interface Notifier {
   forget(id: string): void;
 }
 
+/** Whether the page has a hardware keyboard, as far as its key events tell. */
+export interface KeyboardPresence {
+  /** A key no on-screen keyboard produces is the latest keyboard evidence seen. */
+  hardwareSeen(): boolean;
+  /** `hardwareSeen()`, or the primary pointer is fine. */
+  likely(): boolean;
+}
+
 /** The shell a feature reaches through `ctx.shell`: the pane kernels and the
  *  facts shared between them. */
 export interface ShellContext {
   /** The shell root; the pane root in the direct-root topology. */
   readonly root: HTMLElement;
+  readonly keyboard: KeyboardPresence;
   /** Null while that side has no built kernel. */
   pane(side: PaneSide): PaneHandle | null;
   /** Built panes, left first. */

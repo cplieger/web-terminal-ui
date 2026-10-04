@@ -599,7 +599,7 @@ describe("the tab-click rule", () => {
   });
 
   it("a new tab fills the empty pane first; with both panes shown it replaces the UNSELECTED pane and is selected", async () => {
-    stubMedia({ "(any-pointer: fine)": true });
+    stubMedia({ "(pointer: fine)": true });
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     const plus = root.querySelector<HTMLElement>(".wt-tab-new");
@@ -637,7 +637,7 @@ describe("the tab-click rule", () => {
   });
 
   it("a session created in another browser fills the empty pane first; with both panes shown it replaces the UNSELECTED pane and is selected", async () => {
-    stubMedia({ "(any-pointer: fine)": true });
+    stubMedia({ "(pointer: fine)": true });
     const monitor = fakeMonitor();
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server, {
@@ -987,7 +987,7 @@ describe("the snap items", () => {
   });
 
   it("a keyboard-opened menu offers the snap items enabled, and Enter on one snaps with focus landing in the snapped pane", async () => {
-    stubMedia({ "(any-pointer: fine)": true });
+    stubMedia({ "(pointer: fine)": true });
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     const chip = chipOf(root, "one");
@@ -1603,7 +1603,7 @@ describe("drag and drop onto a half", () => {
 
 describe("the closing rules while the split is open", () => {
   it("(1) closing the selected pane's tab while the other shows one closes the split onto the other pane's tab, selected, creating nothing", async () => {
-    stubMedia({ "(any-pointer: fine)": true });
+    stubMedia({ "(pointer: fine)": true });
     server.list = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
       { id: "s2", title: "two", createdAt: "2", status: "idle" },

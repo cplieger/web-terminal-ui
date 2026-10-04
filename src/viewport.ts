@@ -27,12 +27,17 @@ export interface KeyboardInsetsOptions {
   /** Ignore the visualViewport keyboard geometry (a hardware-keyboard device
    *  has no soft keyboard to accommodate). */
   suppressKeyboardInset?: () => boolean;
+  /** Called with `softKeyboardHeight()` at every reading, before
+   *  `suppressKeyboardInset` is consulted for it. */
+  onSoftKeyboard?: (heightPx: number) => void;
 }
 
 /** The document's one reading of its visual viewport. */
 export interface KeyboardInsets {
   /** The latest geometry; zero where the window has no visual viewport. */
   current(): KeyboardGeometry;
+  /** The visual-viewport keyboard inset now in CSS px, never suppressed. */
+  softKeyboardHeight(): number;
   /** Call `fn` with the geometry on every visual-viewport resize and scroll, on
    *  every window focus and bfcache restore, and on every `refresh()`; returns
    *  the release. */
@@ -110,16 +115,21 @@ export function createKeyboardInsets(opts: KeyboardInsetsOptions): KeyboardInset
     root.style.removeProperty("--vv-top");
   }
 
+  function readVisual(): KeyboardGeometry {
+    return vv
+      ? {
+          top: Math.max(0, Math.round(vv.offsetTop)),
+          bottom: Math.max(0, Math.round(win.innerHeight - vv.offsetTop - vv.height)),
+        }
+      : { top: 0, bottom: 0 };
+  }
+
   function update(): void {
+    const raw = readVisual();
+    opts.onSoftKeyboard?.(raw.bottom);
     // iPadOS has been seen to report a keyboard-sized shrink with no keyboard
     // shown and pin it, which is what suppressKeyboardInset defends against.
-    geometry =
-      !vv || suppressKeyboardInset()
-        ? { top: 0, bottom: 0 }
-        : {
-            top: Math.max(0, Math.round(vv.offsetTop)),
-            bottom: Math.max(0, Math.round(win.innerHeight - vv.offsetTop - vv.height)),
-          };
+    geometry = suppressKeyboardInset() ? { top: 0, bottom: 0 } : raw;
     root.style.setProperty("--kb-inset", `${geometry.bottom}px`);
     root.style.setProperty("--vv-top", `${geometry.top}px`);
     for (const fn of [...subscribers]) {
@@ -144,6 +154,7 @@ export function createKeyboardInsets(opts: KeyboardInsetsOptions): KeyboardInset
 
   return {
     current: () => geometry,
+    softKeyboardHeight: () => readVisual().bottom,
     onChange(fn) {
       subscribers.add(fn);
       return () => {

@@ -281,27 +281,6 @@ interface ShowOptions {
 type SplitOpening =
   { readonly by: "button" } | { readonly by: "snap"; readonly id: string; readonly side: PaneSide };
 
-function looksLikeHardwareKey(ev: KeyboardEvent): boolean {
-  if (ev.ctrlKey || ev.metaKey || ev.altKey) {
-    return true;
-  }
-  switch (ev.key) {
-    case "ArrowUp":
-    case "ArrowDown":
-    case "ArrowLeft":
-    case "ArrowRight":
-    case "Escape":
-    case "Tab":
-    case "Home":
-    case "End":
-    case "PageUp":
-    case "PageDown":
-      return true;
-    default:
-      return /^F\d{1,2}$/.test(ev.key); // F1–F12
-  }
-}
-
 /** Build the tabs feature.
  *  Requires a server that speaks the session API (`GET`/`POST`/`DELETE` on
  *  `/api/sessions`, `?session=<id>` on the WebSocket, ideally the status SSE).
@@ -852,13 +831,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let creatingTab = false;
       let collapseClearTimer: number | null = null;
       let hintShown = false;
-      // No web API reports a hardware keyboard, so two proxies: a fine pointer
-      // (read live, since a keyboard folio with a trackpad can be detached) and a
-      // keydown only a hardware keyboard emits (a trackpad-less folio).
-      let sawHardwareKey = false;
-      const hasFinePointer = (): boolean =>
-        typeof win.matchMedia === "function" && win.matchMedia("(any-pointer: fine)").matches;
-      const physicalKeyboardLikely = (): boolean => sawHardwareKey || hasFinePointer();
       const prefersReduce = (): boolean =>
         win.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -984,7 +956,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         if (
-          physicalKeyboardLikely() ||
+          ctx.shell.keyboard.likely() ||
           (inputFocusedAtPress && keyboardParkedOnChrome()) ||
           keyboardInOtherPane()
         ) {
@@ -2729,7 +2701,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           el.focus();
           return;
         }
-        if (physicalKeyboardLikely()) {
+        if (ctx.shell.keyboard.likely()) {
           focusInput();
         }
       }
@@ -3374,14 +3346,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         });
       }
 
-      // A hardware-only key latches sawHardwareKey, which upgrades focus-on-switch
-      // for a keyboard folio with no trackpad.
-      ctx.registerKeydown((ev) => {
-        if (!sawHardwareKey && looksLikeHardwareKey(ev)) {
-          sawHardwareKey = true;
-        }
-        return false;
-      });
       bar.addEventListener("dragover", (e) => {
         if (!draggingEl) {
           return;
