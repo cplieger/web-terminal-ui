@@ -8,11 +8,11 @@ const TEXT: Partial<Record<ConnState, string>> = {
   connecting: "Reconnecting\u2026",
   reconnecting: "Reconnecting\u2026",
   offline: "Offline",
-  restarted: "Server restarted; recent input may be lost",
+  restarted: "Server restarted. Recent input may be lost",
   // The session's process exited (definitive; nothing is retrying). The final
   // screen stays rendered behind the banner; open a new tab to keep working.
   ended: "Session ended",
-  incompatible: "Terminal protocol mismatch; update the server or reload this page",
+  incompatible: "Terminal protocol mismatch. Update the server or reload this page",
 };
 
 /** Build the connectionBanner feature. Exposes no API: it owns one element in

@@ -2775,19 +2775,19 @@ describe("tabs OSC 9 status chrome", async () => {
     const { root, monitor } = await withMonitor();
     const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[0];
     monitor.emit({ id: "s1", status: "crashed", title: "one", createdAt: "1" });
-    expect(chip?.getAttribute("aria-label")).toBe("one — process crashed");
+    expect(chip?.getAttribute("aria-label")).toBe("one, process crashed");
 
     // The percentage rides along in the ANNOUNCED name only. It is the one place
     // it appears as text: a screen reader cannot see the 2px bar, and the visible
     // label must not spend chip width on it.
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 30 });
-    expect(chip?.getAttribute("aria-label")).toBe("one — working, 30%");
+    expect(chip?.getAttribute("aria-label")).toBe("one, working, 30%");
     expect(tabLabel(root, 0)?.textContent).toBe("one");
 
     // A percentage the tab is not SHOWING is not announced either: the announced
     // name follows the same statusOwnsProgress rule the bar does.
     monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1", progressValue: 30 });
-    expect(chip?.getAttribute("aria-label")).toBe("one — turn finished");
+    expect(chip?.getAttribute("aria-label")).toBe("one, turn finished");
 
     // Both halves come from ONE wording map, so hover text and announced text
     // cannot drift apart. Asserted for every state, in both directions.
@@ -2804,7 +2804,7 @@ describe("tabs OSC 9 status chrome", async () => {
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: -1 });
       const phrase = tabDot(root, 0)?.title;
       expect(phrase, status).toBeTruthy();
-      expect(chip?.getAttribute("aria-label"), status).toBe(`one — ${String(phrase)}`);
+      expect(chip?.getAttribute("aria-label"), status).toBe(`one, ${String(phrase)}`);
     }
   });
 });
@@ -2964,7 +2964,7 @@ describe("tabs secondary activity mark", () => {
 
     // Both channels reach a reader who cannot see either mark, in one name.
     expect(chip?.getAttribute("aria-label")).toBe(
-      "one — working, 30% (1 background task waiting for you)",
+      "one, working, 30%, 1 background task waiting for you",
     );
   });
 

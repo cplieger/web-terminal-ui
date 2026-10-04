@@ -58,7 +58,7 @@ describe("connectionBanner feature", () => {
     emit("incompatible");
     const b = banner(slot);
     expect(b?.textContent).toBe(
-      "Terminal protocol mismatch; update the server or reload this page",
+      "Terminal protocol mismatch. Update the server or reload this page",
     );
     expect(b?.dataset["state"]).toBe("incompatible");
     expect(b?.classList.contains("visible")).toBe(true);
@@ -111,9 +111,9 @@ describe("connectionBanner: the state -> message map is built at load", () => {
     ["connecting", "Reconnecting\u2026"],
     ["reconnecting", "Reconnecting\u2026"],
     ["offline", "Offline"],
-    ["restarted", "Server restarted; recent input may be lost"],
+    ["restarted", "Server restarted. Recent input may be lost"],
     ["ended", "Session ended"],
-    ["incompatible", "Terminal protocol mismatch; update the server or reload this page"],
+    ["incompatible", "Terminal protocol mismatch. Update the server or reload this page"],
   ])("a freshly loaded module renders %s as its own message", async (state, text) => {
     const fresh = await loadFresh();
     const { ctx, emit, slot, announce } = fakeCtx();

@@ -853,11 +853,9 @@ describe("the status vocabulary (the OSC 9 states)", () => {
   });
 
   it("puts the state into a tab's accessible name", () => {
-    expect(tabAccessibleName({ label: "agent", status: "crashed" })).toBe(
-      "agent — process crashed",
-    );
+    expect(tabAccessibleName({ label: "agent", status: "crashed" })).toBe("agent, process crashed");
     expect(tabAccessibleName({ label: "78% · agent", status: "working" })).toBe(
-      "78% · agent — working",
+      "78% · agent, working",
     );
   });
 });
@@ -976,7 +974,7 @@ describe("a tab's accessible name carries both marks", () => {
   it("appends the activity phrase after the state", () => {
     expect(
       tabAccessibleName({ label: "agent", status: "done", activity: "input", activityCount: 1 }),
-    ).toBe("agent — turn finished (1 background task waiting for you)");
+    ).toBe("agent, turn finished, 1 background task waiting for you");
   });
 
   it("carries the percentage AND the activity together", () => {
@@ -990,20 +988,20 @@ describe("a tab's accessible name carries both marks", () => {
         activity: "working",
         activityCount: 2,
       }),
-    ).toBe("agent — working, 78% (2 background tasks running)");
+    ).toBe("agent, working, 78%, 2 background tasks running");
   });
 
   it("announces the state alone when neither optional field is set", () => {
-    expect(tabAccessibleName({ label: "agent", status: "working" })).toBe("agent — working");
+    expect(tabAccessibleName({ label: "agent", status: "working" })).toBe("agent, working");
     expect(
       tabAccessibleName({ label: "agent", status: "working", activity: "", activityCount: 0 }),
-    ).toBe("agent — working");
+    ).toBe("agent, working");
   });
 
   it("drops an unknown activity state from the name", () => {
     expect(
       tabAccessibleName({ label: "agent", status: "idle", activity: "queued", activityCount: 9 }),
-    ).toBe("agent — idle");
+    ).toBe("agent, idle");
   });
 });
 
@@ -1031,16 +1029,16 @@ describe("the OSC 9;4 percentage", () => {
     // The number reaches a screen reader, which cannot see the 2px bar, and
     // reaches nothing that costs label width. No terminal draws it as text.
     expect(tabAccessibleName({ label: "agent", status: "working", progress: 78 })).toBe(
-      "agent — working, 78%",
+      "agent, working, 78%",
     );
     expect(tabAccessibleName({ label: "agent", status: "working", progress: 0 })).toBe(
-      "agent — working, 0%",
+      "agent, working, 0%",
     );
     // Absent, or omitted entirely, announces the state alone.
     expect(
       tabAccessibleName({ label: "agent", status: "working", progress: PROGRESS_ABSENT }),
-    ).toBe("agent — working");
-    expect(tabAccessibleName({ label: "agent", status: "working" })).toBe("agent — working");
+    ).toBe("agent, working");
+    expect(tabAccessibleName({ label: "agent", status: "working" })).toBe("agent, working");
   });
 
   it("shows a percentage only under a status the progress channel owns", () => {

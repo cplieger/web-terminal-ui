@@ -247,12 +247,12 @@ async function createSessionHonouringRetry(
       if (lastAnnouncedAt === null || elapsed - lastAnnouncedAt >= CREATE_RETRY_REANNOUNCE_MS) {
         lastAnnouncedAt = elapsed;
         const reason = err.serverMessage ?? "Server is not ready yet";
-        ctx.toast(`${reason}; waiting…`, 8000);
-        ctx.announce(`${reason}; waiting…`);
+        ctx.toast(`${reason}, waiting…`, 8000);
+        ctx.announce(`${reason}, waiting…`);
       }
       // Unthrottled: the overlay is the only surface visible before the first
       // frame, and it replaces text in place.
-      ctx.loadingReason(`${err.serverMessage ?? "Server is not ready yet"}; waiting…`);
+      ctx.loadingReason(`${err.serverMessage ?? "Server is not ready yet"}, waiting…`);
       await retryWait(win, err.retryAfterMs ?? CREATE_RETRY_FALLBACK_MS, signal);
       continue;
     }
@@ -2432,8 +2432,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // became ready: say so with the server's own words when it gave any.
           ctx.toast(
             err instanceof SessionAPIError && err.serverMessage !== undefined
-              ? `Couldn't open a terminal: ${err.serverMessage}`
-              : "Couldn't open a terminal",
+              ? `Could not open a terminal. ${err.serverMessage}`
+              : "Could not open a terminal",
           );
           return;
         }
@@ -2573,7 +2573,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             await api.close(id);
           } catch {
             if (!tornDown()) {
-              ctx.toast("Couldn't close the terminal on the server");
+              ctx.toast("Could not close the terminal on the server");
             }
           }
         }
@@ -2655,7 +2655,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             await api.close(t.id);
           } catch {
             if (!tornDown()) {
-              ctx.toast("Couldn't close a terminal on the server");
+              ctx.toast("Could not close a terminal on the server");
             }
           }
         }
@@ -2773,7 +2773,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             }
             cur.pinnedTitle = before;
             syncChrome();
-            ctx.toast("Couldn't save the terminal name");
+            ctx.toast("Could not save the terminal name");
           })
           .finally(() => {
             const left = (namesInFlight.get(id) ?? 0) - 1;
@@ -4184,8 +4184,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             // can retry, as the runtime create() does.
             ctx.toast(
               err instanceof SessionAPIError && err.serverMessage !== undefined
-                ? `Couldn't open a terminal: ${err.serverMessage}`
-                : "Couldn't open a terminal",
+                ? `Could not open a terminal. ${err.serverMessage}`
+                : "Could not open a terminal",
             );
           }
         }

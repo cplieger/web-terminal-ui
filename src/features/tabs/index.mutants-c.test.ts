@@ -1281,7 +1281,7 @@ describe("tabs: what a chip carries from the moment it is built", () => {
 
     // The accessible name is the only place a screen reader learns the state the
     // dot is showing, so it has to be there before the first status event too.
-    expect(m.chips()[0]?.getAttribute("aria-label")).toBe("one — working, 45%");
+    expect(m.chips()[0]?.getAttribute("aria-label")).toBe("one, working, 45%");
   });
 });
 
