@@ -17,6 +17,7 @@ export type {
   PaneSide,
   PaneHandle,
   ShellContext,
+  KeyboardPresence,
   AttentionOptions,
   AttentionState,
   AttentionReporter,

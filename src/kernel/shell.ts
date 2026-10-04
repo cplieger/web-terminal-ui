@@ -6,11 +6,11 @@ import {
 import {
   applyTheme,
   buildPane,
-  hasFinePointer,
   type PaneKernel,
   type PaneServices,
   type StoreRegistry,
 } from "./pane.js";
+import { createKeyboardPresence } from "./keyboard-presence.js";
 import { createStatusShare } from "./status-share.js";
 import { browserNotifierEnv, createNotifier } from "./notify.js";
 import { attachLoadingStatus, DEFAULT_LOADING_MESSAGES } from "./loading-status.js";
@@ -269,17 +269,54 @@ function createShellInto(
     });
   }
   const paneOpts: CreateTerminalOptions = splitEnabled ? { ...opts, layout: "container" } : opts;
+  // Called only from a keydown, so keyboardInsets below exists by then.
+  const keyboardPresence = createKeyboardPresence({
+    win,
+    softKeyboardHeight: () => keyboardInsets.softKeyboardHeight(),
+  });
+  const paneInputFocused = (): boolean => {
+    const active = doc.activeElement;
+    return (
+      active instanceof win.HTMLTextAreaElement &&
+      active.classList.contains("term-input") &&
+      shellRoot.contains(active)
+    );
+  };
   // The visual viewport is the document's, so its geometry is read once and
   // published on the outermost root, which the shell's chrome and every pane
   // inherit; published on a pane root it would never reach the chrome beside
   // the panes.
   const keyboardInsets = createKeyboardInsets({
     root: shellRoot,
-    suppressKeyboardInset: () => hasFinePointer(win),
+    suppressKeyboardInset: () => keyboardPresence.insetSuppressed(),
+    onSoftKeyboard(heightPx) {
+      keyboardPresence.noteSoftKeyboard(heightPx, paneInputFocused());
+    },
   });
   held.push(() => {
     keyboardInsets.teardown();
   });
+  const docListeners = new AbortController();
+  held.push(() => {
+    docListeners.abort();
+  });
+  doc.addEventListener(
+    "keydown",
+    (ev) => {
+      keyboardPresence.noteKeydown(ev);
+    },
+    { capture: true, signal: docListeners.signal },
+  );
+  // A press in the host page leaves the keys with the host, so the panes' body
+  // keydown path arms only after a press inside the terminal.
+  let pressedInsideShell = false;
+  doc.addEventListener(
+    "pointerdown",
+    (ev) => {
+      pressedInsideShell = ev.target instanceof win.Node && shellRoot.contains(ev.target);
+    },
+    { capture: true, passive: true, signal: docListeners.signal },
+  );
 
   const loadingStatus = attachLoadingStatus(opts.loading, {
     ...DEFAULT_LOADING_MESSAGES,
@@ -785,6 +822,10 @@ function createShellInto(
     : disabledSplit();
   const shellContext: ShellContext = {
     root: shellRoot,
+    keyboard: {
+      hardwareSeen: () => keyboardPresence.hardwareSeen(),
+      likely: () => keyboardPresence.likely(),
+    },
     pane: (side) => paneAt(side) ?? null,
     panes: builtPanes,
     selected: () => selectedSide,
@@ -841,6 +882,8 @@ function createShellInto(
       scrollbackLines,
       narrowProbe: () => isNarrow(shellRoot.clientWidth, slot.root.clientHeight),
       keyboardInsets,
+      keyboard: shellContext.keyboard,
+      pressedInsideShell: () => pressedInsideShell,
       titleBase(text) {
         slot.baseTitle = text;
         paintTitle();

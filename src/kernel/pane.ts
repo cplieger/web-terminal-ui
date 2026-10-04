@@ -14,6 +14,7 @@ import { createRegions } from "./regions.js";
 import { createAnnouncer, createPaneTablist, type PaneTablist } from "./a11y.js";
 import { createConnState } from "./conn-state.js";
 import { selectionTextWithin } from "./selection.js";
+import { primaryPointerFine } from "./keyboard-presence.js";
 import { windowOf } from "./realm.js";
 import {
   createCleanupScope,
@@ -23,6 +24,7 @@ import {
 } from "./feature-host.js";
 import type {
   CreateTerminalOptions,
+  KeyboardPresence,
   PaneHandle,
   PaneSide,
   SessionRef,
@@ -148,6 +150,9 @@ export interface PaneServices {
   /** The document's keyboard geometry, published on the shell root, which this
    *  pane's root inherits rather than publishes. */
   readonly keyboardInsets: KeyboardInsets;
+  readonly keyboard: KeyboardPresence;
+  /** The document's last press landed inside the shell root. */
+  pressedInsideShell(): boolean;
   /** This pane's base title (the served `<title>`, or its program's OSC 0/2). */
   titleBase(text: string): void;
   readonly loading: PaneLoading;
@@ -224,13 +229,6 @@ export interface PaneKernel extends PaneHandle {
   setTabStop(value: boolean): void;
   /** `cleanupRuntime()` plus the root's classes and children. */
   destroy(): void;
-}
-
-/** Whether `win` has a fine pointer, and with it a hardware keyboard. Read as
- *  `any-pointer: fine` rather than from pointerType because iPadOS reports a
- *  COARSE primary pointer even with a trackpad attached. */
-export function hasFinePointer(win: Window): boolean {
-  return typeof win.matchMedia === "function" && win.matchMedia("(any-pointer: fine)").matches;
 }
 
 /** The consumer's theme as custom properties on `root`, so the whole subtree
@@ -808,12 +806,49 @@ function buildPaneInto(
   let pointerDownX = 0;
   let pointerDownY = 0;
   let pointerDownTime = 0;
+  let pressMadeSelection = false;
+  const ownsSelection = (): boolean => selectionTextWithin(outputEl) !== "";
   function focusTerminal(): void {
     if (destroyed) {
       return;
     }
     input.focus({ preventScroll: true });
   }
+  /** A gesture's focus, never over a selection: iOS refuses every selection
+   *  gesture outside a focused editable (`textInteractionGesture:shouldBeginAtPoint:`,
+   *  https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/ios/WKContentViewInteraction.mm). */
+  function focusFromGesture(): void {
+    if (pressMadeSelection || ownsSelection()) {
+      return;
+    }
+    focusTerminal();
+  }
+  // At the PRESS, not the tap: WebKit decides about 500ms into a long-press
+  // whether it may select (focusFromGesture), and the input must be gone by then.
+  function releaseFocusOnPress(e: PointerEvent): void {
+    if (!services.keyboard.hardwareSeen() || doc.activeElement !== input) {
+      return;
+    }
+    if (e.pointerType !== "touch" && primaryPointerFine(win)) {
+      return;
+    }
+    if (!(e.target instanceof win.Node) || !outputEl.contains(e.target)) {
+      return;
+    }
+    if (isLinkTarget(win, e.target)) {
+      return;
+    }
+    input.blur();
+  }
+  doc.addEventListener(
+    "selectionchange",
+    () => {
+      if (pressHoldsFocus && ownsSelection()) {
+        pressMadeSelection = true;
+      }
+    },
+    { signal },
+  );
   // A passive listener on the pane root: a touch that starts a native selection
   // never focuses the textarea, so focus alone would leave the touched pane
   // unselected.
@@ -832,6 +867,8 @@ function buildPaneInto(
       pointerDownY = e.clientY;
       pointerDownTime = e.timeStamp;
       pressHoldsFocus = true;
+      pressMadeSelection = false;
+      releaseFocusOnPress(e);
     },
     { passive: true, signal },
   );
@@ -841,7 +878,9 @@ function buildPaneInto(
   termWrap.addEventListener(
     "pointerup",
     (e) => {
-      if (e.pointerType !== "touch") {
+      // With a hardware keyboard seen, a tap is the platform's: the press already
+      // released focus, and the uncancelled mousedown lets it deselect natively.
+      if (e.pointerType !== "touch" || services.keyboard.hardwareSeen()) {
         return;
       }
       if (isLinkTarget(win, e.target)) {
@@ -856,19 +895,15 @@ function buildPaneInto(
       if (e.timeStamp - pointerDownTime > TAP_MAX_MS) {
         return;
       }
-      // A clean tap while text is selected means "done selecting": iOS otherwise
-      // leaves the selection stuck, because the synthetic mousedown cancelled
-      // below also suppresses the platform's own tap-to-deselect. A deselect tap
-      // must not pop the soft keyboard, unless a hardware keyboard is present.
+      // A clean tap while text is selected means "done selecting": the synthetic
+      // mousedown cancelled below also suppresses iOS's own tap-to-deselect. It
+      // does not pop the soft keyboard.
       const sel = doc.getSelection();
       if (sel && !sel.isCollapsed) {
         sel.removeAllRanges();
-        if (hasFinePointer(win)) {
-          focusTerminal();
-        }
         return;
       }
-      focusTerminal();
+      focusFromGesture();
     },
     { passive: true, signal },
   );
@@ -876,10 +911,10 @@ function buildPaneInto(
     "mousedown",
     (e) => {
       if (lastPointerType === "touch") {
-        // Cancel the synthetic mousedown after a touch tap so iOS keeps the
-        // keyboard up, except with a fine pointer, where suppressing it defeated
-        // the native focus.
-        if (!hasFinePointer(win)) {
+        // Cancelling the synthetic mousedown after a tap keeps the soft keyboard
+        // up. With a hardware keyboard likely there is none to keep, and the
+        // uncancelled default is what moves focus off the textarea.
+        if (!services.keyboard.likely()) {
           e.preventDefault();
         }
         return;
@@ -908,23 +943,30 @@ function buildPaneInto(
         win.open(link.href, "_blank", "noopener,noreferrer");
         return;
       }
-      if (lastPointerType === "touch" && !hasFinePointer(win)) {
+      // A touch's synthetic click: the pointerup handler owned that gesture.
+      if (lastPointerType === "touch") {
+        return;
+      }
+      // An iPad trackpad click releases focus as a tap does once a hardware
+      // keyboard is seen; a desktop mouse keeps click-to-focus.
+      if (services.keyboard.hardwareSeen() && !primaryPointerFine(win)) {
         return;
       }
       const sel = doc.getSelection();
       if (sel && sel.toString().length > 0) {
         return;
       }
-      focusTerminal();
+      focusFromGesture();
     },
     { signal },
   );
 
-  // A mouse gesture over `.term-output` leaves focus on the body, so typing
-  // silently does nothing (and the two shortcuts on the keydown chain with it).
-  // Focusing on the press would collapse the selection, so the browser's model
+  const keysUnclaimed = (): boolean =>
+    (doc.getSelection()?.toString() ?? "") === "" &&
+    services.shell.selected() === services.side &&
+    services.pressedInsideShell();
+  // Focusing on the press would collapse a selection, so the browser's model
   // stands and typing takes the keyboard back, as Windows Terminal does.
-  const ownsSelection = (): boolean => selectionTextWithin(outputEl) !== "";
   doc.addEventListener(
     "keydown",
     (ev: KeyboardEvent) => {
@@ -945,12 +987,30 @@ function buildPaneInto(
       if (composition.isComposing()) {
         return;
       }
-      if (!ownsSelection()) {
+      if (!ownsSelection() && !keysUnclaimed()) {
         return;
       }
       // Features while the selection is STILL INTACT and before the modifier
       // gate: clipboard's Ctrl+Shift+C is a modified key that reads the selection.
       if (runKeydownChain(ev)) {
+        return;
+      }
+      // Composition happens only in a focused editable (a body target gets no
+      // beforeinput or input, `_tryToHandlePressesEvent:` in
+      // https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/ios/WKContentViewInteraction.mm),
+      // so a dead key or an IME takes focus and passes through, ahead of the
+      // modifier gate that would keep Option+e.
+      if (
+        ev.key === "Dead" ||
+        ev.key === "Process" ||
+        ev.isComposing ||
+        // eslint-disable-next-line @typescript-eslint/no-deprecated -- the only carrier of the IME-commit fact; see IME_COMMIT_KEYCODE
+        ev.keyCode === IME_COMMIT_KEYCODE
+      ) {
+        if (ownsSelection()) {
+          doc.getSelection()?.removeAllRanges();
+        }
+        focusTerminal();
         return;
       }
       // Decided before taking focus, because a bare modifier press (Shift on its
@@ -980,7 +1040,9 @@ function buildPaneInto(
       }
       if (char !== null) {
         // No `input` event is coming for a key that targeted the body, so send it
-        // here; preventDefault makes that exactly once BY SPEC.
+        // here. Cancelling the keydown cancels its insertion
+        // (https://w3c.github.io/uievents/#event-type-keydown), which Chromium
+        // would otherwise route into the textarea just focused: one copy, not two.
         ev.preventDefault();
         sendText(normalizeTypedText(char));
         return;
@@ -1143,7 +1205,7 @@ function buildPaneInto(
           engine.connection.reconnectNow();
         }
         if (services.shell.selected() === services.side) {
-          focusTerminal();
+          focusFromGesture();
         }
         return;
       }
@@ -1158,7 +1220,7 @@ function buildPaneInto(
         engine.connection.reconnectNow();
       }
       if (services.shell.selected() === services.side) {
-        focusTerminal();
+        focusFromGesture();
       }
     },
     { signal },

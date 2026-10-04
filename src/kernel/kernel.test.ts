@@ -11,6 +11,7 @@ import { STARTUP_FAILURE_COPY } from "./startup-copy.js";
 import { mountTerminal } from "../test-helpers/mount.js";
 import { destroyMounted } from "../test-helpers/mounted-registry.js";
 import { clipboard } from "../features/clipboard.js";
+import { softKeyboard } from "../features/tabs/test-helpers/paint.js";
 import type {
   TerminalContext,
   TerminalFeature,
@@ -1675,12 +1676,8 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     }
   });
 
-  it("leaves a dead key and an IME start to the platform", async () => {
-    // A dead key has no bytes and no character, so it delivers nothing and must
-    // not touch the selection or the focus. The composed character arrives on the
-    // NEXT keydown, which this listener then recovers normally, so the accent
-    // survives rather than being traded for focus.
-    for (const key of ["Dead", "Process", "Unidentified"]) {
+  it("hands a dead key and an IME start to the input to compose", async () => {
+    for (const key of ["Dead", "Process"]) {
       sendBinary.mockClear();
       destroyMounted();
       document.body.replaceChildren();
@@ -1688,9 +1685,17 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
       const ev = typeOnDocument({ key });
       expect(sentText()).toBe("");
       expect(ev.defaultPrevented).toBe(false);
-      expect(document.activeElement).not.toBe(ta(root));
-      expect(window.getSelection()?.isCollapsed).toBe(false);
+      expect(document.activeElement).toBe(ta(root));
     }
+  });
+
+  it("leaves an Unidentified key to the platform", async () => {
+    const root = await armed();
+    const ev = typeOnDocument({ key: "Unidentified" });
+    expect(sentText()).toBe("");
+    expect(ev.defaultPrevented).toBe(false);
+    expect(document.activeElement).not.toBe(ta(root));
+    expect(window.getSelection()?.isCollapsed).toBe(false);
   });
 
   it("leaves the selection alone for a key that delivers nothing", async () => {
@@ -2500,11 +2505,8 @@ function sizeRoot(root: HTMLElement, width: number, height: number): void {
   Object.defineProperty(root, "clientHeight", { value: height, configurable: true });
 }
 
-/** A QUERY-AWARE matchMedia. The kernel asks two different questions that mean
- *  opposite things — `(any-pointer: fine)` (a hardware pointer exists, so focus
- *  eagerly) and `(pointer: coarse)` (the primary pointer is a finger, which
- *  ctx.layout() reports) — so a blanket `matches: false` stub answers the wrong
- *  one and a blanket `true` answers both wrongly at once. */
+/** A QUERY-AWARE matchMedia: the kernel asks several pointer questions that mean
+ *  different things, so a blanket `matches` answers some of them wrongly. */
 function stubMedia(answers: Record<string, boolean>): void {
   vi.stubGlobal(
     "matchMedia",
@@ -2520,6 +2522,20 @@ function stubMedia(answers: Record<string, boolean>): void {
         dispatchEvent: () => false,
       }) as unknown as MediaQueryList,
   );
+}
+
+function latchHardwareKeyboard(root: HTMLElement): void {
+  const input = root.querySelector<HTMLTextAreaElement>(".term-input");
+  input?.focus();
+  input?.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "ArrowLeft",
+      code: "ArrowLeft",
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  sendBinary.mockClear();
 }
 
 describe("narrow layout: compact in EITHER dimension", () => {
@@ -3775,13 +3791,11 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(focused(root)).toBe(false);
   });
 
-  it("clears the selection AND focuses in one tap when a hardware keyboard is present", async () => {
-    // An iPad with a Magic Keyboard has no soft keyboard to protect, so the extra
-    // tap the bare-touch rule costs is pure friction — a large part of the
-    // reported "2-3 taps to focus".
-    stubMedia({ "(any-pointer: fine)": true });
+  it("leaves a tap over a selection to the platform once a hardware keyboard is seen", async () => {
+    stubMedia({ "(pointer: coarse)": true });
     const root = rootIn();
     await mountTerminal(root, { features: () => [] });
+    latchHardwareKeyboard(root);
     const output = root.querySelector(".term-output");
     const text = document.createTextNode("selected output");
     output?.appendChild(text);
@@ -3795,8 +3809,20 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
 
     tapSequence(root);
 
-    expect(window.getSelection()?.isCollapsed).toBe(true);
-    expect(focused(root)).toBe(true);
+    expect(window.getSelection()?.isCollapsed).toBe(false);
+    expect(focused(root)).toBe(false);
+  });
+
+  it("does not focus on a clean tap once a hardware keyboard is seen", async () => {
+    stubMedia({ "(pointer: coarse)": true });
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    latchHardwareKeyboard(root);
+    blurTerminal(root);
+
+    tapSequence(root);
+
+    expect(focused(root)).toBe(false);
   });
   it("cancels the synthetic mousedown after a bare-touch tap, which is what keeps the keyboard up", async () => {
     // iOS synthesises a mousedown after a touch tap, and letting it through blurs
@@ -3814,11 +3840,22 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     expect(ev.defaultPrevented).toBe(true);
   });
 
-  it("lets that mousedown through when a hardware keyboard is present", async () => {
-    // There is no soft keyboard to protect on an iPad with a trackpad, and
-    // suppressing the mousedown there was DEFEATING the native focus — which is why
-    // the terminal needed several taps to focus.
-    stubMedia({ "(any-pointer: fine)": true });
+  it("lets that mousedown through once a hardware keyboard is seen", async () => {
+    stubMedia({ "(pointer: coarse)": true });
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    latchHardwareKeyboard(root);
+    const term = root.querySelector(".term");
+    term?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+
+    const ev = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 });
+    term?.dispatchEvent(ev);
+
+    expect(ev.defaultPrevented).toBe(false);
+  });
+
+  it("still cancels it for a Pencil user typing on the on-screen keyboard", async () => {
+    stubMedia({ "(any-pointer: fine)": true, "(pointer: coarse)": true });
     const root = rootIn();
     await mountTerminal(root, { features: () => [] });
     const term = root.querySelector(".term");
@@ -3827,7 +3864,7 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
     const ev = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 });
     term?.dispatchEvent(ev);
 
-    expect(ev.defaultPrevented).toBe(false);
+    expect(ev.defaultPrevented).toBe(true);
   });
 });
 
@@ -3926,10 +3963,15 @@ describe("clicking the terminal", () => {
     expect(focused(root)).toBe(false);
   });
 
-  it("still focuses after a touch tap when a hardware keyboard is present", async () => {
-    stubMedia({ "(any-pointer: fine)": true });
+  it("declines the synthetic click after a touch tap once a hardware keyboard is seen", async () => {
+    stubMedia({
+      "(pointer: coarse)": true,
+      "(any-pointer: fine)": true,
+      "(any-hover: hover)": true,
+    });
     const root = rootIn();
     await mountTerminal(root, { features: () => [] });
+    latchHardwareKeyboard(root);
     const output = root.querySelector(".term-output");
     if (!output) {
       throw new Error("no .term-output");
@@ -3941,7 +3983,143 @@ describe("clicking the terminal", () => {
 
     clickOn(output);
 
+    expect(focused(root)).toBe(false);
+  });
+
+  it("declines an iPad trackpad click once a hardware keyboard is seen", async () => {
+    stubMedia({
+      "(pointer: coarse)": true,
+      "(any-pointer: fine)": true,
+      "(any-hover: hover)": true,
+    });
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    latchHardwareKeyboard(root);
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    output.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse" }));
+    blurTerminal(root);
+
+    clickOn(output);
+
+    expect(focused(root)).toBe(false);
+  });
+
+  it("keeps click-to-focus for a desktop mouse with a keyboard seen", async () => {
+    stubMedia({ "(pointer: fine)": true, "(any-pointer: fine)": true });
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    latchHardwareKeyboard(root);
+    const output = root.querySelector(".term-output");
+    if (!output) {
+      throw new Error("no .term-output");
+    }
+    output.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse" }));
+    blurTerminal(root);
+
+    clickOn(output);
+
     expect(focused(root)).toBe(true);
+  });
+});
+
+describe("the keyboard inset is suppressed for a keyboard or a trackpad, never a Pencil", () => {
+  it("publishes the on-screen keyboard's inset for a Pencil user", async () => {
+    stubMedia({ "(any-pointer: fine)": true, "(pointer: coarse)": true });
+    const kb = softKeyboard();
+    try {
+      const root = rootIn();
+      await mountTerminal(root, { features: () => [] });
+      root.querySelector<HTMLTextAreaElement>(".term-input")?.focus();
+
+      kb.open(300);
+
+      expect(root.style.getPropertyValue("--kb-inset")).toBe("300px");
+    } finally {
+      kb.restore();
+    }
+  });
+
+  it("ignores the shortcut bar's inset once a hardware keyboard is seen", async () => {
+    stubMedia({ "(pointer: coarse)": true });
+    const kb = softKeyboard();
+    try {
+      const root = rootIn();
+      await mountTerminal(root, { features: () => [] });
+      latchHardwareKeyboard(root);
+
+      kb.open(60);
+
+      expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
+    } finally {
+      kb.restore();
+    }
+  });
+
+  it("honours a docked on-screen keyboard that shows after a hardware key", async () => {
+    stubMedia({ "(pointer: coarse)": true });
+    const kb = softKeyboard();
+    try {
+      const root = rootIn();
+      await mountTerminal(root, { features: () => [] });
+      latchHardwareKeyboard(root);
+
+      kb.open(300);
+
+      expect(root.style.getPropertyValue("--kb-inset")).toBe("300px");
+    } finally {
+      kb.restore();
+    }
+  });
+
+  it("ignores a keyboard-sized inset on an iPad with a trackpad, before any key", async () => {
+    stubMedia({
+      "(pointer: coarse)": true,
+      "(any-pointer: fine)": true,
+      "(any-hover: hover)": true,
+    });
+    const kb = softKeyboard();
+    try {
+      const root = rootIn();
+      await mountTerminal(root, { features: () => [] });
+      root.querySelector<HTMLTextAreaElement>(".term-input")?.focus();
+
+      kb.open(300);
+
+      expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
+    } finally {
+      kb.restore();
+    }
+  });
+
+  it("keeps the latch and the suppression through that inset once a key is seen", async () => {
+    stubMedia({
+      "(pointer: coarse)": true,
+      "(any-pointer: fine)": true,
+      "(any-hover: hover)": true,
+    });
+    const kb = softKeyboard();
+    try {
+      const root = rootIn();
+      await mountTerminal(root, { features: () => [] });
+      latchHardwareKeyboard(root);
+
+      kb.open(300);
+
+      expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
+      const output = root.querySelector(".term-output");
+      if (!output) {
+        throw new Error("no .term-output");
+      }
+      output.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse" }),
+      );
+      expect(document.activeElement).not.toBe(root.querySelector(".term-input"));
+    } finally {
+      kb.restore();
+    }
   });
 });
 

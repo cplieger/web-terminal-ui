@@ -259,6 +259,23 @@ describe("viewport: visualViewport keyboard inset", () => {
     expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
     expect(root.style.getPropertyValue("--vv-top")).toBe("0px");
   });
+
+  it("still reads the keyboard height while the published inset is suppressed", () => {
+    const vv = {
+      height: window.innerHeight - 300,
+      offsetTop: 40,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
+    const root = document.createElement("div");
+    document.body.replaceChildren(root);
+
+    innerKeyboard = createKeyboardInsets({ root, suppressKeyboardInset: () => true });
+
+    expect(innerKeyboard.softKeyboardHeight()).toBe(260);
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
+  });
 });
 
 describe("viewport: reserved bottom chrome (--wt-reserve-bottom)", () => {
@@ -517,6 +534,30 @@ describe("viewport: the visual-viewport wiring reacts after construction", () =>
     expect(root.style.getPropertyValue("--kb-inset")).toBe("250px");
     expect(tw.style.bottom).toBe("");
     expect(viewport.isInTransition()).toBe(false);
+  });
+
+  it("reports the on-screen keyboard first, so the reading can lift the suppression", () => {
+    viewport.teardown();
+    keyboard.teardown();
+    let suppress = true;
+    const heights: number[] = [];
+    keyboard = createKeyboardInsets({
+      root,
+      suppressKeyboardInset: () => suppress,
+      onSoftKeyboard: (px) => {
+        heights.push(px);
+        suppress = px < 150;
+      },
+    });
+    viewport = createViewport({ termWrap: tw, box: root, keyboard, scroll, onSettled });
+
+    vv.height = window.innerHeight - 60;
+    vv.fire("resize");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("0px");
+    vv.height = window.innerHeight - 300;
+    vv.fire("resize");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("300px");
+    expect(heights).toEqual([0, 60, 300]);
   });
 });
 

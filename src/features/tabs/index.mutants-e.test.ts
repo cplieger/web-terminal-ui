@@ -148,7 +148,7 @@ function resize(target: Element): number {
 }
 
 // A query-aware matchMedia: the feature asks three different questions of it
-// ("(any-pointer: fine)" for a physical keyboard, "(pointer: coarse)" for the
+// ("(pointer: fine)" for a physical keyboard, "(pointer: coarse)" for the
 // mobile layout, "(prefers-reduced-motion: reduce)" for the animation gate) and
 // they mean opposite things, so a blanket answer proves something other than
 // what the test claims.
@@ -673,9 +673,8 @@ describe("tabs: the switch button's dot", () => {
 describe("tabs: the attention icons are opt-in", () => {
   it("leaves the page's own icon alone unless the app shipped the variants", async () => {
     // The icon sink swaps in a generated per-status variant (favicon-input.svg and
-    // friends, see .kiro/scripts/gen-attention-icons.py). An app that never
-    // generated them would get 404s in place of its icon, so the capability is
-    // off until the consumer says the assets exist.
+    // friends). An app that never generated them would get 404s in place of its
+    // icon, so the capability is off until the consumer says the assets exist.
     // Read back through the link this test inserted, not through the first
     // `link[rel~="icon"]` in the document: the tester page ships an icon link of
     // its own (`/__vitest__/favicon.svg`), so a document-wide query returns that
@@ -800,13 +799,13 @@ describe("tabs: physical-keyboard evidence is the whole key name", () => {
     // value is not proof a keyboard is attached — reading one as proof turns the
     // soft keyboard back on for every switch on a bare phone.
     const h = await mountCoarse();
-    h.press({ key: "XF1" });
+    h.press({ key: "XF1", code: "F1" });
     expect(h.switchAndReportFocus(1)).toBe(false);
-    h.press({ key: "F1x" });
+    h.press({ key: "F1x", code: "F1" });
     expect(h.switchAndReportFocus(0)).toBe(false);
     // F12 itself still counts, so the rejection above is about the anchors and
     // not about the pattern having stopped working.
-    h.press({ key: "F12" });
+    h.press({ key: "F12", code: "F12" });
     expect(h.switchAndReportFocus(1)).toBe(true);
   });
 
@@ -865,7 +864,7 @@ describe("tabs: handing the keyboard to the terminal", () => {
     // switch on an iPad would jump the view. preventScroll is the one option that
     // suppresses it, and nothing else about the call is observable, so this pins
     // the option itself.
-    stubMedia({ "(any-pointer: fine)": true }); // a keyboard is likely: focus on switch
+    stubMedia({ "(pointer: fine)": true }); // a keyboard is likely: focus on switch
     const root = await mount();
     const input = root.querySelector<HTMLElement>(".term-input");
     const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[1];

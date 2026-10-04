@@ -408,11 +408,11 @@ describe("tabs: the mobile swipe on a lone tab", () => {
     vi.stubGlobal(
       "matchMedia",
       vi.fn((query: string) => ({
-        // A fine pointer means a physical keyboard is likely, which is the
+        // A fine primary pointer means a physical keyboard is likely, which is the
         // condition under which a switch focuses the terminal input. Stubbed so
         // the focus rule is ARMED: a test where it could never fire proves
         // nothing about the gate that keeps it from firing.
-        matches: query === "(any-pointer: fine)",
+        matches: query === "(pointer: fine)",
         media: query,
         addEventListener: () => undefined,
         removeEventListener: () => undefined,

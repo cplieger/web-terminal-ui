@@ -49,7 +49,7 @@ interface Ledger {
   /** Make the Nth ResizeObserver construction from now throw. */
   failResizeObserver(nth: number): void;
   /** Make the first listener registration matching `when` throw. */
-  failListener(when: (target: EventTarget, type: string) => boolean): void;
+  failListener(when: (target: EventTarget, type: string, capture: boolean) => boolean): void;
   close(): void;
 }
 
@@ -61,7 +61,7 @@ function openLedger(): Ledger {
   const frames = new Set<number>();
   let failAt = 0;
   let constructed = 0;
-  let failWhen: ((target: EventTarget, type: string) => boolean) | null = null;
+  let failWhen: ((target: EventTarget, type: string, capture: boolean) => boolean) | null = null;
   const realAdd = EventTarget.prototype.addEventListener;
   const realRemove = EventTarget.prototype.removeEventListener;
   // The test runner installs its own addEventListener on the window, so the
@@ -81,7 +81,8 @@ function openLedger(): Ledger {
     listener: EventListenerOrEventListenerObject | null,
     options: boolean | AddEventListenerOptions | undefined,
   ): void => {
-    if (failWhen?.(target, type) === true) {
+    const capture = typeof options === "object" ? options.capture === true : options === true;
+    if (failWhen?.(target, type, capture) === true) {
       failWhen = null;
       throw new Error(`${target.constructor.name} refused ${type}`);
     }
@@ -280,7 +281,10 @@ function arm(fault: Fault, ledger: Ledger): void {
       (target, type) => target instanceof HTMLTextAreaElement && type === "compositionend",
     );
   } else if (fault === "document-keydown") {
-    ledger.failListener((target, type) => target === document && type === "keydown");
+    // The pane's own listener; the shell's keyboard-presence one is a capture.
+    ledger.failListener(
+      (target, type, capture) => target === document && type === "keydown" && !capture,
+    );
   } else if (fault === "viewport-resize") {
     ledger.failListener((target, type) => target === window && type === "resize");
   } else {
