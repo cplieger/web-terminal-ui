@@ -77,6 +77,10 @@ export default defineConfig({
         test: {
           name: "browser-touch",
           include: ["src/**/*.touch.test.ts"],
+          // A later group, so this project never runs beside `browser`: a bail that
+          // lands while the other project is resolving a `vi.mock` factory can end
+          // the vitest process (https://github.com/vitest-dev/vitest/issues/11467).
+          sequence: { groupOrder: 1 },
           exclude: ["node_modules/**", "**/.stryker-tmp/**"],
           browser: {
             ...browserCommon,
