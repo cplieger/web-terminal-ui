@@ -512,7 +512,7 @@ describe("tabs: closing one tab", () => {
     await until(() => toastText(root) !== "");
 
     expect(chips(root)).toHaveLength(1);
-    expect(toastText(root)).toBe("Couldn't close the terminal on the server");
+    expect(toastText(root)).toBe("Could not close the terminal on the server");
     // The chrome reflects the drop straight away: with one tab left there is
     // nothing to switch to, so the switch button stands down.
     expect(switchButtonHidden(root)).toBe("true");
@@ -596,7 +596,7 @@ describe("tabs: closing one tab", () => {
     expect(calls("DELETE", "/s1")).toHaveLength(0);
     // A 503 has already been retried on the server's own schedule by this point, so
     // reaching here means it never became ready: say so in the server's own words.
-    expect(toastText(root)).toBe("Couldn't open a terminal: no capacity");
+    expect(toastText(root)).toBe("Could not open a terminal. no capacity");
   });
 
   it("falls back to the generic wording when the server explained nothing", async () => {
@@ -612,7 +612,7 @@ describe("tabs: closing one tab", () => {
     item(openMenu(root, 0), "Close")?.click();
     await until(() => toastText(root) !== "");
 
-    expect(toastText(root)).toBe("Couldn't open a terminal");
+    expect(toastText(root)).toBe("Could not open a terminal");
   });
 
   it("collapses the expanded list when the close leaves a single tab", async () => {
@@ -697,7 +697,7 @@ describe("tabs: closing many tabs", () => {
     item(openMenu(root, 0), "Close to the right")?.click();
     await until(() => toastText(root) !== "");
 
-    expect(toastText(root)).toBe("Couldn't close a terminal on the server");
+    expect(toastText(root)).toBe("Could not close a terminal on the server");
     expect(labels(root)).toEqual(["one"]);
     // The first toast is not the end of the bulk close: closeMany still has one
     // DELETE to await and a final "did the strip empty?" check after it. Left
@@ -1038,7 +1038,7 @@ describe("tabs: a remote pinned name", () => {
     monitor.emit({ id: "s1", status: "idle", title: "one", createdAt: "1", pinnedTitle: "old" });
 
     await until(() => toastText(root) !== "", 80);
-    expect(toastText(root)).toBe("Couldn't save the terminal name");
+    expect(toastText(root)).toBe("Could not save the terminal name");
     expect(labels(root)[0]).toBe("old");
   });
 
@@ -1101,7 +1101,7 @@ describe("tabs: a remote pinned name", () => {
     answer[1]?.(jsonResponse({ error: "nope" }, 500));
 
     await until(() => toastText(root) !== "", 80);
-    expect(toastText(root)).toBe("Couldn't save the terminal name");
+    expect(toastText(root)).toBe("Could not save the terminal name");
     expect(labels(root)[0]).toBe("first");
   });
 });
@@ -1253,7 +1253,7 @@ describe("tabs: what a rename announces", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await until(() => toastText(root) !== "");
 
-    expect(toastText(root)).toBe("Couldn't save the terminal name");
+    expect(toastText(root)).toBe("Could not save the terminal name");
     expect(labels(root)).toEqual(["mine", "two"]);
   });
 

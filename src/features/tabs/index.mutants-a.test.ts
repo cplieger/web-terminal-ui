@@ -1633,6 +1633,6 @@ describe("tabs: booting onto a page whose sessions have all ended", () => {
     expect(root.querySelectorAll(".wt-tab")[1]?.classList.contains("wt-tab-active")).toBe(true);
     // And the toast says only what it knows: the server offered no explanation,
     // so none is invented (and no "undefined" is shown to the user).
-    expect(root.querySelector(".wt-toast")?.textContent).toBe("Couldn't open a terminal");
+    expect(root.querySelector(".wt-toast")?.textContent).toBe("Could not open a terminal");
   });
 });

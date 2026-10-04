@@ -19,10 +19,10 @@ export interface LoadingMessages {
 export const DEFAULT_LOADING_MESSAGES: LoadingMessages = {
   initial: "Loading terminal…",
   waiting: [
-    "Still working — this can take a while on first start.",
-    "Still working — preparing the environment.",
-    "Still working — almost there.",
-    "Still working — thanks for your patience.",
+    "Still working. This can take a while on first start.",
+    "Still working, preparing the environment.",
+    "Still working, almost there.",
+    "Still working, thanks for your patience.",
   ],
 };
 

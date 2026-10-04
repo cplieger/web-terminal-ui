@@ -331,7 +331,7 @@ describe("inline rename", () => {
     // reload is worse than a visible failure.
     await until(() => labels(root)[0] === "New tab");
     expect(labels(root)[0]).toBe("New tab");
-    expect(root.textContent).toContain("Couldn't save the terminal name");
+    expect(root.textContent).toContain("Could not save the terminal name");
   });
 
   it("does not roll back when a newer change superseded the failed one", async () => {
@@ -389,7 +389,7 @@ describe("inline rename", () => {
     ];
     await until(() => labels(root)[0] === "New tab", 20);
     expect(labels(root)[0]).toBe("New tab");
-    expect(root.textContent).toContain("Couldn't save the terminal name");
+    expect(root.textContent).toContain("Could not save the terminal name");
   });
 
   it("stands the chip's own handlers down while editing", async () => {

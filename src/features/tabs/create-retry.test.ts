@@ -182,12 +182,12 @@ describe("session-create retry: the elapsed-time bound", () => {
     ];
     const root = await mount();
 
-    await until(() => toastText(root).startsWith("Couldn't open a terminal"), 120);
+    await until(() => toastText(root).startsWith("Could not open a terminal"), 120);
     await settle();
     expect(posts).toBe(2);
     // The give-up message repeats the host's own explanation rather than the
     // generic wording, which is the only thing a user can act on.
-    expect(toastText(root)).toBe("Couldn't open a terminal: installing tools");
+    expect(toastText(root)).toBe("Could not open a terminal. installing tools");
   });
 
   it("keeps waiting while the budget still has a millisecond left", async () => {
@@ -204,7 +204,7 @@ describe("session-create retry: the elapsed-time bound", () => {
     expect(root.querySelectorAll(".wt-tab").length).toBe(1);
     expect(posts).toBe(2);
     // Still the waiting line, never the give-up line: the budget was not spent.
-    expect(toastText(root)).toBe("not ready; waiting…");
+    expect(toastText(root)).toBe("not ready, waiting…");
   });
 
   it("does not retry a refusal the server never called temporary", async () => {
@@ -213,10 +213,10 @@ describe("session-create retry: the elapsed-time bound", () => {
     script = [{ status: 429, message: "slow down", retryAfter: "0" }];
     const root = await mount();
 
-    await until(() => toastText(root).startsWith("Couldn't open a terminal"), 120);
+    await until(() => toastText(root).startsWith("Could not open a terminal"), 120);
     await settle();
     expect(posts).toBe(1);
-    expect(toastText(root)).toBe("Couldn't open a terminal: slow down");
+    expect(toastText(root)).toBe("Could not open a terminal. slow down");
   });
 });
 
@@ -245,10 +245,10 @@ describe("session-create retry: the wait runs on the frame's clock", () => {
     inner.body.appendChild(root);
     try {
       term = await mountTerminal(root, { features: () => [tabs()] });
-      await until(() => toastText(root).startsWith("Couldn't open a terminal"), 120);
+      await until(() => toastText(root).startsWith("Could not open a terminal"), 120);
       await settle();
       expect(posts).toBe(2);
-      expect(toastText(root)).toBe("Couldn't open a terminal: installing tools");
+      expect(toastText(root)).toBe("Could not open a terminal. installing tools");
       expect(now).toBe(0);
     } finally {
       term?.destroy();
@@ -276,7 +276,7 @@ describe("session-create retry: what the user is told", () => {
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(posts).toBe(3);
-    expect(toastText(root)).toBe("first reason; waiting…");
+    expect(toastText(root)).toBe("first reason, waiting…");
   });
 
   it("announces the wait to a screen reader as well as to the toast layer", async () => {
@@ -293,7 +293,7 @@ describe("session-create retry: what the user is told", () => {
     // sentence lands a beat after the call.
     await new Promise((r) => setTimeout(r, 150));
     expect(root.querySelector("[aria-live=polite]")?.textContent).toContain(
-      "installing tools; waiting…",
+      "installing tools, waiting…",
     );
   });
 
@@ -309,7 +309,7 @@ describe("session-create retry: what the user is told", () => {
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(posts).toBe(3);
-    expect(toastText(root)).toBe("second reason; waiting…");
+    expect(toastText(root)).toBe("second reason, waiting…");
   });
 
   it("throttles from the FIRST refusal even when it arrives on the same millisecond", async () => {
@@ -326,7 +326,7 @@ describe("session-create retry: what the user is told", () => {
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(posts).toBe(3);
-    expect(toastText(root)).toBe("first reason; waiting…");
+    expect(toastText(root)).toBe("first reason, waiting…");
   });
 
   it("writes the reason onto the loading overlay, which is the only surface up yet", async () => {
@@ -342,7 +342,7 @@ describe("session-create retry: what the user is told", () => {
 
     await until(() => (loading.textContent ?? "").includes("installing tools"), 120);
     expect(loading.querySelector(".wt-loading-text")?.textContent).toBe(
-      "installing tools; waiting…",
+      "installing tools, waiting…",
     );
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(root.querySelectorAll(".wt-tab").length).toBe(1);
@@ -373,7 +373,7 @@ describe("session-create retry: what the user is told", () => {
 
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(loading.querySelector(".wt-loading-text")?.textContent).toBe(
-      "Server is not ready yet; waiting…",
+      "Server is not ready yet, waiting…",
     );
   });
 });

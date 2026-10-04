@@ -167,10 +167,9 @@ export function tabAccessibleName(v: {
 }): string {
   const state = statusPhrase(v.status);
   const progress = v.progress ?? PROGRESS_ABSENT;
-  const head =
-    progress < 0 ? `${v.label} — ${state}` : `${v.label} — ${state}, ${String(progress)}%`;
+  const head = progress < 0 ? `${v.label}, ${state}` : `${v.label}, ${state}, ${String(progress)}%`;
   const activity = activityPhrase(v.activity ?? "", v.activityCount ?? 0);
-  return activity === "" ? head : `${head} (${activity})`;
+  return activity === "" ? head : `${head}, ${activity}`;
 }
 
 // One-time "swipe to switch" hint, remembered across loads.
