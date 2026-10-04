@@ -2,645 +2,102 @@
 
 [![npm](https://img.shields.io/npm/v/@cplieger/web-terminal-ui)](https://www.npmjs.com/package/@cplieger/web-terminal-ui) [![JSR](https://jsr.io/badges/@cplieger/web-terminal-ui)](https://jsr.io/@cplieger/web-terminal-ui) [![Mutation (TS)](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-ui/badges/mutation-ts.json)](https://github.com/cplieger/web-terminal-ui/issues?q=label%3Astryker-tracker)
 
-The reference touch-first browser UI for
-[`@cplieger/web-terminal-engine`](https://github.com/cplieger/web-terminal-engine).
-It turns the engine's render/scroll/connection/keyboard modules into a usable
-terminal on a phone as well as a desktop.
+web-terminal-ui builds a browser terminal on [web-terminal-engine](https://github.com/cplieger/web-terminal-engine) that works on a phone as well as a desktop, with tabs, a split view and an on-screen key bar.
 
-One `createTerminal(target, { features })` call builds the entire terminal UI
-inside a single container element you provide. A small always-present kernel
-composes with opt-in feature modules that own everything above the raw
-terminal:
+![The terminal UI with six tabs carrying progress, working and error indicators, the split view open with a git log on the left and a build and fuzz run on the right, and the tab menu open on Snap to left](docs/images/header.png)
 
-- a **display-only** terminal output (native text selection survives redraws)
-  and a hidden `<textarea>` that owns the keyboard and IME (the kernel)
-- **tabs**: multiple independent terminals with a desktop strip, a mobile
-  bottom switcher, a modal overview sheet, and an opt-in two-pane split view
-- an **activity monitor** that drives per-tab status dots (working / idle /
-  needs-input / exited) from the server's status stream
-- a **mobile key toolbar** (Tab / Esc / arrows / Enter / sticky-Ctrl) and a
-  scroll-to-bottom control
-- a **context menu** (Copy / Select All / Paste), on a right-click and on a
-  touch long-press. Paste is the reason it exists: the keyboard target is a
-  hidden `<textarea>`, so no platform can offer a native paste over the output.
-  On touch the platform keeps its long-press: word selection and the OS copy
-  callout run untouched, and the menu appears on release only when the press
-  selected nothing
-- **predictive local echo**, **IME / composition** (CJK, dictation,
-  autocorrect), and **viewport + keyboard-inset** handling for the iOS soft
-  keyboard, rotation, and font-load reflows
-- a connection-status banner, including a persistent protocol-incompatibility
-  state, and a copy toast
+It replaces the tabs, key bar, paste menu, IME handling and soft-keyboard resizing you would otherwise build around the engine's renderer. It ships as TypeScript source on npm and JSR, with CSS bundles and a reference page. Its one dependency is the peer `@cplieger/web-terminal-engine` 6.x, and it is licensed under MPL-2.0.
 
-It is published as TypeScript source (no build step) to npm and JSR, alongside
-the CSS bundle and a reference HTML page. Consumers who want a different UI should
-depend on the engine directly and skip this package.
+## Why use it
+
+web-terminal-ui is built for a shell or a coding agent served by web-terminal-engine, used from a phone as often as from a desktop.
+
+- One `createTerminal()` call builds the UI inside an element you provide. Four presets cover a single, a touch and two tabbed layouts.
+- On a touchscreen it adds a key bar with Tab, Esc, arrows, Enter and a sticky Ctrl, a long-press paste menu and iOS soft-keyboard handling.
+- Tabs show activity dots from the program's `OSC 9;4` progress reports and raise browser notifications. Two tabs can sit side by side.
+- Native text selection, IME input and dictation work, and predictive echo hides latency.
+
+Consider [xterm.js](https://github.com/xtermjs/xterm.js) if you want a terminal component for any PTY backend, such as node-pty. It has an optional GPU-accelerated renderer and a set of addons, and VS Code uses it. To build a UI of your own on web-terminal-engine, depend on the engine alone.
 
 ## Install
 
 ```sh
 npm install @cplieger/web-terminal-ui @cplieger/web-terminal-engine
+npx jsr add @cplieger/web-terminal-ui @cplieger/web-terminal-engine
 ```
 
-`@cplieger/web-terminal-engine` is a peer dependency: the UI is built on the
-engine, so the consumer pins the engine version explicitly. Pairing compatibility
-is governed by the engine's
-[directional wire contract](https://github.com/cplieger/web-terminal-engine#wire-protocol),
-not strict package-version equality; the UI surfaces a terminal incompatibility
-through its connection banner.
+The engine is a peer dependency, so install both.
 
 ## Usage
 
-Serve a CSS bundle matching how you embed the terminal, plus a minimal HTML
-page that has one empty container element, then call
-`createTerminal(target, { features })` from your entry module.
-
-**Full-page host** (the terminal IS the page, as in `web-terminal-server` and
-`web-terminal-kiro`): concatenate `css/MANIFEST` into the `style.css` your page
-links. That reference bundle is `css/page.css` (the page kit: `html/body`
-reset + the `@font-face` rules for two families, expecting the font files at
-`/vendor/fonts/`) plus the complete component set. The set is the four
-`MonaspaceNeonNF-*.woff2` faces, which back both the terminal display and the
-chrome text, plus `WebTerminalGlyphs.woff2` — a tiling overlay that supplies the
-box-drawing, block, braille and powerline cells the terminal draws — served
-alongside that font's `LICENSE` and `NOTICE`. Serving the Monaspace faces is not
-optional for a full-page host. A host that has not yet added the overlay file
-degrades cleanly rather than breaking: the face errors out, and the terminal
-renders exactly as it did before, with the tiling ranges coming from Monaspace
-and the system font.
-
-**Embedder** (the terminal lives inside your app's layout, as a panel or pane):
-concatenate the per-preset manifest matching your composition instead:
-`css/MANIFEST.single`, `css/MANIFEST.touch`, or `css/MANIFEST.tabbed`. These
-contain ONLY root-scoped component styles: no page reset, no fonts, no
-document-level rules, nothing to quarantine. Chrome text then falls back to your
-platform's monospace unless you declare the `@font-face` yourself; ship it if you
-want the terminal panel to match the full-page product. Pass `layout: "container"`
-so the terminal fills (and positions its chrome against) your container element
-instead of the viewport.
-
-Feature bundles (presets) live at the `./presets` sub-path, with per-preset
-entry modules beside it:
-
-```html
-<div id="terminal"></div>
-<div id="loading">Loading…</div>
-<script type="importmap">
-  {
-    "imports": {
-      "@cplieger/web-terminal-engine": "/vendor/cplieger-web-terminal-engine/index.js",
-      "@cplieger/web-terminal-ui": "/vendor/cplieger-web-terminal-ui/index.js",
-      "@cplieger/web-terminal-ui/presets": "/vendor/cplieger-web-terminal-ui/presets.js"
-    }
-  }
-</script>
-<script type="module">
-  import { createTerminal } from "@cplieger/web-terminal-ui";
-  import { presetTabbed } from "@cplieger/web-terminal-ui/presets";
-  createTerminal("#terminal", {
-    features: presetTabbed,
-    loading: document.getElementById("loading"),
-  });
-  // or, for a server that exposes the WebSocket elsewhere / a custom font:
-  // createTerminal("#terminal", { features: presetTabbed, wsPath: "/api/shell/ws", fontReady: '14px "MyMono"' });
-</script>
-```
-
-`createTerminal(target, opts?)` builds the entire terminal subtree (the kernel
-plus every feature's chrome) inside the target element itself. `target` is a CSS
-selector or an element: pass a **selector** from a page (`"#terminal"`) and pass
-an **element** only when you already hold one you created yourself. The
-difference matters; see "Startup failures" below. There is no element-id
-contract for the host page to reproduce, and every style and CSS custom
-property is scoped to the `wt-root` class it stamps on your element (removed
-again by `destroy()`). Call it at most once per document while the previous
-terminal is alive: the document title, the loading overlay, the status stream and
-the notification permission are properties of the document, so one terminal owns
-them, and a second call reports a `kernel-init` failure and throws without
-touching the page (see "Startup failures"); `destroy()` the first terminal before
-building another, or use the `split` option for a second pane.
-`scaffold/index.html` is a complete reference page to copy and adapt.
-
-Four presets are provided; each is a plain feature-array factory, so you can
-spread and edit it. Import the barrel (`@cplieger/web-terminal-ui/presets`) for
-convenience, or a per-preset entry module (`…/presets/single`, `…/presets/touch`,
-`…/presets/tabbed`, `…/presets/agent-tabbed`) for the minimal delivered import
-graph; the barrel statically reaches every feature, while the touch entry, for
-example, never imports the tabs module. Individual features
-are importable from `…/features/<name>` (`clipboard`, `context-menu`,
-`scroll-to-bottom`, `predictive-echo`, `connection-banner`, `mobile-toolbar`,
-`tabs`, `activity-monitor`, `animations`) for hand-picked compositions:
-
-- `presetSingle()`: single-pane desktop UI (context menu, clipboard,
-  scroll-to-bottom, predictive echo, connection banner).
-- `presetTouch()`: `presetSingle()` plus the mobile key toolbar.
-- `presetTabbed()`: the generic tabbed UI, `presetTouch()` plus tabs, the
-  activity monitor, and animations. Each tab's title is OSC-first: it follows
-  the process window title (OSC 0/2) when the program sets one and keeps it
-  updated, otherwise a name the server infers from the foreground process or the
-  working directory. The per-tab activity dot
-  reveals itself only when a session reports OSC 9;4 progress, so a plain shell
-  keeps clean, label-only tabs. Requires a server that speaks the session API
-  (`/api/sessions`, `/ws?session=`, and the status SSE `/api/sessions/events`),
-  such as `web-terminal-server`.
-- `presetAgentTabbed()`: the same feature set as `presetTabbed()`, tuned for an
-  agent shell such as `web-terminal-kiro`, and differing from `presetTabbed()`
-  only in presumed activity reporting. With `presumeReports`, the idle activity
-  dot shows from tab creation instead of waiting for the session's first
-  OSC 9;4 signal. Its status dots come from the same activity
-  monitor and cover eight states: the three animated OSC 9;4 progress states
-  (working, warning, error), the frozen ringed needs-input dot, two static discs
-  (a green finished turn, a red crashed process), and two hollow ones (idle and a
-  dim ended session). A
-  reported percentage additionally renders a 2px determinate bar on the chip,
-  shown only while one of those three progress states is the session's current
-  status. The number itself is announced in the tab's accessible name and drawn
-  nowhere: no terminal emulator puts a percentage next to a tab label, and a chip
-  that shrinks toward a 100px floor has no width to spare. It is likewise never
-  written to the browser document title, since one page title cannot represent
-  several sessions.
-
-  Beside that dot, every chip carries a second mark for a host-reported
-  background activity that outlives a turn (a workflow run, in the
-  `web-terminal-kiro` case). It is a rounded-square ring rather than a disc, so
-  it does not read as another status dot, and band width carries its three
-  states: a 2px band whose centre closes and reopens while a background task is running, a
-  1px band with a halo while one is paused and resumable, and a 2px band with
-  that same halo while one is blocked on the user. The state and the count are
-  announced in the tab's accessible name and repeated as the mark's hover
-  tooltip. The mark is independent of the dot's reveal gate, so a tab can show
-  one and not the other, and it collapses to no width when there is nothing to
-  report: a chip with no background activity measures exactly as it did before
-  the mark existed. It draws from `--status-working` and `--status-input`, so
-  theming the activity-dot palette themes it too and no extra token is needed.
-
-  An OSC 9 notification is posted as a browser notification when the user is not
-  already looking at that terminal (permission is requested on a user gesture; a
-  denial degrades silently to the tab dots).
-  Clicking one switches to the session that raised it: the Notifications API's
-  own click default already focuses the page, and the handler supplies the
-  in-page half. These are non-persistent notifications, so per the API the
-  constructor throws on most mobile browsers, where the notification degrades to
-  the tab dots.
-
-### Options
-
-| Option              | Default                      | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `features`          | _(none; bare kernel)_        | A FUNCTION returning the feature list. Omitted builds only the terminal (no chrome). Pass a preset by name (`features: presetTabbed`) or a factory of your own; it is called inside the startup-failure boundary, so a preset that throws is handled rather than escaping.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `layout`            | `"viewport"`                 | How the terminal claims space. `"viewport"`: the root becomes a fixed full-viewport box (the full-page product). `"container"`: the root fills your container element, which becomes the styling and positioning boundary (the embedded case).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `wsPath`            | `"/ws"`                      | WebSocket endpoint path the engine connects to.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `fontReady`         | `'14px "Monaspace Neon NF"'` | CSS font shorthand awaited before the first resize, so the server is sized against the real web font's cell metrics rather than a fallback. Only the family that CARRIES those metrics is named: the tiling overlay copies them and holds no letter for the width probe to measure, and naming it as well would open the gate on the overlay alone in WebKit (Safari, every iOS browser), while Monaspace was still loading. The wait is bounded at 3s whatever the fonts do, the `font-display: block` period the bundled faces declare, so a request that stalls leaves the terminal sized on fallback metrics rather than never sized at all, and a font that lands after the bound costs one corrective resize.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `scrollbackLines`   | _(engine default)_           | Retained scrollback lines per terminal, and per tab under the tabs feature (every per-tab cache is built through the same budget). This is the page's dominant memory dial: it bounds the styled-run arrays each session retains AND the DOM rows the renderer keeps (one row element per retained line), so a memory-constrained host (iOS Safari, where the content process is reclaimed under system pressure) passes a smaller budget at the price of a shorter scroll-back. A history budget floored at the live screen: the engine never evicts the current window, so a value at or below the terminal height keeps the full screen with no scrollback, but choose a value comfortably above the largest expected terminal height (a few multiples), since near or below it the batched eviction degrades to per-line churn. Non-integer or non-positive values are ignored. Left unset, the engine decides, and it decides twice: 5000 against a server that cannot serve history back, dropping to a 1500-line resident tail plus an on-demand cache once a server declares demand-paged scrollback. Prefer leaving it unset: the depth then lives on the server and the phone holds a working set. An explicit value opts OUT of that flip: it is an explicit memory decision and holds in both states. |
-| `persistScrollback` | _(off)_                      | Persist each session's scrollback across a page discard, through storage YOU supply. A page that is discarded and reloaded otherwise resumes holding nothing, so it asks the server for everything and refills its whole buffer over the wire (the normal case on iOS, where Safari evicts backgrounded tabs under memory pressure and returning to one re-runs the page). With a snapshot restored, the resume asks only for what was printed while the tab was gone. It helps the FRESH-LOAD case only: a warm reconnect and an in-page tab switch already replay nothing. Off by default because `localStorage` is a shared, origin-wide, quota-limited resource and this library is embedded in applications that keep their own state there: an application decides durability for its own users, a library does not decide it for an embedder. Applies to a single terminal and to every tab alike. See below.                                                                                                                                                                                                                                                                                                                                                                                              |
-| `loading`           | _(none)_                     | A pre-JS loading overlay element (kept in your served HTML so it paints before this module loads); it is faded out and removed once the first frame renders.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `onFatalError`      | _(built-in recovery)_        | Called with a `TerminalStartupFailure` after a fatal startup failure, in either phase (`feature-setup` or `kernel-init`); behavior below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `onSessionEnded`    | _(none)_                     | Called when the active session's process has ended and nothing is retrying: the fact the banner renders as "Session ended". Wire it only if you can act on it: the recovery move is `handle.reattach()`, and whether that helps depends on what your endpoint does on the next connect (see "When a session ends"). Observation only; everything the kernel does about the end happens first and happens regardless, and a handler that throws is logged rather than allowed to take the banner down with it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `theme`             | _(none)_                     | Theme overrides (CSS custom properties on the terminal root): `--accent`, `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg`, `--tab-active-border`, plus the activity-dot palette `--status-working`, `--status-done`, `--status-input`, `--status-warning`, `--status-failed`. The library ships neutral defaults. If you retheme the animated trio (`--status-working` / `--status-warning` / `--status-failed`), keep their LIGHTNESS spread: they differ only in hue, so equal-lightness replacements collapse into one another in greyscale and under deuteranopia.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `split`             | _(off)_                      | Two panes side by side, opened and closed from the tab chrome (see "Split view"). Requires the tabs feature (`tabs()` or a tabbed preset) in `features`; a terminal without it, or a value other than `true` or `false`, fails at `kernel-init`. Without the option the DOM is exactly what it was before the option existed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-
-`createTerminal()` returns a handle: `focus()` re-focuses the terminal input
-(and opens the soft keyboard on touch); `send(bytes)` sends bytes to the active
-session through the kernel's sanitizing input funnel (the supported host path
-for a "type this command" affordance); `reset()` drops the local scrollback and
-screen without injecting keystrokes (send a redraw keystroke yourself if you
-want one, for example Ctrl+L); `reattach()` attaches again to whatever the server
-serves now, for a session that has ended (see "When a session ends"); and
-`destroy()` tears every feature down and releases the kernel. With `split: true`
-the handle also carries `split`, the controller of the "Split view" section;
-`focus()`, `send()`, `reset()` and `reattach()` act on the selected pane.
-
-### Mouse and focus
-
-A terminal application that turns mouse tracking on receives the clicks, drags
-and wheel gestures a user makes in the browser, as SGR reports. The pointer says
-so while that is happening: at rest the grid carries a text cursor, and while an
-application holds the mouse the grid and any links in it carry an arrow instead,
-because a click is reported to that application rather than selecting text or
-opening the link. Shift-drag still selects and shift-click still opens a link,
-which is the convention xterm set, so nothing becomes unreachable.
-
-Mouse input is best-effort, as it is in every terminal: a report says where the
-pointer is at that moment and carries nothing a receiver could use to notice it
-had gone stale, so a report made while the socket is down is dropped rather than
-delivered late against a screen that has since been repainted. Typed input keeps
-its delivery guarantee and is unaffected.
-
-Focus reporting is the server's answer rather than this UI's. The kernel tells
-the server whether its own terminal widget holds focus and the server decides
-what the application is told, so several devices attached to one session cannot
-contradict each other. A blur that a press causes and that the same gesture's
-click undoes is not reported, because the terminal did not lose focus.
-
-`persistScrollback` takes the storage, not a switch, because storage is a
-decision this library should not make for you. Chrome's page-lifecycle guidance
-is to close IndexedDB connections on freeze, since a held connection costs
-bfcache eligibility, and this kernel depends on bfcache, so it must not own a
-database. `localStorage` is also a shared, origin-wide, ~5 MB resource, and this
-package is embedded in applications that keep their own state there: consuming it
-uninvited would risk the host's writes failing, and how that degrades is theirs to
-design. Ours degrades gracefully: nothing restored, terminal unaffected.
-
-So the option is off until you pass storage, and `localScrollbackStorage()` is the
-ready-made answer for consumers who want the ordinary one (one import, and it
-handles the quota sweep, the age bound and the `localStorage`-unavailable case):
-
-```ts
-import { createTerminal, localScrollbackStorage, presetTabbed } from "@cplieger/web-terminal-ui";
-
-createTerminal("#terminal", {
-  features: presetTabbed,
-  persistScrollback: localScrollbackStorage(),
-});
-```
-
-All three reference apps (web-terminal-kiro, web-terminal-server, marotte's shell
-panel) enable it that way; web-terminal-server additionally exposes an operator
-opt-out, because it runs a command its operator chooses.
-
-Supply your own storage instead when the snapshots belong somewhere else: a shared
-IndexedDB, a server round-trip, an in-memory cache for a test. The rest of this
-section is that case:
+The terminal connects to a server that speaks the engine's [wire protocol](https://github.com/cplieger/web-terminal-engine#wire-protocol), such as one built on the engine's Go `terminal` package or [web-terminal-server](https://github.com/cplieger/web-terminal-server). A plain PTY-over-WebSocket server does not speak it.
 
 ```ts
 import { createTerminal } from "@cplieger/web-terminal-ui";
-import type { PersistedScrollback } from "@cplieger/web-terminal-ui";
+import { presetTabbed } from "@cplieger/web-terminal-ui/presets";
 
-// Read your snapshots into memory BEFORE mounting; see the note below.
-const cache = new Map<string, PersistedScrollback>(await loadAllFromIndexedDB());
-
-createTerminal("#terminal", {
-  features: presetTabbed,
-  persistScrollback: {
-    load: (sessionId) => cache.get(sessionId) ?? null,
-    save: (sessionId, entry) => {
-      cache.set(sessionId, entry);
-      void writeToIndexedDB(sessionId, entry); // fire and forget
-    },
-    drop: (sessionId) => {
-      cache.delete(sessionId);
-      void deleteFromIndexedDB(sessionId);
-    },
-  },
-});
+createTerminal("#terminal", { features: presetTabbed });
 ```
 
-`load` is synchronous, which is the one constraint worth understanding rather
-than working around: a restore has to be in place before the resume announces
-what the client already holds, and a resume cannot be taken back. A store
-hydrated after that has already lost the argument. So an asynchronous store is
-read into memory first, which is also the shape that holds no database
-connection open.
+Pass the mount target as a selector and the preset as a function, as above. A missing element or a throwing preset then reaches the library's startup-failure handling instead of escaping at your call site. Call `createTerminal` once per document, or `destroy()` the first terminal before you build another.
 
-`sessionId` is a real session id, never a key of your invention: the id the tabs
-feature uses, or (for a single terminal) the engine's own per-tab id. That is
-load-bearing rather than tidy, because the same id is what the persisted server
-boot epoch is checked against. Prefix it however you like inside your storage.
+No prebuilt JavaScript ships, so your build compiles the TypeScript source. Serve the CSS too. For a full-page terminal, join the files listed in `css/MANIFEST` into one stylesheet and serve the Monaspace Neon NF font files at `/vendor/fonts/`. For a terminal inside your own layout, use `css/MANIFEST.single`, `css/MANIFEST.touch` or `css/MANIFEST.tabbed` instead and pass `layout: "container"`. `scaffold/index.html` is a complete page with an import map.
 
-Knobs, all optional. On the option itself: `lines` (default 200) bounds how much of
-each session's tail is written, `maxAgeMs` (default 7 days) bounds how long an entry
-may be used, and `saveIntervalMs` (default 10s) sets the background save cadence.
-`localScrollbackStorage` adds `prefix` and `maxBytes` (default 512 KiB of
-characters, roughly 1 MiB of quota since `localStorage` is accounted in UTF-16;
-about a fifth of the ~5 MiB floor, leaving the rest to the host application).
+The four presets:
 
-The 200-line default is a measurement rather than a guess: VS Code's own
-`terminal.integrated.persistentSessionScrollback` restores 100 lines by default, and
-at 200 a coloured session serialises to ~60 K characters in under a millisecond,
-against ~300 K and ~4 ms at 1000. A write happens on every backgrounding and on a
-timer while output advances, so that cost is paid repeatedly on the device this
-exists for.
+- `presetSingle()` is a desktop terminal with the context menu, clipboard, scroll-to-bottom, predictive echo and connection banner.
+- `presetTouch()` adds the key bar.
+- `presetTabbed()` adds tabs, activity dots and animations. It needs the engine's session API, which web-terminal-server serves.
+- `presetAgentTabbed()` is the same, with each tab's dot shown from the start, for an agent shell.
 
-The library writes on `visibilitychange` to hidden, on `pagehide`, on `destroy()`,
-and on that timer; in every case only for a session whose content has advanced
-since its last recorded save. That predicate is not an optimisation: two pages of
-the same app hold the same session ids, and an unconditional write let a background
-page roll a foreground page's newer entry back. `pagehide` is documented as not
-guaranteed, which is why the timer exists.
+[Setting up the host page](docs/host-page.md) covers the CSS, the fonts and the presets in full.
 
-Every callback may throw or return nonsense without consequence: a failure
-degrades to "nothing was restored", exactly as if the option were absent. An
-entry is also discarded, and dropped, when it is too old, unreadable, or from a
-different server process: absolute line indices only mean anything within one
-server boot, so an entry that cannot be checked against the live server is
-thrown away rather than shown. A slow restore is a much better failure than a
-terminal that is confidently wrong.
+## API
 
-No permission prompt is involved: `localStorage` is not in the Permissions API, so
-there is nothing for a user to grant or refuse. (`navigator.storage.persist()` is
-the call that can prompt, and this library never makes it; these snapshots are
-disposable by design, so asking a user to exempt them from eviction would be asking
-for the wrong thing.) Storage can still be _unavailable_ with no prompt either way,
-and the failures differ: a browser set to block site data makes
-`window.localStorage` **throw on access** (Chrome, Firefox), while Safari
-historically allowed access in private browsing and threw on the **write**; Firefox
-can clear it on close; Safari's ITP evicts script-writable storage after seven days
-without interaction; and a cross-origin iframe embed gets **partitioned, ephemeral**
-storage rather than the top-level origin's (all three engines partition; Safari has
-the strictest lifetime). `localScrollbackStorage` guards access as well as writes, so
-the read side always degrades to "nothing restored" and the terminal is unaffected; a
-refused write is reported instead, so the library never records a save that did not
-happen.
+- `createTerminal(target, options)` builds the terminal and returns a handle with `focus()`, `send(bytes)`, `reset()`, `reattach()` and `destroy()`, plus `split` under `split: true`. [Options and the terminal handle](docs/configuration.md) lists every option.
+- Presets come from `@cplieger/web-terminal-ui/presets`, or one at a time from `/presets/single`, `/presets/touch`, `/presets/tabbed` and `/presets/agent-tabbed`. Single features come from `/features/<name>`.
+- `localScrollbackStorage()` is the ready-made storage for the `persistScrollback` option.
+- `PUBLIC_THEME_TOKENS` and `LOADING_OVERLAY_CLASSES`, also at `/style-contract`, list the theme keys and the overlay classes. `STARTUP_FAILURE_COPY`, also at `/startup-copy`, holds the failure panel's wording.
+- Types cover the options, the handle, features and their context, startup failures and the split controller.
 
-Cleanup, since a store that only ever writes fills up. Four mechanisms, and the
-first is the one that matters day to day: the kernel calls `drop` when a session
-closes, so a tab the user closes (or one the server reaps while the page is open)
-takes its entry with it. On top of that, an entry past `maxAgeMs` is deleted when it
-is next read; `localScrollbackStorage` sweeps both at construction and after every
-write (expired entries first, then the oldest until the byte budget fits); and a
-rejected entry is always dropped rather than left to be re-read. What no mechanism
-can catch promptly is a session that disappeared while the page was CLOSED. Nothing
-runs then, and there is no reliable "this tab is closing for good" event to hook, so
-that case is the sweep's, which is why a budget exists rather than the age bound
-alone.
+The full reference is on [JSR](https://jsr.io/@cplieger/web-terminal-ui/doc).
 
-The budget is bytes rather than an entry count deliberately, because a count bounds
-the wrong thing. Measured on the real stored value at the 200-line default, a plain
-80-column session is ~24 K characters and a wide coloured one ~112 K, so a 20-entry
-allowance would have permitted over 4 MiB of a ~5 MiB quota; the cap would have
-guaranteed the refusal it was meant to prevent. A single snapshot larger than the
-whole budget is refused outright rather than evicting everything for something that
-still would not fit.
+## Startup failures and ended sessions
 
-### Themes that provably apply
+When a startup failure has a place to render, the library shows one "Terminal failed to start" panel with a **Reload** button and lowers your loading overlay. `onFatalError` lets you observe the failure or render your own recovery UI. Two failures draw no panel. One is an embedded terminal whose mount target is missing. The other is a second terminal in a document that already holds a live one.
 
-`theme` is an open `Record<string, string>` (the kernel sets every key on the
-terminal root verbatim), so a key this library renamed or retired becomes a live
-declaration nothing reads: no error, just the library's neutral defaults where
-your brand should be. The supported keys are therefore published as data:
+A session whose process exits shows "Session ended" and does not reconnect. If your endpoint hands out a new session on the next connect, call `reattach()` from `onSessionEnded`, and bound your retries. [Startup failures and ended sessions](docs/failure-handling.md) has the details.
 
-```ts
-import { PUBLIC_THEME_TOKENS } from "@cplieger/web-terminal-ui/style-contract";
-// or from the package root; the subpath imports nothing and touches no DOM,
-// so a Node script can read it too.
+## Security and storage
 
-for (const key of Object.keys(MY_THEME)) {
-  expect(PUBLIC_THEME_TOKENS).toContain(key); // your test, our list
-}
-```
+The library has no login of its own. Authentication and origin checks belong to the server that serves the WebSocket and the session API. Paste reads the Clipboard API, which needs a secure context, so serve the page over HTTPS for touch paste.
 
-Every token on that list is guaranteed by this package's own suite to be both
-declared AND read by a shipped rule, so setting it changes what renders. The
-second half is the one you cannot check from outside: a token that is declared
-but that no rule reads accepts your override and applies it to nothing. Anything
-NOT on the list is internal and may be renamed without a release note.
-
-`LOADING_OVERLAY_CLASSES` is published from the same module for the same reason:
-your pre-JS overlay markup opts into `css/page.css`'s styling by class name, and
-that markup usually lives in a static HTML file no compiler reads.
-
-### Startup failures
-
-You do not need your own startup-failure UI. Every way starting up can fail ends
-at one recovery surface this package owns (a "Terminal failed to start" panel
-with a Reload button), and your loading overlay is lowered so that panel is
-visible.
-
-Two phases can fail. If a feature's setup throws or rejects
-(`phase: "feature-setup"`), the kernel stops the connection, tears down every
-completed feature and core listener, clears the broken subtree, and shows the
-panel. If `createTerminal` itself throws (`phase: "kernel-init"`: an
-unresolvable mount selector, a preset that throws, an invalid feature list, a DOM
-invariant), it shows the same panel and then rethrows, so a caller with its own
-error handling still sees the error.
-
-The panel is a native `<dialog>`. In `viewport` layout it opens with
-`showModal()`, so the rest of your document is inert while it is up; in
-`container` layout it opens non-modally, so the application around an embedded
-terminal keeps working and keeps its focusables. Escape does not dismiss it in
-either mode: the terminal is already gone, so there would be nothing behind it
-and no way back. Reload is the recovery.
-
-One visible consequence in `viewport` layout: a modal dialog is in the browser's
-top layer, above every `z-index` in the document, so the panel now paints over
-your loading overlay instead of under it. It appears at once and the overlay's
-fade-out finishes behind it.
-
-**This is why `target` takes a selector and `features` takes a function.** Both
-are resolved INSIDE that boundary. Written the other way round
-(`createTerminal(document.getElementById("terminal"), { features: presetTabbed() })`),
-the lookup and the preset call both happen at your call site, before
-`createTerminal` is entered, so a missing element or a throwing preset escapes
-the library entirely and leaves the page spinning under your overlay with nothing
-but a console error. Those were the two failures every consumer used to
-hand-build its own dialog for.
-
-Two cases have no panel by design, both `kernel-init` with `surface: undefined`
-to say there is nowhere to render. An embedded terminal (`layout: "container"`)
-whose mount target does not exist: it is one panel inside a host application that
-is otherwise working, so claiming the viewport to report its own failure would
-break a healthy page. And a second `createTerminal` while the document already
-holds a live terminal, in either layout: the root it names may be the first
-terminal's, so nothing is written to the page and no overlay is faded. Both are
-still delivered to `onFatalError` and still rethrown.
-
-Under `split: true` a failure in the SECOND pane (its kernel or one of its pane
-features, at the first open) is not the terminal's failure: the first pane keeps
-running, the panel renders into the failed pane's own root, non-modally, with its
-one Reload button, and `onFatalError` receives it with that pane root as
-`surface`. The shared split button in the tab row closes the split and discards
-the failed pane, and the next open builds a fresh one. A pane feature that
-rejects only after the split has already closed finds no place for a panel: the
-healthy pane fills the view again, takes over the tab the failed pane was
-showing, and the failed pane is discarded at once, so `onFatalError` receives
-that failure with `surface: undefined` and nothing is rendered.
-
-`onFatalError` receives the failure after cleanup. Discriminate on `phase`:
-`feature-setup` names the offending `feature`, `kernel-init` does not, because
-feature composition never began. `surface` names the element the built-in panel
-would fill, and is the element to render into if you claim it; it is `undefined`
-in the cases above where nothing is rendered, so check it first. Return `true`
-only when you have rendered replacement recovery UI there.
-
-If your page also carries an inline bootstrap watchdog (a script that reports
-"the JS bundle never loaded at all", a rung below `import`), it cannot import
-anything by definition. Take its wording from `STARTUP_FAILURE_COPY` (exported at
-the package root and at `@cplieger/web-terminal-ui/startup-copy`, which imports
-nothing and touches no DOM so a build script can read it) and substitute the
-strings into your HTML at build time, rather than restating them by hand.
-
-### Split view
-
-`split: true` lets the person show two tabs side by side. It requires the tabs
-feature, because everything that drives it lives there: the shared tab row, the
-split button, the snap items and the layout record. Your root becomes the shell
-root holding one root per pane and the shared chrome; each pane is a complete
-terminal with its own engine, so an open split holds up to two WebSocket
-connections, one per shown pane. Closing and resizing the split is a display
-re-arrangement only: no tab or session is ever created or closed by it, and a tab
-that leaves a pane stays in the row as an ordinary tab. Opening it is one too,
-except with a single tab: the split button, a snap or a drop that opens it then
-creates the second tab.
-
-Three ways in, all in the tab chrome, none a key chord:
-
-- **The split button** at the right edge of the tab row (and in the mobile
-  switcher bar on a touchscreen) toggles the split, and never opens an empty
-  pane. The current tab stays in the left pane and selected, and the right pane
-  shows the tab used before it, or with no such tab the next one in the row, else
-  the previous one. With a single tab it creates a new tab and shows it on the
-  right, selected; the split opens once the new tab exists. Closing keeps the
-  SELECTED pane's tab and hides the other pane. Opening slides the divider in
-  from the right edge and closing slides it toward the hidden side, both instant
-  under reduced motion. It is an ordinary button: Tab
-  reaches it, Enter or Space toggles it, `aria-expanded` is its state.
-- **"Snap to left" and "Snap to right"** in a tab's context menu, on a
-  right-click, a touch long-press, or the keyboard (the context-menu key or
-  Shift+F10 on the focused tab, where the browser raises the menu event; Safari
-  binds no key to it, so a keyboard-only person there reaches the menu through
-  an assistive technology's own command). A snapped tab shows on the named side
-  and its pane is selected. When the snap opens the split, the other pane keeps
-  the tab the single view showed (or, when that is the tab being moved, its
-  split partner), so neither pane opens empty. With a single tab, a snap that
-  opens the split creates a new tab for the other pane, and the split opens
-  once that tab exists; a failed create leaves the single view as it was. A tab
-  the other pane shows trades places with the tab on the named side, so both
-  stay on screen (into an empty pane it simply moves); any other tab there
-  becomes an ordinary tab. In an open split, snapping a tab onto the side that
-  already shows it changes nothing.
-- **Dragging a tab** out of the row onto either pane of the terminal area,
-  following the same rule. By touch or pen, hold the tab still for a moment
-  before moving it; a swipe that moves straight away scrolls the row. While
-  the drag lasts the pane under the pointer is
-  highlighted; each highlight covers that pane's terminal area at the divider's
-  position (the two halves while the split is closed), inset a little with the
-  tab chips' rounded border, and a release decides by the divider's centre.
-
-A tab click follows one rule: an empty pane fills first, otherwise the selected
-pane's tab is replaced. A new tab ("+") also fills an empty pane first, but with
-both panes showing a tab it replaces the UNSELECTED pane's tab and its pane
-becomes the selected one, so the tab typed in before stays on screen. A session
-created in another browser lands the same way while the split is open; with the
-split closed it joins the row as an ordinary tab. Closing a
-shown tab closes the split: the other pane's tab fills the view and is selected,
-or, when the other pane was empty, the neighbouring tab is shown as it is with
-one pane. The selected pane is the one that receives typing, the
-last one clicked, touched or typed in. The divider between the panes shows it:
-an 8 px bar in the 10 px gutter holding a short accent pill that sits against
-the selected pane's side and slides across when the selection changes (it jumps
-under reduced motion). The selected pane keeps the filled blinking cursor while
-the other pane's is hollow and steady, and in the tab row both shown tabs render
-active, the selected pane's a step brighter. A screen reader hears "Left
-terminal selected" or "Right terminal selected" as a polite announcement, and
-each pane's tabpanel is described by its side and whether it is selected.
-
-While the split is open each shown pane's input is a stop in the Tab order, so
-Tab runs left pane, divider, right pane, then the tab row; an empty pane adds no
-stop. With the split closed the one pane is entered by typing or a click and Tab
-from outside the terminal lands on the tab row.
-
-The handle is a focusable `role="separator"` with `aria-valuenow`, `aria-valuemin`
-and `aria-valuemax` as percentages of the left share. Dragging it (mouse or
-touch; the hit area is 24 px wide for a fine pointer and 44 px for a coarse one,
-overlapping the pane edges) resizes both panes as the pointer moves; the shells
-are told their new size at most every 100 ms and once on release. Past the
-360 px minimum the pane holds at exactly 360 px for 120 px of further pointer
-travel, and a release there leaves it at 360 px. Beyond that the pane follows
-the pointer again and dims, and releasing there closes it; coming back above
-360 px after such a trip and releasing snaps the handle back to where the drag
-started. From the
-keyboard ArrowLeft and ArrowRight nudge the divider by 16 px and Home and End take
-it to the bounds, and every key stops AT the 360 px minimum rather than closing a
-pane; the record is written when the key is released. The default is 50/50.
-
-Under 730 px of pane-row width (two minimum panes and the gutter) the split
-buttons hide, the snap items are disabled, a drop does nothing, and an OPEN split
-collapses to the selected pane, restoring itself when the row is wide again. At
-730 px or wider a window resize keeps both panes at or over 360 px by clamping the
-displayed share; the share the person chose is remembered and comes back when
-the row is wide enough for it.
-
-The arrangement is remembered on the server, beside the tab order, as
-`GET`/`PUT /api/sessions/layout`: the session in each pane, the handle share, the
-selected pane and whether the split is open. It is read once at load, written on
-every change, and dies with the session list, so a reload or another device
-restores the same panes; the active tab is the selected pane's session and is no
-longer kept in `localStorage`. Against a server without the route the split still
-works and nothing is remembered; one console warning says so.
-
-Two rules for a `features` function under `split: true`, both checked at
-`kernel-init`. It is invoked once per pane and must return FRESH feature objects
-every time, because a feature object's `api` and its `ctx.use` identity belong to
-one pane; a saved array (`const f = presetTabbed(); features: () => f`) is
-refused, naming the reused feature. A feature that must exist once per terminal
-rather than once per pane (the built-in tabs, mobile toolbar, activity monitor
-and animations) declares `scope: "shell"`: it is set up once, from the first
-invocation, with a context whose `surface`, `render`, `scroll`, `modes`,
-`session`, `send` and `paste` resolve to the selected pane at call time and whose
-`ctx.shell.pane(side)` reaches one pane explicitly.
-
-### When a session ends
-
-A session whose process exits is over: the engine closes with its definitive
-process-exited code, the banner reads "Session ended", and no reconnect is
-attempted. That refusal is deliberate. On a server that hands each session its own
-endpoint, reconnecting could only collect the same close again, which is an
-endless "Reconnecting…" flap over a screen that will never change.
-
-Some hosts are the other shape. If your endpoint hands out a NEW session on the
-next connect (one shared PTY the server replaces once it is spent, an endpoint
-that spawns on attach), then the connection the engine declines to make is exactly
-what would produce a working terminal, and you are the only party who knows that.
-So the library gives you the fact and the move, and keeps the policy out of it:
-
-```ts
-const term = createTerminal("#terminal", {
-  features: presetTouch,
-  wsPath: "/api/shell/ws",
-  onSessionEnded: () => {
-    // Your endpoint's own restart call goes here if it needs one, then:
-    term.reattach();
-  },
-});
-```
-
-`reattach()` drops the local scrollback and screen, moves the connection state
-off `ended`, and reconnects. The order is the reason it belongs here: the local
-buffer holds the dead session's content and a line index the replacement has
-never reached, so a bare reconnect would resume against the wrong index space, and
-a bare reset would leave "Session ended" standing over a screen it just blanked.
-
-It reconnects and nothing more. It starts no process and calls no API of yours, so
-if your server needs to be told to make a new session, tell it first and reattach
-after. Do not call it on a live session: that is a needless full replay, and it
-drops history the server may have evicted since.
-
-**Bound your own retries.** A shell that dies as fast as it is spawned will end
-again the moment it is replaced, so a handler that reattaches unconditionally is a
-hot loop. Count consecutive ends, back off, and stop after a few: the banner is
-the honest outcome when a session cannot stay up. The library will not do this for
-you, because how many attempts is worth making, and whether any are, is a fact
-about your server rather than about this terminal.
-
-## What ships
-
-| Path                    | Purpose                                                                                                                                                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/**/*.ts`           | The UI modules: the kernel (`kernel/`), opt-in features (`features/`), per-preset entries (`presets/`), IME, predictive echo, viewport.                                                                                   |
-| `css/*.css` + manifests | Root-scoped component styles. `MANIFEST` = the reference full-page bundle (`page.css` + the tabbed set); `MANIFEST.single/touch/tabbed` = component-only per-preset bundles for embedders. Concatenate in manifest order. |
-| `css/page.css`          | The page kit (full-page hosts only): `html/body` reset + the `@font-face` rules for the terminal's two web fonts, `Monaspace Neon NF` and the `Web Terminal Glyphs` tiling overlay.                                       |
-| `scaffold/index.html`   | A reference full-page HTML host: `<head>` + one empty root element + importmap.                                                                                                                                           |
+Scrollback persistence is off by default, because turning it on writes terminal output to browser storage. An open split view holds up to two WebSocket connections, one per shown pane.
 
 ## Related projects
 
-The web-terminal family:
+- [web-terminal-engine](https://github.com/cplieger/web-terminal-engine) is the Go session engine and TypeScript renderer this UI is built on.
+- [web-terminal-server](https://github.com/cplieger/web-terminal-server) is a ready-to-run container that serves this UI over HTTP and WebSocket for any command.
+- [web-terminal-kiro](https://github.com/cplieger/web-terminal-kiro) serves the Kiro CLI in the browser through this UI, as a full page.
+- [marotte](https://github.com/cplieger/marotte) is a self-hosted agentic IDE that embeds this UI as its shell panel, in `container` layout.
 
-- [`web-terminal-engine`](https://github.com/cplieger/web-terminal-engine): the
-  Go session engine + TypeScript browser renderer this UI is built on (peer
-  dependency).
-- [`web-terminal-server`](https://github.com/cplieger/web-terminal-server): a
-  ready-to-run container that serves this UI over HTTP + WebSocket for any
-  command.
+## Documentation
 
-Consumers that ship this UI:
+- [Setting up the host page](docs/host-page.md) covers the CSS, fonts, import map, presets and loading overlay.
+- [Options and the terminal handle](docs/configuration.md) lists every option and the theme tokens.
+- [Tabs, activity dots and notifications](docs/tabs.md) describes what the tabbed presets show.
+- [Split view](docs/split-view.md) covers two panes side by side.
+- [Keeping scrollback across a reload](docs/scrollback-persistence.md) covers the `persistScrollback` option.
+- [Startup failures and ended sessions](docs/failure-handling.md) covers the Reload panel and `reattach()`.
+- [Keyboard, mouse and touch input](docs/input.md) covers focus, paste and mouse reporting.
 
-- [`marotte`](https://github.com/cplieger/marotte)
-- [`web-terminal-kiro`](https://github.com/cplieger/web-terminal-kiro)
+## Credits
+
+The IME module follows the design of [xterm.js](https://github.com/xtermjs/xterm.js)'s `CompositionHelper`. On a phone, the tab switcher's flick thresholds take [@use-gesture](https://github.com/pmndrs/use-gesture)'s drag defaults, and the five-second composition idle bound comes from [Slate](https://github.com/ianstormtaylor/slate)'s Android input manager. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) names the lines that follow each.
 
 ## Contributing
 
-Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
-conventions and how to run the checks locally.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions and how to run the checks locally.
 
 ## Disclaimer
 
@@ -652,10 +109,6 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 MPL-2.0. See [LICENSE](LICENSE).
 
-The `Web Terminal Glyphs` tiling overlay named in `css/page.css` is a separate
-Apache-2.0 work, and its licence travels with the FONT FILE — which this package
-does not ship, it only names the URL. So no new obligation lands on an npm or JSR
-consumer; the obligation is the serving host's, which is why the full-page host
-notes above ask for the font's `LICENSE` and `NOTICE` beside the `.woff2`.
+The `Web Terminal Glyphs` tiling overlay named in `css/page.css` is a separate Apache-2.0 work, and its licence travels with the FONT FILE, which this package does not ship. It only names the URL. So no new obligation lands on an npm or JSR consumer. The obligation is the serving host's, which is why the full-page host notes in [Setting up the host page](docs/host-page.md) ask for the font's `LICENSE` and `NOTICE` beside the `.woff2`.
 
 Third-party attributions are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
