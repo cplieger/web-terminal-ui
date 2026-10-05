@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
+import {
+  shortAnnounced,
+  shortenReannounce,
+  shortenSettle,
+  shortSettled,
+} from "../test-helpers/delays.js";
 import { clipboard } from "../features/clipboard.js";
 import { contextMenu } from "../features/context-menu.js";
 import { MIN_SPLIT_AREA_PX } from "./layout-policy.js";
@@ -32,15 +38,11 @@ const settle = (): Promise<void> =>
       requestAnimationFrame(() => setTimeout(r, 0));
     });
   });
-/** The announcer re-sets its live region on a 100 ms timer. */
-const announced = (): Promise<void> => new Promise((r) => setTimeout(r, 130));
-/** A pane announces its size only once its viewport controller's 350 ms settle
- *  after a build or a resize has passed. */
-const viewportSettled = (): Promise<void> => new Promise((r) => setTimeout(r, 400));
 
-beforeEach(() => {
+beforeEach(async () => {
   fake.reset();
   document.body.replaceChildren();
+  await shortenReannounce();
 });
 
 /** A root with real geometry; unstyled it would measure 0 by 0. */
@@ -344,7 +346,7 @@ describe("open(): the second pane", () => {
     });
     expect(ratioVar(root)).toBe("0.5");
     expect(split.canOpen()).toBe(false);
-    await announced();
+    await shortAnnounced();
     expect(politeText(root)).toBe("Split open");
   });
 
@@ -561,7 +563,7 @@ describe("open(): the second pane", () => {
     ctx.notifySwitch({ id: "a" });
     controller(term).open();
     ctx.notifySwitch({ id: "b" });
-    await announced();
+    await shortAnnounced();
     expect(ctx.shell.selected()).toBe("right");
     const selections = vi.fn();
     ctx.shell.onSelectionChange(selections);
@@ -585,7 +587,7 @@ describe("open(): the second pane", () => {
     expect(changes.mock.calls[changes.mock.calls.length - 1]?.[0]).toMatchObject({
       selected: "left",
     });
-    await announced();
+    await shortAnnounced();
     expect(politeText(root)).toBe("Left terminal selected");
     // Typing reaches the survivor, not the cleaned kernel.
     ctx.send(new Uint8Array([0x41]));
@@ -654,7 +656,7 @@ describe("the controller refuses what it cannot do", () => {
     ctx.notifySwitch({ id: "a" });
     split.open();
     ctx.shell.pane("left")?.clearActiveSession();
-    await announced();
+    await shortAnnounced();
     const changes = vi.fn();
     split.onChange(changes);
 
@@ -666,7 +668,7 @@ describe("the controller refuses what it cannot do", () => {
     expect(paneRoots(root)[1]?.classList.contains("wt-pane-selected")).toBe(true);
     expect(paneRoots(root)[1]?.hasAttribute("inert")).toBe(true);
     expect(changes).toHaveBeenCalledTimes(1);
-    await announced();
+    await shortAnnounced();
     expect(politeText(root)).toBe("Right terminal selected");
 
     // A shown pane ends the exception: the empty one is refused again. The new
@@ -814,7 +816,7 @@ describe("the ratio: the remembered share and the effective one", () => {
     expect(left?.classList.contains("wt-pane-selected")).toBe(false);
     expect(right?.classList.contains("wt-pane-selected")).toBe(true);
     expect(selections).not.toHaveBeenCalled();
-    await announced();
+    await shortAnnounced();
     expect(politeText(root)).toBe("Split open");
     // The restored side fills first and stays selected once it shows a tab.
     ctx.shell.pane("right")?.notifySwitch({ id: "b" });
@@ -841,13 +843,16 @@ describe("the ratio: the remembered share and the effective one", () => {
     expect(controller(term).state().selected).toBe("left");
     expect(paneRoots(root)[0]?.classList.contains("wt-pane-selected")).toBe(true);
     expect(selections).not.toHaveBeenCalled();
-    await announced();
+    await shortAnnounced();
     expect(politeText(root)).toBe("Split open");
   });
 });
 
 describe("the narrow rule", () => {
   it("collapses an open split under the width two panes need and restores it above", async () => {
+    // A pane announces its size only once its viewport has settled after a build
+    // or a resize.
+    await shortenSettle();
     const root = rootIn(1000);
     const { term, ctx } = await mountSplit(root);
     const split = controller(term);
@@ -858,7 +863,7 @@ describe("the narrow rule", () => {
     const [left, right] = paneRoots(root);
     const changes = vi.fn();
     split.onChange(changes);
-    await viewportSettled();
+    await shortSettled();
     const resizesPerPane = (): number[] =>
       fake.engines.map((e) => e.connection.sendResize.mock.calls.length);
     const clearResizes = (): void => {
@@ -885,7 +890,7 @@ describe("the narrow rule", () => {
     for (const e of fake.engines) {
       expect(e.connection.forgetSession).not.toHaveBeenCalled();
     }
-    await viewportSettled();
+    await shortSettled();
     expect(resizesPerPane().every((n) => n >= 1)).toBe(true);
     expect(resizesPerPane()).toHaveLength(2);
 
@@ -895,7 +900,7 @@ describe("the narrow rule", () => {
     expect(root.classList.contains("wt-split-collapsed")).toBe(false);
     expect(split.state().collapsed).toBe(false);
     expect(left?.hasAttribute("inert")).toBe(false);
-    await viewportSettled();
+    await shortSettled();
     expect(resizesPerPane().every((n) => n >= 1)).toBe(true);
   });
 
@@ -942,7 +947,7 @@ describe("selection", () => {
     const split = controller(term);
     ctx.notifySwitch({ id: "a" });
     split.open();
-    await announced();
+    await shortAnnounced();
     const selections = vi.fn();
     ctx.shell.onSelectionChange(selections);
 
@@ -951,7 +956,7 @@ describe("selection", () => {
     expect(ctx.shell.selected()).toBe("right");
     expect(selections).toHaveBeenCalledTimes(1);
     expect(selections).toHaveBeenCalledWith("right");
-    await announced();
+    await shortAnnounced();
     expect(politeText(root)).toBe("Right terminal selected");
 
     expect(ctx.shell.select("right")).toBe(true);
@@ -1080,6 +1085,7 @@ describe("selection", () => {
 
 describe("close(): the selected pane fills the view", () => {
   it("empties and hides the other pane, keeps its kernel, and shows it again on the next open", async () => {
+    const restoreSettle = await shortenSettle();
     const root = rootIn();
     const { term, ctx } = await mountSplit(root);
     const split = controller(term);
@@ -1088,7 +1094,8 @@ describe("close(): the selected pane fills the view", () => {
     ctx.notifySwitch({ id: "b" });
     ctx.shell.select("left");
     const [left, right] = paneRoots(root);
-    await viewportSettled();
+    await shortSettled();
+    restoreSettle();
     const [leftEngine, rightEngine] = fake.engines;
     for (const e of fake.engines) {
       e.connection.forgetSession.mockClear();
@@ -1129,7 +1136,7 @@ describe("close(): the selected pane fills the view", () => {
     expect(rightEngine?.connection.sendResize).not.toHaveBeenCalled();
     expect(changes).toHaveBeenCalledTimes(1);
     expect(panes).toHaveBeenCalledTimes(1);
-    await announced();
+    await shortAnnounced();
     expect(politeText(root)).toBe("Split closed");
 
     expect(split.open()).toBe(true);

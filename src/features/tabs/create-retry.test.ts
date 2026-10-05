@@ -15,6 +15,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
+import { shortAnnounced, shortenReannounce } from "../../test-helpers/delays.js";
 import type { TerminalHandle } from "../../kernel/types.js";
 
 let term: TerminalHandle | undefined;
@@ -280,6 +281,7 @@ describe("session-create retry: what the user is told", () => {
   });
 
   it("announces the wait to a screen reader as well as to the toast layer", async () => {
+    await shortenReannounce();
     // The toast is decoration to a screen-reader user; the live region is the
     // channel that reaches them, and it carries the same sentence.
     script = [
@@ -291,7 +293,7 @@ describe("session-create retry: what the user is told", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     // The announcer clears the region and re-sets it on a short timer, so the
     // sentence lands a beat after the call.
-    await new Promise((r) => setTimeout(r, 150));
+    await shortAnnounced();
     expect(root.querySelector("[aria-live=polite]")?.textContent).toContain(
       "installing tools, waiting…",
     );

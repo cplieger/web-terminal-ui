@@ -270,7 +270,17 @@ describe("an emptied pane stays idle", () => {
 describe("the catching-up cue is the pane's", () => {
   const cueVisible = (root: HTMLElement, side: "left" | "right"): boolean =>
     paneRoot(root, side).querySelector(".wt-catchup")?.classList.contains("visible") === true;
-  const cueShown = (): Promise<void> => new Promise((r) => setTimeout(r, 200));
+  // The cue's anti-flicker delay runs on these fakes; its completion poll stays
+  // on real frames.
+  const fakeCueTimers = (): void => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  };
+  const cueShown = async (): Promise<void> => {
+    await vi.advanceTimersByTimeAsync(200);
+  };
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it("a backlog frame on the right engine raises the right pane's cue and not the left's", async () => {
     const root = rootIn();
@@ -279,6 +289,7 @@ describe("the catching-up cue is the pane's", () => {
     // A warm store, so showing the tab arms nothing on its own.
     const right = engineOn(fake, root, "right");
     right.renderer.getHighestIndex.mockReturnValue(0);
+    fakeCueTimers();
     chipOf(root, "two").click();
     expect(shown(ctx, "right")).toBe("s2");
     await cueShown();
@@ -307,6 +318,7 @@ describe("the catching-up cue is the pane's", () => {
     const root = rootIn();
     const { term } = await mountTabbed(root, server);
     term.split?.open();
+    fakeCueTimers();
 
     chipOf(root, "two").click();
     await cueShown();

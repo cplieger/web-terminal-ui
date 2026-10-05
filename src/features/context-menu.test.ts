@@ -256,7 +256,8 @@ describe("contextMenu — touch long-press, classified at release", () => {
     expect(isOpen(root)).toBe(true);
 
     // Past the swallow window: a deliberate follow-up tap is a click-away.
-    await new Promise((r) => setTimeout(r, 400));
+    const now = performance.now();
+    vi.spyOn(performance, "now").mockReturnValue(now + 400);
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(isOpen(root)).toBe(false);
   });

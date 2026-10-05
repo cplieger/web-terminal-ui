@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
+import { shortenReannounce } from "../../test-helpers/delays.js";
 import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 // A plain string constant, so reading it through a separate module instance than
@@ -149,7 +150,8 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   return delayed(jsonResponse(server.list, 200), server.listDelayMs);
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  await shortenReannounce();
   fetchMock.mockClear();
   server = {
     list: [
@@ -2000,10 +2002,21 @@ describe("tabs: the long-press menu's trailing click", () => {
   function release(bar: HTMLElement): void {
     bar.dispatchEvent(new PointerEvent("pointerup", { pointerType: "touch", bubbles: true }));
   }
+  /** Moves `performance.now()`, the clock the swallow window reads, forward
+   *  without waiting; event timestamps stay real. */
+  function skewedClock(): (ms: number) => void {
+    const real = performance.now.bind(performance);
+    let skew = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => real() + skew);
+    return (ms) => {
+      skew += ms;
+    };
+  }
 
   it("survives its own trailing click after a press held past the swallow window", async () => {
     const root = document.createElement("div");
     await mount(root);
+    const later = skewedClock();
     const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
     const menu = root.querySelector<HTMLElement>(".wt-tab-menu");
     if (!bar) {
@@ -2014,7 +2027,7 @@ describe("tabs: the long-press menu's trailing click", () => {
     openMenu(root, 0);
     expect(menu?.classList.contains("visible")).toBe(true);
     // Held long enough that the window armed when the menu opened has expired.
-    await new Promise((r) => setTimeout(r, 500)); // past the 350ms swallow window
+    later(500); // past the 350ms swallow window
     release(bar);
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
@@ -2026,6 +2039,7 @@ describe("tabs: the long-press menu's trailing click", () => {
     // genuine dismiss would be swallowed for as long as the user keeps tapping.
     const root = document.createElement("div");
     await mount(root);
+    const later = skewedClock();
     const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
     const menu = root.querySelector<HTMLElement>(".wt-tab-menu");
     if (!bar) {
@@ -2034,12 +2048,12 @@ describe("tabs: the long-press menu's trailing click", () => {
 
     touchDown(bar);
     openMenu(root, 0);
-    await new Promise((r) => setTimeout(r, 500)); // past the 350ms swallow window
+    later(500); // past the 350ms swallow window
     release(bar); // the release of the opening press: re-arms, and clears the flag
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(menu?.classList.contains("visible")).toBe(true);
 
-    await new Promise((r) => setTimeout(r, 500)); // past the 350ms swallow window
+    later(500); // past the 350ms swallow window
     // A stray second release with no press behind it: the flag the opening release
     // cleared is what keeps this from arming again.
     release(bar);
@@ -2054,6 +2068,7 @@ describe("tabs: the long-press menu's trailing click", () => {
     // swallow the click that was meant to dismiss it.
     const root = document.createElement("div");
     await mount(root);
+    const later = skewedClock();
     const bar = root.querySelector<HTMLElement>(".wt-tab-bar");
     const menu = root.querySelector<HTMLElement>(".wt-tab-menu");
     if (!bar) {
@@ -2062,12 +2077,12 @@ describe("tabs: the long-press menu's trailing click", () => {
 
     touchDown(bar);
     openMenu(root, 0);
-    await new Promise((r) => setTimeout(r, 500)); // past the 350ms swallow window
+    later(500); // past the 350ms swallow window
     release(bar);
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(menu?.classList.contains("visible")).toBe(true);
 
-    await new Promise((r) => setTimeout(r, 500)); // past the 350ms swallow window
+    later(500); // past the 350ms swallow window
     touchDown(bar); // a fresh press, which opens no menu...
     release(bar); // ...so its release has nothing to protect
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));

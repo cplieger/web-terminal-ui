@@ -32,6 +32,7 @@ import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import { tabs } from "./index.js";
 import type { PaneLayout } from "./model.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
+import { shortAnnounced, shortenReannounce } from "../../test-helpers/delays.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
@@ -358,6 +359,7 @@ describe("tabs: the switcher's vertical drag", () => {
   });
 
   it("snaps open when the release is past the halfway point", async () => {
+    await shortenReannounce();
     const h = await mountBar(3, { listHeight: LIST_H });
 
     h.down(100, 300, 1000);
@@ -366,7 +368,7 @@ describe("tabs: the switcher's vertical drag", () => {
 
     expect(h.expanded()).toBe(true);
     // The live region clears and re-sets on a timer, so the message lands late.
-    await new Promise((r) => setTimeout(r, 150));
+    await shortAnnounced();
     expect(h.live()).toBe("Terminal list expanded");
     // The height goes back to the class: the snap is CSS's to animate from
     // wherever the finger left it.
@@ -389,6 +391,7 @@ describe("tabs: the switcher's vertical drag", () => {
   });
 
   it("snaps back closed when the release is short of halfway", async () => {
+    await shortenReannounce();
     const h = await mountBar(3, { listHeight: LIST_H });
 
     h.down(100, 300, 1000);
@@ -399,7 +402,7 @@ describe("tabs: the switcher's vertical drag", () => {
     expect(h.list.style.maxHeight).toBe("");
     // Nothing is announced for a list that did not open. The region re-sets on a
     // timer, so this waits out the window an announcement would have landed in.
-    await new Promise((r) => setTimeout(r, 150));
+    await shortAnnounced();
     expect(h.live()).toBe("");
   });
 

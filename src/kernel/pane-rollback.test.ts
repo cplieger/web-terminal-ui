@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
+import { shortenReannounce } from "../test-helpers/delays.js";
 import type {
   TerminalContext,
   TerminalFeature,
@@ -395,6 +396,7 @@ async function mountSplit(
 describe("kernel-init in the second pane", () => {
   for (const fault of FAULTS) {
     it(`a throw at ${fault} leaves the second pane's root as the recovery surface with nothing acquired, and the split button discards it`, async () => {
+      await shortenReannounce();
       const root = rootIn();
       const seen: TerminalStartupFailure[] = [];
       const { term, ctx } = await mountSplit(root, (f) => {

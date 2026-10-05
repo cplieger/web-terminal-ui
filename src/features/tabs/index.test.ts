@@ -10,6 +10,7 @@ import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import { tabs } from "./index.js";
 import type { PaneLayout } from "./model.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
+import { shortAnnounced, shortenReannounce } from "../../test-helpers/delays.js";
 import type { ShellContext, TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
@@ -1134,6 +1135,7 @@ describe("tabs feature", () => {
   });
 
   it("announces a tab move on the polite live region", async () => {
+    await shortenReannounce();
     const root = document.createElement("div");
     document.body.appendChild(root);
     term = await mountTerminal(root, { features: () => [tabs()] });
@@ -1141,7 +1143,7 @@ describe("tabs feature", () => {
 
     menuItem(openTabMenu(root, 0), "Move right")?.click();
     // The announcer re-sets the cleared region after a ~100ms timer.
-    await new Promise((r) => setTimeout(r, 130));
+    await shortAnnounced();
     const live = root.querySelector('[aria-live="polite"]');
     expect(live?.textContent).toBe("Moved one to position 2");
   });
@@ -1818,13 +1820,19 @@ describe("tabs feature", () => {
     const cue = root.querySelector(".wt-catchup");
     // Not shown on initial load (no switch), nor immediately on switch.
     expect(cue?.classList.contains("visible")).toBe(false);
-    root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
-    expect(cue?.classList.contains("visible")).toBe(false);
-    // Shown once the short grace elapses: the incoming tab holds nothing, so its
-    // whole screen is still coming over the network (the mocked connection sends
-    // no frames, so it stays up until the poll's deadline).
-    await new Promise((r) => setTimeout(r, 180));
-    expect(cue?.classList.contains("visible")).toBe(true);
+    // The grace runs on these fakes; the completion poll stays on real frames.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
+      expect(cue?.classList.contains("visible")).toBe(false);
+      // Shown once the short grace elapses: the incoming tab holds nothing, so its
+      // whole screen is still coming over the network (the mocked connection sends
+      // no frames, so it stays up until the poll's deadline).
+      await vi.advanceTimersByTimeAsync(180);
+      expect(cue?.classList.contains("visible")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("polls the session list to update dots and drop reaped tabs without activityMonitor", async () => {

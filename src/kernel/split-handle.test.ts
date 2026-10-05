@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
+import {
+  shortAnnounced,
+  shortenReannounce,
+  shortenSettle,
+  shortSettled,
+} from "../test-helpers/delays.js";
 import { createSplitHandle, type SplitHandleShell } from "./split-handle.js";
 import type {
   CreateTerminalOptions,
@@ -29,15 +35,11 @@ const settle = (): Promise<void> =>
       requestAnimationFrame(() => setTimeout(r, 0));
     });
   });
-/** The announcer re-sets its live region on a 100 ms timer. */
-const announced = (): Promise<void> => new Promise((r) => setTimeout(r, 130));
-/** Fonts settled and the viewport controllers' 350 ms settle passed, so a pane
- *  answers `announceSize()` with a send. */
-const viewportSettled = (): Promise<void> => new Promise((r) => setTimeout(r, 400));
 
-beforeEach(() => {
+beforeEach(async () => {
   fake.reset();
   document.body.replaceChildren();
+  await shortenReannounce();
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -112,14 +114,17 @@ async function mountSplit(
 }
 
 /** Two shown panes, `a` on the left and `b` on the right, the left selected,
- *  fonts and viewports settled, and the resize spy cleared. */
+ *  fonts and viewports settled, and the resize spy cleared. Every settle from
+ *  here on runs at the real length. */
 async function openWithTwoTabs(width = 1000): Promise<Mounted> {
+  const restoreSettle = await shortenSettle();
   const mounted = await mountSplit(rootIn(width));
   mounted.ctx.notifySwitch({ id: "a" });
   mounted.split.open();
   mounted.ctx.notifySwitch({ id: "b" });
   mounted.ctx.shell.select("left");
-  await viewportSettled();
+  await shortSettled();
+  restoreSettle();
   clearResizes();
   return mounted;
 }
@@ -280,11 +285,11 @@ describe("the separator", () => {
     ctx.shell.select("left");
     expect(handle.dataset["faces"]).toBe("left");
     ctx.shell.select("right");
-    await announced();
+    await shortAnnounced();
     expect(politeText(root)).toBe("Right terminal selected");
 
     handle.focus();
-    await announced();
+    await shortAnnounced();
 
     expect(document.activeElement).toBe(handle);
     expect(ctx.shell.selected()).toBe("right");
@@ -384,12 +389,14 @@ describe("the drag", () => {
     frameRoot.style.width = "1000px";
     frameRoot.style.height = "600px";
     inner.body.appendChild(frameRoot);
+    const restoreSettle = await shortenSettle();
     const mounted = await mountSplit(frameRoot);
     mounted.ctx.notifySwitch({ id: "a" });
     mounted.split.open();
     mounted.ctx.notifySwitch({ id: "b" });
     mounted.ctx.shell.select("left");
-    await viewportSettled();
+    await shortSettled();
+    restoreSettle();
     clearResizes();
 
     let frameNow = 50_000;
@@ -700,6 +707,7 @@ describe("the drag", () => {
       },
     });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const restoreSettle = await shortenSettle();
     const { root, ctx, split, handle } = await mountSplit(
       rootIn(1000),
       { onFatalError: () => true },
@@ -709,7 +717,8 @@ describe("the drag", () => {
     split.open();
     await tick();
     expect(ctx.shell.pane("right")?.state()).toBe("failed");
-    await viewportSettled();
+    await shortSettled();
+    restoreSettle();
     clearResizes();
     const [left] = paneRoots(root);
 
