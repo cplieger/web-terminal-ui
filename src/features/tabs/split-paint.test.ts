@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type {} from "@vitest/browser-playwright";
 import { cdp, page } from "vitest/browser";
+import { shortenSettle, shortSettled } from "../../test-helpers/delays.js";
 import {
   chipOf,
   dragAt,
@@ -380,10 +381,12 @@ describe("the tab strip's own height", () => {
   });
 
   it("re-sends the pane's size when it changes and nothing else resizes", async () => {
+    const restoreSettle = await shortenSettle();
     const root = rootIn(1000, 600);
     await mountTabbed(root, server);
     await settle();
-    await new Promise((r) => setTimeout(r, 400));
+    await shortSettled();
+    restoreSettle();
     const pane = engineOn(fake, root, "left");
     pane.connection.sendResize.mockClear();
 
@@ -397,10 +400,12 @@ describe("the tab strip's own height", () => {
 
   it("re-sends it the same way where the window has no visual viewport", async () => {
     restore = withoutVisualViewport();
+    const restoreSettle = await shortenSettle();
     const root = rootIn(1000, 600);
     await mountTabbed(root, server);
     await settle();
-    await new Promise((r) => setTimeout(r, 400));
+    await shortSettled();
+    restoreSettle();
     const pane = engineOn(fake, root, "left");
     pane.connection.sendResize.mockClear();
 

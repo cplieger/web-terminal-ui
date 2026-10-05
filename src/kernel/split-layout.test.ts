@@ -3,6 +3,7 @@ import type * as Engine from "@cplieger/web-terminal-engine";
 import type {} from "@vitest/browser-playwright";
 import { cdp } from "vitest/browser";
 import { mountTerminal } from "../test-helpers/mount.js";
+import { shortenSettle, shortSettled } from "../test-helpers/delays.js";
 import { animations } from "../features/animations.js";
 import type { TerminalContext, TerminalFeature, TerminalHandle } from "./types.js";
 
@@ -81,6 +82,11 @@ beforeEach(() => {
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** A `--dur-standard` the slide's transition and its fallback timer both end
+ *  inside `slid()`; the timer-driven finish keeps the stock token in one opening
+ *  and one closing case. */
+const QUICK_SLIDE = "0.02s";
+const slid = (): Promise<void> => wait(60);
 /** Two frames: a ResizeObserver delivers after layout, between them. */
 const settle = (): Promise<void> =>
   new Promise((r) => {
@@ -207,6 +213,7 @@ describe("the grid", () => {
   });
 
   it("takes no font measurement in a pane the closed split hides, where every box measures zero", async () => {
+    await shortenSettle();
     const { root } = hostOf(1000);
     const { ctx, split } = await mountSplit(root, false);
     ctx.notifySwitch({ id: "a" });
@@ -216,18 +223,18 @@ describe("the grid", () => {
     if (!hidden) {
       throw new Error("no engine drives the right pane");
     }
-    await wait(400);
+    await shortSettled();
 
     split.close();
     hidden.renderer.updateFontMetrics.mockClear();
     await settle();
-    await wait(400);
+    await shortSettled();
     expect(getComputedStyle(right ?? root).display).toBe("none");
     expect(hidden.renderer.updateFontMetrics).not.toHaveBeenCalled();
 
     split.open();
     await settle();
-    await wait(400);
+    await shortSettled();
     expect(hidden.renderer.updateFontMetrics).toHaveBeenCalled();
   });
 
@@ -354,6 +361,7 @@ describe("closing with wt-animate", () => {
     const [leftEngine, rightEngine] = fake.engines;
     leftEngine?.connection.forgetSession.mockClear();
     rightEngine?.connection.forgetSession.mockClear();
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
 
     expect(split.close()).toBe(true);
 
@@ -376,7 +384,7 @@ describe("closing with wt-animate", () => {
     expect(right?.classList.contains("wt-pane-hidden")).toBe(false);
     expect(getComputedStyle(root).transitionProperty).toBe("grid-template-columns");
 
-    await wait(400);
+    await slid();
 
     expect(root.classList.contains("wt-split-closing")).toBe(false);
     expect(root.classList.contains("wt-split-open")).toBe(false);
@@ -394,6 +402,7 @@ describe("closing with wt-animate", () => {
     ctx.notifySwitch({ id: "b" });
     const [first, second] = paneRoots(root);
     expect(ctx.shell.selected()).toBe("right");
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
 
     split.close();
 
@@ -407,7 +416,7 @@ describe("closing with wt-animate", () => {
     expect(first?.classList.contains("wt-side-left")).toBe(true);
     expect(paneRoots(root)).toEqual([first, second]);
 
-    await wait(400);
+    await slid();
 
     expect(second?.classList.contains("wt-side-left")).toBe(true);
     expect(first?.classList.contains("wt-side-right")).toBe(true);
@@ -420,10 +429,11 @@ describe("closing with wt-animate", () => {
     const { root } = hostOf(1000);
     const { ctx, split } = await mountSplit(root);
     ctx.notifySwitch({ id: "a" });
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
     split.open();
     ctx.notifySwitch({ id: "b" });
     ctx.shell.select("left");
-    await wait(300);
+    await slid();
     // Long enough that a stalled frame cannot run it to the end, and read a tenth
     // of the way in, where the ease-out curve has moved the track by ~75 px.
     root.style.setProperty("--dur-standard", "3s");
@@ -450,24 +460,25 @@ describe("closing with wt-animate", () => {
   });
 
   it("finishes when the transition ends, ahead of the fallback timer", async () => {
-    // The token the timer reads says 3 s; the transition actually runs 0.1 s.
+    // The token the timer reads says 3 s; the transition actually runs 20 ms.
     const quick = document.createElement("style");
     quick.textContent =
-      ".wt-root.wt-split.wt-animate.wt-split-closing { transition-duration: 0.1s !important; }";
+      ".wt-root.wt-split.wt-animate.wt-split-closing { transition-duration: 0.02s !important; }";
     document.head.appendChild(quick);
     try {
       const { root } = hostOf(1000);
       const { ctx, split } = await mountSplit(root);
       ctx.notifySwitch({ id: "a" });
+      root.style.setProperty("--dur-standard", QUICK_SLIDE);
       split.open();
-      await wait(300);
+      await slid();
       root.style.setProperty("--dur-standard", "3s");
       const [, right] = paneRoots(root);
 
       split.close();
       expect(root.classList.contains("wt-split-closing")).toBe(true);
 
-      await wait(300);
+      await slid();
       expect(root.classList.contains("wt-split-closing")).toBe(false);
       expect(root.classList.contains("wt-split-open")).toBe(false);
       expect(right?.classList.contains("wt-pane-hidden")).toBe(true);
@@ -503,17 +514,19 @@ describe("closing with wt-animate", () => {
   });
 
   it("destroy() during the slide drops the pending finish", async () => {
+    await shortenSettle();
     const { root } = hostOf(1000);
     const { ctx, split, term } = await mountSplit(root);
     ctx.notifySwitch({ id: "a" });
     split.open();
     const [, right] = paneRoots(root);
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
 
     split.close();
     term.destroy();
     expect(root.classList.contains("wt-split-closing")).toBe(false);
 
-    await wait(400);
+    await slid();
     expect(right?.classList.contains("wt-pane-hidden")).toBe(false);
   });
 
@@ -534,11 +547,15 @@ describe("closing with wt-animate", () => {
 });
 
 describe("opening with wt-animate", () => {
+  /** One shown pane with its viewport settled. Later settles run at the real
+   *  length: the geometry an open holds must outlast its slide. */
   async function settledSingle(): Promise<Mounted & { root: HTMLElement }> {
+    const restoreSettle = await shortenSettle();
     const { root } = hostOf(1000);
     const mounted = await mountSplit(root);
     mounted.ctx.notifySwitch({ id: "a" });
-    await wait(400);
+    await shortSettled();
+    restoreSettle();
     return { ...mounted, root };
   }
 
@@ -582,12 +599,16 @@ describe("opening with wt-animate", () => {
 
   it("holds every pane's geometry through the slide, so a socket opening meanwhile announces no size", async () => {
     const { root, split } = await settledSingle();
+    const restoreSettle = await shortenSettle();
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
     split.open();
-    await wait(300);
+    await slid();
     split.close();
-    await wait(800);
+    await slid();
+    await shortSettled();
     const [leftEngine, rightEngine] = fake.engines;
     expect(leftEngine?.options.callbacks.initialSize?.()).not.toBeNull();
+    restoreSettle();
     root.style.setProperty("--dur-standard", "3s");
 
     split.open();
@@ -623,7 +644,7 @@ describe("opening with wt-animate", () => {
   it("finishes when the transition ends, ahead of the fallback timer", async () => {
     const quick = document.createElement("style");
     quick.textContent =
-      ".wt-root.wt-split.wt-animate.wt-split-opening { transition-duration: 0.1s !important; }";
+      ".wt-root.wt-split.wt-animate.wt-split-opening { transition-duration: 0.02s !important; }";
     document.head.appendChild(quick);
     try {
       const { root, split } = await settledSingle();
@@ -631,7 +652,7 @@ describe("opening with wt-animate", () => {
 
       split.open();
       expect(root.classList.contains("wt-split-opening")).toBe(true);
-      await wait(300);
+      await slid();
 
       expect(root.classList.contains("wt-split-opening")).toBe(false);
       expect(columnsOf(root)).toEqual([495, 10, 495]);
@@ -693,13 +714,16 @@ describe("opening with wt-animate", () => {
 
   it("destroy() during the slide drops the pending finish", async () => {
     const { root, split, term } = await settledSingle();
+    await shortenSettle();
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
     split.open();
 
     term.destroy();
 
     expect(root.classList.contains("wt-split-opening")).toBe(false);
     const sends = fake.engines.map((e) => e.connection.sendResize.mock.calls.length);
-    await wait(400);
+    await slid();
+    await shortSettled();
     expect(fake.engines.map((e) => e.connection.sendResize.mock.calls.length)).toEqual(sends);
   });
 });
@@ -849,10 +873,11 @@ describe("the grip handle under the stylesheet", () => {
     const { root } = hostOf(1000);
     const { ctx, split } = await mountSplit(root);
     ctx.notifySwitch({ id: "a" });
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
     split.open();
     ctx.notifySwitch({ id: "b" });
     ctx.shell.select("left");
-    await wait(300);
+    await slid();
     root.style.setProperty("--dur-standard", "3s");
     const handle = handleOf(root);
     const pill = getComputedStyle(handle, "::after");
@@ -946,12 +971,14 @@ describe("the grip handle under the stylesheet", () => {
   });
 
   it("the panes follow the pointer, and the shells are resized mid-drag while the panes' own boxes are still settling", async () => {
+    const restoreSettle = await shortenSettle();
     const { root } = hostOf(1000);
     const { ctx, split } = await mountSplit(root, false);
     ctx.notifySwitch({ id: "a" });
     split.open();
     ctx.notifySwitch({ id: "b" });
-    await wait(400);
+    await shortSettled();
+    restoreSettle();
     const resizesPerPane = (): number[] =>
       fake.engines.map((e) => e.connection.sendResize.mock.calls.length);
     for (const e of fake.engines) {

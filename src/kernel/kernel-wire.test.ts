@@ -28,6 +28,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { LineStore } from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
+import { shortenSettle, shortSettled } from "../test-helpers/delays.js";
 import { softKeyboard, type SoftKeyboard } from "../features/tabs/test-helpers/paint.js";
 import type {
   CreateTerminalOptions,
@@ -75,12 +76,18 @@ afterEach(() => {
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-/** Waits out the settle every mount opens: the viewport's ResizeObserver
- *  delivers its first observation after observe(), which starts a transition,
- *  and `measurableSize()` declines during one. That is a second reason for a
- *  null size beside the fonts gate, so a fonts assertion that skips this can
- *  pass for the viewport's reason. 400ms clears viewport.ts's 350ms settle. */
-const viewportSettled = (): Promise<void> => new Promise((r) => setTimeout(r, 400));
+/** Mounts and waits out the settle the mount opens: the viewport's
+ *  ResizeObserver delivers its first observation after observe(), which starts
+ *  a transition, and `measurableSize()` declines during one. That is a second
+ *  reason for a null size beside the fonts gate, so a fonts assertion that skips
+ *  this can pass for the viewport's reason. Later settles run at the real length. */
+async function mountSettled(opts: CreateTerminalOptions): Promise<TerminalHandle> {
+  const restoreSettle = await shortenSettle();
+  const term = await mount(opts);
+  await shortSettled();
+  restoreSettle();
+  return term;
+}
 
 /** Advances FAKE timers a settle window at a time until `done()` holds.
  *
@@ -671,8 +678,7 @@ describe("the resize announce, and the two things it waits for", () => {
 
   it("does not announce a size while the fonts are still loading", async () => {
     stubFonts();
-    await mount({ features: () => [] });
-    await viewportSettled();
+    await mountSettled({ features: () => [] });
     sendResize.mockClear();
 
     wire().onOpen();
@@ -681,8 +687,7 @@ describe("the resize announce, and the two things it waits for", () => {
   });
 
   it("announces on open once the fonts have settled", async () => {
-    await mount({ features: () => [] });
-    await viewportSettled();
+    await mountSettled({ features: () => [] });
     sendResize.mockClear();
 
     wire().onOpen();
@@ -692,8 +697,7 @@ describe("the resize announce, and the two things it waits for", () => {
 
   it("announces when the fonts settle after the socket is already open", async () => {
     const settle = stubFonts();
-    await mount({ features: () => [] });
-    await viewportSettled();
+    await mountSettled({ features: () => [] });
     wire().onOpen();
     sendResize.mockClear();
 
@@ -723,8 +727,7 @@ describe("the resize announce, and the two things it waits for", () => {
     // The cell metrics are what turn a pixel box into cols and rows. A size
     // computed from metrics measured before the webfont swapped is wrong in
     // exactly the way the fonts gate exists to avoid.
-    await mount({ features: () => [] });
-    await viewportSettled();
+    await mountSettled({ features: () => [] });
     updateFontMetrics.mockClear();
 
     const size = wire().initialSize?.();
@@ -735,8 +738,7 @@ describe("the resize announce, and the two things it waits for", () => {
 
   it("reports NO size to the resume while the fonts are still loading", async () => {
     stubFonts();
-    await mount({ features: () => [] });
-    await viewportSettled();
+    await mountSettled({ features: () => [] });
 
     expect(wire().initialSize?.()).toBeNull();
   });
@@ -750,8 +752,7 @@ describe("the resize announce, and the two things it waits for", () => {
     // including a failed face.
     const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const settleFontSet = stubFontsRejecting();
-    await mount({ features: () => [] });
-    await viewportSettled();
+    await mountSettled({ features: () => [] });
 
     // Null for the FONTS' reason, not the viewport's: the same call answers a size
     // below without a further wait.
@@ -800,8 +801,7 @@ describe("the resize announce, and the two things it waits for", () => {
     // opened on the fonts themselves, so it has already measured the metrics `ready`
     // would report, and a second announce would cost the server a resize for nothing.
     const settleFontSet = stubFontsLoaded();
-    await mount({ features: () => [] });
-    await viewportSettled();
+    await mountSettled({ features: () => [] });
     expect(wire().initialSize?.()).toEqual({ cols: 80, rows: 24 });
     sendResize.mockClear();
 

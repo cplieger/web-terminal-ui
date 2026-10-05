@@ -15,6 +15,7 @@ import { MAX_PINNED_NAME, baseLabel, hasPinnedName, sanitizePinnedName } from ".
 import type { Tab } from "./model.js";
 import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
+import { shortAnnounced, shortenReannounce } from "../../test-helpers/delays.js";
 import type { TerminalHandle } from "../../kernel/types.js";
 
 // --- Pure model pieces (no DOM) ---
@@ -519,6 +520,7 @@ describe("inline rename", () => {
   });
 
   it("closes the screen-reader narrative on a no-op commit", async () => {
+    await shortenReannounce();
     const root = document.createElement("div");
     await mount(root);
     const live = root.querySelector<HTMLElement>('[aria-live="polite"]');
@@ -532,7 +534,7 @@ describe("inline rename", () => {
     // The announcer clears the region synchronously and re-sets it after ~100ms
     // (so repeats re-announce), so the message needs the timer to land.
     pressEnter(input);
-    await new Promise((r) => setTimeout(r, 150));
+    await shortAnnounced();
     expect(live?.textContent).toContain("Rename finished, keeping New tab");
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/pinned-title"))).toBe(false);
   });

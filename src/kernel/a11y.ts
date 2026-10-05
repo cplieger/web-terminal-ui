@@ -29,7 +29,15 @@ export interface Announcer {
 /** Delay before a cleared live region is re-set with the new message (ms).
  *  Long enough for assistive tech to register the clear and the set as two
  *  distinct mutations (a sub-frame gap is not). */
-const REANNOUNCE_DELAY_MS = 100;
+let REANNOUNCE_DELAY_MS = 100;
+
+/** @internal Test seam: re-set every later announcement after `ms`; returns the
+ *  previous value so the caller can restore it. */
+export function setReannounceDelayMs(ms: number): number {
+  const previous = REANNOUNCE_DELAY_MS;
+  REANNOUNCE_DELAY_MS = ms;
+  return previous;
+}
 
 /** Build the single pair of live regions inside root. */
 export function createAnnouncer(root: HTMLElement): Announcer {

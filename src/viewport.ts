@@ -9,7 +9,15 @@ import { windowOf } from "./kernel/realm.js";
 
 // Long enough to bridge the iOS keyboard slide (~250ms) with margin for fonts
 // and reflow.
-const SETTLE_MS = 350;
+let SETTLE_MS = 350;
+
+/** @internal Test seam: arm every settle started from now on at `ms`; returns the
+ *  previous value so the caller can restore it. */
+export function setSettleMs(ms: number): number {
+  const previous = SETTLE_MS;
+  SETTLE_MS = ms;
+  return previous;
+}
 
 /** The visual viewport against the layout viewport, in whole CSS px. */
 interface KeyboardGeometry {
