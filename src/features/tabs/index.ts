@@ -545,11 +545,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
       // forgetCueSeen drops an acknowledgement, so the session's NEXT input/done
       // is a fresh cue: called when its status moves off the acknowledged value
-      // (a new working phase, an exit) and when the session goes away.
+      // (a new working phase, an exit) and when the session goes away. Every
+      // caller ends in syncChrome, which repaints the out-of-page surfaces.
       function forgetCueSeen(id: string): void {
         if (cueSeen.delete(id)) {
           writeCueSeen(win, cueSeen);
-          paintAttention();
         }
       }
       // The out-of-page surfaces render the SAME unseen-cue set the switch dot
@@ -600,9 +600,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           swSwitchDot.dataset["status"] = switchNotify;
           swSwitchDot.title = statusPhrase(switchNotify);
         }
-        // The out-of-page surfaces answer to the same set, so they repaint
-        // wherever this does: a raise, and every clear through clearSwitchNotify.
-        paintAttention();
       }
       function clearSwitchNotify(): void {
         switchNotify = "";
@@ -931,7 +928,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
       function keyboardParkedOnChrome(): boolean {
         const active = doc.activeElement;
-        return active !== null && (bar.contains(active) || switcher.contains(active));
+        return bar.contains(active) || switcher.contains(active);
       }
       function keyboardInPaneInput(): boolean {
         const active = doc.activeElement;
@@ -1254,8 +1251,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         for (const tab of tabList) {
           scroller.appendChild(tab.el);
         }
-        paintActive();
-        syncMobile();
       }
 
       // closeKeyGrid closes the mobile key grid (if a keyboardToggle is wired and
@@ -1298,9 +1293,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
           collapseClearTimer = win.setTimeout(() => {
             collapseClearTimer = null;
-            if (!expanded) {
-              clearRows();
-            }
+            clearRows();
           }, 260);
         }
       }
@@ -1414,10 +1407,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             activityCount: tab.activityCount,
           }),
         );
-        el.addEventListener("click", (e) => {
-          if ((e.target as HTMLElement).closest(".wt-tab-close")) {
-            return; // handled by the close button
-          }
+        el.addEventListener("click", () => {
           if (editingId === tab.id) {
             return; // the rename field owns this chip
           }
@@ -1983,10 +1973,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // would ignore an inline transform and refuse to move. `translate` composes
       // with it instead, so the two can own one chip at the same time.
       function applyShift(px: ReadonlyMap<HTMLElement, number>, trans: string): void {
-        if (shiftTimer !== null) {
-          win.clearTimeout(shiftTimer);
-          shiftTimer = null;
-        }
         for (const [el, dx] of px) {
           el.style.transition = trans;
           el.style.translate = `${String(Math.round(dx))}px`;
@@ -2105,7 +2091,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (before !== null && before.parentNode !== scroller) {
           return;
         }
-        if (before === dragged || before === dragged.nextElementSibling) {
+        if (before === dragged.nextElementSibling) {
           return;
         }
         flipTo(() => {
@@ -2162,16 +2148,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return [...scroller.querySelectorAll<HTMLElement>(".wt-tab")].indexOf(el) + 1;
       }
       function announceTarget(el: HTMLElement): void {
-        const at = slotPosition(el);
-        if (at > 0) {
-          ctx.announce(`Drop position ${String(at)}`);
-        }
+        ctx.announce(`Drop position ${String(slotPosition(el))}`);
       }
       function announceMoved(el: HTMLElement): void {
         const tab = tabList.find((t) => t.el === el);
-        const at = slotPosition(el);
-        if (tab && at > 0) {
-          ctx.announce(`Moved ${tab.display} to position ${String(at)}`);
+        if (tab) {
+          ctx.announce(`Moved ${tab.display} to position ${String(slotPosition(el))}`);
         }
       }
 
@@ -2222,10 +2204,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (removed !== draggingEl) {
           return;
         }
-        removed.classList.remove("wt-tab-dragging");
         draggingEl = null;
-        dropped = false;
-        endReorderPreview();
         endShift();
         clearDragGhost();
       }
@@ -2238,14 +2217,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             order.push(t);
           }
         }
-        if (order.length === tabList.length) {
-          tabList.length = 0;
-          tabList.push(...order);
-          // Before syncChrome: it ends in applyServerOrder, which would undo this
-          // move while the tabs still carry their old positions.
-          publishOrder();
-          syncChrome();
-        }
+        tabList.length = 0;
+        tabList.push(...order);
+        // Before syncChrome: it ends in applyServerOrder, which would undo this
+        // move while the tabs still carry their old positions.
+        publishOrder();
+        syncChrome();
       }
 
       // The write half of tab-order sync, called only from the paths that COMMIT
@@ -2254,9 +2231,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // the strip straight back. A 409 means this client's list is stale, so the
       // server's word is taken; any other failure leaves the arrangement local.
       function publishOrder(): void {
-        if (tabList.length === 0) {
-          return;
-        }
         tabList.forEach((tab, i) => {
           tab.order = i;
         });
@@ -2486,7 +2460,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // far left while the create POST is in flight. The replacement lands as any
         // new tab does, and dropping the old tab is then an ordinary non-last
         // close, so this intercept does not re-fire. A user close only.
-        if (remote && tabList.length === 1 && tabList[0]?.id === id) {
+        if (remote && tabList.length === 1) {
           await create();
           // A failed create adds nothing (and toasts): keep the existing tab
           // rather than stranding the user on an empty strip.
@@ -2687,10 +2661,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // Recorded at entry because the exit paths cannot tell a keyboard-started
       // edit (focus returns to the chip) from a pointer one (to the terminal).
       let editFrom: "keyboard" | "pointer" = "pointer";
-      // Pinned-name requests in flight, COUNTED per id: two renames of one tab can
-      // be out at once, and a bare Set let the first completion clear the marker
-      // while the second's PUT was still open, so that rename failed silently.
-      const namesInFlight = new Map<string, number>();
 
       /** restoreFocusAfterEdit sends focus where the entry path implies. The
        *  terminal branch is gated exactly like switchTo's focus-on-switch: on a
@@ -2745,8 +2715,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         // Optimistic: paint it now, guarded by a monotonic counter AND the tab's
         // birth epoch so a slow response cannot roll back a newer rename, a later
-        // clear, a remote update, or — if this id were ever reused by a fresh
-        // session — a different tab entirely.
+        // clear, or — if this id were ever reused by a fresh session — a
+        // different tab entirely.
         const seq = ++t.nameSeq;
         const born = t.born;
         t.pinnedTitle = name;
@@ -2761,28 +2731,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           ctx.announce(fallback ? "Custom name removed" : `Using automatic name: ${text}`);
         }
         const request = name === "" ? api.clearPinnedTitle(id) : api.setPinnedTitle(id, name);
-        // Counted only once the request exists: an api implementation that throws
-        // instead of rejecting would otherwise leave a count behind that no
-        // .finally ever releases, and the id would read as in flight forever.
-        namesInFlight.set(id, (namesInFlight.get(id) ?? 0) + 1);
-        void request
-          .catch(() => {
-            const cur = tabList.find((x) => x.id === id);
-            if (cur?.born !== born || cur.nameSeq !== seq) {
-              return; // gone, reused, or superseded: the newer state stands
-            }
-            cur.pinnedTitle = before;
-            syncChrome();
-            ctx.toast("Could not save the terminal name");
-          })
-          .finally(() => {
-            const left = (namesInFlight.get(id) ?? 0) - 1;
-            if (left > 0) {
-              namesInFlight.set(id, left);
-            } else {
-              namesInFlight.delete(id);
-            }
-          });
+        void request.catch(() => {
+          const cur = tabList.find((x) => x.id === id);
+          if (cur?.born !== born || cur.nameSeq !== seq) {
+            return; // gone, reused, or superseded: the newer state stands
+          }
+          cur.pinnedTitle = before;
+          syncChrome();
+          ctx.toast("Could not save the terminal name");
+        });
         return true;
       }
 
@@ -2973,7 +2930,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         hideTabMenu();
         const idx = tabList.findIndex((t) => t.id === id);
         const target = tabList[idx];
-        if (idx < 0 || !target) {
+        if (!target) {
           return;
         }
         const n = tabList.length;
@@ -3134,17 +3091,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           t.title = rec.title;
         }
         // "" is meaningful here: it is how a clear made in ANOTHER browser reaches
-        // this one. The bump is gated on a DIFFERING value because the wire echoes
-        // pinnedTitle on every event, and an unconditional bump would mark an
-        // in-flight local rename as superseded by its own echo.
-        if (rec.pinnedTitle !== undefined && rec.pinnedTitle !== (t.pinnedTitle ?? "")) {
+        // this one. It never bumps nameSeq: SSE delivery and REST mutation are not
+        // one total order, so a record arriving during a pending request may
+        // predate our own PUT, and a bump would suppress that request's rollback.
+        if (rec.pinnedTitle !== undefined) {
           t.pinnedTitle = rec.pinnedTitle;
-          // SSE delivery and REST mutation are not one total order: during a
-          // pending request the record may predate our own PUT, and bumping would
-          // suppress that request's rollback and its failure toast.
-          if (!namesInFlight.has(rec.id)) {
-            t.nameSeq++;
-          }
         }
       }
 
@@ -3350,20 +3301,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!draggingEl) {
           return;
         }
-        e.preventDefault();
         if (e.dataTransfer) {
           e.dataTransfer.dropEffect = "move";
         }
         trackRest(e.clientX);
       });
-      // The preventDefault is load-bearing: WebKit's default for an uncancelled
-      // drop is to LOAD the payload as a URL, so dropping a tab on iPadOS
-      // navigated the page to /<session-id>.
+      // onDocTabDrop cancels both events here too, as they bubble.
       bar.addEventListener("drop", (e) => {
-        if (!draggingEl) {
-          return;
-        }
-        e.preventDefault();
         dropOnStrip(e.clientX);
       });
       function dropOnStrip(clientX: number): void {
@@ -3388,7 +3332,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         const next = e.relatedTarget;
-        if (next === null || !bar.contains(next as Node)) {
+        if (!bar.contains(next as Node | null)) {
           endRestNet();
         }
       });
@@ -3412,10 +3356,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ctx.shell.root.classList.toggle("wt-drop-left", half === "left");
         ctx.shell.root.classList.toggle("wt-drop-right", half === "right");
       }
-      // A tab released anywhere OTHER than the strip must be inert, not a
-      // navigation, so the whole document is a drop target for the life of a tab
-      // drag; over a half of the pane row it is a snap. Gated on draggingEl so a
-      // file dropped on the page is the browser's.
+      // A tab released anywhere must be inert, not a navigation: WebKit's default
+      // for an uncancelled drop is to LOAD the payload as a URL, which sent iPadOS
+      // to /<session-id>. So the whole document, the strip included, is a drop
+      // target for the life of a tab drag; over a half of the pane row it is a
+      // snap. Gated on draggingEl so a file dropped on the page is the browser's.
       const onDocTabDrop = (e: DragEvent): void => {
         if (!draggingEl) {
           return;
@@ -3499,7 +3444,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const rule = pointerDragActivation(e.pointerType);
         const el =
           e.target instanceof win.Element ? e.target.closest<HTMLElement>(".wt-tab") : null;
-        if (rule === null || !e.isPrimary || press !== null || el?.parentNode !== scroller) {
+        if (rule === null || !e.isPrimary || el?.parentNode !== scroller) {
           return;
         }
         const tab = tabList.find((t) => t.el === el);
@@ -3529,7 +3474,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         win.addEventListener("pointermove", onPressMove, opts);
         win.addEventListener("pointerup", onPressUp, opts);
         win.addEventListener("pointercancel", onPressCancel, opts);
-        win.addEventListener("pointerdown", onPressSecond, opts);
+        // Registered after this press's own pointerdown has passed the window, so
+        // any pointerdown it sees is another pointer.
+        win.addEventListener("pointerdown", cancelPointerPress, opts);
         win.addEventListener("keydown", onPressKey, opts);
         win.addEventListener("blur", cancelPointerPress, { signal: off.signal });
         doc.addEventListener("visibilitychange", onPressVisibility, { signal: off.signal });
@@ -3608,11 +3555,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           cancelPointerPress();
         }
       }
-      function onPressSecond(e: PointerEvent): void {
-        if (press !== null && press.id !== e.pointerId) {
-          cancelPointerPress();
-        }
-      }
       // lostpointercapture bubbles, and the chip's implicit touch capture ending
       // when the bar takes it over is not a loss.
       function onPressLostCapture(e: PointerEvent): void {
@@ -3657,7 +3599,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         const target = doc.elementFromPoint(x, y);
-        if (target !== null && bar.contains(target)) {
+        if (bar.contains(target)) {
           paintDropHalf(null);
           if (release) {
             dropOnStrip(x);

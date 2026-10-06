@@ -214,7 +214,6 @@ export function localScrollbackStorage(
   function sweep(): void {
     const now = Date.now();
     const live: { key: string; savedAt: number; chars: number }[] = [];
-    let total = 0;
     for (const entry of ownEntries()) {
       // An unreadable timestamp is treated as expired: the kernel would refuse
       // the entry anyway, so keeping it only consumes quota.
@@ -223,10 +222,6 @@ export function localScrollbackStorage(
         continue;
       }
       live.push({ key: entry.key, savedAt: entry.savedAt, chars: entry.chars });
-      total += entry.chars;
-    }
-    if (total <= maxBytes) {
-      return;
     }
     // Newest first, then keep entries while they fit and drop the rest: an entry
     // the user last saw a minute ago is worth more than one from this morning.

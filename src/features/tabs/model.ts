@@ -293,7 +293,7 @@ export const MAX_PERSISTED_CUE_SEEN = 200;
  *  lost acknowledgement only re-lights a dot the user can dismiss again. */
 export function parseCueSeen(raw: string | null): Map<string, CueStatus> {
   const out = new Map<string, CueStatus>();
-  if (raw === null || raw === "") {
+  if (raw === null) {
     return out;
   }
   let data: unknown;
@@ -608,9 +608,6 @@ function parseRetryAfter(header: string | null, now: number): number | undefined
     return undefined;
   }
   const raw = header.trim();
-  if (raw === "") {
-    return undefined;
-  }
   if (/^\d+$/.test(raw)) {
     return Math.min(Number(raw) * 1000, RETRY_AFTER_MAX_MS);
   }
@@ -627,9 +624,6 @@ function parseRetryAfter(header: string | null, now: number): number | undefined
 async function readServerMessage(r: Response): Promise<string | undefined> {
   try {
     const body: unknown = await r.json();
-    if (typeof body !== "object" || body === null) {
-      return undefined;
-    }
     const fields = body as { error?: unknown; message?: unknown };
     for (const candidate of [fields.error, fields.message]) {
       if (typeof candidate === "string" && candidate.trim() !== "") {

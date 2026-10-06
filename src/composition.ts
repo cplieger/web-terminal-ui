@@ -190,7 +190,7 @@ export function createComposition(opts: CompositionOptions): Composition {
 
   return {
     isComposing,
-    isCompositionOpen: () => composing || pendingSend !== null,
+    isCompositionOpen: () => composing,
     cancelComposition,
     positionCompositionView,
     teardown,

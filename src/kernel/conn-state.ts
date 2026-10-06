@@ -62,12 +62,10 @@ export function createConnState(opts: {
     // Suppress transient states until the initial load is over (the loading
     // overlay owns the screen). Terminal states ("ended" and "incompatible")
     // must pass through because no later frame or reconnect will explain the
-    // failure; "offline" also passes once the initial-failure limit is reached.
+    // failure; offline, which before load is reached only at the initial-failure
+    // limit (closed() returns before it until then), passes for the same reason.
     // connectionBanner renders "open" as hidden.
-    const passesLoadingGate =
-      state === "ended" ||
-      state === "incompatible" ||
-      (state === "offline" && consecutiveFailures >= INITIAL_FAILURE_LIMIT);
+    const passesLoadingGate = state === "ended" || state === "incompatible" || state === "offline";
     if (!loaded && !passesLoadingGate) {
       opts.onState("open"); // nothing to show yet
       return;
@@ -140,10 +138,6 @@ export function createConnState(opts: {
     },
     idle(): void {
       consecutiveFailures = 0;
-      if (restartedTimer !== null) {
-        timers.clearTimeout(restartedTimer);
-        restartedTimer = null;
-      }
       setState("idle", 0);
     },
     setLoaded(): void {

@@ -220,7 +220,8 @@ export interface PaneKernel extends PaneHandle {
    *  gets when the closing transition ends. */
   setHidden(value: boolean): void;
   /** The shell is about to slide this pane's box: nothing it measures from now
-   *  until its viewport settles is final, and the settle sends the size. */
+   *  until its viewport settles is final, and the settle sends the size. Live
+   *  panes only: a failed pane is torn down before the split next opens. */
   holdGeometry(): void;
   /** Whether this pane's input is a stop in the document's Tab order. On while
    *  the split is open and the pane shows a tab, so Tab runs left input, divider,
@@ -437,15 +438,10 @@ function buildPaneInto(
   let hidden = false;
   let rootReleased = false;
 
-  let ready = false;
   let firstFrameRendered = false;
   let fontsLoaded = false;
   let wsOpen = false;
   function markReady(): void {
-    if (ready) {
-      return;
-    }
-    ready = true;
     connState.setLoaded();
     services.loading.firstFrame();
   }
@@ -981,7 +977,7 @@ function buildPaneInto(
       }
       // Nobody owns the keyboard: focus in a shadow root, a dialog or an ARIA
       // widget all report non-body and all bail.
-      if (doc.activeElement !== null && doc.activeElement !== doc.body) {
+      if (doc.activeElement !== doc.body) {
         return;
       }
       if (composition.isComposing()) {
@@ -1514,9 +1510,7 @@ function buildPaneInto(
       hidden = value;
     },
     holdGeometry() {
-      if (!destroyed) {
-        viewport.beginTransition();
-      }
+      viewport.beginTransition();
     },
     setTabStop(value) {
       input.tabIndex = value ? 0 : -1;

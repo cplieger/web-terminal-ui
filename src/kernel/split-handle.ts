@@ -237,9 +237,6 @@ export function createSplitHandle(shell: SplitHandleShell): SplitHandle {
       return;
     }
     const state = split.state();
-    if (!state.open || state.collapsed) {
-      return;
-    }
     ev.preventDefault();
     const span = root.clientWidth - SPLIT_GUTTER_PX;
     const { min, max } = bounds();

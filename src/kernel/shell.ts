@@ -549,9 +549,6 @@ function createShellInto(
     applyRatioVar();
   }
   function fireSplitChange(): void {
-    if (changeListeners.size === 0) {
-      return;
-    }
     const state = splitState();
     for (const cb of [...changeListeners]) {
       cb(state);
@@ -608,9 +605,6 @@ function createShellInto(
   // may rest on the empty pane the replacement is headed for, so the handle faces
   // where the new tab will land.
   function select(side: PaneSide): boolean {
-    if (!isPaneSide(side)) {
-      return false;
-    }
     const state = paneAt(side)?.state();
     if (state !== "shown" && !(state === "empty" && !anyShown())) {
       return false;
@@ -1064,15 +1058,12 @@ function createShellInto(
       return;
     }
     for (const feature of features) {
-      if (destroyed || kernel.isDestroyed()) {
+      if (kernel.isDestroyed()) {
         return;
       }
       const outcome = await kernel.setupFeature(feature);
       if (outcome.status === "failed") {
         failPane(slot, { phase: "feature-setup", feature: outcome.feature, cause: outcome.cause });
-        return;
-      }
-      if (outcome.status === "aborted") {
         return;
       }
     }
@@ -1231,7 +1222,7 @@ function createShellInto(
     return true;
   }
   function closeSide(side: PaneSide): boolean {
-    if (!isPaneSide(side) || !splitOpen || destroyed) {
+    if (!splitOpen || destroyed) {
       return false;
     }
     const squeezed = slotAt(side);
@@ -1266,9 +1257,6 @@ function createShellInto(
     );
   }
   function onShellResize(): void {
-    if (destroyed) {
-      return;
-    }
     paintShellNarrow();
     for (const p of builtPanes()) {
       p.updateNarrow();
@@ -1427,9 +1415,6 @@ function createShellInto(
 
   let rootReleased = false;
   function cleanupRuntime(): void {
-    if (destroyed) {
-      return;
-    }
     destroyed = true;
     // The tracked stores are about to become unreachable, and the connections
     // whose epochs the save is filed under go with the drain.
@@ -1441,7 +1426,6 @@ function createShellInto(
     if (destroyed) {
       return;
     }
-    primaryKernel.markFailed();
     cleanupRuntime();
     dismissLoadingOverlay();
     let handled = false;
@@ -1517,21 +1501,12 @@ function createShellInto(
       selectedPane().focus();
     },
     send(bytes) {
-      if (destroyed) {
-        return;
-      }
       selectedPane().send(bytes);
     },
     reset() {
-      if (destroyed) {
-        return;
-      }
       selectedPane().reset();
     },
     reattach() {
-      if (destroyed) {
-        return;
-      }
       selectedPane().reattach();
     },
     destroy() {

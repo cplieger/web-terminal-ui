@@ -49,7 +49,6 @@ export function predictiveEcho(): TerminalFeature {
           predict.reset();
         },
         teardown() {
-          predict.reset();
           ctx.render.setPredictedCursor(0, 0, false);
         },
       };
