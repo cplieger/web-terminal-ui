@@ -66,10 +66,7 @@ export function createAnnouncer(root: HTMLElement): Announcer {
     // distinct mutations — the same rationale ui-primitives' announce()
     // documents for its shared region.
     el.textContent = "";
-    const pending = timers.get(el);
-    if (pending !== undefined) {
-      win.clearTimeout(pending);
-    }
+    win.clearTimeout(timers.get(el));
     timers.set(
       el,
       win.setTimeout(() => {

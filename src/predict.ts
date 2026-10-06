@@ -31,7 +31,6 @@ export function createPredictor(): Predictor {
   let predCol = 0;
   let predActive = false;
   let predPendingWrap = false;
-  let predFrozen = false;
   let cols = 80;
   let rows = 30;
   let onChange: (() => void) | null = null;
@@ -40,8 +39,6 @@ export function createPredictor(): Predictor {
     predRow = 0;
     predCol = 0;
     predActive = false;
-    predPendingWrap = false;
-    predFrozen = false;
     onChange?.();
   }
 
@@ -73,23 +70,17 @@ export function createPredictor(): Predictor {
       predRow = serverRow;
       predCol = serverCol;
       predPendingWrap = false;
-      predFrozen = cursorHidden ?? false;
-      predActive = !predFrozen;
+      predActive = !(cursorHidden ?? false);
       onChange?.();
     },
     applyInput(bytes) {
-      if (!predActive || predFrozen) {
+      if (!predActive) {
         return;
       }
       let i = 0;
       while (i < bytes.length) {
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index checked by loop condition
         const b = bytes[i]!;
-        if (b === 0x1b) {
-          predActive = false;
-          onChange?.();
-          return;
-        }
         if (b === 0x08 || b === 0x7f) {
           predPendingWrap = false;
           if (predCol > 0) {

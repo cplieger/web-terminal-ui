@@ -226,9 +226,6 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
         pressSelection = selectionTextWithin(surface);
       };
       const onTouchMove = (e: TouchEvent): void => {
-        if (!pressLive) {
-          return;
-        }
         const t = e.touches.length === 1 ? e.touches[0] : undefined;
         if (!t) {
           pressLive = false;
@@ -258,11 +255,9 @@ export function contextMenu(opts: ContextMenuOptions = {}): TerminalFeature {
           return; // this press selected text; the OS callout owns it
         }
         show(pressX, pressY);
-        if (menu.classList.contains("visible")) {
-          // Armed at the release edge, so the trailing click this same gesture
-          // emits is always inside the window.
-          swallow.arm();
-        }
+        // Armed at the release edge, so the trailing click this same gesture
+        // emits is always inside the window.
+        swallow.arm();
       };
       const onTouchCancel = (): void => {
         pressLive = false;

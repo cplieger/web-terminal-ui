@@ -165,10 +165,7 @@ export function attachLoadingStatus(
       }
       current = text;
       pinned = true;
-      if (rotation !== undefined) {
-        win.clearInterval(rotation);
-        rotation = undefined;
-      }
+      win.clearInterval(rotation);
       show(text);
       announce(text);
     },
@@ -179,16 +176,11 @@ export function attachLoadingStatus(
       // cancellable callback, can run, and it is the one reader of `stopped`.
       // show() and announce() do not re-test it; a timer armed outside later()
       // is what the "stop() leaves no timer armed" test catches.
-      if (stopped) {
-        return;
-      }
       stopped = true;
       for (const t of timers) {
         win.clearTimeout(t);
       }
-      if (rotation !== undefined) {
-        win.clearInterval(rotation);
-      }
+      win.clearInterval(rotation);
       visible.remove();
       live.remove();
     },
