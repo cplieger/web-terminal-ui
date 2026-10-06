@@ -3222,7 +3222,7 @@ describe("tabs OSC 9 notifications", () => {
   });
 });
 
-// The switch animation's lifecycle (docs/tab-switch-repaint.md §3.2). The class
+// The switch animation's lifecycle. The class
 // comes off on the animation's own end, with the 360ms timer kept as the net for
 // the cases no event covers: an interrupted animation (animationend does not
 // fire, and animationcancel is not reliably delivered in Blink), a host with no
