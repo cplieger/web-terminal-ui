@@ -64,13 +64,13 @@ createTerminal("#terminal", {
 
 All of these are optional.
 
-| Setting          | Default               | Purpose                                         |
-| ---------------- | --------------------- | ----------------------------------------------- |
-| `lines`          | `200`                 | How much of each session's tail is written      |
-| `maxAgeMs`       | 7 days                | How long an entry may be used                   |
-| `saveIntervalMs` | 10 seconds            | The background save interval                    |
-| `prefix`         | `"wt.scrollback."`    | The key prefix, `localScrollbackStorage` only   |
-| `maxBytes`       | 512 KiB of characters | The total budget, `localScrollbackStorage` only |
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `lines` | `200` | How much of each session's tail is written |
+| `maxAgeMs` | 7 days | How long an entry may be used |
+| `saveIntervalMs` | 10 seconds | The background save interval |
+| `prefix` | `"wt.scrollback."` | The key prefix, `localScrollbackStorage` only |
+| `maxBytes` | 512 KiB of characters | The total budget, `localScrollbackStorage` only |
 
 The first three go on the `persistScrollback` storage object. `prefix` and `maxBytes` are options of `localScrollbackStorage()`.
 
