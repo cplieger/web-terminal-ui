@@ -139,6 +139,33 @@ describe("with a hardware keyboard seen, a press on the output lets go of focus"
     expect(document.activeElement).not.toBe(m.input);
   });
 
+  it("keeps focus at a press on the scroll surface beside the output, where nothing can be selected", async () => {
+    const m = await mount();
+    latch(m);
+    const term = m.root.querySelector(".term");
+    if (!term) {
+      throw new Error("no .term");
+    }
+
+    pointer("pointerdown", term, 1000);
+
+    expect(document.activeElement).toBe(m.input);
+  });
+
+  it("keeps focus at a press on a link in the output, which is the link's to open", async () => {
+    const m = await mount();
+    latch(m);
+    const link = document.createElement("a");
+    link.className = "term-link";
+    link.href = "https://example.com/";
+    link.textContent = "example.com";
+    m.row.appendChild(link);
+
+    pointer("pointerdown", link, 1000);
+
+    expect(document.activeElement).toBe(m.input);
+  });
+
   it("reports the focus loss once, when the press ends", async () => {
     const m = await mount();
     latch(m);
@@ -273,6 +300,15 @@ describe("a touch-only user with the on-screen keyboard", () => {
     tap(m.row, { heldMs: 900 });
 
     expect(document.activeElement).not.toBe(m.input);
+  });
+
+  it("keeps the input focused through a long-press, so the on-screen keyboard stays up", async () => {
+    const m = await mount();
+    m.input.focus();
+
+    tap(m.row, { heldMs: 900 });
+
+    expect(document.activeElement).toBe(m.input);
   });
 
   it.each([

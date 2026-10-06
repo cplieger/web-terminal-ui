@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { createRegions } from "./regions.js";
 import type { RegionName } from "./types.js";
 
@@ -71,14 +71,19 @@ describe("regions: slot ordering (DOM order == reading order, WCAG 2.4.3)", () =
 
 describe("regions: the declared slot order is the table's, not the request order's", () => {
   // SLOT_ORDER is built when the module is evaluated, so the statically imported
-  // module above has already committed to it before any test runs. Re-importing
-  // per test is what puts the TABLE itself under test rather than only the
-  // ranking code that reads it.
+  // module above has already committed to it before any test runs. A fresh
+  // evaluation per test is what puts the TABLE itself under test rather than only
+  // the ranking code that reads it. `vi.resetModules()` cannot give one: the
+  // browser's module map is URL-keyed, so only a busted specifier re-evaluates,
+  // and its `.ts` extension is what keeps coverage on the real file.
   let freshRegions: typeof createRegions;
+  let evaluation = 0;
 
   beforeEach(async () => {
-    vi.resetModules();
-    ({ createRegions: freshRegions } = await import("./regions.js"));
+    const mod = (await import(/* @vite-ignore */ `./regions.ts?fresh=${String(++evaluation)}`)) as {
+      createRegions: typeof createRegions;
+    };
+    freshRegions = mod.createRegions;
   });
 
   it.each([

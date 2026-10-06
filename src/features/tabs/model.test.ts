@@ -681,6 +681,7 @@ describe("the layout record's client half", () => {
       { left: null, right: null, handle: 0.5, selected: "left", open: false },
       { left: null, right: null, handle: 0.5, selected: "left", open: true },
       { left: "s1", right: "s2", handle: 0.3, selected: "right", open: true },
+      { left: "s1", right: null, handle: 0.5, selected: "left", open: true },
       { left: null, right: "s2", handle: 0.5, selected: "right", open: true },
     ];
     for (const body of consistent) {

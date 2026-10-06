@@ -61,6 +61,7 @@ let destroyOnPost = 0;
 // Armed by a test that wants the first POST held open until it says so.
 let holdFirstPost = false;
 let releasePost: (() => void) | null = null;
+let refuseDeletes = false;
 
 const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
@@ -76,7 +77,9 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   }
   if (method === "DELETE") {
     deletes.push(String(url).split("/").pop() ?? "");
-    return Promise.resolve(jsonResponse(null, 204));
+    return Promise.resolve(
+      refuseDeletes ? jsonResponse({ error: "busy" }, 500) : jsonResponse(null, 204),
+    );
   }
   if (method !== "POST") {
     return Promise.resolve(jsonResponse([], 200)); // no live sessions: the bootstrap must create
@@ -127,6 +130,7 @@ beforeEach(() => {
   destroyOnPost = 0;
   holdFirstPost = false;
   releasePost = null;
+  refuseDeletes = false;
   now = 0;
   setClock = (t) => {
     now = t;
@@ -446,5 +450,36 @@ describe("session-create retry: teardown", () => {
 
     expect(deletes).toEqual(["s-new"]);
     expect(posts).toBe(1);
+  });
+
+  it("warns, naming the session, when that late session cannot be closed", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    holdFirstPost = true;
+    refuseDeletes = true;
+    await mount();
+    await until(() => releasePost !== null, 120);
+
+    term?.destroy();
+    term = undefined;
+    releasePost?.();
+    await settle();
+
+    expect(deletes).toEqual(["s-new"]);
+    expect(warn).toHaveBeenCalledWith(
+      "web-terminal-ui: session s-new was created after teardown and could not be closed",
+      expect.objectContaining({ status: 500 }),
+    );
+  });
+});
+
+describe("session-create retry: a bootstrap that opens nothing", () => {
+  it("lifts the loading overlay so the retry chrome is reachable", async () => {
+    script = [{ status: 500, message: "no shells left" }];
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    await mount(loading);
+
+    await until(() => loading.classList.contains("fade"), 120);
+    expect(loading.classList.contains("fade")).toBe(true);
   });
 });

@@ -708,6 +708,31 @@ describe("viewport and keyboard insets: teardown releases every listener they at
   });
 });
 
+describe("keyboard insets: a registration that throws leaves nothing behind", () => {
+  afterEach(() => {
+    undoShadow();
+  });
+
+  it("rethrows, and the listener attached before it no longer answers", () => {
+    const vv = liveVisualViewport(window.innerHeight - 200, 0);
+    const attach = vv.addEventListener;
+    vv.addEventListener = (type, fn) => {
+      if (type === "scroll") {
+        throw new Error("refused");
+      }
+      attach(type, fn);
+    };
+    restoreShadow = shadowOwn(window, "visualViewport", vv);
+    const root = document.createElement("div");
+    document.body.replaceChildren(root);
+
+    expect(() => createKeyboardInsets({ root })).toThrow("refused");
+
+    vv.fire("resize");
+    expect(root.style.getPropertyValue("--kb-inset")).toBe("");
+  });
+});
+
 describe("viewport: rotation is a re-measure signal on both Safari generations", () => {
   afterEach(() => {
     undoShadow();

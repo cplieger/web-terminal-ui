@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { LineStore } from "@cplieger/web-terminal-engine";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
 import {
@@ -239,6 +240,60 @@ describe("the two topologies", () => {
     expect(fake.engines).toHaveLength(2);
     expect(leftEngine?.dispose).toHaveBeenCalledTimes(1);
     expect(rightEngine?.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("a second destroy() of a released terminal leaves a terminal built on the same root since intact", async () => {
+    const root = rootIn();
+    const { term: first } = await mountSplit(root);
+    first.destroy();
+    const { term: second } = await mountSplit(root);
+
+    first.destroy();
+
+    expect(root.classList.contains("wt-root")).toBe(true);
+    expect(root.classList.contains("wt-split")).toBe(true);
+    expect(controller(second).enabled).toBe(true);
+  });
+
+  it("a dropped session shown again carries no epoch from before it was dropped", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountSplit(root);
+    const [leftEngine] = fake.engines;
+    leftEngine?.connection.serverEpochOf.mockReturnValue(77);
+    ctx.notifySwitch({ id: "a" });
+    ctx.notifySwitch({ id: "b" });
+    controller(term).open();
+
+    ctx.dropSession("a");
+    ctx.shell.pane("right")?.notifySwitch({ id: "a" });
+
+    expect(fake.engines[1]?.connection.adoptPersistedEpoch).not.toHaveBeenCalled();
+  });
+
+  it("a session every other pane is told to forget carries no epoch from before into them", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountSplit(root);
+    const [leftEngine] = fake.engines;
+    leftEngine?.connection.serverEpochOf.mockReturnValue(77);
+    ctx.notifySwitch({ id: "a" });
+    ctx.notifySwitch({ id: "b" });
+    controller(term).open();
+
+    ctx.shell.dropSessionExcept("a", "left");
+    ctx.shell.pane("right")?.notifySwitch({ id: "a" });
+
+    expect(fake.engines[1]?.connection.adoptPersistedEpoch).not.toHaveBeenCalled();
+  });
+
+  it("an attention reporter asked for after destroy() writes nothing", async () => {
+    const root = rootIn();
+    document.title = "Page";
+    const { term, ctx } = await mountSplit(root);
+
+    term.destroy();
+    ctx.shell.attention({ icons: false }).report({ count: 2, icon: null });
+
+    expect(document.title).toBe("Page");
   });
 });
 
@@ -528,6 +583,47 @@ describe("open(): the second pane", () => {
     expect(paneRoots(root)[1]?.querySelector("dialog.wt-fatal")).toBeNull();
   });
 
+  it("a second pane whose feature setup throws leaves its features hearing none of the terminal's later errors", async () => {
+    const root = rootIn();
+    const heard: string[] = [];
+    let listeners = 0;
+    const listener = (): TerminalFeature<void> => {
+      const side = listeners++ === 0 ? "left" : "right";
+      return {
+        name: "listener",
+        setup(ctx) {
+          ctx.onError((feature) => heard.push(`${side}:${feature}`));
+          return { api: undefined, teardown: () => undefined };
+        },
+      };
+    };
+    let setups = 0;
+    const boom = (): TerminalFeature<void> => ({
+      name: "boom",
+      setup() {
+        setups += 1;
+        if (setups === 2) {
+          throw new Error("second pane only");
+        }
+        return { api: undefined, teardown: () => undefined };
+      },
+    });
+    const { term, ctx } = await mountSplit(root, {}, () => [listener(), boom()]);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ctx.notifySwitch({ id: "a" });
+    expect(controller(term).open()).toBe(true);
+    await tick();
+    expect(ctx.shell.pane("right")?.state()).toBe("failed");
+    heard.length = 0;
+    ctx.on("wire:title", () => {
+      throw new Error("a handler fault");
+    });
+
+    fake.engines[0]?.callbacks.onMessage({ type: "title", title: "t" });
+
+    expect(heard).toEqual(["left:shell-probe"]);
+  });
+
   /** A pane feature whose second setup (the second pane's) stays pending until
    *  `reject()` is called, so the pane can be shown and selected first. */
   function lateRejecting(): { feature: () => TerminalFeature<void>; reject: () => void } {
@@ -622,9 +718,280 @@ describe("open(): the second pane", () => {
     expect(ctx.shell.pane("right")?.state()).toBe("failed");
     expect(loading.classList.contains("fade")).toBe(true);
   });
+
+  it("a throwing onFatalError still leaves the failed second pane its recovery panel, and the throw is logged", async () => {
+    const root = rootIn();
+    const late = lateRejecting();
+    const { term, ctx } = await mountSplit(
+      root,
+      {
+        onFatalError() {
+          throw new Error("handler broke");
+        },
+      },
+      () => [late.feature()],
+    );
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ctx.notifySwitch({ id: "a" });
+    controller(term).open();
+
+    late.reject();
+    await tick();
+
+    expect(paneRoots(root)[1]?.querySelector("dialog.wt-fatal")).not.toBeNull();
+    expect(
+      error.mock.calls.some(([message]) => String(message).includes("onFatalError handler failed")),
+    ).toBe(true);
+  });
+
+  it("an onFatalError that takes over a failed second pane gets no built-in panel drawn over its own", async () => {
+    const root = rootIn();
+    const late = lateRejecting();
+    const { term, ctx } = await mountSplit(
+      root,
+      {
+        onFatalError(failure) {
+          const own = document.createElement("p");
+          own.className = "own-recovery";
+          failure.surface?.append(own);
+          return true;
+        },
+      },
+      () => [late.feature()],
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ctx.notifySwitch({ id: "a" });
+    controller(term).open();
+
+    late.reject();
+    await tick();
+
+    const right = paneRoots(root)[1];
+    expect(right?.querySelector(".own-recovery")).not.toBeNull();
+    expect(right?.querySelector("dialog.wt-fatal")).toBeNull();
+  });
+
+  it("the recovery panel of a second pane that failed while still empty can take focus", async () => {
+    const root = rootIn();
+    const late = lateRejecting();
+    const { term, ctx } = await mountSplit(root, {}, () => [late.feature()]);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ctx.notifySwitch({ id: "a" });
+    controller(term).open();
+    const right = paneRoots(root)[1];
+    expect(right?.hasAttribute("inert")).toBe(true);
+
+    late.reject();
+    await tick();
+
+    const reload = right?.querySelector<HTMLButtonElement>(".wt-fatal-reload");
+    reload?.focus();
+    expect(document.activeElement).toBe(reload);
+    expect(right?.hasAttribute("inert")).toBe(false);
+  });
+
+  it("a second pane refused before its kernel was built still gets the style boundary its panel's rules need", async () => {
+    const root = rootIn();
+    const c = clipboard();
+    const { term, ctx } = await mountSplit(root, {}, () => [c]);
+    ctx.notifySwitch({ id: "a" });
+
+    controller(term).open();
+
+    const right = paneRoots(root)[1];
+    expect(right?.querySelector("dialog.wt-fatal")).not.toBeNull();
+    expect(right?.classList.contains("wt-root")).toBe(true);
+    expect(right?.classList.contains("wt-container")).toBe(true);
+  });
+
+  it("reports nothing for a second pane whose failure an error handler answered by destroying the terminal", async () => {
+    const root = rootIn();
+    const late = lateRejecting();
+    const handle: { term?: TerminalHandle } = {};
+    const destroyer: TerminalFeature<void> = {
+      name: "destroyer",
+      scope: "shell",
+      setup(ctx) {
+        ctx.onError(() => {
+          handle.term?.destroy();
+        });
+        return { api: undefined, teardown: () => undefined };
+      },
+    };
+    const seen: TerminalStartupFailure[] = [];
+    const { term, ctx } = await mountSplit(
+      root,
+      {
+        onFatalError(failure) {
+          seen.push(failure);
+        },
+      },
+      () => [destroyer, late.feature()],
+    );
+    handle.term = term;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ctx.notifySwitch({ id: "a" });
+    controller(term).open();
+
+    late.reject();
+    await tick();
+
+    expect(seen).toEqual([]);
+  });
+
+  it("destroy() while the second pane sets up its features sets up none of the ones after", async () => {
+    const root = rootIn();
+    const late = lateRejecting();
+    let afterSetups = 0;
+    const after = (): TerminalFeature<void> => ({
+      name: "after",
+      setup() {
+        afterSetups += 1;
+        return { api: undefined, teardown: () => undefined };
+      },
+    });
+    const { term, ctx } = await mountSplit(root, {}, () => [late.feature(), after()]);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ctx.notifySwitch({ id: "a" });
+    controller(term).open();
+    expect(afterSetups).toBe(1);
+
+    term.destroy();
+    late.reject();
+    await tick();
+
+    expect(afterSetups).toBe(1);
+  });
+
+  it("an open that retries a failed second pane refuses the feature objects the failed pane used", async () => {
+    const root = rootIn();
+    let calls = 0;
+    let failedPaneFeature: TerminalFeature<void> | undefined;
+    const paneFeatures = (): TerminalFeature<unknown>[] => {
+      calls += 1;
+      if (calls === 2) {
+        failedPaneFeature = {
+          name: "boom",
+          setup() {
+            throw new Error("second pane only");
+          },
+        };
+      }
+      if (calls >= 2 && failedPaneFeature !== undefined) {
+        return [failedPaneFeature];
+      }
+      return [];
+    };
+    const seen: TerminalStartupFailure[] = [];
+    const { term, ctx } = await mountSplit(
+      root,
+      {
+        onFatalError(failure) {
+          seen.push(failure);
+        },
+      },
+      paneFeatures,
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ctx.notifySwitch({ id: "a" });
+    const split = controller(term);
+    split.open();
+    await tick();
+    expect(seen.map((f) => f.phase)).toEqual(["feature-setup"]);
+    split.close();
+
+    split.open();
+
+    expect(seen.map((f) => f.phase)).toEqual(["feature-setup", "kernel-init"]);
+    expect(String((seen[1]?.cause as Error).message)).toMatch(/boom was already used/);
+  });
+
+  it("a second pane failing after a close kept it as the single view gives the view and the title back to the first pane", async () => {
+    const root = rootIn();
+    document.title = "Page";
+    const late = lateRejecting();
+    let ctxRef: TerminalContext | undefined;
+    const rehoming: TerminalFeature<void> = {
+      name: "owner",
+      scope: "shell",
+      paneLayoutOwner: {
+        resolveInitialLayout: () => Promise.resolve(false),
+        shownIn: () => null,
+        showIn(side, id) {
+          ctxRef?.shell.pane(side)?.notifySwitch({ id });
+          return true;
+        },
+      },
+      setup(ctx) {
+        ctxRef = ctx;
+        return { api: undefined, teardown: () => undefined };
+      },
+    };
+    const { term, ctx } = await mountSplit(root, {}, () => [late.feature()], rehoming);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ctx.notifySwitch({ id: "a" });
+    fake.engines[0]?.callbacks.onMessage({ type: "title", title: "first program" } as never);
+    controller(term).open();
+    ctx.notifySwitch({ id: "b" });
+    fake.engines[1]?.callbacks.onMessage({ type: "title", title: "second program" } as never);
+    controller(term).close();
+    expect(document.title).toBe("second program");
+
+    late.reject();
+    await tick();
+
+    expect(ctx.shell.panes()).toHaveLength(1);
+    expect(ctx.shell.pane("left")?.state()).toBe("shown");
+    expect(ctx.shell.pane("left")?.session.id).toBe("b");
+    expect(document.title).toBe("first program");
+  });
 });
 
 describe("the controller refuses what it cannot do", () => {
+  it("refuses close() and closeSide() on either side once the split has closed, and changes nothing", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountSplit(root);
+    const split = controller(term);
+    ctx.notifySwitch({ id: "a" });
+    split.open();
+    ctx.notifySwitch({ id: "b" });
+    split.close();
+    const changes = vi.fn();
+    split.onChange(changes);
+    const panes = vi.fn();
+    ctx.shell.onPanesChange(panes);
+
+    expect(split.close()).toBe(false);
+    expect(split.closeSide("left")).toBe(false);
+    expect(split.closeSide("right")).toBe(false);
+
+    expect(changes).not.toHaveBeenCalled();
+    expect(panes).not.toHaveBeenCalled();
+    expect(ctx.shell.pane("left")?.session.id).toBe("b");
+  });
+
+  it("can open on a row exactly two minimum panes and the gutter wide", async () => {
+    const root = rootIn(MIN_SPLIT_AREA_PX);
+    const { term, ctx } = await mountSplit(root);
+    ctx.notifySwitch({ id: "a" });
+
+    expect(controller(term).canOpen()).toBe(true);
+  });
+
+  it("stops calling an onChange callback once its returned release has run", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountSplit(root);
+    const split = controller(term);
+    ctx.notifySwitch({ id: "a" });
+    const changes = vi.fn();
+    const off = split.onChange(changes);
+
+    off();
+    split.open();
+
+    expect(changes).not.toHaveBeenCalled();
+  });
+
   it("closes nothing while closed, and refuses a bad side or an absent pane", async () => {
     const root = rootIn();
     const { term, ctx } = await mountSplit(root);
@@ -937,6 +1304,83 @@ describe("the narrow rule", () => {
     root.style.height = "800px";
     await settle();
     expect(root.classList.contains("wt-narrow")).toBe(false);
+  });
+
+  /** Two shown panes, `a` left and `b` right, with fonts and viewports settled
+   *  and the resize spies cleared; settles from here on run at the real length. */
+  async function openTwo(): Promise<Mounted & { split: NonNullable<TerminalHandle["split"]> }> {
+    const restoreSettle = await shortenSettle();
+    const mounted = await mountSplit(rootIn(1000));
+    mounted.ctx.notifySwitch({ id: "a" });
+    controller(mounted.term).open();
+    mounted.ctx.notifySwitch({ id: "b" });
+    await shortSettled();
+    restoreSettle();
+    for (const e of fake.engines) {
+      e.connection.sendResize.mockClear();
+    }
+    return { ...mounted, split: controller(mounted.term) };
+  }
+  const resizesPerPane = (): number[] =>
+    fake.engines.map((e) => e.connection.sendResize.mock.calls.length);
+
+  it("tells both panes their size the moment the split collapses, ahead of their own settles", async () => {
+    const { root } = await openTwo();
+
+    root.style.width = "720px";
+    await settle();
+
+    expect(root.classList.contains("wt-split-collapsed")).toBe(true);
+    expect(resizesPerPane()).toEqual([1, 1]);
+  });
+
+  it("leaves each pane's size to its own settle on a resize that does not change the collapse", async () => {
+    const { root } = await openTwo();
+
+    root.style.width = "900px";
+    await settle();
+
+    expect(root.classList.contains("wt-split-collapsed")).toBe(false);
+    expect(resizesPerPane()).toEqual([0, 0]);
+  });
+
+  it("a collapse moves focus out of the pane it hides into the selected one", async () => {
+    const { root, ctx } = await openTwo();
+    const [left, right] = paneRoots(root);
+    right?.querySelector<HTMLElement>(".term-input")?.focus();
+    ctx.shell.select("left");
+
+    root.style.width = "720px";
+    await settle();
+
+    expect(document.activeElement).toBe(left?.querySelector(".term-input"));
+  });
+
+  it("a collapse leaves focus where it is when it sits outside both panes", async () => {
+    const { root } = await openTwo();
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    outside.focus();
+
+    root.style.width = "720px";
+    await settle();
+
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it("a collapse leaves focus where it is on a link in the selected pane's output", async () => {
+    const { root, ctx } = await openTwo();
+    ctx.shell.select("left");
+    const link = document.createElement("a");
+    link.href = "https://example.com/";
+    link.textContent = "example";
+    paneRoots(root)[0]?.querySelector(".term-output")?.appendChild(link);
+    link.focus();
+
+    root.style.width = "720px";
+    await settle();
+
+    expect(document.activeElement).toBe(link);
   });
 });
 
@@ -1304,5 +1748,97 @@ describe("the loading overlay over two panes", () => {
     ctx.shell.pane("right")?.clearActiveSession();
     await tick();
     expect(loading.classList.contains("fade")).toBe(true);
+  });
+
+  it("stays up for a restored split whose owner reports nothing shown while one of its panes connects", async () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    let ctxRef: TerminalContext | undefined;
+    const restoring: TerminalFeature<void> = {
+      name: "owner",
+      scope: "shell",
+      paneLayoutOwner: {
+        resolveInitialLayout() {
+          ctxRef?.shell.restoreSplit(0.5, "left");
+          ctxRef?.shell.pane("left")?.notifySwitch({ id: "a" });
+          return Promise.resolve(false);
+        },
+        shownIn: () => null,
+        showIn: () => false,
+      },
+      setup(ctx) {
+        ctxRef = ctx;
+        return { api: undefined, teardown: () => undefined };
+      },
+    };
+    const { term } = await mountSplit(root, { loading }, () => [], restoring);
+    await tick();
+
+    expect(controller(term).isOpen()).toBe(true);
+    expect(loading.classList.contains("fade")).toBe(false);
+  });
+
+  it("leaves the consumer's overlay alone when the terminal is destroyed before its owner answers", async () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    let answer: (shown: boolean) => void = () => undefined;
+    const slow: TerminalFeature<void> = {
+      name: "owner",
+      scope: "shell",
+      paneLayoutOwner: {
+        resolveInitialLayout: () =>
+          new Promise<boolean>((resolve) => {
+            answer = resolve;
+          }),
+        shownIn: () => null,
+        showIn: () => false,
+      },
+      setup() {
+        return { api: undefined, teardown: () => undefined };
+      },
+    };
+    const { term } = await mountSplit(root, { loading }, () => [], slow);
+
+    term.destroy();
+    answer(false);
+    await tick();
+
+    expect(loading.classList.contains("fade")).toBe(false);
+  });
+});
+
+describe("what a shell-scoped feature reaches through its context", () => {
+  it("draws, scrolls and pastes in the selected pane alone", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountSplit(root);
+    ctx.notifySwitch({ id: "a" });
+    controller(term).open();
+    ctx.notifySwitch({ id: "b" });
+    const [leftEngine, rightEngine] = fake.engines;
+    const store = new LineStore(10);
+    const view = { top: 40, following: false };
+    for (const e of fake.engines) {
+      e.renderer.bind.mockClear();
+      e.scroll.scrollToBottom.mockClear();
+      e.connection.sendBinary.mockClear();
+    }
+
+    ctx.render.setPredictedCursor(2, 5, true);
+    ctx.render.bind(store);
+    ctx.scroll.scrollToBottom();
+    expect(rightEngine?.scroll.scrollToBottom).toHaveBeenCalledTimes(1);
+    ctx.scroll.restoreView(view);
+    ctx.paste("hi");
+
+    expect(rightEngine?.renderer.setPredictedCursor).toHaveBeenCalledWith(2, 5, true);
+    expect(rightEngine?.renderer.bind).toHaveBeenCalledWith(store, undefined);
+    expect(rightEngine?.scroll.restoreView).toHaveBeenCalledWith(view);
+    expect(rightEngine?.connection.sendBinary).toHaveBeenCalled();
+    expect(leftEngine?.connection.sendBinary).not.toHaveBeenCalled();
+    expect(leftEngine?.renderer.setPredictedCursor).not.toHaveBeenCalled();
+    expect(leftEngine?.scroll.scrollToBottom).not.toHaveBeenCalled();
+    expect(leftEngine?.scroll.restoreView).not.toHaveBeenCalled();
   });
 });

@@ -151,6 +151,11 @@ describe("viewportMoved: whether the box moved under a still pointer", () => {
     ).toBe(false);
   });
 
+  it("reads a zoomed-in pan that has not moved since the press as unmoved", () => {
+    const panned = { offsetLeft: 240, offsetTop: 180, width: 500, height: 300 };
+    expect(viewportMoved(panned, { ...panned })).toBe(false);
+  });
+
   it.each(["offsetLeft", "offsetTop", "width", "height"] as const)(
     "reads a 1px change of %s as a move",
     (field) => {

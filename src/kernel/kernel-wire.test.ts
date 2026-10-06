@@ -695,6 +695,20 @@ describe("the resize announce, and the two things it waits for", () => {
     expect(sendResize).toHaveBeenCalledTimes(1);
   });
 
+  it("announces on open in a document with no Font Loading API", async () => {
+    // fonts.load cannot even be called there, so the failure itself has to open
+    // the gate, or no size ever reaches the server.
+    restoreFonts();
+    restoreFonts = shadowFonts(undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await mountSettled({ features: () => [] });
+    sendResize.mockClear();
+
+    wire().onOpen();
+
+    expect(sendResize).toHaveBeenCalledTimes(1);
+  });
+
   it("announces when the fonts settle after the socket is already open", async () => {
     const settle = stubFonts();
     await mountSettled({ features: () => [] });

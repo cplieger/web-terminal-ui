@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { INPUT_PLACEHOLDER } from "../input-placeholder.js";
 import { mountTerminal } from "../test-helpers/mount.js";
+import { shortAnnounced, shortenReannounce } from "../test-helpers/delays.js";
 import type { SessionRef, TerminalContext, TerminalFeature, TerminalHandle } from "./types.js";
 
 // The library's single navigation call lives in its own module so a test can
@@ -588,6 +589,54 @@ describe("what a teardown owes the primitives the kernel built", () => {
     } finally {
       error.mockRestore();
     }
+  });
+
+  it("logs a feature's release that throws, naming the feature, and still runs its others", async () => {
+    const released: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const leaky: TerminalFeature<void> = {
+        name: "leaky",
+        setup(ctx) {
+          ctx.defer(() => {
+            released.push("kept");
+          });
+          ctx.defer(() => {
+            throw new Error("release broke");
+          });
+          return { teardown: () => undefined };
+        },
+      };
+      const handle = await mountTerminal(rootIn(), { features: () => [leaky] });
+      await tick();
+
+      handle.destroy();
+
+      expect(released).toEqual(["kept"]);
+      expect(error).toHaveBeenCalledWith(
+        expect.stringContaining('feature "leaky" error'),
+        expect.any(Error),
+      );
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("speaks a pane feature's announcement through the pane's polite live region", async () => {
+    await shortenReannounce();
+    let ctx: TerminalContext | undefined;
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [probeFeature((c) => (ctx = c))] });
+    await tick();
+    const polite = root.querySelector<HTMLElement>('[aria-live="polite"]');
+    if (!ctx || !polite) {
+      throw new Error("the probe feature never ran");
+    }
+
+    ctx.announce("session ready");
+    await shortAnnounced();
+
+    expect(polite.textContent).toBe("session ready");
   });
 
   it("cancels a pending announcement, so a released live region is never written", async () => {

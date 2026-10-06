@@ -126,6 +126,11 @@ function tabStops(from: HTMLElement, count: number): HTMLElement[] {
   }
   return out;
 }
+function danglingPanelLabels(root: HTMLElement): string[] {
+  return Array.from(root.querySelectorAll('[role="tabpanel"]'))
+    .map((p) => p.getAttribute("aria-labelledby"))
+    .filter((id): id is string => id !== null && document.getElementById(id) === null);
+}
 function stubMedia(answers: Record<string, boolean>): void {
   vi.stubGlobal(
     "matchMedia",
@@ -833,6 +838,41 @@ describe("the snap items", () => {
     expect(menuItem(open, "Snap to right").disabled).toBe(false);
   });
 
+  it("disables Snap to right for the tab the right pane shows", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    expect(shown(ctx, "right")).toBe("s2");
+
+    const items = openTabMenu(root, "two");
+    expect(menuItem(items, "Snap to right").disabled).toBe(true);
+    expect(menuItem(items, "Snap to left").disabled).toBe(false);
+  });
+
+  it("snapping an unshown tab onto the one shown side leaves the empty pane empty", async () => {
+    const root = rootIn();
+    const { term, ctx, api } = await mountTabbed(root, server);
+    term.split?.open();
+    expect(shown(ctx, "right")).toBeNull();
+
+    expect(api.snap("s2", "left")).toBe(true);
+    expect(shown(ctx, "left")).toBe("s2");
+    expect(shown(ctx, "right")).toBeNull();
+    expect(activeLabels(root)).toEqual(["two"]);
+  });
+
+  it("with no physical keyboard, a snap from the menu summons no keyboard", async () => {
+    stubMedia({ "(pointer: fine)": false });
+    const root = rootIn();
+    const { ctx } = await mountTabbed(root, server);
+    textareaOf(root, "left").blur();
+
+    menuItem(openTabMenu(root, "two"), "Snap to right").click();
+    expect(shown(ctx, "right")).toBe("s2");
+    expect(document.activeElement?.classList.contains("term-input")).toBe(false);
+  });
+
   it("snapping the selected pane's tab to the right empties the left, shows it on the right and selects the right, forgetting before attaching", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
@@ -860,6 +900,14 @@ describe("the snap items", () => {
     expect(shown(ctx, "left")).toBeNull();
     expect(shown(ctx, "right")).toBe("s1");
     expect(ctx.shell.selected()).toBe("right");
+    await until(() => server.writes.length > 0);
+    expect(server.writes.at(-1)).toEqual({
+      left: null,
+      right: "s1",
+      handle: 0.5,
+      selected: "right",
+      open: true,
+    });
     // The losing pane forgets, then the gaining pane attaches; no other call.
     expect(calls).toEqual(["left:forget:s1", "right:set:s1"]);
     expect(activeLabels(root)).toEqual(["one"]);
@@ -973,11 +1021,20 @@ describe("the snap items", () => {
     const { term, ctx, api } = await mountTabbed(root, server);
     expect(term.split?.isOpen()).toBe(false);
 
+    const left = engineOn(root, "left");
+    left.connection.setSession.mockClear();
+    left.connection.forgetSession.mockClear();
+    textareaOf(root, "left").blur();
     expect(api.snap("s1", "left")).toBe(true);
     expect(term.split?.isOpen()).toBe(true);
     expect(shown(ctx, "left")).toBe("s1");
     expect(shown(ctx, "right")).toBe("s2");
     expect(ctx.shell.selected()).toBe("left");
+    // The tab never left its pane, so its terminal keeps its connection and the
+    // keyboard a physical keyboard expects.
+    expect(left.connection.forgetSession).not.toHaveBeenCalled();
+    expect(left.connection.setSession).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(textareaOf(root, "left"));
     await until(() => server.writes.length > 0);
     await tick();
     expect(server.writes).toEqual([
@@ -1301,6 +1358,35 @@ describe("drag and drop onto a half", () => {
     expect(ctx.shell.selected()).toBe("left");
     expect(chips(root)).toHaveLength(2);
     expect(server.posts()).toBe(1);
+  });
+
+  it("with one tab and no physical keyboard, a snap carries the keyboard its input held to the tab's new side", async () => {
+    stubMedia({ "(any-pointer: fine)": false });
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { ctx, api } = await mountTabbed(root, server);
+    textareaOf(root, "left").focus();
+
+    expect(api.snap("s1", "right")).toBe(true);
+    await until(() => shown(ctx, "left") === "s-new");
+
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(document.activeElement).toBe(textareaOf(root, "right"));
+  });
+
+  it("with one tab and no physical keyboard, a snap leaves a keyboard parked on the strip where it was", async () => {
+    stubMedia({ "(any-pointer: fine)": false });
+    server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    const root = rootIn();
+    const { ctx, api } = await mountTabbed(root, server);
+    const chip = chipOf(root, "one");
+    chip.focus();
+
+    expect(api.snap("s1", "right")).toBe(true);
+    await until(() => shown(ctx, "left") === "s-new");
+
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(document.activeElement).toBe(chip);
   });
 
   it("with one tab under 730 px a snap is refused and creates nothing", async () => {
@@ -1703,6 +1789,43 @@ describe("the closing rules while the split is open", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  it("with a physical keyboard parked outside the terminal, closing the selected pane's tab hands it to the other pane's tab", async () => {
+    stubMedia({ "(pointer: fine)": true });
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+    ];
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+
+    chipOf(root, "two").querySelector<HTMLElement>(".wt-tab-close")?.click();
+    await until(() => server.deletes().includes("s2"));
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(document.activeElement).toBe(textareaOf(root, "left"));
+  });
+
+  it("closing a shown tab leaves no panel named by its chip", async () => {
+    server.list = [
+      { id: "s1", title: "one", createdAt: "1", status: "idle" },
+      { id: "s2", title: "two", createdAt: "2", status: "idle" },
+    ];
+    const root = rootIn();
+    const { term } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+
+    chipOf(root, "two").querySelector<HTMLElement>(".wt-tab-close")?.click();
+    await until(() => server.deletes().includes("s2"));
+
+    expect(term.split?.isOpen()).toBe(false);
+    expect(danglingPanelLabels(root)).toEqual([]);
+  });
+
   it("(2) closing the shown tab while the other pane is empty closes the split, and the one-pane neighbor rule picks the tab, creating nothing", async () => {
     server.list = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
@@ -2029,6 +2152,90 @@ describe("the closing rules while the split is open", () => {
     expect(chips(root).map((c) => c.querySelector(".wt-tab-label")?.textContent)).toEqual([
       "three",
     ]);
+  });
+});
+
+describe("bulk closes while the split is open", () => {
+  const four = [
+    { id: "s1", title: "one", createdAt: "1", status: "idle" },
+    { id: "s2", title: "two", createdAt: "2", status: "idle" },
+    { id: "s3", title: "three", createdAt: "3", status: "idle" },
+    { id: "s4", title: "four", createdAt: "4", status: "idle" },
+  ];
+
+  it("leaves both panes and the split as they were when no shown tab is among the closed", async () => {
+    server.list = four;
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    menuItem(openTabMenu(root, "two"), "Close to the right").click();
+    await until(() => server.deletes().length === 2);
+
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s2");
+  });
+
+  it("closing the selected pane's tab with others closes the split onto the other pane, keeping that pane's terminal", async () => {
+    server.list = four;
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    expect(ctx.shell.selected()).toBe("right");
+    const kept = engineOn(root, "left");
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    menuItem(openTabMenu(root, "one"), "Close to the right").click();
+    await until(() => server.deletes().length === 3);
+
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(engineOn(root, "left")).toBe(kept);
+  });
+
+  it("has every connection forget a closed shown session exactly once", async () => {
+    server.list = four;
+    const root = rootIn();
+    const { term } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    const left = engineOn(root, "left");
+    const right = engineOn(root, "right");
+    clearForgets();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    menuItem(openTabMenu(root, "two"), "Close others").click();
+    await until(() => server.deletes().length === 3);
+
+    expect(left.connection.forgetSession.mock.calls.map((c) => c[0]).sort()).toEqual([
+      "s1",
+      "s3",
+      "s4",
+    ]);
+    expect(right.connection.forgetSession.mock.calls.map((c) => c[0]).sort()).toEqual([
+      "s1",
+      "s3",
+      "s4",
+    ]);
+  });
+
+  it("leaves no panel named by a closed tab's chip", async () => {
+    server.list = four;
+    const root = rootIn();
+    const { term } = await mountTabbed(root, server);
+    term.split?.open();
+    chipOf(root, "two").click();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    menuItem(openTabMenu(root, "one"), "Close to the right").click();
+    await until(() => server.deletes().length === 3);
+
+    expect(term.split?.isOpen()).toBe(false);
+    expect(danglingPanelLabels(root)).toEqual([]);
   });
 });
 

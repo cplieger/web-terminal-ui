@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type { TerminalContext } from "../../kernel/types.js";
+import type { TabsApi } from "./index.js";
 import {
   activeLabels,
   chipOf,
@@ -29,6 +30,7 @@ const FINGER = 7;
 
 let server: FakeSessionServer;
 let ctx: TerminalContext;
+let api: TabsApi;
 beforeEach(() => {
   expect(matchMedia("(pointer: coarse)").matches).toBe(true);
   fake.reset();
@@ -50,7 +52,7 @@ afterEach(() => {
  *  iPad), then on fake timers so a hold can be measured to the millisecond. */
 async function mountStrip(): Promise<HTMLElement> {
   const root = rootIn(1000, 600);
-  ({ ctx } = await mountTabbed(root, server));
+  ({ ctx, api } = await mountTabbed(root, server));
   vi.useFakeTimers({
     toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
   });
@@ -85,6 +87,13 @@ function pointer(
 
 const lifted = (root: HTMLElement): boolean =>
   root.querySelector(".wt-tab-scroll .wt-tab-dragging") !== null;
+function scrollerOf(root: HTMLElement): HTMLElement {
+  const el = root.querySelector<HTMLElement>(".wt-tab-scroll");
+  if (!el) {
+    throw new Error("no tab scroller");
+  }
+  return el;
+}
 const labels = (root: HTMLElement): string[] =>
   chips(root).map((c) => c.querySelector(".wt-tab-label")?.textContent ?? "");
 const orderWrites = (): unknown[] =>
@@ -332,6 +341,69 @@ describe("a touch press on a strip chip", () => {
     vi.advanceTimersByTime(150);
     expect(touchmove().defaultPrevented).toBe(true);
   });
+
+  it("lifts nothing from the chip being renamed", async () => {
+    const root = await mountStrip();
+    const chip = chipOf(root, "two");
+    chip.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    const field = chip.querySelector(".wt-tab-rename");
+    if (!field) {
+      throw new Error("no rename field");
+    }
+    const at = centre(chip);
+
+    pointer("pointerdown", field, at.x, at.y);
+    vi.advanceTimersByTime(150);
+
+    expect(lifted(root)).toBe(false);
+    expect(root.querySelectorAll(".wt-tab-ghost")).toHaveLength(0);
+  });
+
+  it("leaves a chip renamed mid-press undraggable once the finger lifts", async () => {
+    const root = await mountStrip();
+    const chip = chipOf(root, "two");
+    const at = centre(chip);
+
+    pointer("pointerdown", chip, at.x, at.y);
+    vi.advanceTimersByTime(50);
+    chip.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "F2", bubbles: true, cancelable: true }),
+    );
+    pointer("pointerup", chip, at.x, at.y);
+
+    expect(chip.querySelector(".wt-tab-rename")).not.toBeNull();
+    expect(chip.draggable).toBe(false);
+  });
+
+  it("is a scroll, not a drag, once the strip scrolls under the held finger", async () => {
+    const root = await mountStrip();
+    const chip = chipOf(root, "two");
+    const at = centre(chip);
+
+    pointer("pointerdown", chip, at.x, at.y);
+    vi.advanceTimersByTime(100);
+    scrollerOf(root).dispatchEvent(new Event("scroll"));
+    vi.advanceTimersByTime(50);
+
+    expect(lifted(root)).toBe(false);
+    expect(chip.draggable).toBe(true);
+  });
+
+  it("gives a press right after a tap its own full hold", async () => {
+    const root = await mountStrip();
+    const chip = chipOf(root, "two");
+    const at = centre(chip);
+
+    pointer("pointerdown", chip, at.x, at.y);
+    vi.advanceTimersByTime(100);
+    pointer("pointerup", chip, at.x, at.y);
+    vi.advanceTimersByTime(20);
+    pointer("pointerdown", chip, at.x, at.y);
+    vi.advanceTimersByTime(40);
+    expect(lifted(root)).toBe(false);
+    vi.advanceTimersByTime(110);
+    expect(lifted(root)).toBe(true);
+  });
 });
 
 describe("a touch drag along the strip", () => {
@@ -465,6 +537,92 @@ describe("a touch drag along the strip", () => {
 
     expect(activeLabels(root)).toEqual(["one"]);
   });
+
+  it("lets the next tap through when the drop's own release delivered no click", async () => {
+    const root = await mountStrip();
+    const to = pastChip(root, "three");
+    liftAndDrag(root, "two", to);
+    pointer("pointerup", chipOf(root, "two"), to.x, to.y);
+    const chip = chipOf(root, "three");
+    const at = centre(chip);
+
+    pointer("pointerdown", chip, at.x, at.y);
+    pointer("pointerup", chip, at.x, at.y);
+    chip.click();
+
+    expect(activeLabels(root)).toEqual(["three"]);
+  });
+
+  it("carries the lifted chip's image with the finger", async () => {
+    const root = await mountStrip();
+    const chip = chipOf(root, "one");
+    const at = centre(chip);
+
+    pointer("pointerdown", chip, at.x, at.y);
+    vi.advanceTimersByTime(150);
+    pointer("pointermove", chip, at.x + 40, at.y + 3);
+
+    expect(root.querySelector<HTMLElement>(".wt-tab-ghost")?.style.translate).toBe("40px 3px");
+  });
+
+  it.each([
+    [
+      "another pointer's cancel",
+      (): void => {
+        pointer("pointercancel", document.body, 0, 0, { pointerId: 9, pointerType: "pen" });
+      },
+    ],
+    [
+      "the chip's own capture ending as the bar takes it over",
+      (root: HTMLElement): void => {
+        pointer("lostpointercapture", chipOf(root, "one"), 0, 0);
+      },
+    ],
+    [
+      "a strip scroll",
+      (root: HTMLElement): void => {
+        scrollerOf(root).dispatchEvent(new Event("scroll"));
+      },
+    ],
+    [
+      "a visibility change that leaves the page visible",
+      (): void => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      },
+    ],
+    [
+      "a key other than Escape",
+      (): void => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", cancelable: true }));
+      },
+    ],
+  ])("keeps the drag through %s", async (_name, event) => {
+    const root = await mountStrip();
+    const to = pastChip(root, "three");
+
+    liftAndDrag(root, "one", to);
+    event(root);
+    expect(lifted(root)).toBe(true);
+    pointer("pointerup", chipOf(root, "one"), to.x, to.y);
+
+    expect(orderWrites()).toEqual([{ order: ["s2", "s3", "s1"] }]);
+  });
+
+  it("starts a later drag from rest, untouched by the last one's finger", async () => {
+    const root = await mountStrip();
+    const to = pastChip(root, "three");
+    liftAndDrag(root, "one", to);
+    pointer("pointerup", chipOf(root, "one"), to.x, to.y);
+    expect(labels(root)).toEqual(["two", "three", "one"]);
+    const chip = chipOf(root, "two");
+    const at = centre(chip);
+
+    pointer("pointerdown", chip, at.x, at.y);
+    vi.advanceTimersByTime(450);
+
+    expect(lifted(root)).toBe(true);
+    expect(labels(root)).toEqual(["two", "three", "one"]);
+  });
 });
 
 describe("a touch press that lifts but never moves", () => {
@@ -538,5 +696,72 @@ describe("a touch drag onto a split half", () => {
     expect(shown(ctx, "right")).toBe("s1");
     expect(chips(root)).toHaveLength(2);
     expect(server.posts()).toBe(1);
+  });
+
+  it("lights the half under the finger as it arrives, and clears it back over the strip", async () => {
+    const root = await mountStrip();
+    const chip = chipOf(root, "one");
+    const at = centre(chip);
+    const r = root.getBoundingClientRect();
+
+    pointer("pointerdown", chip, at.x, at.y);
+    vi.advanceTimersByTime(150);
+    pointer("pointermove", chip, r.left + r.width * 0.75, r.top + r.height * 0.4);
+    expect(root.classList.contains("wt-drop-right")).toBe(true);
+    pointer("pointermove", chip, at.x + 40, at.y);
+
+    expect(root.classList.contains("wt-drop-right")).toBe(false);
+  });
+});
+
+describe("a touch press that lifts and only trembles", () => {
+  it("is still a tap: nothing is published and its click switches tabs", async () => {
+    const root = await mountStrip();
+    const chip = chipOf(root, "two");
+    const at = centre(chip);
+
+    pointer("pointerdown", chip, at.x, at.y);
+    vi.advanceTimersByTime(150);
+    pointer("pointermove", chip, at.x + 3, at.y + 2);
+    pointer("pointerup", chip, at.x + 3, at.y + 2);
+    chip.click();
+
+    expect(activeLabels(root)).toEqual(["two"]);
+    expect(orderWrites()).toEqual([]);
+  });
+});
+
+describe("a tab closed during a touch drag", () => {
+  it("leaves the drag of another chip running", async () => {
+    const root = await mountStrip();
+    const to = pastChip(root, "three");
+    liftAndDrag(root, "one", to);
+
+    void api.close("s2");
+    expect(lifted(root)).toBe(true);
+    pointer("pointerup", chipOf(root, "one"), to.x, to.y);
+
+    expect(lifted(root)).toBe(false);
+    expect(orderWrites()).toEqual([{ order: ["s3", "s1"] }]);
+  });
+
+  it("ends the drag of its own chip, handing the strip back to panning at once", async () => {
+    const root = await mountStrip();
+    liftAndDrag(root, "one", pastChip(root, "three"));
+    const chip = chipOf(root, "two");
+    const at = centre(chip);
+
+    void api.close("s1");
+    const touch = new Touch({ identifier: FINGER, target: chip, clientX: at.x, clientY: at.y });
+    const e = new TouchEvent("touchmove", {
+      bubbles: true,
+      cancelable: true,
+      touches: [touch],
+      changedTouches: [touch],
+    });
+    chip.dispatchEvent(e);
+
+    expect(e.defaultPrevented).toBe(false);
+    expect(root.querySelectorAll(".wt-tab-ghost")).toHaveLength(0);
   });
 });

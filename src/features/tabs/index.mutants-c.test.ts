@@ -227,11 +227,14 @@ function pick(root: HTMLElement, sel: string): HTMLElement {
 
 // Mount tabs over the current listBody and wait for every listed session to have
 // a chip. Returns the surfaces every case below reads.
-async function mount(feature?: TerminalFeature<unknown>[]): Promise<Mounted> {
+async function mount(
+  feature?: TerminalFeature<unknown>[],
+  opts: { split?: boolean } = {},
+): Promise<Mounted> {
   const root = document.createElement("div");
   document.body.appendChild(root);
   const wanted = listBody.length;
-  term = await mountTerminal(root, { features: () => feature ?? [tabs()] });
+  term = await mountTerminal(root, { ...opts, features: () => feature ?? [tabs()] });
   await until(() => root.querySelectorAll(".wt-tab").length === wanted);
   return {
     root,
@@ -1119,6 +1122,34 @@ describe("tabs: the reel (a swipe rotates the open list)", () => {
     expect(ghostOf(m)).toBeDefined();
     vi.advanceTimersByTime(200);
     expect(ghostOf(m)).toBeUndefined();
+  });
+
+  it("still rotates the list after a snap that had to create the tab it pairs with", async () => {
+    listBody = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
+    stubRowLayout();
+    const feature = tabs();
+    const m = await mount([feature], { split: true });
+    expect(feature.api?.snap("s1", "right")).toBe(true);
+    await until(() => term?.split?.isOpen() === true && m.chips().length === 2);
+    term?.split?.close();
+    m.current.click();
+
+    flickNext(m.current);
+
+    expect(ghostOf(m)).toBeDefined();
+  });
+
+  it("still rotates the open list on the swipe after a tab was created from it", async () => {
+    three();
+    stubRowLayout();
+    const m = await mount();
+    m.current.click();
+    m.root.querySelector<HTMLElement>(".wt-switcher-new")?.click();
+    await until(() => m.chips().length === 4);
+
+    flickNext(m.current);
+
+    expect(ghostOf(m)).toBeDefined();
   });
 
   it("does not reel when the swipe is a two-step move", async () => {
