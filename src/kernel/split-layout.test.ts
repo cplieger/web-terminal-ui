@@ -726,6 +726,119 @@ describe("opening with wt-animate", () => {
     await shortSettled();
     expect(fake.engines.map((e) => e.connection.sendResize.mock.calls.length)).toEqual(sends);
   });
+
+  it.each([["-0.2s"], ["0.2s ease"], ["0.2sec"]])(
+    "opens at once when --dur-standard is %s, which is not one CSS time",
+    async (token) => {
+      const { root, split } = await settledSingle();
+      root.style.setProperty("--dur-standard", token);
+
+      split.open();
+
+      expect(root.classList.contains("wt-split-opening")).toBe(false);
+    },
+  );
+
+  it("reads a --dur-standard in milliseconds as milliseconds", async () => {
+    const { root, split } = await settledSingle();
+    root.style.setProperty("--dur-standard", "40ms");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      split.open();
+      expect(root.classList.contains("wt-split-opening")).toBe(true);
+
+      vi.advanceTimersByTime(60);
+
+      expect(root.classList.contains("wt-split-opening")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends only on the shell root's own grid-template-columns transition", async () => {
+    const { root, split } = await settledSingle();
+    root.style.setProperty("--dur-standard", "3s");
+    split.open();
+    const ended = (target: Element | undefined, propertyName: string): void => {
+      target?.dispatchEvent(new TransitionEvent("transitionend", { propertyName, bubbles: true }));
+    };
+
+    ended(paneRoots(root)[0], "grid-template-columns");
+    expect(root.classList.contains("wt-split-opening")).toBe(true);
+    ended(root, "opacity");
+    expect(root.classList.contains("wt-split-opening")).toBe(true);
+    ended(root, "grid-template-columns");
+
+    expect(root.classList.contains("wt-split-opening")).toBe(false);
+  });
+
+  it("a close during the slide leaves the next open's slide to its own clock", async () => {
+    const { root, split } = await settledSingle();
+    root.style.setProperty("--dur-standard", "1s");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      split.open();
+      split.close();
+      vi.advanceTimersByTime(600);
+      split.open();
+      expect(root.classList.contains("wt-split-opening")).toBe(true);
+
+      // Past where the first open's slide would have ended, short of the second's.
+      vi.advanceTimersByTime(500);
+
+      expect(root.classList.contains("wt-split-opening")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("a second pane failing while its close slides", () => {
+  it("leaves the first pane as the terminal's one pane", async () => {
+    let setups = 0;
+    let rejectSecond: ((err: Error) => void) | undefined;
+    const late = (): TerminalFeature<void> => ({
+      name: "late",
+      setup() {
+        setups += 1;
+        if (setups === 2) {
+          return new Promise((_, reject) => {
+            rejectSecond = reject;
+          });
+        }
+        return { api: undefined, teardown: () => undefined };
+      },
+    });
+    let ctxRef: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "shell-probe",
+      scope: "shell",
+      setup(ctx) {
+        ctxRef = ctx;
+        return { api: undefined, teardown: () => undefined };
+      },
+    };
+    const { root } = hostOf(1000);
+    const term = await mountTerminal(root, {
+      split: true,
+      layout: "container",
+      onFatalError: () => true,
+      features: () => [layoutOwner(), probe, animations(), late()],
+    });
+    await tick();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ctxRef?.notifySwitch({ id: "a" });
+    root.style.setProperty("--dur-standard", "3s");
+    term.split?.open();
+    term.split?.close();
+    expect(root.classList.contains("wt-split-closing")).toBe(true);
+
+    rejectSecond?.(new Error("second pane, later"));
+    await tick();
+
+    expect(ctxRef?.shell.panes()).toHaveLength(1);
+    expect(ctxRef?.shell.pane("left")?.session.id).toBe("a");
+  });
 });
 
 const POINTER = 7;

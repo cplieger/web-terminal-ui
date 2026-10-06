@@ -160,3 +160,63 @@ describe("selection indicators", () => {
     expect(log).toEqual(["right:65", "left:66"]);
   });
 });
+
+describe("the keyboard with no element focused", () => {
+  const blurAll = (): void => {
+    (document.activeElement as HTMLElement | null)?.blur();
+  };
+
+  it("a key typed after a press in the shell goes to the selected pane alone", async () => {
+    const root = rootIn();
+    const log: string[] = [];
+    const { term, ctx } = await mountSplit(root, log);
+    ctx.notifySwitch({ id: "a" });
+    term.split?.open();
+    ctx.notifySwitch({ id: "b" });
+    expect(ctx.shell.selected()).toBe("right");
+    termOf(root, "right").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    blurAll();
+
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "x", bubbles: true, cancelable: true }),
+    );
+
+    expect(log).toEqual(["right:120"]);
+    expect(document.activeElement).toBe(textareaOf(root, "right"));
+  });
+
+  it("returning to the page focuses the selected pane and leaves the selection where it was", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountSplit(root);
+    ctx.notifySwitch({ id: "a" });
+    term.split?.open();
+    ctx.notifySwitch({ id: "b" });
+    ctx.shell.select("left");
+    blurAll();
+
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    expect(ctx.shell.selected()).toBe("left");
+    expect(document.activeElement).toBe(textareaOf(root, "left"));
+  });
+});
+
+describe("a shell-scoped feature's input observer", () => {
+  it("sees what each pane sends, the pane built at the open included", async () => {
+    const root = rootIn();
+    const { term, ctx } = await mountSplit(root);
+    const seen: number[] = [];
+    ctx.registerInputObserver((bytes) => {
+      seen.push(bytes[0] ?? -1);
+    });
+    ctx.notifySwitch({ id: "a" });
+    term.split?.open();
+    ctx.notifySwitch({ id: "b" });
+
+    term.send(new Uint8Array([0x41]));
+    ctx.shell.select("left");
+    term.send(new Uint8Array([0x42]));
+
+    expect(seen).toEqual([0x41, 0x42]);
+  });
+});

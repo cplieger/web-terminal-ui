@@ -457,3 +457,21 @@ describe("kernel-init in the second pane", () => {
     });
   }
 });
+
+describe("a release that throws on the way down", () => {
+  it("is logged, and the pane still releases its root", async () => {
+    const root = rootIn();
+    const term = await mountTerminal(root, { features: () => [] });
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const fault = new Error("engine dispose failed");
+    fake.dispose.mockImplementationOnce(() => {
+      throw fault;
+    });
+
+    term.destroy();
+
+    expect(error).toHaveBeenCalledWith("web-terminal-ui: release failed during teardown", fault);
+    expect(root.classList.contains("wt-root")).toBe(false);
+    expect(root.childElementCount).toBe(0);
+  });
+});

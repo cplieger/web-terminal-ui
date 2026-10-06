@@ -11,7 +11,17 @@
 // toggles one class and the cascade decides three cursors from it (the grid, a
 // link inside the grid, and the resting state). Reading the rules back as text
 // would assert the declarations exist, not that they win.
-import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  afterEach,
+  onTestFinished,
+  vi,
+} from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
 import type {
@@ -373,6 +383,25 @@ describe("mouse reports on the wire", () => {
     // One report of the END state, and it matches what was already reported, so
     // nothing reaches the application.
     expect(setClientFocus.mock.calls).toEqual([[true]]);
+  });
+
+  it("reports a blur that comes after the press is over", async () => {
+    const { termWrap, outputEl, input } = await mountGrid();
+    deliverModes(modesFrame({ focusReporting: true }));
+    input.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    termWrap.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, isPrimary: true }));
+    termWrap.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, isPrimary: true }));
+    outputEl.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    vi.advanceTimersByTime(0);
+    setClientFocus.mockClear();
+
+    input.blur();
+
+    expect(setClientFocus.mock.calls).toEqual([[false]]);
   });
 
   it("reports the blur when the gesture ends with focus genuinely gone", async () => {

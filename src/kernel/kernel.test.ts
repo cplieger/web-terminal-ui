@@ -228,6 +228,25 @@ describe("startup connect gating (session-managed vs single-terminal)", () => {
       /multiple session-owning features: a, b/,
     );
   });
+
+  it("throws when one feature registers both ways of owning the first connect, naming it", async () => {
+    const root = rootIn();
+    const both: TerminalFeature = {
+      name: "greedy",
+      sessionOwner: { resolveInitialSession: () => Promise.resolve(null) },
+      paneLayoutOwner: {
+        resolveInitialLayout: () => Promise.resolve(false),
+        shownIn: () => null,
+        showIn: () => false,
+      },
+      setup() {
+        return { teardown: () => undefined };
+      },
+    };
+    await expect(mountTerminal(root, { features: () => [both] })).rejects.toThrow(
+      /greedy registers both sessionOwner and paneLayoutOwner/,
+    );
+  });
 });
 
 describe("layout modes and root classes", () => {
@@ -609,6 +628,46 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
     expect(root.querySelector(".wt-fatal-reload")).not.toBeNull();
     // Boundary classes stay so the recovery surface keeps the design tokens.
     expect(root.classList.contains("wt-root")).toBe(true);
+  });
+
+  it("reports nothing and draws nothing when an error handler destroys the terminal as a setup fails", async () => {
+    const root = rootIn();
+    const loading = document.createElement("div");
+    document.body.appendChild(loading);
+    const handle: { term?: TerminalHandle } = {};
+    let fail: (err: Error) => void = () => undefined;
+    const destroyer: TerminalFeature = {
+      name: "destroyer",
+      scope: "shell",
+      setup(ctx) {
+        ctx.onError(() => {
+          handle.term?.destroy();
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    const late: TerminalFeature = {
+      name: "late",
+      setup: () =>
+        new Promise((_, reject) => {
+          fail = reject;
+        }),
+    };
+    const onFatalError = vi.fn();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    handle.term = await mountTerminal(root, {
+      features: () => [destroyer, late],
+      loading,
+      onFatalError,
+    });
+    await tick();
+
+    fail(new Error("import graph broken"));
+    await tick();
+
+    expect(onFatalError).not.toHaveBeenCalled();
+    expect(root.querySelector("dialog.wt-fatal")).toBeNull();
+    expect(loading.classList.contains("fade")).toBe(false);
   });
 
   it("stays non-modal in container layout, so the host page keeps its focusables", async () => {
@@ -1412,6 +1471,28 @@ describe("mouse selection: a press never turns into a native text drag", () => {
     expect(collapsed()).toBe(false);
   });
 
+  it("takes no focus on a modified click that keeps the selection", async () => {
+    // Shift+click extends a selection, here one started in the page; focusing
+    // the input would collapse it.
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    (root.querySelector(".term-input") as HTMLTextAreaElement).blur();
+    const inside = document.createTextNode("terminal output text");
+    root.querySelector(".term-output")?.appendChild(inside);
+    const outside = document.createTextNode("host page paragraph");
+    document.body.insertBefore(outside, root);
+    window.getSelection()?.setBaseAndExtent(outside, 0, inside, 8);
+    await tick();
+    const term = root.querySelector(".term");
+
+    term?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse" }));
+    press(root, { button: 0, shiftKey: true });
+    term?.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, shiftKey: true }));
+
+    expect(document.activeElement).not.toBe(root.querySelector(".term-input"));
+    expect(collapsed()).toBe(false);
+  });
+
   it("leaves a touch press alone: the platform's selection UI owns it", async () => {
     const root = rootIn();
     await mountTerminal(root, { features: () => [] });
@@ -1687,6 +1768,60 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
       expect(ev.defaultPrevented).toBe(false);
       expect(document.activeElement).toBe(ta(root));
     }
+  });
+
+  it("hands a key an IME has claimed (keyCode 229) to the input, sending nothing", async () => {
+    // Safari reports a key an IME consumes with its ordinary `key`, so sending
+    // that letter from here would put it on the wire ahead of the composed text.
+    const root = await armed();
+    const ev = typeOnDocument({ key: "a", keyCode: 229 });
+    expect(sentText()).toBe("");
+    expect(ev.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(ta(root));
+  });
+
+  it("keeps the application keypad's encoding for a numpad digit", async () => {
+    // The typed character is only the fallback for a key the encoder leaves to
+    // the `input` event; a key it maps is sent as mapped.
+    await armed();
+    fake.callbacks().onMessage({
+      type: "modes",
+      bracketedPaste: false,
+      applicationCursor: false,
+      applicationKeypad: true,
+      mouseSGR: false,
+      focusReporting: false,
+      reverseVideo: false,
+      mousePixels: false,
+      mouseMode: 0,
+      keyboardFlags: 0,
+    });
+    typeOnDocument({ key: "5", code: "Numpad5" });
+    expect(sentText()).toBe("\x1bOu");
+  });
+
+  it("leaves a key to the page while text outside the terminal is selected, after a press inside it", async () => {
+    // A press inside the shell arms typing only while nothing is selected
+    // anywhere: taking this key would clear the page's selection.
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    root
+      .querySelector(".term-output")
+      ?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    ta(root).blur();
+    const hostText = document.createTextNode("host page paragraph");
+    document.body.appendChild(hostText);
+    const range = document.createRange();
+    range.setStart(hostText, 0);
+    range.setEnd(hostText, 4);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+
+    typeOnDocument({ key: "x" });
+
+    expect(sentText()).toBe("");
+    expect(window.getSelection()?.toString()).toBe("host");
+    expect(document.activeElement).not.toBe(ta(root));
   });
 
   it("leaves an Unidentified key to the platform", async () => {
@@ -2425,6 +2560,53 @@ describe("the built-in features follow the terminal's own document", () => {
     expect(FakeSource.urls).toEqual(["/api/sessions/events"]);
     expect(outerUrls).toEqual([]);
     off();
+  });
+
+  it("delivers the status stream's events to a subscriber and closes the stream with the last unsubscribe", async () => {
+    const sources: { listeners: Map<string, () => void>; closed: number }[] = [];
+    vi.stubGlobal(
+      "EventSource",
+      class {
+        readonly readyState = 0;
+        readonly record = { listeners: new Map<string, () => void>(), closed: 0 };
+        constructor() {
+          sources.push(this.record);
+        }
+        addEventListener(type: string, listener: () => void): void {
+          this.record.listeners.set(type, listener);
+        }
+        close(): void {
+          this.record.closed += 1;
+        }
+      },
+    );
+    let ctxRef: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "status-probe",
+      scope: "shell",
+      setup(ctx) {
+        ctxRef = ctx;
+        return { api: undefined, teardown: () => undefined };
+      },
+    };
+    await mountTerminal(rootIn(), { features: () => [probe] });
+    await tick();
+    if (!ctxRef) {
+      throw new Error("the probe feature never ran");
+    }
+    const onOpen = vi.fn();
+    const off = ctxRef.shell.subscribeStatus("/api/sessions/events", {
+      onStatus: () => undefined,
+      onOpen,
+    });
+    expect(sources).toHaveLength(1);
+
+    sources[0]?.listeners.get("open")?.();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(sources[0]?.closed).toBe(0);
+
+    off();
+    expect(sources[0]?.closed).toBe(1);
   });
 
   it("arms the connection banner's grace timers on the frame's clock", async () => {
@@ -3269,6 +3451,69 @@ describe("a stale composition gate must not leak control bytes (desktop/iOS CJK)
     );
     expect(sendBinary).not.toHaveBeenCalled();
   });
+
+  /** A composition opened, then left with no event for longer than the idle
+   *  bound, so the reconciling read treats it as stranded. */
+  function strandComposition(el: HTMLTextAreaElement): void {
+    el.dispatchEvent(new CompositionEvent("compositionstart"));
+    vi.setSystemTime(Date.now() + 6000);
+  }
+
+  it("withholds the 229 commit key of a composition quiet past the idle bound", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const el = ta();
+      strandComposition(el);
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, isComposing: false }),
+      );
+      expect(sendBinary).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends any other key once a composition has been quiet past the idle bound", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const el = ta();
+      strandComposition(el);
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", keyCode: 37 }));
+      expect(sentText()).toBe("\x1b[D");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends CR for an Android Enter once a quiet composition has been released", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const el = ta();
+      strandComposition(el);
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", keyCode: 37 }));
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, isComposing: false }),
+      );
+      expect(sentText()).toBe("\x1b[D\r");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends CR for an Android Enter pressed after a composition committed", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
+    const el = ta();
+    el.dispatchEvent(new CompositionEvent("compositionstart"));
+    el.dispatchEvent(new CompositionEvent("compositionend"));
+    await tick();
+    el.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, isComposing: false }),
+    );
+    expect(sentText()).toBe("\r");
+  });
 });
 
 describe("autocorrect: a retroactive rewrite is dropped, not applied", () => {
@@ -3824,6 +4069,21 @@ describe("tap-to-focus on touch (the gesture boundary with native selection)", (
 
     expect(focused(root)).toBe(false);
   });
+
+  it("lets go of focus at a touch press on a fine-pointer device once a hardware keyboard is seen", async () => {
+    // A fine primary pointer leaves only a MOUSE press to the browser's own
+    // mousedown; a touch press has no mousedown until it ends.
+    stubMedia({ "(pointer: fine)": true, "(any-pointer: fine)": true });
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    latchHardwareKeyboard(root);
+    const output = root.querySelector(".term-output");
+
+    output?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+
+    expect(focused(root)).toBe(false);
+  });
+
   it("cancels the synthetic mousedown after a bare-touch tap, which is what keeps the keyboard up", async () => {
     // iOS synthesises a mousedown after a touch tap, and letting it through blurs
     // and refocuses the textarea — which closes and reopens the soft keyboard. The

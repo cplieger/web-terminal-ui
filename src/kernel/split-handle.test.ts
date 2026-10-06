@@ -776,6 +776,142 @@ describe("the drag", () => {
     expect(split.isOpen()).toBe(false);
     expect(root.querySelector(":scope > .wt-split-pane:not(.wt-pane-hidden)")).toBe(left);
   });
+
+  it("a split closed under the pointer drops a resize the drag still had due", async () => {
+    const { split, handle } = await openWithTwoTabs(1000);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    press(handle, 500);
+    moveTo(450);
+    moveTo(440);
+    expect(resizes()).toEqual([1, 1]);
+
+    split.close();
+    clearResizes();
+    vi.advanceTimersByTime(200);
+
+    expect(resizes()).toEqual([0, 0]);
+  });
+
+  it("a trailing resize already overdue when the next move arrives is replaced by that move's own", async () => {
+    const { handle } = await openWithTwoTabs(1000);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    press(handle, 500);
+    moveTo(510);
+    moveTo(520);
+    expect(resizes()).toEqual([1, 1]);
+
+    // The clock passes the trailing call's due time before its timer has run.
+    vi.setSystemTime(Date.now() + 150);
+    moveTo(530);
+    expect(resizes()).toEqual([2, 2]);
+    vi.advanceTimersByTime(200);
+
+    expect(resizes()).toEqual([2, 2]);
+  });
+
+  it("a release that closes a pane resizes only the pane left filling the view", async () => {
+    const { split, handle } = await openWithTwoTabs(1000);
+    press(handle, 500);
+    moveTo(244);
+    expect(resizes()).toEqual([1, 1]);
+
+    release(244);
+
+    expect(split.isOpen()).toBe(false);
+    expect(resizes()).toEqual([1, 2]);
+  });
+
+  it("a drag brought back within 8 px of where it started follows the pointer there", async () => {
+    const { root, split, handle } = await openWithTwoTabs(1000);
+    press(handle, 500);
+    moveTo(450);
+
+    moveTo(503);
+
+    expect(ratioVar(root)).toBe(String(498 / 990));
+    release(503);
+    expect(split.state().committedRatio).toBe(498 / 990);
+  });
+
+  it("a second pointer pressed on the handle mid-drag leaves the drag with the first", async () => {
+    const { root, split, handle } = await openWithTwoTabs(1000);
+    press(handle, 500);
+    moveTo(450);
+
+    handle.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        pointerId: POINTER + 1,
+        clientX: 600,
+        clientY: 100,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    moveTo(420);
+
+    expect(ratioVar(root)).toBe(String(415 / 990));
+    release(420);
+    expect(split.state().committedRatio).toBe(415 / 990);
+  });
+
+  it("a release inside the right pane's grace zone after a trip past it still sets that pane to 360 px", async () => {
+    const { root, split, handle } = await openWithTwoTabs(1000);
+    const [, right] = paneRoots(root);
+
+    press(handle, 500);
+    moveTo(800);
+    expect(right?.classList.contains("wt-pane-closing")).toBe(true);
+    moveTo(700);
+    expect(right?.classList.contains("wt-pane-closing")).toBe(false);
+    release(700);
+
+    expect(split.isOpen()).toBe(true);
+    expect(split.state()).toMatchObject({ ratio: 630 / 990, committedRatio: 630 / 990 });
+  });
+
+  it("a release past the right pane's grace zone whose close the split refuses snaps the divider back", async () => {
+    // The second pane's setup stays pending until it is shown on the left, so its
+    // failure leaves the left pane failed and the right one closable only onto it.
+    let setups = 0;
+    let rejectSecond: ((err: Error) => void) | undefined;
+    const late = (): TerminalFeature<void> => ({
+      name: "late",
+      setup() {
+        setups += 1;
+        if (setups === 2) {
+          return new Promise((_, reject) => {
+            rejectSecond = reject;
+          });
+        }
+        return { api: undefined, teardown: () => undefined };
+      },
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { root, ctx, split, handle } = await mountSplit(
+      rootIn(1000),
+      { onFatalError: () => true },
+      () => [late()],
+    );
+    ctx.notifySwitch({ id: "a" });
+    split.open();
+    ctx.notifySwitch({ id: "b" });
+    split.close();
+    split.open();
+    expect(ctx.shell.pane("left")?.session.id).toBe("b");
+    rejectSecond?.(new Error("second pane, later"));
+    await tick();
+    expect(ctx.shell.pane("left")?.state()).toBe("failed");
+    const [, right] = paneRoots(root);
+
+    press(handle, 500);
+    moveTo(800);
+    expect(right?.classList.contains("wt-pane-closing")).toBe(true);
+    release(800);
+
+    expect(split.isOpen()).toBe(true);
+    expect(ratioVar(root)).toBe("0.5");
+    expect(split.state()).toMatchObject({ ratio: 0.5, committedRatio: 0.5 });
+  });
 });
 
 describe("the keyboard", () => {
@@ -925,6 +1061,33 @@ describe("the keyboard", () => {
     expect(changes).toHaveBeenCalledTimes(afterBlur);
     expect(split.state().committedRatio).toBe(479 / 990);
   });
+
+  it("the release's own resize replaces a trailing one a quick second press left due", async () => {
+    const { handle } = await openWithTwoTabs(1000);
+    handle.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    key(handle, "keydown", "ArrowLeft");
+    key(handle, "keydown", "ArrowLeft", { repeat: true });
+    expect(resizes()).toEqual([1, 1]);
+
+    key(handle, "keyup", "ArrowLeft");
+    expect(resizes()).toEqual([2, 2]);
+    vi.advanceTimersByTime(200);
+
+    expect(resizes()).toEqual([2, 2]);
+  });
+
+  it("releasing some other key mid-nudge writes nothing; the nudge key's own release does", async () => {
+    const { split, handle } = await openWithTwoTabs(1000);
+    handle.focus();
+
+    key(handle, "keydown", "ArrowLeft");
+    key(handle, "keyup", "Shift");
+    expect(split.state().committedRatio).toBe(0.5);
+
+    key(handle, "keyup", "ArrowLeft");
+    expect(split.state().committedRatio).toBe(479 / 990);
+  });
 });
 
 describe("focus when the handle leaves the layout", () => {
@@ -1061,5 +1224,18 @@ describe("construction is transactional", () => {
     expect(offChange).toHaveBeenCalledTimes(1);
     expect(taken.map((t) => t.signal?.aborted)).toEqual(taken.map(() => true));
     expect(handle.element.isConnected).toBe(false);
+  });
+
+  it("dispose() during a drag drops the drag's window listeners too", () => {
+    const { shell } = handleShell(rootIn());
+    const setRatio = vi.fn(() => false);
+    const handle = createSplitHandle({ ...shell, split: { ...shell.split, setRatio } });
+    shell.root.append(handle.element);
+    press(handle.element, 500);
+
+    handle.dispose();
+    moveTo(400);
+
+    expect(setRatio).not.toHaveBeenCalled();
   });
 });

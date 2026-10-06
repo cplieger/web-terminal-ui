@@ -358,6 +358,15 @@ describe("tabs: the switcher's vertical drag", () => {
     expect(h.list.style.maxHeight).toBe("0px");
   });
 
+  it("wears the open list's look while the finger is still pulling it up", async () => {
+    const h = await mountBar(3, { listHeight: LIST_H });
+
+    h.down(100, 300, 1000);
+    h.move(100, 240, 1010);
+
+    expect(h.expanded()).toBe(true);
+  });
+
   it("snaps open when the release is past the halfway point", async () => {
     await shortenReannounce();
     const h = await mountBar(3, { listHeight: LIST_H });
@@ -703,6 +712,24 @@ describe("tabs: the switcher's horizontal drag", () => {
     expect(h.inner.style.transform).toBe("translateX(-50px)");
     expect(h.list.style.overflow).toBe("");
     expect(h.list.style.position).toBe("");
+  });
+
+  it("hands a reel still settling over to the next drag's peek", async () => {
+    stubMatchMedia(false);
+    const h = await mountBar(3, { surfaceWidth: WIDTH });
+    h.openList();
+    h.freezeTime();
+    h.down(300, 300, 1000);
+    h.move(300 - QUARTER - 20, 300, 1200);
+    h.up(300 - QUARTER - 20, 300, 1210);
+    expect(h.active()).toBe("two");
+
+    h.down(300, 300, 1300);
+    h.move(250, 300, 1400);
+    const peek = h.rows().map((r) => r.style.transform);
+    vi.advanceTimersByTime(1000);
+
+    expect(h.rows().map((r) => r.style.transform)).toEqual(peek);
   });
 
   it("springs the chip back when the release is short of a quarter width", async () => {
@@ -1637,5 +1664,83 @@ describe("tabs: booting onto a page whose sessions have all ended", () => {
     // And the toast says only what it knows: the server offered no explanation,
     // so none is invented (and no "undefined" is shown to the user).
     expect(root.querySelector(".wt-toast")?.textContent).toBe("Could not open a terminal");
+  });
+});
+
+describe("tabs: the switcher list's close", () => {
+  // The rows leave the DOM once the collapse animation is over, so the timer
+  // that removes them belongs to the close that armed it and to no other.
+  const ROWS_GONE_MS = 260;
+
+  it("keeps the rows of a list re-opened before the last close finished", async () => {
+    const h = await mountBar(3, { listHeight: 200 });
+    h.openList();
+    h.freezeTime();
+    h.openList();
+    vi.advanceTimersByTime(100);
+    h.openList();
+
+    vi.advanceTimersByTime(ROWS_GONE_MS);
+    expect(h.expanded()).toBe(true);
+    expect(h.rows()).toHaveLength(2);
+  });
+
+  it("gives a second close its own full collapse before the rows go", async () => {
+    const h = await mountBar(3, { listHeight: 200 });
+    h.openList();
+    h.freezeTime();
+    h.openList();
+    vi.advanceTimersByTime(100);
+    // A pull that never reaches halfway closes the list again.
+    h.down(100, 300, 2000);
+    h.move(100, 260, 2400);
+    h.up(100, 260, 2410);
+    expect(h.expanded()).toBe(false);
+
+    vi.advanceTimersByTime(ROWS_GONE_MS - 100 + 20);
+    expect(h.rows()).toHaveLength(2);
+    vi.advanceTimersByTime(100);
+    expect(h.rows()).toHaveLength(0);
+  });
+});
+
+describe("tabs: the switcher bar's controls", () => {
+  it("sets the switch button straight after the keyboard button when there is no split", async () => {
+    const h = await mountBar(2, {});
+    const bar = h.switcher.querySelector<HTMLElement>(".wt-switcher-bar");
+    const tail = [...(bar?.childNodes ?? [])].slice(-3);
+
+    expect(tail).toHaveLength(3);
+    expect(tail[0]).toBe(bar?.querySelector(".wt-switcher-kb"));
+    expect(tail[1]).toBe(bar?.querySelector(".wt-switcher-switch"));
+    expect(tail[2]).toBe(bar?.querySelector(".wt-switcher-new"));
+  });
+
+  it("hands the keyboard back to the terminal after a row tap took it", async () => {
+    // A touchscreen with no physical keyboard: only the press-time snapshot can
+    // say the terminal held the keyboard before the row's button took it.
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: query.includes("coarse"),
+        media: query,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+      })),
+    );
+    const h = await mountBar(3, { listHeight: 200 });
+    h.openList();
+    const input = h.root.querySelector<HTMLTextAreaElement>(".term-input");
+    const row = h.rows()[0]?.querySelector<HTMLElement>(".wt-switcher-row-select");
+    input?.focus();
+
+    row?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    row?.focus();
+    row?.click();
+
+    expect(h.active()).toBe("two");
+    expect(document.activeElement).toBe(input);
   });
 });

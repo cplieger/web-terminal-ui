@@ -645,6 +645,19 @@ describe("inline rename", () => {
     expect(chip?.getAttribute("aria-selected")).toBe("false");
   });
 
+  it("names the panel after a tab that became the shown one while it was being renamed", async () => {
+    const root = document.createElement("div");
+    await mount(root);
+    const chips = root.querySelectorAll<HTMLElement>(".wt-tab");
+    chips[1]?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    chips[0]?.querySelector<HTMLButtonElement>(".wt-tab-close")?.click();
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+    field(root)?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    const panel = root.querySelector('[role="tabpanel"]');
+    expect(panel?.getAttribute("aria-labelledby")).toBe(chips[1]?.id);
+  });
+
   it("keeps a long-pressed tab menu open through the release click (iPadOS)", async () => {
     const root = document.createElement("div");
     await mount(root);

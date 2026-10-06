@@ -363,6 +363,17 @@ describe("persistScrollback: when the snapshot is written", () => {
     }
   });
 
+  it("writes on freeze, the last code a frozen page runs", async () => {
+    const { term, store } = await booted();
+    try {
+      printOnBoundStore(4, 20);
+      document.dispatchEvent(new Event("freeze"));
+      expect(store.entries.get("unmanaged-1")?.snapshot.highest).toBe(23);
+    } finally {
+      term.destroy();
+    }
+  });
+
   it("writes on destroy, because a closed panel is still a page to come back to", async () => {
     const { term, store } = await booted();
     printOnBoundStore(3, 10);

@@ -120,6 +120,32 @@ describe("the read", () => {
   });
 });
 
+describe("the read's failures", () => {
+  it("warns once when the layout record cannot be read, and boots the oldest live tab", async () => {
+    server.layoutReadStatus = 500;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    await tick();
+
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("could not read the pane layout");
+    warn.mockRestore();
+  });
+
+  it("keeps the split closed when an open record names no session that still exists", async () => {
+    server.layout = { open: true, left: "ghost", right: "gone", handle: 0.5, selected: "left" };
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    await tick();
+
+    expect(term.split?.isOpen()).toBe(false);
+    expect(shown(ctx, "left")).toBe("s1");
+  });
+});
+
 describe("the writes", () => {
   it("a snap writes the whole record once, and creates or closes no session", async () => {
     const root = rootIn();
@@ -359,6 +385,53 @@ describe("the writes", () => {
     await tick();
     await tick();
     expect(server.writes).toHaveLength(2);
+  });
+
+  it("a 409 whose re-list changes nothing still writes the record once more", async () => {
+    const root = rootIn();
+    const { ctx } = await mountTabbed(root, server);
+    await tick();
+    server.putOnce = 409;
+
+    chipOf(root, "two").click();
+    await until(() => server.writes.length === 2);
+    await tick();
+
+    expect(server.writes[1]).toEqual(server.writes[0]);
+    expect(shown(ctx, "left")).toBe("s2");
+  });
+
+  it("a second 409 in a row is not retried again", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const root = rootIn();
+    await mountTabbed(root, server);
+    await tick();
+    server.putStatus = 409;
+
+    chipOf(root, "two").click();
+    await until(() => server.writes.length === 2);
+    await tick();
+    await tick();
+
+    expect(server.writes).toHaveLength(2);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("a server that reads the record but has no write route warns once that the route is missing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const root = rootIn();
+    await mountTabbed(root, server);
+    await tick();
+    server.putStatus = 404;
+
+    chipOf(root, "two").click();
+    await until(() => server.writes.length === 1);
+    await tick();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("no GET/PUT /api/sessions/layout route");
+    warn.mockRestore();
   });
 
   it("a 500 warns once, and the next change writes again", async () => {

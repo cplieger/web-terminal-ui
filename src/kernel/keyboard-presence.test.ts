@@ -125,6 +125,30 @@ describe("keyboard presence: an iOS key, which always carries a code", () => {
     expect(presence.hardwareSeen()).toBe(false);
   });
 
+  it.each([
+    ["an input", () => document.createElement("input")],
+    [
+      "a contenteditable element",
+      () => {
+        const el = document.createElement("div");
+        el.contentEditable = "true";
+        return el;
+      },
+    ],
+  ])("refuses an arrow typed into %s over a docked on-screen keyboard", (_, make) => {
+    const target = make();
+    document.body.replaceChildren(target);
+    softKeyboard = 300;
+    keydown(target, { key: "ArrowLeft", code: "ArrowLeft" });
+    expect(presence.hardwareSeen()).toBe(false);
+  });
+
+  it("reads an inset of exactly 150px as an on-screen keyboard", () => {
+    softKeyboard = 150;
+    keydown(field, { key: "ArrowLeft", code: "ArrowLeft" });
+    expect(presence.hardwareSeen()).toBe(false);
+  });
+
   it("latches on an arrow on the body, where no on-screen keyboard can be typing", () => {
     softKeyboard = 300;
     keydown(document.body, { key: "ArrowLeft", code: "ArrowLeft" });

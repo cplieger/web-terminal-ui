@@ -2151,8 +2151,20 @@ describe("tabs feature: boot race (stream-open reconcile vs bootstrap create)", 
     const stale: { resolve: (() => void) | null } = { resolve: null };
     let posts = 0;
     let gets = 0;
-    fetchMock.mockImplementation((_url: string | URL, init?: RequestInit) => {
+    fetchMock.mockImplementation((url: string | URL, init?: RequestInit) => {
       const method = init?.method ?? "GET";
+      // The layout record is the bootstrap's other read; only the session
+      // listings take part in the race.
+      if (String(url).endsWith("/layout")) {
+        return Promise.resolve(
+          method === "PUT"
+            ? jsonResponse(null, 204)
+            : jsonResponse(
+                { left: null, right: null, handle: 0.5, selected: "left", open: false },
+                200,
+              ),
+        );
+      }
       if (method === "POST") {
         posts++;
         if (posts === 1) {
@@ -3011,16 +3023,21 @@ describe("tabs OSC 9 notifications", () => {
    *  permission state. */
   function stubNotification(permission: string): {
     posts: { title: string; body: string | undefined }[];
+    shown: { onclick: ((e: Event) => void) | null }[];
   } {
     const posts: { title: string; body: string | undefined }[] = [];
+    const shown: { onclick: ((e: Event) => void) | null }[] = [];
     class FakeNotification {
       static permission = permission;
+      onclick: ((e: Event) => void) | null = null;
       constructor(title: string, options?: { body?: string }) {
         posts.push({ title, body: options?.body });
+        shown.push(this);
       }
+      close = (): void => undefined;
     }
     vi.stubGlobal("Notification", FakeNotification);
-    return { posts };
+    return { posts, shown };
   }
   /** A shell-scoped feature that captures the shell the tabs feature reports to. */
   function shellProbe(): { feature: TerminalFeature<void>; shell: () => ShellContext } {
@@ -3075,6 +3092,24 @@ describe("tabs OSC 9 notifications", () => {
       notificationSeq: 1,
     });
     expect(posts).toEqual([{ title: "two", body: "Response complete" }]);
+  });
+
+  it("titles a notification with the tab's own name, and a click on it opens that tab", async () => {
+    const { posts, shown } = stubNotification("granted");
+    const { root, monitor } = await boot();
+    monitor.emit({
+      id: "s2",
+      status: "done",
+      title: "two",
+      pinnedTitle: "Build box",
+      createdAt: "2",
+      notification: "Response complete",
+      notificationSeq: 1,
+    });
+    expect(posts).toEqual([{ title: "Build box", body: "Response complete" }]);
+
+    shown[0]?.onclick?.(new Event("click"));
+    expect(root.querySelector(".wt-tab-active .wt-tab-label")?.textContent).toBe("Build box");
   });
 
   it("suppresses the ACTIVE session's notification while the page is visible", async () => {
@@ -3136,6 +3171,41 @@ describe("tabs OSC 9 notifications", () => {
     expect(posts.map((p) => p.body)).toEqual(["First run", "Second run"]);
   });
 
+  it("lets a bulk-closed session's id notify again from sequence one", async () => {
+    const { posts } = stubNotification("granted");
+    const { root, monitor } = await boot();
+    monitor.emit({
+      id: "s2",
+      status: "done",
+      title: "two",
+      createdAt: "2",
+      notification: "First run",
+      notificationSeq: 5,
+    });
+    root.querySelector(".wt-tab")?.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 10,
+        clientY: 10,
+      }),
+    );
+    [...root.querySelectorAll<HTMLButtonElement>(".wt-tab-menu button")]
+      .find((b) => b.textContent === "Close others")
+      ?.click();
+    await until(() => root.querySelectorAll(".wt-tab").length === 1);
+
+    monitor.emit({
+      id: "s2",
+      status: "done",
+      title: "two",
+      createdAt: "9",
+      notification: "Second run",
+      notificationSeq: 1,
+    });
+    expect(posts.map((p) => p.body)).toEqual(["First run", "Second run"]);
+  });
+
   it("passes untrusted notification text as data, never into the DOM", async () => {
     const { posts } = stubNotification("granted");
     const { root, monitor } = await boot();
@@ -3167,6 +3237,10 @@ describe("tabs OSC 9 notifications", () => {
       .querySelector(".wt-tab-bar")
       ?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     expect(gesture).toHaveBeenCalledTimes(1);
+    expect(arm).not.toHaveBeenCalled();
+
+    // A session that never reported is a plain shell, which never notifies.
+    monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
     expect(arm).not.toHaveBeenCalled();
 
     // A session that reports activity speaks OSC 9, so it may notify.
@@ -3673,7 +3747,7 @@ describe("tabs reorder preview", () => {
     // pass and the strip commits every slot the pointer crosses. At 120ms a fast sweep
     // over five tabs moved all five. Simulated here at the platform's worst-case
     // cadence, which is the case a shorter window cannot survive.
-    const h = await mountDrag(4);
+    const h = await mountDragLaidOut(4);
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
 
     for (const x of [20, 90, 160, 240, 320]) {
@@ -3809,9 +3883,9 @@ describe("tabs reorder preview", () => {
   });
 
   it("withdraws a pending slot when the pointer leaves the strip", async () => {
-    const h = await mountDrag(3);
+    const h = await mountDragLaidOut(3);
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
 
     // Off the strip there is no candidate, so no rest can open a slot for a target the
     // pointer has already left.
@@ -3832,9 +3906,9 @@ describe("tabs reorder preview", () => {
     // problem: a null relatedTarget is the window exit. A pointer that left the window
     // is also, by definition, one that has stopped moving over the strip, so the rest
     // window would otherwise run down and commit.
-    const h = await mountDrag(3);
+    const h = await mountDragLaidOut(3);
     h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
-    h.sweepTo(10);
+    h.sweepTo(h.pastEnd);
 
     const leave = dragEvent("dragleave", h.dt);
     Object.defineProperty(leave, "relatedTarget", { value: null });
@@ -3842,6 +3916,70 @@ describe("tabs reorder preview", () => {
 
     vi.advanceTimersByTime(REORDER_REST_MS * 4);
     expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+  });
+
+  it("withdraws a pending slot when the pointer comes back to the tab's own slot", async () => {
+    const h = await mountDragLaidOut(3);
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(h.pastEnd);
+    h.sweepTo(20);
+
+    vi.advanceTimersByTime(REORDER_REST_MS * 4);
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+  });
+
+  it("previews nothing while the pointer rests over the dragged tab itself", async () => {
+    const h = await mountDragLaidOut(3);
+    const dragged = h.chips()[1];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(120);
+    vi.advanceTimersByTime(REORDER_STILL_MS);
+    h.sweepTo(120);
+    vi.advanceTimersByTime(REORDER_REST_MS);
+
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+    expect(dragged?.classList.contains("wt-tab-slotted")).toBe(false);
+    vi.advanceTimersByTime(150);
+    expect(h.live()).toBe("");
+  });
+
+  it("makes the strip a drop target for the dragged tab", async () => {
+    const h = await mountDragLaidOut(3);
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    const over = dragAt("dragover", h.dt, h.pastEnd);
+    h.bar.dispatchEvent(over);
+
+    expect(over.defaultPrevented).toBe(true);
+    expect(h.dt.dropEffect).toBe("move");
+  });
+
+  it("swallows the tab's drop on the strip, so WebKit cannot load it as a URL", async () => {
+    const h = await mountDragLaidOut(3);
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    const drop = dragAt("drop", h.dt, h.pastEnd);
+    dragged?.dispatchEvent(drop);
+
+    expect(drop.defaultPrevented).toBe(true);
+  });
+
+  it("leaves a drop on the strip that is not a tab drag to the browser", async () => {
+    const h = await mountDragLaidOut(3);
+    const drop = dragAt("drop", fakeDataTransfer(), h.pastEnd);
+    h.bar.dispatchEvent(drop);
+
+    expect(drop.defaultPrevented).toBe(false);
+    expect(idsOf(h.root)).toEqual(["one", "two", "three"]);
+  });
+
+  it("promises no move over the terminal when no pane half can take the tab", async () => {
+    // Without the split there is no half to snap into, so a release there cancels.
+    const h = await mountDragLaidOut(3);
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    const offStrip = fakeDataTransfer();
+    h.surface.dispatchEvent(dragAt("dragover", offStrip, 40));
+
+    expect(offStrip.dropEffect).toBe("");
   });
 
   it("keeps a pending slot when dragleave is only a move between the bar's own children", async () => {
@@ -3989,6 +4127,79 @@ describe("tabs reorder preview", () => {
       expect(translateOf(chip)).toBe("");
       expect(chip.classList.contains("wt-tab-dragging")).toBe(false);
     }
+  });
+
+  it("settles a slide in progress when the dragged tab is closed", async () => {
+    // The strip reflows without the closed chip, so the slide the last commit
+    // started has nowhere left to go.
+    const h = await mountDragLaidOut(3);
+    h.stubRects();
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(h.pastEnd);
+    vi.advanceTimersByTime(REORDER_REST_MS);
+    expect(h.chips().some((c) => c.style.transition !== "")).toBe(true);
+
+    dragged?.querySelector<HTMLElement>(".wt-tab-close")?.click();
+
+    expect(h.chips()).toHaveLength(2);
+    for (const chip of h.chips()) {
+      expect(translateOf(chip)).toBe("");
+      expect(chip.style.transition).toBe("");
+    }
+  });
+
+  it("starts the next drag from rest when the last one's revert is still sliding", async () => {
+    const h = await mountDragLaidOut(3);
+    h.stubRects();
+    const dragged = h.chips()[0];
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(h.pastEnd);
+    vi.advanceTimersByTime(REORDER_REST_MS);
+    dragged?.dispatchEvent(dragEvent("dragend", h.dt));
+    expect(h.chips().some((c) => c.style.transition !== "")).toBe(true);
+
+    dragged?.dispatchEvent(dragEvent("dragstart", h.dt));
+
+    for (const chip of h.chips()) {
+      expect(translateOf(chip)).toBe("");
+      expect(chip.style.transition).toBe("");
+    }
+  });
+
+  it("gives a drag started right after the dragged tab closed none of its pending slot", async () => {
+    const h = await mountDragLaidOut(3);
+    const first = h.chips()[0];
+    first?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(h.pastEnd);
+    first?.querySelector<HTMLElement>(".wt-tab-close")?.click();
+    expect(h.chips()).toHaveLength(2);
+
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    vi.advanceTimersByTime(REORDER_REST_MS * 2);
+
+    expect(idsOf(h.root)).toEqual(["two", "three"]);
+  });
+
+  it("lets a second slot's slide run its full course", async () => {
+    // A commit landing while the previous slide still settles restarts the settle
+    // clock: the first slide's timer must not end the second slide early.
+    const h = await mountDragLaidOut(4);
+    h.stubRects();
+    h.chips()[0]?.dispatchEvent(dragEvent("dragstart", h.dt));
+    h.sweepTo(300);
+    vi.advanceTimersByTime(REORDER_STILL_MS);
+    h.sweepTo(300);
+    expect(idsOf(h.root)).toEqual(["two", "three", "one", "four"]);
+
+    h.stubLayout();
+    h.sweepTo(h.pastEnd);
+    vi.advanceTimersByTime(REORDER_STILL_MS);
+    h.sweepTo(h.pastEnd);
+    expect(idsOf(h.root)).toEqual(["two", "three", "four", "one"]);
+
+    vi.advanceTimersByTime(REORDER_SETTLE_MS - REORDER_STILL_MS + 10);
+    expect(h.chips().some((c) => c.style.transition !== "")).toBe(true);
   });
 
   it("writes no inline transition at all under reduced motion", async () => {

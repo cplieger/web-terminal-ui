@@ -163,6 +163,16 @@ describe("composition: cancelComposition (tab-switch detach, design 5.1)", () =>
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("neutralizes the deferred send of a composition whose end was reported twice", () => {
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    textarea.value = "\u4F60\u597D";
+    textarea.dispatchEvent(new CompositionEvent("compositionend"));
+    textarea.dispatchEvent(new CompositionEvent("compositionend"));
+    composition.cancelComposition();
+    vi.advanceTimersByTime(0);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("releases the deferred send's timer, not only its effect", () => {
     textarea.dispatchEvent(new CompositionEvent("compositionstart"));
     textarea.value = "\u4F60\u597D";
