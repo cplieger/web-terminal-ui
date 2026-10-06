@@ -926,6 +926,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const el = termInput();
         inputFocusedAtPress = el !== null && doc.activeElement === el;
       }
+      // Read at the button's own pointerdown, before the press moves focus onto it.
+      function keyboardAtPressOf(btn: HTMLElement): () => boolean {
+        let held = false;
+        btn.addEventListener(
+          "pointerdown",
+          () => {
+            held = doc.activeElement === termInput();
+          },
+          { passive: true },
+        );
+        return () => held;
+      }
       function keyboardParkedOnChrome(): boolean {
         const active = doc.activeElement;
         return bar.contains(active) || switcher.contains(active);
@@ -1018,9 +1030,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           collapseSwitcher();
           switchTo(t.id);
         });
-        pick(row, ".wt-switcher-row-close").addEventListener("click", (e) => {
+        const rowClose = pick(row, ".wt-switcher-row-close");
+        const heldKeyboard = keyboardAtPressOf(rowClose);
+        rowClose.addEventListener("click", (e) => {
           e.stopPropagation();
-          void close_(t.id);
+          void dropTab(t.id, true, heldKeyboard());
         });
         return row;
       }
@@ -1476,9 +1490,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           switchTo(target.id);
           target.el.focus();
         });
+        const heldKeyboard = keyboardAtPressOf(close);
         close.addEventListener("click", (e) => {
           e.stopPropagation();
-          void close_(tab.id);
+          void dropTab(tab.id, true, heldKeyboard());
         });
         // Middle-click closes the tab (#8). Suppress the middle-click default on
         // mousedown so the browser's autoscroll/paste affordance does not fire.
@@ -2449,8 +2464,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // its pane shows next. remote=true also DELETEs the server session (a user
       // close); remote=false is a local drop for a session the server already
       // ended (an SSE removed event or a poll that no longer lists it), so no
-      // redundant DELETE is sent.
-      async function dropTab(id: string, remote: boolean): Promise<void> {
+      // redundant DELETE is sent. keyboardHeld: the terminal input held the
+      // keyboard when the press on this tab's close button began, so focus goes
+      // back to it once the button that took it is gone.
+      async function dropTab(id: string, remote: boolean, keyboardHeld = false): Promise<void> {
         const idx = tabList.findIndex((t) => t.id === id);
         if (idx < 0) {
           return;
@@ -2539,7 +2556,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             replacement = create();
           }
         }
-        if (typing) {
+        if (typing || keyboardHeld) {
           focusInput();
         }
         if (remote) {
