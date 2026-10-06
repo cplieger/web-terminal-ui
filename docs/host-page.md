@@ -104,9 +104,9 @@ Pass the element as the `loading` option. The terminal fades it out and removes 
 
 ## What ships
 
-| Path                      | Purpose                                                                                                                                                                  |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/**/*.ts`             | The UI modules: the core (`kernel/`), the features (`features/`), the per-preset entries (`presets/`), IME, predictive echo and viewport handling                        |
+| Path | Purpose |
+| --- | --- |
+| `src/**/*.ts` | The UI modules: the core (`kernel/`), the features (`features/`), the per-preset entries (`presets/`), IME, predictive echo and viewport handling |
 | `css/*.css` and manifests | Component styles scoped to the terminal root. `MANIFEST` is the full-page bundle, and `MANIFEST.single`, `MANIFEST.touch` and `MANIFEST.tabbed` are the embedder bundles |
-| `css/page.css`            | The page kit for full-page hosts only: the `html` and `body` reset, the loading overlay and the `@font-face` rules for `Monaspace Neon NF` and `Web Terminal Glyphs`     |
-| `scaffold/index.html`     | A reference full-page host: the `<head>`, one empty root element and the import map                                                                                      |
+| `css/page.css` | The page kit for full-page hosts only: the `html` and `body` reset, the loading overlay and the `@font-face` rules for `Monaspace Neon NF` and `Web Terminal Glyphs` |
+| `scaffold/index.html` | A reference full-page host: the `<head>`, one empty root element and the import map |

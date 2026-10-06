@@ -4,20 +4,20 @@ This page lists every `createTerminal` option, the handle it returns and the the
 
 ## Every option
 
-| Option              | Default                      | Purpose                                                                                                                                               |
-| ------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `features`          | _(none, the bare terminal)_  | A function returning the feature list. Pass a preset by name or a factory of your own. Omitted builds only the terminal, with no chrome               |
-| `layout`            | `"viewport"`                 | `"viewport"` makes the root a fixed full-viewport box. `"container"` fills your container element, which becomes the styling and positioning boundary |
-| `wsPath`            | `"/ws"`                      | The WebSocket endpoint path the engine connects to                                                                                                    |
-| `fontReady`         | `'14px "Monaspace Neon NF"'` | The CSS font shorthand awaited, for at most 3 seconds, before the first resize. See [Waiting for the font](#waiting-for-the-font)                     |
-| `scrollbackLines`   | _(engine default)_           | Retained scrollback lines per terminal and per tab. See [Scrollback size](#scrollback-size)                                                           |
-| `persistScrollback` | _(off)_                      | Storage you supply to keep each session's scrollback across a page reload. See [Keeping scrollback across a reload](scrollback-persistence.md)        |
-| `loading`           | _(none)_                     | The pre-JS loading overlay element, faded out and removed once the first frame renders                                                                |
-| `loadingMessages`   | _(library wording)_          | Rewords the overlay's slow-start status lines. Anything omitted keeps the default                                                                     |
-| `onFatalError`      | _(built-in Reload panel)_    | Called with a `TerminalStartupFailure` after a fatal startup failure. See [Startup failures](failure-handling.md#startup-failures)                    |
-| `onSessionEnded`    | _(none)_                     | Called when the active session's process has ended and nothing is retrying. See [When a session ends](failure-handling.md#when-a-session-ends)        |
-| `theme`             | _(none)_                     | CSS custom properties set on the terminal root. See [Themes](#themes)                                                                                 |
-| `split`             | `false`                      | Two panes side by side, opened from the tab chrome. Needs the tabs feature. See [Split view](split-view.md)                                           |
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `features` | _(none, the bare terminal)_ | A function returning the feature list. Pass a preset by name or a factory of your own. Omitted builds only the terminal, with no chrome |
+| `layout` | `"viewport"` | `"viewport"` makes the root a fixed full-viewport box. `"container"` fills your container element, which becomes the styling and positioning boundary |
+| `wsPath` | `"/ws"` | The WebSocket endpoint path the engine connects to |
+| `fontReady` | `'14px "Monaspace Neon NF"'` | The CSS font shorthand awaited, for at most 3 seconds, before the first resize. See [Waiting for the font](#waiting-for-the-font) |
+| `scrollbackLines` | _(engine default)_ | Retained scrollback lines per terminal and per tab. See [Scrollback size](#scrollback-size) |
+| `persistScrollback` | _(off)_ | Storage you supply to keep each session's scrollback across a page reload. See [Keeping scrollback across a reload](scrollback-persistence.md) |
+| `loading` | _(none)_ | The pre-JS loading overlay element, faded out and removed once the first frame renders |
+| `loadingMessages` | _(library wording)_ | Rewords the overlay's slow-start status lines. Anything omitted keeps the default |
+| `onFatalError` | _(built-in Reload panel)_ | Called with a `TerminalStartupFailure` after a fatal startup failure. See [Startup failures](failure-handling.md#startup-failures) |
+| `onSessionEnded` | _(none)_ | Called when the active session's process has ended and nothing is retrying. See [When a session ends](failure-handling.md#when-a-session-ends) |
+| `theme` | _(none)_ | CSS custom properties set on the terminal root. See [Themes](#themes) |
+| `split` | `false` | Two panes side by side, opened from the tab chrome. Needs the tabs feature. See [Split view](split-view.md) |
 
 `features` is a function rather than an array so that a preset which throws does so inside the library's startup-failure handling. A preset that takes arguments is written `features: () => presetTabbed({ attentionIcons: true })`.
 
