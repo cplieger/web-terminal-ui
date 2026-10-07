@@ -639,6 +639,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           };
           reflectArmed(kbApi.isCtrlArmed());
           ctx.defer(kbApi.onCtrlArmedChange(reflectArmed));
+          // The keyboard buttons render only under a coarse pointer, so a grid
+          // still open when the primary pointer turns fine would have no closer.
+          const coarse = win.matchMedia("(pointer: coarse)");
+          const onPointerChange = (): void => {
+            if (!coarse.matches) {
+              closeKeyGrid();
+            }
+          };
+          coarse.addEventListener("change", onPointerChange);
+          ctx.defer(() => {
+            coarse.removeEventListener("change", onPointerChange);
+          });
         }
       }
       // Measured optical centring for every chip label in both layouts: writes

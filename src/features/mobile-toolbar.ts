@@ -20,8 +20,9 @@ export interface MobileToolbarApi {
 
 /** Options for the mobileToolbar feature. */
 export interface MobileToolbarOptions {
-  /** Hide the toolbar's own toggle and open the grid above the mobile tab bar;
-   *  the grid is then driven through the returned API. The tabbed presets set it. */
+  /** Hide the toolbar's own toggle; the grid is then driven through the returned
+   *  API and renders whenever it is open, whatever the primary pointer, so the
+   *  host's trigger decides where a grid exists. The tabbed presets set it. */
   externalToggle?: boolean;
 }
 
@@ -38,12 +39,12 @@ const TOOLBAR_HTML = `
   <button type="button" id="kb-right" class="kb-key kb-r2c4" aria-label="Right"><svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg></button>
 </div>`;
 
-/** Build the mobileToolbar feature. The chrome is always built; only a coarse
- *  pointer makes it visible (`css/23-toolbar.css`). Order it before `tabs` when
- *  `externalToggle` is set, since tabs reads the API through `ctx.use`.
- *  Sticky-Ctrl is a kernel INPUT TRANSFORM rather than a toolbar click path, so
- *  it rewrites a character typed on the soft keyboard as well as one from these
- *  buttons. */
+/** Build the mobileToolbar feature. The chrome is always built; a self-toggled
+ *  toolbar is visible only under a coarse pointer (`css/23-toolbar.css`). Order
+ *  it before `tabs` when `externalToggle` is set, since tabs reads the API
+ *  through `ctx.use`. Sticky-Ctrl is a kernel INPUT TRANSFORM rather than a
+ *  toolbar click path, so it rewrites a character typed on the soft keyboard as
+ *  well as one from these buttons. */
 export function mobileToolbar(opts: MobileToolbarOptions = {}): TerminalFeature<MobileToolbarApi> {
   return {
     name: "mobileToolbar",

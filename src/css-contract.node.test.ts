@@ -367,6 +367,55 @@ describe("bottom-strip clearance contract (the safe-area pairing)", () => {
   });
 });
 
+// The externalToggle mode's own rules are what an embedder serving MANIFEST.touch
+// (no tab chrome, no 31-switcher.css) depends on, and the host decides when the
+// grid exists, so no pointer query may gate them.
+describe("externally toggled key grid contract", () => {
+  const toolbarCss = readFileSync(path.join(cssDir, "23-toolbar.css"), "utf8");
+  const touchManifest = readFileSync(path.join(cssDir, "MANIFEST.touch"), "utf8");
+
+  function outsideMedia(css: string): string {
+    let out = "";
+    let depth = 0;
+    let mediaDepth = -1;
+    for (let i = 0; i < css.length; i++) {
+      if (mediaDepth < 0 && css.startsWith("@media", i)) {
+        mediaDepth = depth;
+      }
+      const ch = css[i];
+      if (ch === "{") {
+        depth++;
+      } else if (ch === "}") {
+        depth--;
+        if (depth === mediaDepth) {
+          mediaDepth = -1;
+          continue;
+        }
+      }
+      if (mediaDepth < 0) {
+        out += ch;
+      }
+    }
+    return out;
+  }
+
+  it("ships 23-toolbar.css in the embedder bundle", () => {
+    expect(touchManifest.split("\n").map((l) => l.trim())).toContain("23-toolbar.css");
+  });
+
+  it.each([
+    [":where(.wt-root) .wt-toolbar-external .kb-toggle", /display:\s*none/],
+    [":where(.wt-root) .key-toolbar.wt-toolbar-external", /grid-template-columns:\s*repeat\(4,/],
+    [":where(.wt-root) .key-toolbar.wt-toolbar-external.collapsed", /display:\s*none/],
+  ])("declares %s outside any media query", (selector, decl) => {
+    const flat = outsideMedia(toolbarCss);
+    const at = flat.indexOf(`${selector} {`);
+    expect(at, `${selector} is unconditional in 23-toolbar.css`).toBeGreaterThan(-1);
+    const body = flat.slice(at, flat.indexOf("}", at));
+    expect(decl.test(body), `${selector} carries ${String(decl)}`).toBe(true);
+  });
+});
+
 // The desktop reorder preview is CSS-only where it is visible: the feature's own
 // suite loads no stylesheet, so it can prove the state machine but not one pixel of
 // the result. These are grep-level guards on the three decisions that would fail
