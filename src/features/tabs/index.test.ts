@@ -1980,6 +1980,34 @@ describe("tabs feature", () => {
     expect(mobKb?.classList.contains("wt-active")).toBe(true);
   });
 
+  it("closes an open key grid when the primary pointer stops being coarse", async () => {
+    const pointer = new EventTarget();
+    let coarse = true;
+    vi.stubGlobal("matchMedia", (query: string) => {
+      const list = query === "(pointer: coarse)" ? pointer : new EventTarget();
+      return Object.defineProperties(list, {
+        media: { value: query, configurable: true },
+        matches: { get: () => query === "(pointer: coarse)" && coarse, configurable: true },
+      });
+    });
+    const kbt = fakeKeyboardToggle();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    term = await mountTerminal(root, {
+      features: () => [kbt.feature, tabs({ keyboardToggle: kbt.feature })],
+    });
+    await until(() => root.querySelectorAll(".wt-tab").length === 2);
+    const deskKb = root.querySelector<HTMLElement>(".wt-tab-kb");
+    deskKb?.click();
+    expect(kbt.isOpen()).toBe(true);
+
+    coarse = false;
+    pointer.dispatchEvent(new Event("change"));
+    expect(kbt.isOpen()).toBe(false);
+    expect(deskKb?.getAttribute("aria-expanded")).toBe("false");
+    expect(deskKb?.classList.contains("wt-active")).toBe(false);
+  });
+
   // --- Tab arrangement and hostile storage ---
   //
   // The arrangement itself is the SERVER's since engine 3.10.0: a reorder is
