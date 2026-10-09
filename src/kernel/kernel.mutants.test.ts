@@ -143,11 +143,10 @@ function selectOutsideTerminal(): Selection {
   return sel;
 }
 
-function keyOnDocument(key: string): KeyboardEvent {
+function keyOnDocument(key: string): void {
   const ev = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
   Object.defineProperty(ev, "getModifierState", { value: (): boolean => false });
   document.body.dispatchEvent(ev);
-  return ev;
 }
 
 describe("a released runtime answers no event it registered for", () => {

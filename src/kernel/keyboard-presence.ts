@@ -27,7 +27,7 @@ export interface KeyboardPresenceTracker extends KeyboardPresence {
   noteSoftKeyboard(heightPx: number, editableFocused: boolean): void;
 }
 
-export interface KeyboardPresenceOptions {
+interface KeyboardPresenceOptions {
   readonly win: Window & typeof globalThis;
   /** Never the suppressed inset: the suppression itself reads this tracker. */
   readonly softKeyboardHeight: () => number;

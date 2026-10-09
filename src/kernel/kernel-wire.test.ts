@@ -81,12 +81,11 @@ const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
  *  a transition, and `measurableSize()` declines during one. That is a second
  *  reason for a null size beside the fonts gate, so a fonts assertion that skips
  *  this can pass for the viewport's reason. Later settles run at the real length. */
-async function mountSettled(opts: CreateTerminalOptions): Promise<TerminalHandle> {
+async function mountSettled(opts: CreateTerminalOptions): Promise<void> {
   const restoreSettle = await shortenSettle();
-  const term = await mount(opts);
+  await mount(opts);
   await shortSettled();
   restoreSettle();
-  return term;
 }
 
 /** Advances FAKE timers a settle window at a time until `done()` holds.

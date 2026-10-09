@@ -246,7 +246,7 @@ export function isUnseenCue(
 
 /** What the cue fold reads per tab; structural, so a caller passes its own tab
  *  objects. */
-export interface CueCandidate {
+interface CueCandidate {
   readonly id: string;
   readonly status: string;
 }
@@ -255,7 +255,7 @@ export interface CueCandidate {
  *  WORST for the icon. A count is set-valued and needs no rule for choosing among
  *  sessions; severity is a total order, so the icon's choice is not arbitrary.
  *  Neither names a session, the standing constraint on a page-wide surface. */
-export interface CueSummary {
+interface CueSummary {
   readonly count: number;
   readonly worst: CueStatus | "";
 }
@@ -480,7 +480,7 @@ export function hasPinnedName(tab: Tab): boolean {
 
 /** The realm a session API runs in: the mounted window's `fetch`, its abort
  *  signals and its clock, never the importing page's. */
-export interface SessionAPIRealm {
+interface SessionAPIRealm {
   readonly fetch: typeof fetch;
   readonly AbortSignal: typeof AbortSignal;
   readonly Date: typeof Date;
@@ -489,7 +489,7 @@ export interface SessionAPIRealm {
 /** The session REST client, bound to an apiBase. Every call is timeout-bounded:
  *  fetch has no default timeout, and a stalled-but-open server would leave a
  *  bootstrap await pending forever. */
-export interface SessionAPI {
+interface SessionAPI {
   list(): Promise<SessionInfo[]>;
   create(): Promise<SessionInfo>;
   close(id: string): Promise<void>;
@@ -753,7 +753,7 @@ export function createSessionAPI(apiBase: string, realm: SessionAPIRealm): Sessi
  *  listing (the SSE re-open snapshot, or the poll's GET /api/sessions) that
  *  predates the server reaping the session does not re-adopt (flash back) the
  *  closed tab. */
-export interface Tombstones {
+interface Tombstones {
   add(id: string): void;
   /** True while `id` is tombstoned (within the TTL). A hit past the TTL clears
    *  the entry and reports false (the adopt may proceed). */

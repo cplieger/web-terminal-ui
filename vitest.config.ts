@@ -113,7 +113,8 @@ export default defineConfig({
     },
     // A setup file imports vitest, which a consumer does not install, so every
     // publish and analysis filter (package.json `files`, jsr.json, stryker, the
-    // coverage exclude, scripts/verify.sh) excludes `*-setup.ts`: keep the name.
+    // coverage exclude, deadset.json, scripts/verify.sh) excludes `*-setup.ts`:
+    // keep the name.
     setupFiles: ["./src/fc-strict-setup.ts", "./src/mounted-terminal-setup.ts"],
     printConsoleTrace: true,
     expandSnapshotDiff: true,

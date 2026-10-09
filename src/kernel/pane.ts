@@ -200,7 +200,6 @@ export interface PaneKernel extends PaneHandle {
   ): Unsubscribe;
   connectionInitiated(): boolean;
   isDestroyed(): boolean;
-  layout(): { narrow: boolean; coarse: boolean };
   toast(message: string, ms?: number): void;
   announce(message: string, politeness?: "polite" | "assertive"): void;
   paste(text: string): void;
@@ -1468,7 +1467,6 @@ function buildPaneInto(
       ),
     connectionInitiated: () => connectionInitiated,
     isDestroyed: () => destroyed,
-    layout,
     toast,
     announce: (message, politeness) => {
       announcer.announce(message, politeness);
