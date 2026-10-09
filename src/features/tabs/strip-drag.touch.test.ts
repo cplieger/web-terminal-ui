@@ -70,7 +70,7 @@ function pointer(
   x: number,
   y: number,
   init: PointerEventInit = {},
-): PointerEvent {
+): void {
   const e = new PointerEvent(type, {
     pointerId: FINGER,
     pointerType: "touch",
@@ -82,7 +82,6 @@ function pointer(
     ...init,
   });
   target.dispatchEvent(e);
-  return e;
 }
 
 const lifted = (root: HTMLElement): boolean =>

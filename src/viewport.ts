@@ -13,6 +13,7 @@ let SETTLE_MS = 350;
 
 /** @internal Test seam: arm every settle started from now on at `ms`; returns the
  *  previous value so the caller can restore it. */
+// deadset:ignore DS1004 -- the browser tests shorten the settle delay so they need not wait out the real one
 export function setSettleMs(ms: number): number {
   const previous = SETTLE_MS;
   SETTLE_MS = ms;
@@ -27,7 +28,7 @@ interface KeyboardGeometry {
   readonly bottom: number;
 }
 
-export interface KeyboardInsetsOptions {
+interface KeyboardInsetsOptions {
   /** The outermost terminal root: receives --kb-inset and --vv-top, which every
    *  pane and chrome element beneath it inherits, so they scope to the terminal
    *  subtree instead of leaking onto the host document. */
@@ -56,7 +57,7 @@ export interface KeyboardInsets {
   teardown(): void;
 }
 
-export interface ViewportOptions {
+interface ViewportOptions {
   termWrap: HTMLElement;
   /** The box termWrap is pinned within, observed in its place: termWrap's
    *  insets follow chrome measured in ResizeObserver callbacks on boxes deeper

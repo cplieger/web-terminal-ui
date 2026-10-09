@@ -18,7 +18,7 @@ import { windowOf } from "./kernel/realm.js";
  *  after a pause, against losing all input until an unrelated event fires. */
 const COMPOSITION_IDLE_MS = 5000;
 
-export interface CompositionOptions {
+interface CompositionOptions {
   textarea: HTMLTextAreaElement;
   compositionView: HTMLElement;
   getCursorPx: () => { left: number; top: number; cellH: number };

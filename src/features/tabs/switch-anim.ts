@@ -23,7 +23,7 @@ export const SWITCH_ANIMATIONS = {
 } as const;
 
 /** A class the tabs feature puts on the terminal surface to play a switch animation. */
-export type SwitchClass = keyof typeof SWITCH_ANIMATIONS;
+type SwitchClass = keyof typeof SWITCH_ANIMATIONS;
 
 /** The three classes, for a caller that has to clear whichever one is present. */
 export const SWITCH_CLASSES = Object.keys(SWITCH_ANIMATIONS) as SwitchClass[];

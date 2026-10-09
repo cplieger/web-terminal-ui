@@ -50,7 +50,7 @@ interface Entry {
   readonly scope: CleanupScope;
 }
 
-export interface FeatureHost {
+interface FeatureHost {
   /** Set one feature up. The scope exists before `setup` runs, so a throw drains
    *  what the feature acquired; a `destroyed()` true after the await tears the
    *  instance down instead of registering it. */

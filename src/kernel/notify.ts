@@ -5,6 +5,7 @@
 import type { Notifier } from "./types.js";
 
 interface NotificationLike {
+  // deadset:ignore DS1301 -- the browser's Notification calls this handler when the user clicks the notification
   onclick: ((event: Event) => void) | null;
   close: () => void;
 }
