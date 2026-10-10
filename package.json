@@ -33,8 +33,12 @@
     "test": "vitest --run",
     "test:watch": "vitest",
     "test:coverage": "vitest --run --coverage",
+    "test:browsers": "playwright install chromium",
+    "test:mutation": "stryker run",
     "lint:eslint": "eslint .",
     "lint:prettier": "prettier --check .",
+    "lint:css": "stylelint \"css/**/*.css\"",
+    "lint:html": "html-validate scaffold/index.html",
     "lint:fix": "eslint . --fix && prettier --write .",
     "lint:knip": "knip",
     "verify": "bash scripts/verify.sh"
