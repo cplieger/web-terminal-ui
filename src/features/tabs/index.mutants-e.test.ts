@@ -619,11 +619,11 @@ describe("tabs: returning to the page acknowledges what the user can now see", (
 
     setVisibility("hidden");
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) two · Host page");
 
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
-    expect(document.title).toBe("Host page");
+    expect(document.title).toBe("two · Host page");
   });
 
   it("acknowledges nothing while the page is still hidden", async () => {
@@ -634,10 +634,10 @@ describe("tabs: returning to the page acknowledges what the user can now see", (
     const { monitor } = await mountWithMonitor();
     setVisibility("hidden");
     monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
 
     document.dispatchEvent(new Event("visibilitychange"));
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
     expect(localStorage.getItem(CUE_SEEN_KEY)).toBeNull();
   });
 });
@@ -688,7 +688,7 @@ describe("tabs: the attention icons are opt-in", () => {
       const { monitor } = await mountWithMonitor();
       monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
       // The title count still rises: only the icon needs the generated assets.
-      expect(document.title).toBe("(1) Host page");
+      expect(document.title).toBe("(1) one · Host page");
       expect(iconHref()).toBe("/favicon.svg");
     } finally {
       ownIcon.remove();

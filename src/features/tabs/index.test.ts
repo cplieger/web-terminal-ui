@@ -2649,11 +2649,12 @@ describe("tabs OSC 9 status chrome", async () => {
     // The active tab's percentage renders on its own chip...
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 40 });
     expect(tabBar(root, 0)?.style.width).toBe("40%");
-    // ...and a background tab's too, but neither reaches the page title.
+    // ...and a background tab's too, but neither reaches the page title, which
+    // carries the active tab's label and the served title.
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2", progressValue: 90 });
-    expect(document.title).toBe("Host page");
+    expect(document.title).toBe("one · Host page");
 
-    // Including across a destroy, which must leave no trace either way.
+    // A destroy hands the page its own title back.
     term?.destroy();
     term = undefined;
     expect(document.title).toBe("Host page");
@@ -2663,20 +2664,14 @@ describe("tabs OSC 9 status chrome", async () => {
     // The COUNT is what the title carries, and it is a different proposal from the
     // percentage above rather than a softening of it: a count names no session, so
     // it needs no arbitrary choice among them.
-    //
-    // This is also the only test of the kernel's title composition. The kernel owns
-    // document.title precisely so a program's OSC 0/2 window title cannot erase a
-    // feature's prefix, and nothing else asserts that: attention.test.ts checks the
-    // sink is CALLED with the right string, which passes just as well if the kernel
-    // appends the prefix after the base, ignores it, or drops it on destroy.
     document.title = "Host page";
     const { root, monitor } = await withMonitor();
-    expect(document.title).toBe("Host page");
+    expect(document.title).toBe("one · Host page");
 
     // A background tab wanting the user puts the count FIRST, where a truncating
     // tab strip still shows it.
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
 
     // Acknowledging the cue drops the prefix and leaves the base alone. (The
     // prefix surviving a program's OSC 0/2 title is the other half of the kernel's
@@ -2684,12 +2679,12 @@ describe("tabs OSC 9 status chrome", async () => {
     // kernel.test.ts where the connection callbacks are reachable.)
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
-    expect(document.title).toBe("Host page");
+    expect(document.title).toBe("one · Host page");
 
     // And a destroy with a cue still raised must not strand the count on a page
     // the user comes back to.
     monitor.emit({ id: "s2", status: "crashed", title: "two", createdAt: "2" });
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
     term?.destroy();
     term = undefined;
     expect(document.title).toBe("Host page");
@@ -2706,32 +2701,32 @@ describe("tabs OSC 9 status chrome", async () => {
 
     // Visible + active: nothing to tell anyone, exactly as before.
     monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1" });
-    expect(document.title).toBe("Host page");
+    expect(document.title).toBe("one · Host page");
 
     // Hidden + active: the user cannot see the terminal, so it raises.
     setVisibility("hidden");
     monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
 
     // Coming back acknowledges it, because now they ARE looking at it. Deferred
     // rather than dropped: this is the same acknowledgement, at the moment it
     // becomes true.
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
-    expect(document.title).toBe("Host page");
+    expect(document.title).toBe("one · Host page");
 
     // ...and only for the ACTIVE tab. A background tab's cue must survive a return
     // to a DIFFERENT tab, or the viewer loses the thing it came back for.
     setVisibility("hidden");
     monitor.emit({ id: "s2", status: "crashed", title: "two", createdAt: "2" });
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
     void root;
   });
 
-  it("hands the page's own icon and title back when the page goes away", async () => {
+  it("hands the page's own icon back and drops the count when the page goes away", async () => {
     // A browser remembers ONE icon per URL and renders it for the bookmark, the
     // history row and the new-tab tile, so a tab closed on a lit cue would leave a
     // status variant standing in for the app until the page is next loaded.
@@ -2749,11 +2744,11 @@ describe("tabs OSC 9 status chrome", async () => {
     try {
       const { root, monitor } = await withMonitor({ attentionIcons: true });
       monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
-      expect(document.title).toBe("(1) Host page");
+      expect(document.title).toBe("(1) one · Host page");
       expect(iconHref()).toBe("/favicon-input.svg");
 
       window.dispatchEvent(new Event("pagehide"));
-      expect(document.title).toBe("Host page");
+      expect(document.title).toBe("one · Host page");
       expect(iconHref()).toBe("/favicon.svg");
 
       // A bfcache entry fires the same event and that page comes BACK, so the
@@ -2761,7 +2756,7 @@ describe("tabs OSC 9 status chrome", async () => {
       const restored = new Event("pageshow");
       Object.defineProperty(restored, "persisted", { value: true });
       window.dispatchEvent(restored);
-      expect(document.title).toBe("(1) Host page");
+      expect(document.title).toBe("(1) one · Host page");
       expect(iconHref()).toBe("/favicon-input.svg");
       void root;
     } finally {
@@ -2778,11 +2773,11 @@ describe("tabs OSC 9 status chrome", async () => {
     document.title = "Host page";
     const { root, monitor } = await withMonitor();
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
 
     document.dispatchEvent(new Event("freeze"));
 
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
     void root;
   });
 
@@ -5231,7 +5226,7 @@ describe("tabs: in a second document", () => {
     // shown tab raises, because the terminal's own document is out of sight.
     Object.defineProperty(second.doc, "visibilityState", { value: "hidden", configurable: true });
     monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
-    expect(second.doc.title).toBe("(1) Inner page");
+    expect(second.doc.title).toBe("(1) one · Inner page");
 
     // The importing page's visibility change is not this document's.
     Object.defineProperty(second.doc, "visibilityState", {
@@ -5239,10 +5234,10 @@ describe("tabs: in a second document", () => {
       configurable: true,
     });
     document.dispatchEvent(new Event("visibilitychange"));
-    expect(second.doc.title).toBe("(1) Inner page");
+    expect(second.doc.title).toBe("(1) one · Inner page");
 
     second.doc.dispatchEvent(new second.win.Event("visibilitychange"));
-    expect(second.doc.title).toBe("Inner page");
+    expect(second.doc.title).toBe("one · Inner page");
   });
 
   it("swallows a tab drop anywhere in the frame's document, and only there", async () => {

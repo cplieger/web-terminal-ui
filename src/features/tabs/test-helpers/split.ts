@@ -63,6 +63,8 @@ export interface FakeSessionServer {
   putOnce: number | null;
   /** The status `POST /api/sessions` answers; 201 creates `s-new`. */
   postStatus: number;
+  /** The alias the 201 body gives `s-new`, absent when undefined. */
+  newAlias: string | undefined;
   /** When set, `POST` answers only once this settles. */
   postGate: Gate | null;
   /** When set, `DELETE` answers only once this settles. */
@@ -93,6 +95,7 @@ export function fakeServer(): FakeSessionServer {
     putStatus: 204,
     putOnce: null,
     postStatus: 201,
+    newAlias: undefined,
     postGate: null,
     deleteGate: null,
     putGate: null,
@@ -129,7 +132,13 @@ export function fakeServer(): FakeSessionServer {
         await server.postGate?.promise;
         return jsonResponse(
           server.postStatus === 201
-            ? { id: "s-new", title: "", createdAt: "9", status: "idle" }
+            ? {
+                id: "s-new",
+                title: "",
+                createdAt: "9",
+                status: "idle",
+                ...(server.newAlias === undefined ? {} : { alias: server.newAlias }),
+              }
             : { error: "no" },
           server.postStatus,
         );

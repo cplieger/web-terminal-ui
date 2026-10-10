@@ -2239,6 +2239,7 @@ describe("the document title is composed from a base and the attention count", (
   async function withTitleFeature(): Promise<{
     setCount: (count: number) => void;
     emitTitle: (title: string) => void;
+    claim: () => ReturnType<TerminalContext["shell"]["claimPageTitle"]>;
     destroy: () => void;
   }> {
     let ctxRef: TerminalContext | undefined;
@@ -2265,6 +2266,12 @@ describe("the document title is composed from a base and the attention count", (
         reporter.report({ count, icon: null });
       },
       emitTitle: (title) => cbs.onMessage?.({ type: "title", title } as never),
+      claim: () => {
+        if (!ctxRef) {
+          throw new Error("the probe feature never ran");
+        }
+        return ctxRef.shell.claimPageTitle();
+      },
       destroy: () => term.destroy(),
     };
   }
@@ -2306,6 +2313,61 @@ describe("the document title is composed from a base and the attention count", (
     expect(document.title).toBe("Served page");
   });
 
+  it("suffixes a claimed name with the served title, behind the count", async () => {
+    document.title = "Served page";
+    const t = await withTitleFeature();
+    const page = t.claim();
+    expect(document.title).toBe("Served page");
+
+    page.set("fix build");
+    expect(document.title).toBe("fix build · Served page");
+    t.setCount(2);
+    expect(document.title).toBe("(2) fix build · Served page");
+
+    // The suffix comes from the title the page was served with, so neither a
+    // program title nor a repaint of the composed title can stack it.
+    t.emitTitle("vim README.md");
+    page.set("fix build");
+    page.set("bash");
+    expect(document.title).toBe("(2) bash · Served page");
+
+    page.set("");
+    expect(document.title).toBe("(2) Served page");
+    page.set(null);
+    expect(document.title).toBe("(2) Served page");
+
+    page.release();
+    expect(document.title).toBe("(2) vim README.md");
+
+    // A destroyed terminal leaves no program title behind.
+    t.destroy();
+    expect(document.title).toBe("Served page");
+  });
+
+  it("names an untitled page after the claimed name alone", async () => {
+    document.title = "";
+    const t = await withTitleFeature();
+    t.claim().set("bash");
+    expect(document.title).toBe("bash");
+    t.destroy();
+  });
+
+  it("leaves a host's own title on destroy when the terminal never wrote one", async () => {
+    document.title = "Served page";
+    const t = await withTitleFeature();
+    document.title = "Host renamed";
+    t.destroy();
+    expect(document.title).toBe("Host renamed");
+  });
+
+  it("writes nothing for a claim a setup still running past destroy() takes", async () => {
+    document.title = "Served page";
+    const t = await withTitleFeature();
+    t.destroy();
+    t.claim().set("late");
+    expect(document.title).toBe("Served page");
+  });
+
   it("composes the title of the ROOT's document, leaving the importing document's alone", async () => {
     // A same-origin iframe is a second document with a window of its own. The
     // one-shell-per-document rule admits a terminal there, and that terminal
@@ -2343,7 +2405,7 @@ describe("the document title is composed from a base and the attention count", (
       expect(document.title).toBe("Outer page");
 
       term.destroy();
-      expect(inner.title).toBe("vim README.md");
+      expect(inner.title).toBe("Inner page");
       expect(document.title).toBe("Outer page");
     } finally {
       frame.remove();
