@@ -1,6 +1,9 @@
 /** A session alias that has passed `parseTabAlias`: 1 to 64 characters of
  *  `[A-Za-z0-9_-]`, the grammar the engine's `SessionInfo.alias` documents. */
-export type TabAlias = string & { readonly __brand: "TabAlias" };
+export type TabAlias = string & {
+  // deadset:ignore DS1003 -- the brand only makes TabAlias nominal; nothing reads it
+  readonly __brand: "TabAlias";
+};
 
 // A fragment rather than a path: only a fragment edit navigates without a reload,
 // and a library mounted in someone else's page must not claim its path.

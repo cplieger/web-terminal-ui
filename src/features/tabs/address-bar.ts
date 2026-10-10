@@ -3,7 +3,7 @@
  *  replay entries the page itself wrote, are corrected silently. */
 export type RouteOrigin = "deeplink" | "history" | "restore";
 
-export interface AddressBarOptions {
+interface AddressBarOptions {
   /** The fragment for what the page shows now (`#...`, or `""` for none), or null
    *  while there is nothing to name, which leaves the address bar alone. */
   readonly read: () => string | null;
