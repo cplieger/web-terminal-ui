@@ -74,6 +74,12 @@ The server keeps the arrangement beside the tab order, through `GET` and `PUT /a
 
 Against a server without that route, the split still works and nothing is saved. One console warning says so.
 
+## The split's address
+
+A full-page terminal puts both panes in the page address. The fragment holds the left tab's alias, a comma, then the right tab's alias, for example `#k3q7m2xa,p4wz6tbe`. An empty pane leaves its side blank, as in `#k3q7m2xa,`. Opening and closing the split, and a tab moving between panes, each add a history entry. Resizing and changing the selected pane do not.
+
+Editing the fragment, or going back and forward, shows the named tabs in place without reloading the page. It opens the split for an address with a comma, even when one side is blank, and closes it for a single tab. When the pane row is too narrow for a split, the terminal shows one named tab alone, the left one when it is open, and says "Split view needs a wider window". A load with a split address wins over the saved layout, and the saved layout then follows it. [Tabs](tabs.md#each-tabs-address) describes the address of a single tab.
+
 ## Writing features for a split
 
 Two rules apply to a `features` function under `split: true`, and both are checked at `kernel-init`.

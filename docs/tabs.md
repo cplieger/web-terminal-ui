@@ -14,6 +14,16 @@ On a wide screen the tabs sit in a strip along the bottom edge. When the termina
 
 A tab's title is whatever the server reports for the session. The program's own window title, set through OSC 0 or OSC 2, comes first and stays current while the program changes it. Without one, the server infers a name from the foreground process or the working directory. A user can rename a tab from its menu, and the server keeps that name.
 
+A full-page terminal also names the browser tab after the active tab, the selected pane's tab in a split, followed by the title the page was served with: `fix build · Web Terminal`. The tab comes first, so a browser that shortens a long title cuts the page title, not the tab. The name follows every switch and rename, and the `(N)` count stays in front of it. With no tab open the browser tab shows the served title alone, and so does a page after `destroy()`.
+
+## Each tab's address
+
+A full-page terminal (`layout: "viewport"`) puts the shown tab in the page address, after a `#`. The name is the session's alias, which the server reports with each session: a random 8-character name on web-terminal-server, and the kiro-cli session id on web-terminal-kiro. Opening that address, reloading it or pasting it into another browser tab shows that tab. The address needs engine 6.2 or later on the server. With an older server the address carries no fragment.
+
+Switching tabs adds a history entry, so the browser's back and forward buttons move between the tabs you looked at. Editing the fragment by hand shows the tab it names without reloading the page. A change of alias, such as kiro-cli starting a new session in the same tab, rewrites the current entry instead of adding one. The address only shows tabs that are already open. It never opens or closes a terminal.
+
+An address naming a tab that is no longer open keeps what is shown and rewrites the address to match. A fresh load or a hand-edited address also shows "That tab is no longer open". A reload and the back and forward buttons correct the address without a message. While a live tab is open, a fresh load naming a tab whose program has ended opens on a live tab instead, also without a message. An embedded terminal (`layout: "container"`) leaves the page address to its host. [Split view](split-view.md#the-splits-address) describes the address of two panes.
+
 ## The activity dot
 
 Each tab can carry a status dot that the activity monitor drives from the server's status stream. Under `presetTabbed()` the dot appears only once a session reports `OSC 9;4` progress, so a plain shell keeps clean, label-only tabs. Under `presetAgentTabbed()` the idle dot shows from the moment the tab opens.

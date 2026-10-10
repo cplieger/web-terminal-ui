@@ -175,7 +175,7 @@ describe("a background task suppresses its session's settled cue", () => {
     // withdrawal event changes the activity and NOTHING else — same session, same
     // `done` — so the cue only fires if that one field reaches the fold.
     const { root, monitor } = await mount();
-    expect(document.title).toBe("Host page");
+    expect(document.title).toBe("one · Host page");
 
     monitor.emit({
       id: "s2",
@@ -186,7 +186,9 @@ describe("a background task suppresses its session's settled cue", () => {
       activityCount: 1,
     });
     expect(switchDot(root), "the switch dot stays dark while the task runs").toBe("");
-    expect(document.title, "the title count stays clear while the task runs").toBe("Host page");
+    expect(document.title, "the title count stays clear while the task runs").toBe(
+      "one · Host page",
+    );
 
     monitor.emit({
       id: "s2",
@@ -197,7 +199,9 @@ describe("a background task suppresses its session's settled cue", () => {
       activityCount: 0,
     });
     expect(switchDot(root), "the switch dot lights when the task ends").toBe("done");
-    expect(document.title, "the title counts the cue when the task ends").toBe("(1) Host page");
+    expect(document.title, "the title counts the cue when the task ends").toBe(
+      "(1) one · Host page",
+    );
   });
 
   it("keeps the mark out of the tab's own dot, which reports the turn", async () => {
@@ -255,7 +259,7 @@ describe("a background task suppresses its session's settled cue", () => {
       activityCount: 0,
     });
     expect(switchDot(root), "the task ending re-raises nothing").toBe("");
-    expect(document.title, "and adds nothing to the count").toBe("Host page");
+    expect(document.title, "and adds nothing to the count").toBe("one · Host page");
     expect(acknowledged()).toEqual({ s2: "done" });
   });
 
@@ -286,7 +290,7 @@ describe("a background task suppresses its session's settled cue", () => {
       activityCount: 0,
     });
     expect(switchDot(root), "the active tab raises no cue when its task ends").toBe("");
-    expect(document.title).toBe("Host page");
+    expect(document.title).toBe("one · Host page");
     expect(acknowledged()).toEqual({ s1: "done" });
   });
 
@@ -323,7 +327,7 @@ describe("a background task suppresses its session's settled cue", () => {
     });
     expect(acknowledged(), "the acknowledgement outlives the switch").toEqual({ s1: "done" });
     expect(switchDot(root), "so the switch dot stays dark once the task ends").toBe("");
-    expect(document.title, "and the title counts nothing").toBe("Host page");
+    expect(document.title, "and the title counts nothing").toBe("two · Host page");
   });
 
   it("still forgets the watched tab's acknowledgement when its turn moves on", async () => {
@@ -360,7 +364,7 @@ describe("a background task suppresses its session's settled cue", () => {
       activityCount: 0,
     });
     expect(switchDot(root), "so the next turn to finish in the background raises").toBe("done");
-    expect(document.title, "and the title counts it").toBe("(1) Host page");
+    expect(document.title, "and the title counts it").toBe("(1) two · Host page");
   });
 
   it("keeps a cue the viewer is being pointed at, and one for a dead process", async () => {
@@ -378,7 +382,7 @@ describe("a background task suppresses its session's settled cue", () => {
       activityCount: 1,
     });
     expect(switchDot(root)).toBe("input");
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
 
     monitor.emit({
       id: "s2",
@@ -389,6 +393,6 @@ describe("a background task suppresses its session's settled cue", () => {
       activityCount: 1,
     });
     expect(switchDot(root)).toBe("crashed");
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
   });
 });

@@ -394,18 +394,41 @@ function createShellInto(
   }
 
   let titleMark = "";
+  // The base a feature claimed through claimPageTitle; null text is the served title.
+  let claimedTitle: { text: string | null } | null = null;
+  // Suffixed from servedTitle, never from doc.title, so a repaint cannot stack it.
+  function claimedBase(text: string | null): string {
+    if (text === null || text === "") {
+      return servedTitle;
+    }
+    return servedTitle === "" ? text : `${text} · ${servedTitle}`;
+  }
+  let titleWritten = false;
   function paintTitle(): void {
-    const next =
-      titleMark + (slotAt(selectedSide)?.baseTitle ?? slots[0]?.baseTitle ?? servedTitle);
+    if (destroyed) {
+      return;
+    }
+    const base =
+      claimedTitle !== null
+        ? claimedBase(claimedTitle.text)
+        : (slotAt(selectedSide)?.baseTitle ?? slots[0]?.baseTitle ?? servedTitle);
+    const next = titleMark + base;
     // The title doubles as the browser-tab label and the bookmark name, and this
     // runs on every status sweep, so an unchanged assignment must not churn it.
     if (doc.title !== next) {
       doc.title = next;
+      titleWritten = true;
     }
   }
+  // Hands back the served title the terminal overwrote; paintTitle's destroyed
+  // guard stops teardown from repainting over it.
+  held.push(() => {
+    if (titleWritten) {
+      doc.title = servedTitle;
+    }
+  });
   const attentionSurfaces = new Set<AttentionSurface>();
-  // The badge is OS-level and the icon links outlive the terminal; the base
-  // title belongs to the document.
+  // The badge is OS-level and the icon links outlive the terminal.
   held.push(() => {
     for (const surface of attentionSurfaces) {
       surface.dispose();
@@ -816,6 +839,7 @@ function createShellInto(
     : disabledSplit();
   const shellContext: ShellContext = {
     root: shellRoot,
+    layoutMode,
     keyboard: {
       hardwareSeen: () => keyboardPresence.hardwareSeen(),
       likely: () => keyboardPresence.likely(),
@@ -851,6 +875,25 @@ function createShellInto(
     split,
     restoreSplit: (committed, selected) =>
       splitEnabled && isPaneSide(selected) && openSplitAt(committed, selected),
+    claimPageTitle() {
+      const claim: { text: string | null } = { text: null };
+      claimedTitle = claim;
+      paintTitle();
+      return {
+        set(text) {
+          claim.text = text;
+          if (claimedTitle === claim) {
+            paintTitle();
+          }
+        },
+        release() {
+          if (claimedTitle === claim) {
+            claimedTitle = null;
+            paintTitle();
+          }
+        },
+      };
+    },
   };
   // One row controller over every pane's tabpanel: a chip names the panel of the
   // pane showing it, or the one a click would fill.

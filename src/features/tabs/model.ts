@@ -4,14 +4,18 @@ import type { LineStore } from "@cplieger/web-terminal-engine";
 import type { SessionInfo } from "@cplieger/web-terminal-engine";
 import type { ViewMemory } from "@cplieger/web-terminal-engine";
 import type { PaneSide, TabHandle } from "../../kernel/types.js";
+import type { TabAlias } from "./route.js";
 
 export type { SessionInfo };
 
 /** A status record as the tabs feature consumes it: the REST wire shape plus the
  *  percentage that exists only on the status STREAM. The polling fallback lists
- *  no percentage at all, which means "no information", not "cleared". */
+ *  no percentage at all, which means "no information", not "cleared". `alias` is
+ *  read as `unknown` because `parseTabAlias` validates it where it enters, and an
+ *  engine before 6.2 sends none. */
 export type StatusRecord = SessionInfo & {
   readonly progressValue?: number;
+  readonly alias?: unknown;
 };
 
 // The status vocabulary is module-private so a status's MEANING has one home:
@@ -392,6 +396,10 @@ export function orderedInsertIndex(current: readonly TabOrderKey[], incoming: Ta
 
 export interface Tab {
   id: string;
+  /** The session's public URL name from the server, or undefined when it sent
+   *  none (a server before engine 6.2) or one outside the alias grammar; such a
+   *  tab has no address of its own. */
+  alias: TabAlias | undefined;
   /** The local mutation epoch at which this tab was adopted. The list reconcile
    *  snapshots the counter BEFORE its GET and drops an unlisted tab only when
    *  the tab predates the snapshot: a tab born while the list was in flight is

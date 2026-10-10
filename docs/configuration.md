@@ -7,7 +7,7 @@ This page lists every `createTerminal` option, the handle it returns and the the
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `features` | _(none, the bare terminal)_ | A function returning the feature list. Pass a preset by name or a factory of your own. Omitted builds only the terminal, with no chrome |
-| `layout` | `"viewport"` | `"viewport"` makes the root a fixed full-viewport box. `"container"` fills your container element, which becomes the styling and positioning boundary |
+| `layout` | `"viewport"` | `"viewport"` makes the root a fixed full-viewport box, and the tabs feature then owns the page address fragment (see [Each tab's address](tabs.md#each-tabs-address)) and puts the active tab's name in front of the page title (see [Tab titles](tabs.md#tab-titles)). `"container"` fills your container element, which becomes the styling and positioning boundary, and leaves the page address to your page |
 | `wsPath` | `"/ws"` | The WebSocket endpoint path the engine connects to |
 | `fontReady` | `'14px "Monaspace Neon NF"'` | The CSS font shorthand awaited, for at most 3 seconds, before the first resize. See [Waiting for the font](#waiting-for-the-font) |
 | `scrollbackLines` | _(engine default)_ | Retained scrollback lines per terminal and per tab. See [Scrollback size](#scrollback-size) |

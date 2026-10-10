@@ -293,6 +293,9 @@ export interface KeyboardPresence {
 export interface ShellContext {
   /** The shell root; the pane root in the direct-root topology. */
   readonly root: HTMLElement;
+  /** The resolved `layout` option. Only a `"viewport"` terminal owns the page, so
+   *  only it may write the address bar. */
+  readonly layoutMode: "viewport" | "container";
   readonly keyboard: KeyboardPresence;
   /** Null while that side has no built kernel. */
   pane(side: PaneSide): PaneHandle | null;
@@ -322,9 +325,10 @@ export interface ShellContext {
   /** Bind the page's attention surfaces (the document-title prefix, the app
    *  badge, the icon links) and get the reporter that drives them. The terminal
    *  is the only writer of `document.title`: a program's OSC 0/2 title replaces
-   *  the base and keeps the prefix. The surfaces are restored when the page hides
-   *  and on destroy, and repainted on a back-forward cache restore. Keep the
-   *  report an AGGREGATE, since a page has one title over many sessions. */
+   *  the base (unless a feature holds `claimPageTitle`) and keeps the prefix.
+   *  The surfaces are restored when the page hides and on destroy (which also
+   *  restores the served title), and repainted on a back-forward cache restore.
+   *  Keep the report an AGGREGATE, since a page has one title over many sessions. */
   attention(opts: AttentionOptions): AttentionReporter;
   /** Subscribe to the server's session status stream at `path`. The terminal
    *  holds ONE stream per path for the page and fans it out, because the server
@@ -346,6 +350,12 @@ export interface ShellContext {
    *  shows a tab. False when the split is open already, `committedRatio` is not a
    *  share of 0 to 1, or `selected` is not a side. */
   restoreSplit(committedRatio: number, selected: PaneSide): boolean;
+  /** Take the document title's base over from the selected pane's program title.
+   *  `set(text)` names the page `<text> · <served title>` (the text alone when
+   *  the page was served untitled), `set(null)` or `set("")` shows the served
+   *  title, and `release()` hands the base back. The attention prefix is kept,
+   *  and a later claim replaces an earlier one. */
+  claimPageTitle(): { set(text: string | null): void; release(): void };
 }
 
 /** The inbound-wire + lifecycle events features can subscribe to via ctx.on.
