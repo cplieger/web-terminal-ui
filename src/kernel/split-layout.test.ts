@@ -82,11 +82,41 @@ beforeEach(() => {
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-/** A `--dur-standard` the slide's transition and its fallback timer both end
- *  inside `slid()`; the timer-driven finish keeps the stock token in one opening
- *  and one closing case. */
+/** A `--dur-standard` short enough that a slide is over a moment after it starts. */
 const QUICK_SLIDE = "0.02s";
-const slid = (): Promise<void> => wait(60);
+/** Resolves once no open or close slide is in flight on `root`. A finish removes
+ *  the slide class in the same task as its announcements, and the observer runs
+ *  after that task, so everything the finish does has landed. */
+function slideOver(root: HTMLElement): Promise<void> {
+  const sliding = (): boolean =>
+    root.classList.contains("wt-split-opening") || root.classList.contains("wt-split-closing");
+  return new Promise((resolve) => {
+    if (!sliding()) {
+      resolve();
+      return;
+    }
+    const observer = new MutationObserver(() => {
+      if (!sliding()) {
+        observer.disconnect();
+        resolve();
+      }
+    });
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+  });
+}
+/** Past the point a QUICK_SLIDE finish would have run, for a finish that must not. */
+const pastQuickSlide = (): Promise<void> => wait(60);
+/** Leave the slide classes no transition, so a test drives the finish through the
+ *  timer or a synthetic transitionend with no real one competing; returns the removal. */
+function timerOnlySlides(): () => void {
+  const sheet = document.createElement("style");
+  sheet.textContent =
+    ".wt-root.wt-split.wt-animate:is(.wt-split-opening, .wt-split-closing) { transition-property: none !important; }";
+  document.head.appendChild(sheet);
+  return () => {
+    sheet.remove();
+  };
+}
 /** Two frames: a ResizeObserver delivers after layout, between them. */
 const settle = (): Promise<void> =>
   new Promise((r) => {
@@ -384,7 +414,7 @@ describe("closing with wt-animate", () => {
     expect(right?.classList.contains("wt-pane-hidden")).toBe(false);
     expect(getComputedStyle(root).transitionProperty).toBe("grid-template-columns");
 
-    await slid();
+    await slideOver(root);
 
     expect(root.classList.contains("wt-split-closing")).toBe(false);
     expect(root.classList.contains("wt-split-open")).toBe(false);
@@ -416,7 +446,7 @@ describe("closing with wt-animate", () => {
     expect(first?.classList.contains("wt-side-left")).toBe(true);
     expect(paneRoots(root)).toEqual([first, second]);
 
-    await slid();
+    await slideOver(root);
 
     expect(second?.classList.contains("wt-side-left")).toBe(true);
     expect(first?.classList.contains("wt-side-right")).toBe(true);
@@ -433,7 +463,7 @@ describe("closing with wt-animate", () => {
     split.open();
     ctx.notifySwitch({ id: "b" });
     ctx.shell.select("left");
-    await slid();
+    await slideOver(root);
     // Long enough that a stalled frame cannot run it to the end, and read a tenth
     // of the way in, where the ease-out curve has moved the track by ~75 px.
     root.style.setProperty("--dur-standard", "3s");
@@ -471,14 +501,14 @@ describe("closing with wt-animate", () => {
       ctx.notifySwitch({ id: "a" });
       root.style.setProperty("--dur-standard", QUICK_SLIDE);
       split.open();
-      await slid();
+      await slideOver(root);
       root.style.setProperty("--dur-standard", "3s");
       const [, right] = paneRoots(root);
 
       split.close();
       expect(root.classList.contains("wt-split-closing")).toBe(true);
 
-      await slid();
+      await slideOver(root);
       expect(root.classList.contains("wt-split-closing")).toBe(false);
       expect(root.classList.contains("wt-split-open")).toBe(false);
       expect(right?.classList.contains("wt-pane-hidden")).toBe(true);
@@ -526,7 +556,7 @@ describe("closing with wt-animate", () => {
     term.destroy();
     expect(root.classList.contains("wt-split-closing")).toBe(false);
 
-    await slid();
+    await pastQuickSlide();
     expect(right?.classList.contains("wt-pane-hidden")).toBe(false);
   });
 
@@ -602,9 +632,9 @@ describe("opening with wt-animate", () => {
     const restoreSettle = await shortenSettle();
     root.style.setProperty("--dur-standard", QUICK_SLIDE);
     split.open();
-    await slid();
+    await slideOver(root);
     split.close();
-    await slid();
+    await slideOver(root);
     await shortSettled();
     const [leftEngine, rightEngine] = fake.engines;
     expect(leftEngine?.options.callbacks.initialSize?.()).not.toBeNull();
@@ -617,7 +647,7 @@ describe("opening with wt-animate", () => {
     expect(rightEngine?.options.callbacks.initialSize?.()).toBeNull();
   });
 
-  it("finishes on the timer, announcing every pane at its final size", async () => {
+  it("finishes when the columns arrive, announcing every pane at its final size, however late the slide starts", async () => {
     const { root, ctx, split } = await settledSingle();
     split.open();
     ctx.notifySwitch({ id: "b" });
@@ -629,16 +659,110 @@ describe("opening with wt-animate", () => {
     fake.engines[1]?.connection.sendResize.mockImplementation(() => {
       sent.push(["right", widthOf(right)]);
     });
+    // A busy main thread, as on a slow phone: the transition starts on the first
+    // frame after open(), so it is still running when the stock token's fallback
+    // timer comes due.
+    const busyUntil = performance.now() + 100;
+    while (performance.now() < busyUntil) {
+      // spin
+    }
 
-    await wait(300);
+    await slideOver(root);
 
-    expect(root.classList.contains("wt-split-opening")).toBe(false);
     expect(getComputedStyle(root).transitionProperty).not.toBe("grid-template-columns");
     expect(columnsOf(root)).toEqual([495, 10, 495]);
     expect(sent).toEqual([
       ["left", 495],
       ["right", 495],
     ]);
+  });
+
+  it("holds every pane's geometry until the slide ends, however late its first frame", async () => {
+    const { root, ctx, split } = await settledSingle();
+    const sent: [string, number][] = [];
+    // Fake timers come due with no frame between them: the slide's fallback timer
+    // and the panes' settle both run before the transition has moved.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      split.open();
+      ctx.notifySwitch({ id: "b" });
+      const [left, right] = paneRoots(root);
+      fake.engines[0]?.connection.sendResize.mockImplementation(() => {
+        sent.push(["left", widthOf(left)]);
+      });
+      fake.engines[1]?.connection.sendResize.mockImplementation(() => {
+        sent.push(["right", widthOf(right)]);
+      });
+      vi.advanceTimersByTime(1000);
+    } finally {
+      vi.useRealTimers();
+    }
+    await slideOver(root);
+
+    expect(sent).toEqual([
+      ["left", 495],
+      ["right", 495],
+    ]);
+  });
+
+  it("a close during the slide lets the panes settle again", async () => {
+    const { root, split } = await settledSingle();
+    const restoreSettle = await shortenSettle();
+    root.style.setProperty("--dur-standard", "3s");
+    split.open();
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
+
+    split.close();
+    await slideOver(root);
+    await shortSettled();
+    restoreSettle();
+
+    expect(fake.engines[0]?.options.callbacks.initialSize?.()).not.toBeNull();
+  });
+
+  it("waits out a transition that outlasts the fallback timer, and finishes when it is cancelled", async () => {
+    const slow = document.createElement("style");
+    slow.textContent =
+      ".wt-root.wt-split.wt-animate.wt-split-opening { transition-duration: 3s !important; }";
+    document.head.appendChild(slow);
+    try {
+      const { root, split } = await settledSingle();
+      root.style.setProperty("--dur-standard", QUICK_SLIDE);
+
+      split.open();
+      await pastQuickSlide();
+      expect(root.classList.contains("wt-split-opening")).toBe(true);
+
+      root.style.transitionProperty = "none";
+      await slideOver(root);
+
+      expect(columnsOf(root)).toEqual([495, 10, 495]);
+    } finally {
+      slow.remove();
+    }
+  });
+
+  it("stops waiting for its transition once the slide was settled some other way", async () => {
+    const slow = document.createElement("style");
+    slow.textContent =
+      ".wt-root.wt-split.wt-animate.wt-split-opening { transition-duration: 3s !important; }";
+    document.head.appendChild(slow);
+    try {
+      const { root, split } = await settledSingle();
+      root.style.setProperty("--dur-standard", QUICK_SLIDE);
+      split.open();
+      await pastQuickSlide();
+      expect(split.setRatio(0.4, false)).toBe(true);
+      const sends = fake.engines.map((e) => e.connection.sendResize.mock.calls.length);
+
+      // The snap cancels the transition the fallback timer was left waiting on.
+      expect(columnsOf(root)).toEqual([396, 10, 594]);
+      await tick();
+
+      expect(fake.engines.map((e) => e.connection.sendResize.mock.calls.length)).toEqual(sends);
+    } finally {
+      slow.remove();
+    }
   });
 
   it("finishes when the transition ends, ahead of the fallback timer", async () => {
@@ -652,12 +776,82 @@ describe("opening with wt-animate", () => {
 
       split.open();
       expect(root.classList.contains("wt-split-opening")).toBe(true);
-      await slid();
+      await slideOver(root);
 
       expect(root.classList.contains("wt-split-opening")).toBe(false);
       expect(columnsOf(root)).toEqual([495, 10, 495]);
     } finally {
       quick.remove();
+    }
+  });
+
+  it("is not held by another animation running on the shell root", async () => {
+    const { root, split } = await settledSingle();
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
+    const fade = root.animate([{ opacity: 1 }, { opacity: 0.5 }], { duration: 3000 });
+    try {
+      split.open();
+      await slideOver(root);
+
+      expect(fade.playState).toBe("running");
+      expect(columnsOf(root)).toEqual([495, 10, 495]);
+    } finally {
+      fade.cancel();
+    }
+  });
+
+  it("is not held by a host's CSS transition of another property on the shell root", async () => {
+    const { root, split } = await settledSingle();
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
+    root.style.transition = `grid-template-columns ${QUICK_SLIDE}, opacity 3s`;
+    root.style.opacity = "0.5";
+    try {
+      split.open();
+      await slideOver(root);
+
+      const fade = root
+        .getAnimations()
+        .find((a) => "transitionProperty" in a && a.transitionProperty === "opacity");
+      expect(fade?.playState).toBe("running");
+      expect(columnsOf(root)).toEqual([495, 10, 495]);
+    } finally {
+      root.style.removeProperty("transition");
+      root.style.removeProperty("opacity");
+    }
+  });
+
+  it("is not held by a columns transition that completed but is still listed", async () => {
+    const { root, split } = await settledSingle();
+    root.style.setProperty("--dur-standard", QUICK_SLIDE);
+    // Any style change on its element would drop the completed transition, so it
+    // runs on a bystander the test never touches again.
+    const bystander = document.createElement("div");
+    bystander.style.display = "grid";
+    bystander.style.transition = "grid-template-columns 1ms";
+    bystander.style.gridTemplateColumns = "100px";
+    document.body.appendChild(bystander);
+    bystander.getBoundingClientRect();
+    bystander.style.gridTemplateColumns = "200px";
+    const [completed] = bystander.getAnimations();
+    await completed?.finished;
+    expect(completed?.playState).toBe("finished");
+    // The browser may keep listing a completed transition until the next style
+    // change event; past 50 reads the check is spinning, so the list empties.
+    let reads = 0;
+    root.getAnimations = (options) => {
+      reads++;
+      const listed = Element.prototype.getAnimations.call(root, options);
+      return reads > 50 || completed === undefined ? listed : [completed, ...listed];
+    };
+    try {
+      split.open();
+      await slideOver(root);
+
+      expect(reads).toBeLessThan(10);
+      expect(completed?.playState).toBe("finished");
+      expect(columnsOf(root)).toEqual([495, 10, 495]);
+    } finally {
+      Reflect.deleteProperty(root, "getAnimations");
     }
   });
 
@@ -722,7 +916,7 @@ describe("opening with wt-animate", () => {
 
     expect(root.classList.contains("wt-split-opening")).toBe(false);
     const sends = fake.engines.map((e) => e.connection.sendResize.mock.calls.length);
-    await slid();
+    await pastQuickSlide();
     await shortSettled();
     expect(fake.engines.map((e) => e.connection.sendResize.mock.calls.length)).toEqual(sends);
   });
@@ -742,6 +936,7 @@ describe("opening with wt-animate", () => {
   it("reads a --dur-standard in milliseconds as milliseconds", async () => {
     const { root, split } = await settledSingle();
     root.style.setProperty("--dur-standard", "40ms");
+    const restoreTransitions = timerOnlySlides();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       split.open();
@@ -752,29 +947,53 @@ describe("opening with wt-animate", () => {
       expect(root.classList.contains("wt-split-opening")).toBe(false);
     } finally {
       vi.useRealTimers();
+      restoreTransitions();
     }
   });
 
   it("ends only on the shell root's own grid-template-columns transition", async () => {
     const { root, split } = await settledSingle();
     root.style.setProperty("--dur-standard", "3s");
+    const restoreTransitions = timerOnlySlides();
+    try {
+      split.open();
+      const ended = (target: Element | undefined, propertyName: string): void => {
+        target?.dispatchEvent(
+          new TransitionEvent("transitionend", { propertyName, bubbles: true }),
+        );
+      };
+
+      ended(paneRoots(root)[0], "grid-template-columns");
+      expect(root.classList.contains("wt-split-opening")).toBe(true);
+      ended(root, "opacity");
+      expect(root.classList.contains("wt-split-opening")).toBe(true);
+      ended(root, "grid-template-columns");
+
+      expect(root.classList.contains("wt-split-opening")).toBe(false);
+    } finally {
+      restoreTransitions();
+    }
+  });
+
+  it("is not ended by a transitionend while its own columns transition still runs", async () => {
+    const { root, split } = await settledSingle();
+    root.style.setProperty("--dur-standard", "3s");
     split.open();
-    const ended = (target: Element | undefined, propertyName: string): void => {
-      target?.dispatchEvent(new TransitionEvent("transitionend", { propertyName, bubbles: true }));
-    };
 
-    ended(paneRoots(root)[0], "grid-template-columns");
-    expect(root.classList.contains("wt-split-opening")).toBe(true);
-    ended(root, "opacity");
-    expect(root.classList.contains("wt-split-opening")).toBe(true);
-    ended(root, "grid-template-columns");
+    root.dispatchEvent(
+      new TransitionEvent("transitionend", {
+        propertyName: "grid-template-columns",
+        bubbles: true,
+      }),
+    );
 
-    expect(root.classList.contains("wt-split-opening")).toBe(false);
+    expect(root.classList.contains("wt-split-opening")).toBe(true);
   });
 
   it("a close during the slide leaves the next open's slide to its own clock", async () => {
     const { root, split } = await settledSingle();
     root.style.setProperty("--dur-standard", "1s");
+    const restoreTransitions = timerOnlySlides();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       split.open();
@@ -789,6 +1008,7 @@ describe("opening with wt-animate", () => {
       expect(root.classList.contains("wt-split-opening")).toBe(true);
     } finally {
       vi.useRealTimers();
+      restoreTransitions();
     }
   });
 });
@@ -990,7 +1210,7 @@ describe("the grip handle under the stylesheet", () => {
     split.open();
     ctx.notifySwitch({ id: "b" });
     ctx.shell.select("left");
-    await slid();
+    await slideOver(root);
     root.style.setProperty("--dur-standard", "3s");
     const handle = handleOf(root);
     const pill = getComputedStyle(handle, "::after");
@@ -1035,9 +1255,17 @@ describe("the grip handle under the stylesheet", () => {
       expect(root.classList.contains("wt-split-opening")).toBe(false);
       expect(columnsOf(root)).toEqual([495, 10, 495]);
       ctx.notifySwitch({ id: "b" });
-      // 01-scope.css's kill switch leaves every change a 0.01 ms transition.
-      await wait(20);
-      expect(getComputedStyle(handleOf(root), "::after").translate).toBe("4px");
+      // 01-scope.css's kill switch leaves every change a 0.01 ms transition, which
+      // still waits for frames; finishing them shows where the pill comes to rest.
+      const handle = handleOf(root);
+      const moving = handle.getAnimations({ subtree: true });
+      expect(moving.map((a) => a.effect?.getComputedTiming().duration)).toEqual(
+        moving.map(() => 0.01),
+      );
+      for (const a of moving) {
+        a.finish();
+      }
+      expect(getComputedStyle(handle, "::after").translate).toBe("4px");
     } finally {
       await media.send("Emulation.setEmulatedMedia", { features: [] });
     }
