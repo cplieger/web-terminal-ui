@@ -9,7 +9,7 @@ coverage/
 # Local engine overlay for pre-publish typecheck (scripts/verify.sh)
 node_modules/@cplieger/web-terminal/
 
-# Kiro skill artifacts (app-review, judgement, steering-maintenance)
+# Local agent state
 **/.app-review/
 **/.judgement/
 **/.steering-maintenance/
