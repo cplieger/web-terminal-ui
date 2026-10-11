@@ -508,7 +508,9 @@ function createShellInto(
     return cssTimeMs(win.getComputedStyle(shellRoot).getPropertyValue("--dur-standard"));
   }
   function slideFor(durationMs: number, tail: () => void): Slide {
+    let live = true;
     const stop = (): void => {
+      live = false;
       win.clearTimeout(timer);
       shellRoot.removeEventListener("transitionend", onEnd);
     };
@@ -518,12 +520,39 @@ function createShellInto(
     };
     const onEnd = (ev: TransitionEvent): void => {
       if (ev.target === shellRoot && ev.propertyName === "grid-template-columns") {
-        settle();
+        settleWhenStill();
       }
+    };
+    // Removing the slide class does not stop a running transition (the fallback
+    // `transition-property: all` still matches it), so a slide whose first frame
+    // came late would finish while its columns still move, announcing mid-slide
+    // sizes. Nor is every transitionend this slide's: the previous slide's can
+    // land after its finish. So the timer and transitionend settle only once no
+    // columns transition runs; a direct `settle()` still ends the slide at once.
+    const settleWhenStill = (): void => {
+      if (!live) {
+        return;
+      }
+      // A completed transition can stay listed until the next style change event
+      // (https://www.w3.org/TR/css-transitions-1/#complete); waiting on its settled
+      // `finished` would rerun this check in microtasks forever.
+      const running = shellRoot
+        .getAnimations()
+        .filter(
+          (a) =>
+            a.playState === "running" &&
+            "transitionProperty" in a &&
+            a.transitionProperty === "grid-template-columns",
+        );
+      if (running.length === 0) {
+        settle();
+        return;
+      }
+      void Promise.allSettled(running.map((a) => a.finished)).then(settleWhenStill);
     };
     shellRoot.addEventListener("transitionend", onEnd);
     // An engine that applies a track-list change at once fires no transitionend.
-    const timer = win.setTimeout(settle, durationMs);
+    const timer = win.setTimeout(settleWhenStill, durationMs);
     return { settle, abort: stop };
   }
   function beginClosing(toward: 0 | 1, durationMs: number, tail: () => void): void {
@@ -546,9 +575,12 @@ function createShellInto(
    *  start shows the new pane 0 px wide, so the panes hold their geometry until
    *  it is over, or a socket opening meanwhile would size its PTY to that. */
   function beginOpening(durationMs: number): void {
-    for (const p of builtPanes()) {
-      p.holdGeometry();
-    }
+    const holds = builtPanes().map((p) => p.holdGeometry());
+    const release = (): void => {
+      for (const r of holds) {
+        r();
+      }
+    };
     shellRoot.style.setProperty("--wt-split-ratio", "1");
     // The read commits the start as a style of its own; without it the slide
     // would start from the closed view's single column.
@@ -560,6 +592,7 @@ function createShellInto(
       for (const p of builtPanes()) {
         p.announceSize();
       }
+      release();
     });
     opening = {
       settle: slide.settle,
@@ -567,6 +600,7 @@ function createShellInto(
         slide.abort();
         opening = null;
         shellRoot.classList.remove("wt-split-opening");
+        release();
       },
     };
     applyRatioVar();
