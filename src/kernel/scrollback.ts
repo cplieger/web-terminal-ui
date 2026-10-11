@@ -44,7 +44,7 @@ const DEFAULT_SAVE_INTERVAL_MS = 10_000;
 
 /** What the kernel drives. Every method is safe to call at any point in the
  *  terminal's life, including after stop(). */
-export interface ScrollbackKeeper {
+interface ScrollbackKeeper {
   /** The store for a session: hydrated from storage when a usable entry exists,
    *  otherwise a fresh one. Either way the store is tracked for saving. Seeds
    *  the persisted server epoch, so this MUST be called before that session

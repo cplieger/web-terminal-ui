@@ -41,7 +41,7 @@ export interface ConnStateMachine {
 
 /** The timers the machine schedules on: the mounted window's, so a grace delay
  *  runs on the terminal's own clock. */
-export interface ConnStateTimers {
+interface ConnStateTimers {
   setTimeout(handler: () => void, ms: number): number;
   clearTimeout(id: number): void;
 }

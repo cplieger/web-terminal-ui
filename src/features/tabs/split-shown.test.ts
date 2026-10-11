@@ -371,7 +371,7 @@ describe("attention with two shown tabs", () => {
         notification: "Response complete",
         notificationSeq: 1,
       });
-      expect(document.title).toBe("Host page");
+      expect(document.title).toBe("two · Host page");
       expect(ownIcon.getAttribute("href")).toBe("/favicon.svg");
       expect(dot?.dataset["status"]).toBeUndefined();
       expect(posts).toEqual([]);
@@ -391,7 +391,7 @@ describe("attention with two shown tabs", () => {
         notification: "Response complete",
         notificationSeq: 1,
       });
-      expect(document.title).toBe("(1) Host page");
+      expect(document.title).toBe("(1) two · Host page");
       expect(ownIcon.getAttribute("href")).toBe("/favicon-done.svg");
       expect(dot?.dataset["status"]).toBe("done");
       expect(posts).toEqual([{ title: "three", body: "Response complete" }]);
@@ -417,11 +417,11 @@ describe("attention with two shown tabs", () => {
     monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
     monitor.emit({ id: "s3", status: "input", title: "three", createdAt: "3" });
-    expect(document.title).toBe("(3) Host page");
+    expect(document.title).toBe("(3) two · Host page");
 
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) two · Host page");
     expect(cueSeen()["s1"]).toBe("input");
     expect(cueSeen()["s2"]).toBe("input");
     expect(cueSeen()["s3"]).toBeUndefined();

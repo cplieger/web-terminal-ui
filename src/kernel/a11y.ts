@@ -33,6 +33,7 @@ let REANNOUNCE_DELAY_MS = 100;
 
 /** @internal Test seam: re-set every later announcement after `ms`; returns the
  *  previous value so the caller can restore it. */
+// deadset:ignore DS1004 -- the browser tests shorten the re-announce delay so they need not wait out the real one
 export function setReannounceDelayMs(ms: number): number {
   const previous = REANNOUNCE_DELAY_MS;
   REANNOUNCE_DELAY_MS = ms;

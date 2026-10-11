@@ -33,14 +33,18 @@
     "test": "vitest --run",
     "test:watch": "vitest",
     "test:coverage": "vitest --run --coverage",
+    "test:browsers": "playwright install chromium",
+    "test:mutation": "stryker run",
     "lint:eslint": "eslint .",
     "lint:prettier": "prettier --check .",
+    "lint:css": "stylelint \"css/**/*.css\"",
+    "lint:html": "html-validate scaffold/index.html",
     "lint:fix": "eslint . --fix && prettier --write .",
     "lint:knip": "knip",
     "verify": "bash scripts/verify.sh"
   },
   "peerDependencies": {
-    "@cplieger/web-terminal-engine": "^6.0.0"
+    "@cplieger/web-terminal-engine": "^6.0.0 || ^6.2.0-dev"
   },
   "overrides": {
     "qs": "^6.15.2"
@@ -58,13 +62,13 @@
     "eslint": "10.12.0",
     "fast-check": "4.10.2",
     "html-validate": "11.16.2",
-    "knip": "6.39.0",
-    "playwright": "1.63.0",
+    "knip": "6.40.0",
+    "playwright": "1.64.0",
     "prettier": "3.9.9",
     "stylelint": "17.16.0",
     "stylelint-config-standard": "40.0.0",
     "typescript": "npm:@typescript/typescript6@6.0.2",
-    "typescript-eslint": "8.71.0",
+    "typescript-eslint": "8.71.1",
     "vitest": "5.0.3"
   },
   "publishConfig": {

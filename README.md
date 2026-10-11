@@ -14,7 +14,7 @@ web-terminal-ui is built for a shell or a coding agent served by web-terminal-en
 
 - One `createTerminal()` call builds the UI inside an element you provide. Four presets cover a single, a touch and two tabbed layouts.
 - On a touchscreen it adds a key bar with Tab, Esc, arrows, Enter and a sticky Ctrl, a long-press paste menu and iOS soft-keyboard handling.
-- Tabs show activity dots from the program's `OSC 9;4` progress reports and raise browser notifications. Two tabs can sit side by side.
+- Tabs show activity dots from the program's `OSC 9;4` progress reports and raise browser notifications. Two tabs can sit side by side. A full-page terminal gives each tab and each split its own page address, and names the browser tab after the active tab, followed by the page's own title: `fix build · Web Terminal`.
 - Native text selection, IME input and dictation work, and predictive echo hides latency.
 
 Consider [xterm.js](https://github.com/xtermjs/xterm.js) if you want a terminal component for any PTY backend, such as node-pty. It has an optional GPU-accelerated renderer and a set of addons, and VS Code uses it. To build a UI of your own on web-terminal-engine, depend on the engine alone.

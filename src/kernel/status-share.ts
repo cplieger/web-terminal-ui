@@ -7,7 +7,7 @@ import type { Unsubscribe } from "./types.js";
 
 /** Opens the server's status stream at a path; the engine's `connectStatusStream`
  *  in production. */
-export type StatusConnector = (path: string, callbacks: StatusStreamCallbacks) => StatusStream;
+type StatusConnector = (path: string, callbacks: StatusStreamCallbacks) => StatusStream;
 
 /** The shell's shared status streams. */
 export interface StatusShare {

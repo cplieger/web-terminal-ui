@@ -9,7 +9,7 @@
 import type { TerminalEvents, Unsubscribe } from "./types.js";
 
 /** A typed event bus over TerminalEvents. */
-export interface TypedBus {
+interface TypedBus {
   on<K extends keyof TerminalEvents>(e: K, fn: (p: TerminalEvents[K]) => void): Unsubscribe;
   emit<K extends keyof TerminalEvents>(e: K, p: TerminalEvents[K]): void;
   /** Drop every listener (used on kernel destroy). */

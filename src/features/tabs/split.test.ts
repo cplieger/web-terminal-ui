@@ -91,11 +91,9 @@ const paneRoots = (root: HTMLElement): HTMLElement[] =>
   Array.from(root.querySelectorAll<HTMLElement>(":scope > .wt-split-pane"));
 /** Activate a focused button the way a keyboard does: the keydown, then the
  *  click the button dispatches for it. */
-function pressKey(el: HTMLElement, key: string): KeyboardEvent {
-  const ev = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-  el.dispatchEvent(ev);
+function pressKey(el: HTMLElement, key: string): void {
+  el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
   el.click();
-  return ev;
 }
 /** The elements Tab visits after `from`, in document order: a non-negative
  *  tabIndex, not hidden, not disabled, not inside an inert subtree, and able to

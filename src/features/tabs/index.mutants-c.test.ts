@@ -1276,14 +1276,14 @@ describe("tabs: chrome that only a runtime change moves", () => {
 
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
     monitor.emit({ id: "s3", status: "done", title: "three", createdAt: "3" });
-    expect(document.title).toBe("(2) Host page");
+    expect(document.title).toBe("(2) one · Host page");
 
     // s2 is not the dot's subject (latest wins, so that is s3), so nothing else on
     // the close path repaints the count.
     pick(m.chips()[1] ?? m.root, ".wt-tab-close").click();
     await until(() => m.chips().length === 2);
 
-    expect(document.title).toBe("(1) Host page");
+    expect(document.title).toBe("(1) one · Host page");
     document.title = "";
   });
 });

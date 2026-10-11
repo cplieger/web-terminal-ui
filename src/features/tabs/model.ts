@@ -4,14 +4,18 @@ import type { LineStore } from "@cplieger/web-terminal-engine";
 import type { SessionInfo } from "@cplieger/web-terminal-engine";
 import type { ViewMemory } from "@cplieger/web-terminal-engine";
 import type { PaneSide, TabHandle } from "../../kernel/types.js";
+import type { TabAlias } from "./route.js";
 
 export type { SessionInfo };
 
 /** A status record as the tabs feature consumes it: the REST wire shape plus the
  *  percentage that exists only on the status STREAM. The polling fallback lists
- *  no percentage at all, which means "no information", not "cleared". */
+ *  no percentage at all, which means "no information", not "cleared". `alias` is
+ *  read as `unknown` because `parseTabAlias` validates it where it enters, and an
+ *  engine before 6.2 sends none. */
 export type StatusRecord = SessionInfo & {
   readonly progressValue?: number;
+  readonly alias?: unknown;
 };
 
 // The status vocabulary is module-private so a status's MEANING has one home:
@@ -246,7 +250,7 @@ export function isUnseenCue(
 
 /** What the cue fold reads per tab; structural, so a caller passes its own tab
  *  objects. */
-export interface CueCandidate {
+interface CueCandidate {
   readonly id: string;
   readonly status: string;
 }
@@ -255,7 +259,7 @@ export interface CueCandidate {
  *  WORST for the icon. A count is set-valued and needs no rule for choosing among
  *  sessions; severity is a total order, so the icon's choice is not arbitrary.
  *  Neither names a session, the standing constraint on a page-wide surface. */
-export interface CueSummary {
+interface CueSummary {
   readonly count: number;
   readonly worst: CueStatus | "";
 }
@@ -392,6 +396,10 @@ export function orderedInsertIndex(current: readonly TabOrderKey[], incoming: Ta
 
 export interface Tab {
   id: string;
+  /** The session's public URL name from the server, or undefined when it sent
+   *  none (a server before engine 6.2) or one outside the alias grammar; such a
+   *  tab has no address of its own. */
+  alias: TabAlias | undefined;
   /** The local mutation epoch at which this tab was adopted. The list reconcile
    *  snapshots the counter BEFORE its GET and drops an unlisted tab only when
    *  the tab predates the snapshot: a tab born while the list was in flight is
@@ -480,7 +488,7 @@ export function hasPinnedName(tab: Tab): boolean {
 
 /** The realm a session API runs in: the mounted window's `fetch`, its abort
  *  signals and its clock, never the importing page's. */
-export interface SessionAPIRealm {
+interface SessionAPIRealm {
   readonly fetch: typeof fetch;
   readonly AbortSignal: typeof AbortSignal;
   readonly Date: typeof Date;
@@ -489,7 +497,7 @@ export interface SessionAPIRealm {
 /** The session REST client, bound to an apiBase. Every call is timeout-bounded:
  *  fetch has no default timeout, and a stalled-but-open server would leave a
  *  bootstrap await pending forever. */
-export interface SessionAPI {
+interface SessionAPI {
   list(): Promise<SessionInfo[]>;
   create(): Promise<SessionInfo>;
   close(id: string): Promise<void>;
@@ -753,7 +761,7 @@ export function createSessionAPI(apiBase: string, realm: SessionAPIRealm): Sessi
  *  listing (the SSE re-open snapshot, or the poll's GET /api/sessions) that
  *  predates the server reaping the session does not re-adopt (flash back) the
  *  closed tab. */
-export interface Tombstones {
+interface Tombstones {
   add(id: string): void;
   /** True while `id` is tombstoned (within the TTL). A hit past the TTL clears
    *  the entry and reports false (the adopt may proceed). */

@@ -63,6 +63,7 @@ let holdFirstPost = false;
 let releasePost: (() => void) | null = null;
 let refuseDeletes = false;
 
+// deadset:ignore DS1005 -- every case runs against this fake; the one package symbol it calls, TerminalHandle.destroy, is published API
 const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   const method = init?.method ?? "GET";
   if (String(url).endsWith("/layout")) {

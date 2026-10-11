@@ -18,7 +18,7 @@ The CSS ships as separate files plus manifests that list them. Concatenate the f
 
 ### A full-page terminal
 
-When the terminal is the whole page, as in web-terminal-server and web-terminal-kiro, concatenate `css/MANIFEST` into the `style.css` your page links. It holds `css/page.css` and the complete component set.
+When the terminal is the whole page, as in web-terminal-server and web-terminal-kiro, concatenate `css/MANIFEST` into the `style.css` your page links. It holds `css/page.css` and the complete component set. A full-page terminal with tabs also owns the page address fragment, so keep your own page state out of `location.hash`.
 
 `css/page.css` is the page kit. It resets `html` and `body`, styles the loading overlay and declares the `@font-face` rules for two font families, expecting the font files at `/vendor/fonts/`:
 
@@ -79,7 +79,7 @@ The package ships TypeScript source. Your build compiles it with the rest of you
 
 The library builds the terminal's own elements and finds them by class, so your page reproduces no element ids. Every style and CSS custom property is scoped to the `wt-root` class it adds to your element, and `destroy()` removes that class again.
 
-Call `createTerminal` at most once per document while the previous terminal is alive. The document title, the loading overlay, the status stream and the notification permission belong to the document, so one terminal owns them. A second call reports a `kernel-init` failure and throws without touching the page. Call `destroy()` on the first terminal before you build another, or use the `split` option for a second pane.
+Call `createTerminal` at most once per document while the previous terminal is alive. The document title, the loading overlay, the status stream and the notification permission belong to the document, so one terminal owns them. A full-page terminal with tabs puts the active tab's title in front of your page's `<title>`, so keep that title to the app's name. A second call reports a `kernel-init` failure and throws without touching the page. Call `destroy()` on the first terminal before you build another, or use the `split` option for a second pane.
 
 ## Pick a preset or features
 

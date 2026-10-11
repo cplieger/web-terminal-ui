@@ -19,6 +19,8 @@ import { createClickSwallow, placeMenuAt } from "../menu-position.js";
 import { snapToDevicePixels } from "./device-snap.js";
 import { centreChipLabels } from "./ink-centre.js";
 import { SWITCH_ANIMATIONS, SWITCH_CLASSES } from "./switch-anim.js";
+import { createAddressBar, type AddressBar, type RouteOrigin } from "./address-bar.js";
+import { formatTabRoute, parseTabAlias, parseTabRoute, type TabAlias } from "./route.js";
 import type { CueStatus, PaneLayout, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
   CUE_SEEN_KEY,
@@ -95,6 +97,19 @@ const DEFAULT_POLL_MS = 4000;
 // URL and NAVIGATES to it when no handler cancels the drop, so a bare session id
 // loaded /<session-id> on iPadOS. It also keeps the id out of the pasteboard.
 const TAB_DRAG_TYPE = "application/x-web-terminal-tab";
+const STALE_TAB_NOTICE = "That tab is no longer open";
+
+// Whether two records show the same tabs the same way; the handle is a device's
+// preference and does not count.
+function sameShownLayout(a: PaneLayout, b: PaneLayout | null): boolean {
+  return (
+    b !== null &&
+    a.left === b.left &&
+    a.right === b.right &&
+    a.open === b.open &&
+    a.selected === b.selected
+  );
+}
 
 /** The value a peer or a host reads through `ctx.use(tabs(...))`. `create` and
  *  `close` are server round trips and NEITHER rejects: a refusal is toasted and
@@ -781,6 +796,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // The record is read once and never written back by a read.
       let applyingRecord = false;
       let warnedLayout = false;
+      // The page address names the shown tabs only when the terminal owns the page.
+      const address: AddressBar | null =
+        ctx.shell.layoutMode === "viewport"
+          ? createAddressBar(win, { read: currentFragment, apply: applyFragment })
+          : null;
+      if (address !== null) {
+        ctx.defer(() => {
+          address.dispose();
+        });
+      }
+      // The page that owns its address is named after its active tab too.
+      const pageTitle = address === null ? null : ctx.shell.claimPageTitle();
+      if (pageTitle !== null) {
+        ctx.defer(() => {
+          pageTitle.release();
+        });
+      }
       // Twin of marotte static-src/tabs-drag.ts; when changing drag behaviour or its
       // constants, check the other app. Both judge a live drag's viewport against the
       // PRESS-time frame, so a move a hold lifted across still ends the drag.
@@ -1244,6 +1276,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Every list mutation ends in syncChrome, so no path can forget the
         // out-of-page surfaces; the fold is idempotent and the sinks no-op.
         paintAttention();
+        const active = selectedId();
+        pageTitle?.set(tabList.find((t) => t.id === active)?.display ?? null);
       }
 
       // The percentage is deliberately NOT written into the document title: a page
@@ -1391,6 +1425,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
         const tab: Tab = {
           id: info.id,
+          alias: parseTabAlias(info.alias) ?? undefined,
           born: ++tabEpoch,
           title: info.title,
           pinnedTitle: info.pinnedTitle,
@@ -1650,6 +1685,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           ctx.shell.select(side);
         }
         scheduleLayoutWrite();
+        address?.schedule("push");
         // Only when the user is about to wait: a revisited tab with a warm store
         // paints from cache in one frame and must not flash a cue at every switch.
         if (
@@ -3066,6 +3102,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (rec.order !== undefined) {
           t.order = rec.order;
         }
+        // A changed alias renames the tab it already is, so the address it is
+        // shown under is rewritten in place rather than pushed.
+        if (rec.alias !== undefined) {
+          const alias = parseTabAlias(rec.alias) ?? undefined;
+          if (alias !== t.alias) {
+            t.alias = alias;
+            address?.schedule("replace");
+          }
+        }
         paintStatusDot(t.dot, rec.status, reports);
         // Only a PRESENT percentage updates the tab: the polling fallback lists
         // SessionInfo, which carries none, and reading absence as cleared would
@@ -3193,6 +3238,98 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           open: split.open,
         };
       }
+      // Own-field equality over the list, never a keyed object, so an alias such
+      // as `constructor` finds nothing rather than Object.prototype.
+      function tabByAlias(alias: TabAlias | null): Tab | undefined {
+        return alias === null ? undefined : tabList.find((t) => t.alias === alias);
+      }
+      /** The fragment naming what the panes show: `""` when a shown tab has no
+       *  alias, null while no pane shows a tab. */
+      function currentFragment(): string | null {
+        const left = shownIn("left");
+        const right = shownIn("right");
+        if (left === null && right === null) {
+          return null;
+        }
+        const aliasOf = (id: string | null): TabAlias | null | undefined =>
+          id === null ? null : tabList.find((t) => t.id === id)?.alias;
+        const l = aliasOf(left);
+        const r = aliasOf(right);
+        if (l === undefined || r === undefined) {
+          return "";
+        }
+        if (!ctx.shell.split.isOpen()) {
+          const tab = l ?? r;
+          return tab === null ? "" : formatTabRoute({ kind: "single", tab });
+        }
+        return formatTabRoute({ kind: "split", left: l, right: r });
+      }
+      /** Show what a fragment the user navigated to names. Only tabs already open
+       *  are shown: a URL never creates or closes a session, because a history
+       *  entry would otherwise resurrect a tab closed on another device. */
+      function applyFragment(fragment: string, origin: RouteOrigin): void {
+        const route = parseTabRoute(fragment);
+        if (route === null) {
+          return;
+        }
+        const [wantLeft, wantRight] =
+          route.kind === "single" ? [route.tab, null] : [route.left, route.right];
+        const left = tabByAlias(wantLeft);
+        const right = tabByAlias(wantRight);
+        if (
+          origin === "deeplink" &&
+          ((wantLeft !== null && !left) || (wantRight !== null && !right))
+        ) {
+          ctx.toast(STALE_TAB_NOTICE);
+        }
+        const first = left ?? right;
+        if (first === undefined) {
+          return;
+        }
+        const split = ctx.shell.split;
+        let wantSplit = route.kind === "split" && split.enabled;
+        if (wantSplit && !split.isOpen() && !split.canOpen()) {
+          wantSplit = false;
+          ctx.toast("Split view needs a wider window");
+        }
+        if (!wantSplit) {
+          if (split.isOpen()) {
+            // Closing keeps the selected pane's tab, so select the one wanted.
+            const at = sideOf(first.id);
+            if (at !== null) {
+              ctx.shell.select(at);
+            }
+            split.close();
+          }
+          if (sideOf(first.id) === null) {
+            showIn(ctx.shell.selected(), first.id, { keepSelection: true });
+          }
+          return;
+        }
+        if (!split.isOpen() && !split.open()) {
+          return;
+        }
+        const want: Record<PaneSide, Tab | undefined> = { left, right };
+        // The selected side goes first: filling the peer first could empty the
+        // selected pane (a tab moving across), and showIn then moves the
+        // selection to the peer. A moving tab is emptied from its old side by showIn.
+        const kept = ctx.shell.selected();
+        for (const side of [kept, otherSide(kept)]) {
+          const tab = want[side];
+          if (tab !== undefined && shownIn(side) !== tab.id) {
+            showIn(side, tab.id, { keepSelection: true });
+          }
+        }
+        for (const side of ["left", "right"] as const) {
+          if (want[side] === undefined && shownIn(side) !== null) {
+            ctx.shell.pane(side)?.clearActiveSession();
+          }
+        }
+        const sel = ctx.shell.selected();
+        if (shownIn(sel) === null && shownIn(otherSide(sel)) !== null) {
+          ctx.shell.select(otherSide(sel));
+        }
+      }
       async function writeLayout(layout: PaneLayout, retryOnStale: boolean): Promise<void> {
         try {
           await api.setLayout(layout);
@@ -3274,6 +3411,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           syncCatchups();
           syncChrome();
           scheduleLayoutWrite();
+          address?.schedule("push");
         }),
       );
       ctx.defer(ctx.shell.onSelectionChange(syncChrome));
@@ -4173,6 +4311,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // its bootShowedNothing gate), or the SSE snapshot would win this race on
         // every load.
         if (anyShown()) {
+          address?.start(listed.status === "fulfilled");
           return true;
         }
         // The record's sessions where they still exist, else the oldest LIVE tab:
@@ -4197,7 +4336,64 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return true;
         };
         let shown = false;
-        if (layout?.open === true) {
+        // The address outranks the record when it names an open tab: it is the
+        // explicit instruction for this load. Read only with the server's list in
+        // hand, so a failed list never declares a tab gone.
+        const route =
+          address !== null && listed.status === "fulfilled"
+            ? parseTabRoute(win.location.hash)
+            : null;
+        if (route !== null && address !== null) {
+          const [wantLeft, wantRight] =
+            route.kind === "single" ? [route.tab, null] : [route.left, route.right];
+          const fromRoute = (alias: TabAlias | null): Tab | undefined => {
+            const tab = tabByAlias(alias);
+            return tab === undefined ? undefined : saved(tab.id);
+          };
+          const sides: Record<PaneSide, Tab | undefined> = {
+            left: fromRoute(wantLeft),
+            right: fromRoute(wantRight),
+          };
+          // Gone means absent from the list: an ended tab still in the row is
+          // refused here only because a boot never lands on a corpse.
+          const gone = (alias: TabAlias | null): boolean =>
+            alias !== null && tabByAlias(alias) === undefined;
+          if ((gone(wantLeft) || gone(wantRight)) && address.bootOrigin() === "deeplink") {
+            ctx.toast(STALE_TAB_NOTICE);
+          }
+          applyingRecord = true;
+          try {
+            if (route.kind === "split" && (sides.left || sides.right)) {
+              const record =
+                layout?.open === true &&
+                layout.left === (sides.left?.id ?? null) &&
+                layout.right === (sides.right?.id ?? null)
+                  ? layout.selected
+                  : null;
+              const selected: PaneSide =
+                record !== null && sides[record] ? record : sides.left ? "left" : "right";
+              if (ctx.shell.restoreSplit(layout?.handle ?? 0.5, selected)) {
+                for (const side of ["left", "right"] as const) {
+                  const tab = sides[side];
+                  if (tab) {
+                    shown = showAtBoot(side, tab) || shown;
+                  }
+                }
+              }
+            }
+            const only = sides.left ?? sides.right;
+            if (!shown && only) {
+              shown = showAtBoot(ctx.shell.targetFor(only.id), only);
+            }
+          } finally {
+            applyingRecord = false;
+          }
+          // The shared record follows the address this load was opened at.
+          if (shown && layout !== null && !sameShownLayout(layout, currentLayout())) {
+            scheduleLayoutWrite();
+          }
+        }
+        if (!shown && layout?.open === true) {
           const sides: Record<PaneSide, Tab | undefined> = {
             left: saved(layout.left),
             right: saved(layout.right),
@@ -4233,10 +4429,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         if (!shown) {
           bootShowedNothing = true;
+          address?.start(false);
           return false;
         }
         syncChrome();
         focusInput();
+        address?.start(listed.status === "fulfilled");
         return true;
       };
       live = { resolveInitialLayout, shownIn, showIn };

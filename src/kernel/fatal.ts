@@ -15,7 +15,7 @@ export function fadeOutOverlay(ld: HTMLElement | undefined): void {
   windowOf(ld.ownerDocument).setTimeout(removeOverlay, 1500);
 }
 
-export interface FatalPanelOptions {
+interface FatalPanelOptions {
   message?: string;
   /** `showModal()` (the terminal IS the page) or the bare `open` attribute (an
    *  embedded panel, or a pane beside a live one). */
