@@ -124,16 +124,54 @@ describe("viewport: settle lifecycle", () => {
     expect(viewport.isInTransition()).toBe(false);
   });
 
-  it("begins a transition on request, before anything has moved, and settles it like a resize", () => {
-    viewport.beginTransition();
+  it("holds a transition on request, before anything has moved, and settles it like a resize once released", () => {
+    const release = viewport.hold();
     expect(viewport.isInTransition()).toBe(true);
     vi.advanceTimersByTime(200);
+    release();
     window.dispatchEvent(new Event("resize"));
     vi.advanceTimersByTime(SETTLE_MS - 1);
     expect(onSettled).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(viewport.isInTransition()).toBe(false);
     expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not settle while any hold is live, and settles SETTLE_MS after the last release", () => {
+    const first = viewport.hold();
+    const second = viewport.hold();
+    vi.advanceTimersByTime(3 * SETTLE_MS);
+    first();
+    first();
+    vi.advanceTimersByTime(3 * SETTLE_MS);
+    expect(viewport.isInTransition()).toBe(true);
+    expect(onSettled).not.toHaveBeenCalled();
+
+    second();
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    expect(onSettled).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(viewport.isInTransition()).toBe(false);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the pending settle when a hold is released before it is due", () => {
+    const release = viewport.hold();
+    vi.advanceTimersByTime(100);
+    release();
+    vi.advanceTimersByTime(SETTLE_MS - 101);
+    expect(onSettled).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(viewport.isInTransition()).toBe(false);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles nothing when a hold is released after teardown", () => {
+    const release = viewport.hold();
+    viewport.teardown();
+    release();
+    vi.advanceTimersByTime(3 * SETTLE_MS);
+    expect(onSettled).not.toHaveBeenCalled();
   });
 
   it("keeps two panes' settle lifecycles apart", () => {

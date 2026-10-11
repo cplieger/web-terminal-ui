@@ -122,6 +122,20 @@ const nextFrame = (): Promise<void> =>
     });
   });
 
+/** Resolves after the next rendering step that delivers ResizeObservers. A new
+ *  observer's first callback comes in the same step as every observation pending
+ *  now (https://drafts.csswg.org/resize-observer/#html-event-loop), so the
+ *  kernel's own observers, created earlier, have run their callbacks by then. */
+function observersDelivered(): Promise<void> {
+  return new Promise((resolve) => {
+    const observer = new ResizeObserver(() => {
+      observer.disconnect();
+      resolve();
+    });
+    observer.observe(document.body);
+  });
+}
+
 function rootIn(): HTMLElement {
   const root = document.createElement("div");
   document.body.appendChild(root);
@@ -953,6 +967,9 @@ describe("a viewport grow while the reader is scrolled up", () => {
   async function keyboardOpen(): Promise<void> {
     vi.useFakeTimers();
     await mount({ features: () => [] });
+    // The viewport's initial observation re-arms the settle whenever a frame
+    // delivers it; after the settle below it would leave the size unmeasurable.
+    await observersDelivered();
     await vi.advanceTimersByTimeAsync(0);
     await settleUntil(() => sendResize.mock.calls.length > 0);
     fake.renderer.computeSize.mockReturnValue({ cols: 80, rows: 14 });
