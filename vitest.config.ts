@@ -3,8 +3,8 @@
 // misplacement fails loudly: a test needing Node (`node:fs`, a golden write)
 // throws in the browser, while a test needing a browser capability ABSENT passes
 // vacuously in Node too, so it stays in the browser and removes it at the site.
-import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
+import { alwaysOnInterception } from "./src/test-helpers/always-on-interception.js";
 
 // VITEST_TRACE=1 turns on trace view and the html reporter together, so one
 // variable yields an openable report (.vitest/index.html). Off by default: the
@@ -62,7 +62,7 @@ export default defineConfig({
           ],
           browser: {
             ...browserCommon,
-            provider: playwright({ launchOptions }),
+            provider: alwaysOnInterception({ launchOptions }),
             instances: [{ browser: "chromium" }],
           },
         },
@@ -84,7 +84,7 @@ export default defineConfig({
           exclude: ["node_modules/**", "**/.stryker-tmp/**"],
           browser: {
             ...browserCommon,
-            provider: playwright({ launchOptions, contextOptions: { hasTouch: true } }),
+            provider: alwaysOnInterception({ launchOptions, contextOptions: { hasTouch: true } }),
             instances: [{ browser: "chromium" }],
           },
         },

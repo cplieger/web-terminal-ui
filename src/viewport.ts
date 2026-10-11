@@ -79,8 +79,11 @@ export interface Viewport {
   /** Whether a transition is in flight, so geometry measured now is provisional. */
   isInTransition(): boolean;
   /** Start a transition as a resize would, for a box about to move that has not
-   *  moved yet; it settles SETTLE_MS after the last resize, as any other does. */
-  beginTransition(): void;
+   *  moved yet, and keep it from settling until the returned release runs (which
+   *  is idempotent). It settles SETTLE_MS after the last hold or resize, as any
+   *  transition does; a settle that came due while held runs SETTLE_MS after the
+   *  last release instead. */
+  hold(): () => void;
   /** Release every listener and observer and stop the settle timer. */
   teardown(): void;
 }
@@ -185,6 +188,7 @@ export function createViewport(opts: ViewportOptions): Viewport {
   // page's.
   const win = windowOf(termWrap.ownerDocument);
   let inTransition = false;
+  let holds = 0;
   let settleTimer: number | null = null;
   const cleanup: (() => void)[] = [];
   function release(): void {
@@ -203,6 +207,9 @@ export function createViewport(opts: ViewportOptions): Viewport {
     }
     settleTimer = win.setTimeout(() => {
       settleTimer = null;
+      if (holds > 0) {
+        return;
+      }
       inTransition = false;
       // Read at SETTLE, not at the start of the burst: every further event
       // re-arms the timer without re-reading, and on iOS a wake emits a stream
@@ -214,6 +221,22 @@ export function createViewport(opts: ViewportOptions): Viewport {
       }
       opts.onSettled(stillFollowing);
     }, SETTLE_MS);
+  }
+  function hold(): () => void {
+    holds++;
+    startTransition();
+    let held = true;
+    return () => {
+      if (!held) {
+        return;
+      }
+      held = false;
+      holds--;
+      // A settle that came due while held was dropped: start it again.
+      if (holds === 0 && inTransition && settleTimer === null) {
+        startTransition();
+      }
+    };
   }
 
   // iOS shrinks (and can offset) the visual viewport without resizing the layout
@@ -267,7 +290,7 @@ export function createViewport(opts: ViewportOptions): Viewport {
 
   return {
     isInTransition: () => inTransition,
-    beginTransition: startTransition,
+    hold,
     teardown: release,
   };
 }
