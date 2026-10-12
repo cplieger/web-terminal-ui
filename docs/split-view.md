@@ -70,7 +70,7 @@ At 730 px or wider, a window resize keeps both panes at 360 px or more by clampi
 
 ## Where the layout is saved
 
-The server keeps the arrangement beside the tab order, through `GET` and `PUT /api/sessions/layout`. The record holds the session in each pane, the divider share, the selected pane and whether the split is open. It is read once at load, written on every change, and lives as long as the session list. A reload or another device therefore restores the same panes, and the active tab is the selected pane's session.
+The server keeps the arrangement beside the tab order, through `GET` and `PUT /api/sessions/layout`. The record holds the session in each pane, the divider share, the selected pane and whether the split is open. It is read once at load, written on every change, and lives as long as the session list. A reload or another device therefore restores the same panes, and the active tab is the selected pane's session. When the server restores its sessions after a restart, as web-terminal-kiro does, the layout comes back with them.
 
 Against a server without that route, the split still works and nothing is saved. One console warning says so.
 

@@ -18,6 +18,7 @@ import type { ActivityMonitorApi } from "../activity-monitor.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
 import { CUE_SEEN_KEY } from "./model.js";
+import { tick } from "./test-helpers/split.js";
 
 // A fake activityMonitor: lets a test push status events (and stream (re)opens)
 // into tabs without the real SSE. tabs reads it via ctx.use, so the same feature
@@ -95,11 +96,15 @@ interface ServerBehaviour {
   /** Delay before the pinned-title answer resolves, so a test can land a status
    *  event while the request is genuinely in flight. */
   pinnedDelayMs: number;
-  /** Delay before GET /api/sessions answers, so a test can trigger a second
-   *  reconcile while the first one's list is still out. */
-  listDelayMs: number;
+  /** Hold each GET /api/sessions until the test calls the next of
+   *  `listReleases`, so a test can trigger a second reconcile while the first
+   *  one's list is still out. */
+  holdLists: boolean;
 }
 let server: ServerBehaviour;
+const listReleases: (() => void)[] = [];
+let listsInFlight = 0;
+let maxListsInFlight = 0;
 
 function delayed<T>(value: T, ms: number): Promise<T> {
   return ms <= 0 ? Promise.resolve(value) : new Promise((r) => setTimeout(() => r(value), ms));
@@ -147,7 +152,15 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
       ),
     );
   }
-  return delayed(jsonResponse(server.list, 200), server.listDelayMs);
+  if (!server.holdLists) {
+    return Promise.resolve(jsonResponse(server.list, 200));
+  }
+  listsInFlight++;
+  maxListsInFlight = Math.max(maxListsInFlight, listsInFlight);
+  return new Promise<void>((r) => listReleases.push(r)).then(() => {
+    listsInFlight--;
+    return jsonResponse(server.list, 200);
+  });
 });
 
 beforeEach(async () => {
@@ -164,8 +177,11 @@ beforeEach(async () => {
     deleteStatus: 204,
     pinnedStatus: 204,
     pinnedDelayMs: 0,
-    listDelayMs: 0,
+    holdLists: false,
   };
+  listReleases.length = 0;
+  listsInFlight = 0;
+  maxListsInFlight = 0;
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
   localStorage.clear();
@@ -547,14 +563,16 @@ describe("tabs: closing one tab", () => {
   });
 
   it("opens a fresh terminal when the only tab is removed server-side", async () => {
-    // An SSE `removed` for the last session: nothing is left to re-home to, so a
-    // replacement is spawned rather than leaving the page with no terminal. No
-    // DELETE — the session is already gone.
+    // An SSE `removed` for the last session: nothing is left to re-home to, so the
+    // page settles against the server and spawns a replacement when it lists
+    // nothing live, rather than leaving the page with no terminal. No DELETE —
+    // the session is already gone.
     server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     await mount(root, monitor.feature);
 
+    server.list = [];
     monitor.emit({ id: "s1", status: "exited", title: "one", createdAt: "1", removed: true });
     await until(() => labels(root).includes("fresh"));
 
@@ -1950,22 +1968,32 @@ describe("tabs: the physical-keyboard observer", () => {
 
 // --- The reconcile's overlap guard ---
 describe("tabs: the list reconcile", () => {
-  it("skips a run that overlaps one already in flight", async () => {
+  it("never runs two at once: a reopen queues behind the run in flight", async () => {
     // A server slower than the trigger cadence would otherwise have two runs
-    // mutating tabList at once. The extra run is dropped, not queued.
-    server.listDelayMs = 20;
+    // mutating tabList at once. A reopen's run waits for the one in flight, and
+    // its list is issued after the reopen, so each reopen gets its own.
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     await mount(root, monitor.feature);
+    server.holdLists = true;
     fetchMock.mockClear();
 
     monitor.open();
     monitor.open();
     monitor.open();
-    await until(() => calls("GET", "/api/sessions").length > 0);
-    await new Promise((r) => setTimeout(r, 40));
-
-    expect(calls("GET", "/api/sessions")).toHaveLength(1);
+    for (let n = 1; n <= 3; n++) {
+      await until(() => listReleases.length === 1);
+      for (let i = 0; i < 5; i++) {
+        await tick();
+      }
+      expect(calls("GET", "/api/sessions"), `lists while list ${n} is held`).toHaveLength(n);
+      listReleases.shift()?.();
+    }
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+    expect(calls("GET", "/api/sessions")).toHaveLength(3);
+    expect(maxListsInFlight).toBe(1);
   });
 
   it("relabels the strip after adopting what the server listed", async () => {

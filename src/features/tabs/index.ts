@@ -20,7 +20,13 @@ import { snapToDevicePixels } from "./device-snap.js";
 import { centreChipLabels } from "./ink-centre.js";
 import { SWITCH_ANIMATIONS, SWITCH_CLASSES } from "./switch-anim.js";
 import { createAddressBar, type AddressBar, type RouteOrigin } from "./address-bar.js";
-import { formatTabRoute, parseTabAlias, parseTabRoute, type TabAlias } from "./route.js";
+import {
+  formatTabRoute,
+  parseTabAlias,
+  parseTabRoute,
+  type TabAlias,
+  type TabRoute,
+} from "./route.js";
 import type { CueStatus, PaneLayout, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
   CUE_SEEN_KEY,
@@ -169,9 +175,10 @@ export interface TabsOptions {
   attentionIcons?: boolean;
 }
 
-/** Session creation can be TEMPORARILY refused: a host answers 503 with
- *  `Retry-After` and a body message while it installs tools on first boot, a
- *  window that can run twenty minutes. Only 503 retries, on the server's own
+/** The layout read, the session list and session creation can be TEMPORARILY
+ *  refused: a host answers 503 with `Retry-After` and a body message while it
+ *  installs tools on first boot or restores its sessions, a window that can run
+ *  twenty minutes. Only 503 retries, on the server's own
  *  schedule and repeating its own explanation. The bound is ELAPSED TIME, not an
  *  attempt count, which at `Retry-After: 5` would give up in a minute; every
  *  iteration sleeps at least the hint, so this is never a hot loop, and the user
@@ -228,20 +235,83 @@ function retryWait(win: Window, ms: number, signal: AbortSignal): Promise<void> 
   });
 }
 
+/** How long a run of refusals has waited and when it last told the user. */
+interface RefusalWait {
+  readonly startedAt: number;
+  // Null, NOT a 0 sentinel: elapsed is legitimately 0 when a host on the same
+  // machine refuses inside the first millisecond.
+  lastAnnouncedAt: number | null;
+}
+
+/** Wait out one temporary refusal: a 503, on the server's own `Retry-After`,
+ *  repeating its own explanation. False means give up: `err` is not a 503, or
+ *  the run of refusals has spent `CREATE_RETRY_MAX_TOTAL_MS`. An abort ends the
+ *  wait early; the caller checks its signal next. */
+async function waitOutRefusal(
+  err: unknown,
+  wait: RefusalWait,
+  ctx: TerminalContext,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const win = windowOf(ctx.shell.root.ownerDocument);
+  const elapsed = win.Date.now() - wait.startedAt;
+  if (
+    !(err instanceof SessionAPIError) ||
+    err.status !== 503 ||
+    elapsed >= CREATE_RETRY_MAX_TOTAL_MS
+  ) {
+    return false;
+  }
+  // "waiting", not "retrying": the server only said "not yet", and the first
+  // announcement fires before any retry has happened.
+  if (
+    wait.lastAnnouncedAt === null ||
+    elapsed - wait.lastAnnouncedAt >= CREATE_RETRY_REANNOUNCE_MS
+  ) {
+    wait.lastAnnouncedAt = elapsed;
+    const reason = err.serverMessage ?? "Server is not ready yet";
+    ctx.toast(`${reason}, waiting…`, 8000);
+    ctx.announce(`${reason}, waiting…`);
+  }
+  // Unthrottled: the overlay is the only surface visible before the first
+  // frame, and it replaces text in place.
+  ctx.loadingReason(`${err.serverMessage ?? "Server is not ready yet"}, waiting…`);
+  await retryWait(win, err.retryAfterMs ?? CREATE_RETRY_FALLBACK_MS, signal);
+  return true;
+}
+
+const isRefusal = (err: unknown): boolean => err instanceof SessionAPIError && err.status === 503;
+
+interface SessionAPIClient {
+  list(): Promise<SessionInfo[]>;
+  getLayout(): Promise<PaneLayout | null>;
+  create(): Promise<SessionInfo>;
+  close(id: string): Promise<void>;
+}
+
+/** Close a session a page created after it was torn down: nothing holds it. */
+function closeOrphan(api: Pick<SessionAPIClient, "close">, id: string): void {
+  void api.close(id).catch((err: unknown) => {
+    console.warn(
+      `web-terminal-ui: session ${id} was created after teardown and could not be closed`,
+      err,
+    );
+  });
+}
+
 /** Create a session, honouring the server's retry schedule, for as long as
  *  `signal` stays live: an abort ends the wait and throws its reason, and a
  *  create that finishes after the abort is closed rather than returned, because
  *  the page that asked for it has no tab left to hold it. */
 async function createSessionHonouringRetry(
-  api: { create: () => Promise<SessionInfo>; close: (id: string) => Promise<void> },
+  api: Pick<SessionAPIClient, "create" | "close">,
   ctx: TerminalContext,
   signal: AbortSignal,
 ): Promise<SessionInfo> {
-  const win = windowOf(ctx.shell.root.ownerDocument);
-  const startedAt = win.Date.now();
-  // Null, NOT a 0 sentinel: elapsed is legitimately 0 when a host on the same
-  // machine refuses inside the first millisecond.
-  let lastAnnouncedAt: number | null = null;
+  const wait: RefusalWait = {
+    startedAt: windowOf(ctx.shell.root.ownerDocument).Date.now(),
+    lastAnnouncedAt: null,
+  };
   for (;;) {
     signal.throwIfAborted();
     let info: SessionInfo;
@@ -249,38 +319,128 @@ async function createSessionHonouringRetry(
       info = await api.create();
     } catch (err) {
       signal.throwIfAborted();
-      const elapsed = win.Date.now() - startedAt;
-      if (
-        !(err instanceof SessionAPIError) ||
-        err.status !== 503 ||
-        elapsed >= CREATE_RETRY_MAX_TOTAL_MS
-      ) {
+      if (!(await waitOutRefusal(err, wait, ctx, signal))) {
         throw err;
       }
-      // "waiting", not "retrying": the server only said "not yet", and the first
-      // announcement fires before any retry has happened.
-      if (lastAnnouncedAt === null || elapsed - lastAnnouncedAt >= CREATE_RETRY_REANNOUNCE_MS) {
-        lastAnnouncedAt = elapsed;
-        const reason = err.serverMessage ?? "Server is not ready yet";
-        ctx.toast(`${reason}, waiting…`, 8000);
-        ctx.announce(`${reason}, waiting…`);
-      }
-      // Unthrottled: the overlay is the only surface visible before the first
-      // frame, and it replaces text in place.
-      ctx.loadingReason(`${err.serverMessage ?? "Server is not ready yet"}, waiting…`);
-      await retryWait(win, err.retryAfterMs ?? CREATE_RETRY_FALLBACK_MS, signal);
       continue;
     }
     if (signal.aborted) {
-      void api.close(info.id).catch((err: unknown) => {
-        console.warn(
-          `web-terminal-ui: session ${info.id} was created after teardown and could not be closed`,
-          err,
-        );
-      });
+      closeOrphan(api, info.id);
       signal.throwIfAborted();
     }
     return info;
+  }
+}
+
+/** What a settled server answered: its sessions, its layout record (null on a
+ *  404, an unreadable or a malformed record, each warned), and whether the list
+ *  itself succeeded. */
+interface Settled {
+  readonly sessions: SessionInfo[];
+  readonly layout: PaneLayout | null;
+  readonly listed: boolean;
+}
+
+const NOTHING_SETTLED: Settled = { sessions: [], layout: null, listed: false };
+
+/** settleSessionSet's create failed for good; `settled` is what was listed. */
+class SettleCreateFailed extends Error {
+  readonly settled: Settled;
+  constructor(cause: unknown, settled: Settled) {
+    super("web-terminal-ui: could not create a session", { cause });
+    this.name = "SettleCreateFailed";
+    this.settled = settled;
+  }
+}
+
+/** Read the layout, then list, then (when nothing live is listed) create one
+ *  session, starting the turn again after any 503, so a
+ *  create refused mid-restore never adds a tab beside the restored ones. A
+ *  non-503 layout read proves the host was not restoring when it was served, so
+ *  a list issued after it sees the whole restored set. Past
+ *  `CREATE_RETRY_MAX_TOTAL_MS` a refused layout read or list returns the last
+ *  good list, or rethrows the 503; a create that fails for good, a spent 503
+ *  included, throws `SettleCreateFailed` carrying the list, an abort its
+ *  reason. */
+async function settleSessionSet(
+  api: SessionAPIClient,
+  ctx: TerminalContext,
+  signal: AbortSignal,
+  warnLayout: (what: string, err?: unknown) => void,
+): Promise<Settled> {
+  const wait: RefusalWait = {
+    startedAt: windowOf(ctx.shell.root.ownerDocument).Date.now(),
+    lastAnnouncedAt: null,
+  };
+  let last: Settled | null = null;
+  // True to go round again; false once the refusals spent their budget.
+  const waited = async (err: unknown): Promise<boolean> => {
+    signal.throwIfAborted();
+    const again = await waitOutRefusal(err, wait, ctx, signal);
+    signal.throwIfAborted();
+    return again;
+  };
+  for (;;) {
+    signal.throwIfAborted();
+    let layout: PaneLayout | null = null;
+    try {
+      layout = await api.getLayout();
+      if (layout === null) {
+        warnLayout("this server has no GET/PUT /api/sessions/layout route");
+      }
+    } catch (err) {
+      if (isRefusal(err)) {
+        if (await waited(err)) {
+          continue;
+        }
+        if (last !== null) {
+          return last;
+        }
+        throw err;
+      }
+      signal.throwIfAborted();
+      warnLayout("could not read the pane layout", err);
+    }
+    let sessions: SessionInfo[] = [];
+    let listed = false;
+    try {
+      sessions = await api.list();
+      listed = true;
+    } catch (err) {
+      if (isRefusal(err)) {
+        if (await waited(err)) {
+          continue;
+        }
+        if (last !== null) {
+          return last;
+        }
+        throw err;
+      }
+      signal.throwIfAborted();
+    }
+    const settled: Settled = { sessions, layout, listed };
+    if (listed) {
+      last = settled;
+    }
+    // An ended session is viewable history, not a working terminal.
+    if (sessions.some((s) => !isEndedStatus(s.status))) {
+      return settled;
+    }
+    let info: SessionInfo;
+    try {
+      info = await api.create();
+    } catch (err) {
+      if (isRefusal(err) && (await waited(err))) {
+        continue;
+      }
+      signal.throwIfAborted();
+      throw new SettleCreateFailed(err, settled);
+    }
+    if (signal.aborted) {
+      closeOrphan(api, info.id);
+      signal.throwIfAborted();
+    }
+    return { sessions: [...sessions, info], layout, listed };
   }
 }
 
@@ -787,6 +947,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // Set by a bootstrap that showed nothing, cleared by the first showIn: the
       // one case a status event may pick a tab to show.
       let bootShowedNothing = false;
+      // While a reconcile that may resync onto a restarted server runs, a tab
+      // arriving on the stream is held rather than placed by arrival, which would
+      // beat the address and the record to the panes (withPlacementHold). A depth,
+      // because two stream reopens inside one long settle each hold.
+      let holdDepth = 0;
+      let heldPlacements: string[] = [];
+      // Whether a resync ran inside the current outermost hold; its release then
+      // places none of the held tabs, so a late arrival cannot replace a pane the
+      // address and the record restored.
+      let holdResynced = false;
+      // While a resync settles, the address bar is left alone so the dead tabs it
+      // drops write no history entries (scheduleAddress).
+      let settling = false;
       // The coalesced layout write (scheduleLayoutWrite): one PUT per macrotask,
       // one in flight at a time, and a change during the flight sends the latest
       // state once it lands, so an older record can never become the server's.
@@ -1078,7 +1251,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const heldKeyboard = keyboardAtPressOf(rowClose);
         rowClose.addEventListener("click", (e) => {
           e.stopPropagation();
-          void dropTab(t.id, true, heldKeyboard());
+          void dropTab(t.id, { remote: true, keyboardHeld: heldKeyboard() });
         });
         return row;
       }
@@ -1540,7 +1713,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const heldKeyboard = keyboardAtPressOf(close);
         close.addEventListener("click", (e) => {
           e.stopPropagation();
-          void dropTab(tab.id, true, heldKeyboard());
+          void dropTab(tab.id, { remote: true, keyboardHeld: heldKeyboard() });
         });
         // Middle-click closes the tab (#8). Suppress the middle-click default on
         // mousedown so the browser's autoscroll/paste affordance does not fire.
@@ -1685,7 +1858,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           ctx.shell.select(side);
         }
         scheduleLayoutWrite();
-        address?.schedule("push");
+        scheduleAddress("push");
         // Only when the user is about to wait: a revisited tab with a warm store
         // paints from cache in one frame and must not flash a cue at every switch.
         if (
@@ -2402,7 +2575,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // emptied is never refilled by a status event. A live tab outranks an ENDED
       // one, which would wedge the page the same way.
       function ensureActive(): void {
-        if (!bootShowedNothing || anyShown()) {
+        if (holdDepth > 0 || !bootShowedNothing || anyShown()) {
           return;
         }
         const first = tabList.find((t) => !isEndedStatus(statusOf(t))) ?? tabList[0];
@@ -2444,6 +2617,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // This client's own new session can reach the stream before its POST
       // answers, so the placement waits until a create in flight has shown its tab.
       function showCreatedElsewhere(id: string): void {
+        if (holdDepth > 0) {
+          heldPlacements.push(id);
+          return;
+        }
         if (creating !== null) {
           void creating.then(() => {
             showCreatedElsewhere(id);
@@ -2467,11 +2644,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // the user rather than throwing. A 503 has already been retried on the
           // server's own schedule by this point, so reaching here means it never
           // became ready: say so with the server's own words when it gave any.
-          ctx.toast(
-            err instanceof SessionAPIError && err.serverMessage !== undefined
-              ? `Could not open a terminal. ${err.serverMessage}`
-              : "Could not open a terminal",
-          );
+          toastCreateFailure(err);
           return;
         }
         // The status SSE may have adopted this session during the POST round-trip
@@ -2509,13 +2682,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // dropTab removes a tab's chrome + cache and, for a shown tab, decides what
-      // its pane shows next. remote=true also DELETEs the server session (a user
-      // close); remote=false is a local drop for a session the server already
-      // ended (an SSE removed event or a poll that no longer lists it), so no
-      // redundant DELETE is sent. keyboardHeld: the terminal input held the
-      // keyboard when the press on this tab's close button began, so focus goes
-      // back to it once the button that took it is gone.
-      async function dropTab(id: string, remote: boolean, keyboardHeld = false): Promise<void> {
+      // its pane shows next. remote also DELETEs the session (a user close);
+      // without it the server already ended it. keyboardHeld: the terminal input
+      // held the keyboard when the press on this tab's close button began, so
+      // focus returns to it. quiet: the caller (a resync) places what the panes
+      // show next, so no pane transaction or focus move runs.
+      async function dropTab(
+        id: string,
+        opts: { remote: boolean; keyboardHeld?: boolean; quiet?: boolean },
+      ): Promise<void> {
+        const { remote, keyboardHeld = false, quiet = false } = opts;
         const idx = tabList.findIndex((t) => t.id === id);
         if (idx < 0) {
           return;
@@ -2530,7 +2706,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // A failed create adds nothing (and toasts): keep the existing tab
           // rather than stranding the user on an empty strip.
           if (tabList.some((t) => t.id !== id)) {
-            await dropTab(id, true);
+            await dropTab(id, { remote: true });
           }
           return;
         }
@@ -2573,8 +2749,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         tab.el.remove();
         // Each connection forgets the session exactly once: the showing pane's
         // through clearActiveSession (which closes its socket and empties the
-        // pane), every other through dropSessionExcept.
-        if (side !== null && splitOpen) {
+        // pane), every other through dropSessionExcept. A quiet drop empties a
+        // single view's pane too, since no switch will replace what it shows.
+        if (side !== null && (splitOpen || quiet)) {
           ctx.shell.pane(side)?.clearActiveSession();
           ctx.shell.dropSessionExcept(id, side);
         } else {
@@ -2589,23 +2766,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         syncChrome(); // reflect the drop immediately (count, position)
         // What the panes show next is decided here, before the server's answer:
         // selection must not sit on an emptied pane for a DELETE round trip.
-        let replacement: Promise<void> | undefined;
-        if (side !== null && splitOpen && shownIn(otherSide(side)) !== null) {
-          ctx.shell.split.closeSide(side);
-          focusAfterSwitch();
-        } else if (side !== null) {
-          if (splitOpen) {
-            ctx.shell.split.close();
+        if (!quiet) {
+          placeAfterDrop(idx, side, splitOpen);
+          if (typing || keyboardHeld) {
+            focusInput();
           }
-          const neighbor = tabList[idx] ?? tabList[idx - 1];
-          if (neighbor) {
-            switchTo(neighbor.id);
-          } else {
-            replacement = create();
-          }
-        }
-        if (typing || keyboardHeld) {
-          focusInput();
         }
         if (remote) {
           try {
@@ -2616,11 +2781,35 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             }
           }
         }
-        await replacement;
+      }
+
+      // The pane transaction for a dropped tab that `side` showed (null: none).
+      function placeAfterDrop(idx: number, side: PaneSide | null, splitOpen: boolean): void {
+        if (side === null) {
+          return;
+        }
+        if (splitOpen && shownIn(otherSide(side)) !== null) {
+          ctx.shell.split.closeSide(side);
+          focusAfterSwitch();
+          return;
+        }
+        if (splitOpen) {
+          ctx.shell.split.close();
+        }
+        const neighbor = tabList[idx] ?? tabList[idx - 1];
+        if (neighbor) {
+          switchTo(neighbor.id);
+          return;
+        }
+        // Only the server removes a last tab here (a user's close of it took the
+        // create-first branch of dropTab). Its server either restarted or saw
+        // another device replace it, so settle rather than create a second tab.
+        // Not awaited: this may run inside the reconcile slot itself.
+        void inReconcileSlot(() => resync([]));
       }
 
       async function close_(id: string): Promise<void> {
-        await dropTab(id, true);
+        await dropTab(id, { remote: true });
       }
 
       // Each tab is a running agent, so closing two or more asks first. This path
@@ -3108,7 +3297,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           const alias = parseTabAlias(rec.alias) ?? undefined;
           if (alias !== t.alias) {
             t.alias = alias;
-            address?.schedule("replace");
+            scheduleAddress("replace");
           }
         }
         paintStatusDot(t.dot, rec.status, reports);
@@ -3177,15 +3366,55 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // server lists, then drop tabs it no longer lists. The SSE path runs it on
       // every (re)open because a RESTARTED manager's snapshot carries no
       // tombstones for sessions it never knew, so those tabs would otherwise spin
-      // "Reconnecting…" forever. An overlapping call joins the run in flight
-      // rather than starting another, so a caller that awaits it sees a listing.
+      // "Reconnecting…" forever. reconcileOnce joins the run in flight, so a
+      // caller that awaits it sees a listing; inReconcileSlot queues behind it.
       let reconciling: Promise<void> | null = null;
-      const reconcileOnce = (): Promise<void> => {
-        reconciling ??= reconcileNow().finally(() => {
-          reconciling = null;
-        });
-        return reconciling;
-      };
+      // Runs fn in the single reconcile slot: it never joins, it queues behind the
+      // run in flight. The slot never rejects, so a failed run cannot skip the
+      // runs queued behind it, and only the run still stored clears it.
+      function inReconcileSlot(fn: () => Promise<void>): Promise<void> {
+        const slot: Promise<void> = (reconciling ?? Promise.resolve())
+          .then(() => fn())
+          .catch((err: unknown) => {
+            console.warn("web-terminal-ui: tab reconcile failed", err);
+          })
+          .finally(() => {
+            if (reconciling === slot) {
+              reconciling = null;
+            }
+          });
+        reconciling = slot;
+        return slot;
+      }
+      const reconcileOnce = (): Promise<void> => reconciling ?? inReconcileSlot(reconcileNow);
+      // Placement of a tab arriving on the stream waits until fn ends. Then, unless
+      // a resync ran meanwhile, the held tabs still open are placed as they would
+      // have been; either way a page that booted onto nothing gets its repair.
+      async function withPlacementHold(fn: () => Promise<void>): Promise<void> {
+        holdDepth++;
+        try {
+          await fn();
+        } finally {
+          holdDepth--;
+          if (holdDepth === 0) {
+            const held = holdResynced ? [] : heldPlacements;
+            heldPlacements = [];
+            holdResynced = false;
+            for (const id of held) {
+              if (tabList.some((t) => t.id === id)) {
+                showCreatedElsewhere(id);
+              }
+            }
+            ensureActive();
+          }
+        }
+      }
+      // While settling, the dead tabs a resync drops must write no history entry.
+      function scheduleAddress(mode: "push" | "replace"): void {
+        if (!settling) {
+          address?.schedule(mode);
+        }
+      }
       async function reconcileNow(): Promise<void> {
         // The listing is authoritative only for tabs that existed when it was
         // requested: a tab adopted while the GET was in flight is invisible to
@@ -3201,6 +3430,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         const seen = new Set(list.map((s) => s.id));
+        // Every tab the listing could have named is missing from it: the server
+        // restarted (or replaced every tab). Decided before the adopt loop, so the
+        // tabs it lists are placed by the address and the record, not by arrival.
+        // Because this branch takes every such case, the gone loop below drops a
+        // strict subset of the known tabs and never reaches dropTab's last-tab arm.
+        const known = tabList.filter((t) => t.born <= epochAtList).map((t) => t.id);
+        if (known.length > 0 && known.every((id) => !seen.has(id))) {
+          await resync(known);
+          return;
+        }
         for (const info of list) {
           adoptSession(info); // add sessions created elsewhere (no local tab)
           applyStatus(info, reportsOf(info.reportsActivity));
@@ -3211,10 +3450,62 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           .filter((t) => !seen.has(t.id) && t.born <= epochAtList)
           .map((t) => t.id);
         for (const id of gone) {
-          await dropTab(id, false);
+          await dropTab(id, { remote: false });
         }
         ensureActive();
         syncChrome();
+      }
+      // Rebuild the page onto a server whose sessions replaced `known` (a restart,
+      // or the server's last tab removed): drop them without placing anything,
+      // settle the new set, then place it the way a boot does, by the address and
+      // the record. Runs inside the reconcile slot.
+      async function resync(known: readonly string[]): Promise<void> {
+        await withPlacementHold(async () => {
+          holdResynced = true;
+          const typing = keyboardInPaneInput();
+          settling = true;
+          let placed: "kept" | "shown" | "none" = "none";
+          try {
+            for (const id of known) {
+              await dropTab(id, { remote: false, quiet: true });
+            }
+            // showSettled reopens a split through restoreSplit, which refuses an
+            // open one; closed under applyingRecord so no record write goes out.
+            if (ctx.shell.split.isOpen()) {
+              applyingRecord = true;
+              try {
+                ctx.shell.split.close();
+              } finally {
+                applyingRecord = false;
+              }
+            }
+            const settled = await settleOrToast();
+            if (tornDown()) {
+              return;
+            }
+            for (const info of settled.sessions) {
+              adoptSession(info);
+              applyStatus(info, reportsOf(info.reportsActivity));
+            }
+            // Read now, so an address the user navigated to during the wait wins.
+            const route =
+              address !== null && settled.listed ? parseTabRoute(win.location.hash) : null;
+            // No stale-tab toast: the user did not open this address in this act.
+            placed = showSettled(settled, route, false);
+          } finally {
+            settling = false;
+            if (placed === "none") {
+              bootShowedNothing = true;
+            }
+            if (!tornDown()) {
+              syncChrome();
+              if (typing) {
+                focusInput();
+              }
+              scheduleAddress("replace");
+            }
+          }
+        });
       }
       function warnLayoutOnce(what: string, err?: unknown): void {
         if (warnedLayout) {
@@ -3411,7 +3702,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           syncCatchups();
           syncChrome();
           scheduleLayoutWrite();
-          address?.schedule("push");
+          scheduleAddress("push");
         }),
       );
       ctx.defer(ctx.shell.onSelectionChange(syncChrome));
@@ -3427,7 +3718,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       if (monitor) {
         const offStatus = monitor.onStatus((s) => {
           if (s.removed) {
-            void dropTab(s.id, false); // already gone server-side; no DELETE
+            void dropTab(s.id, { remote: false }); // already gone server-side; no DELETE
             return;
           }
           adoptSession(s);
@@ -3448,8 +3739,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           });
         });
         ctx.defer(offStatus);
+        // The first open joins the boot's reconcile. A reopen queues a fresh one
+        // under a placement hold, so its decision comes from a list issued after
+        // the reopen and a restarted server's tabs are placed by resync.
+        let streamOpens = 0;
         const offStreamOpen = monitor.onStreamOpen?.(() => {
-          void reconcileOnce();
+          streamOpens++;
+          if (streamOpens === 1) {
+            void reconcileOnce();
+          } else {
+            void withPlacementHold(() => inReconcileSlot(reconcileNow));
+          }
         });
         if (offStreamOpen) {
           ctx.defer(offStreamOpen);
@@ -4257,62 +4557,85 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         toggleSwitcher();
       });
 
-      // The bootstrap (paneLayoutOwner.resolveInitialLayout): list existing
-      // sessions or create the first one, adopt them, pick the start tab from the
-      // server's layout record, and show it. A false return (nothing could be
-      // listed or spawned) keeps the chrome up with the "+" retry alive, and the
+      // The bootstrap (paneLayoutOwner.resolveInitialLayout): settle the session
+      // set (creating the first session when nothing live is listed), adopt it,
+      // pick the start tab and show it. A false return (nothing could be listed
+      // or spawned) keeps the chrome up with the "+" retry alive, and the
       // terminal dismisses the loading overlay over it. The record is read once
       // and never written back by a read.
       const resolveInitialLayout = async (): Promise<boolean> => {
-        const [listed, layoutRead] = await Promise.allSettled([api.list(), api.getLayout()]);
+        const settled = await settleOrToast();
         if (tornDown()) {
           return false;
-        }
-        let sessions: SessionInfo[] = listed.status === "fulfilled" ? listed.value : [];
-        let layout: PaneLayout | null = null;
-        if (layoutRead.status === "fulfilled") {
-          layout = layoutRead.value;
-          if (layout === null) {
-            warnLayoutOnce("this server has no GET/PUT /api/sessions/layout route");
-          }
-        } else {
-          warnLayoutOnce("could not read the pane layout", layoutRead.reason);
-        }
-        // A fresh session unless a LIVE one is listed: an ended session is viewable
-        // history, not a working terminal, and a boot onto one would hang the
-        // loading state. The dead ones are still adopted below.
-        if (!sessions.some((s) => !isEndedStatus(s.status))) {
-          try {
-            sessions = [...sessions, await createSessionHonouringRetry(api, ctx, lifetime.signal)];
-          } catch (err) {
-            if (tornDown()) {
-              return false;
-            }
-            // The give-up path (a 503 was already retried on the server's schedule):
-            // toast with the server's explanation and leave the chrome up so "+"
-            // can retry, as the runtime create() does.
-            ctx.toast(
-              err instanceof SessionAPIError && err.serverMessage !== undefined
-                ? `Could not open a terminal. ${err.serverMessage}`
-                : "Could not open a terminal",
-            );
-          }
         }
         // Adopt rather than push: the status stream's open snapshot may already
         // have given a listed session its tab, since the subscription precedes
         // this list.
-        for (const info of sessions) {
+        for (const info of settled.sessions) {
           adoptSession(info);
         }
         // From here on, tabs added at runtime (create / adopt) animate in.
         started = true;
-        // A tap on a chip while the list was in flight outranks the record;
-        // ensureActive is deliberately NOT one of these callers during boot (see
-        // its bootShowedNothing gate), or the SSE snapshot would win this race on
-        // every load.
+        // Read only with the server's list in hand, so a failed list never
+        // declares a tab gone, and only once settled, so a wait keeps its intent.
+        const route = address !== null && settled.listed ? parseTabRoute(win.location.hash) : null;
+        switch (showSettled(settled, route, address?.bootOrigin() === "deeplink")) {
+          case "kept":
+            address?.start(settled.listed);
+            return true;
+          case "shown":
+            syncChrome();
+            focusInput();
+            address?.start(settled.listed);
+            return true;
+          case "none":
+            bootShowedNothing = true;
+            address?.start(false);
+            return false;
+        }
+      };
+
+      // settleSessionSet, toasting a failure the way a failed create always has
+      // and carrying on with whatever was listed.
+      async function settleOrToast(): Promise<Settled> {
+        try {
+          return await settleSessionSet(api, ctx, lifetime.signal, warnLayoutOnce);
+        } catch (err) {
+          if (tornDown()) {
+            return NOTHING_SETTLED;
+          }
+          const failure = err instanceof SettleCreateFailed ? err : null;
+          toastCreateFailure(failure === null ? err : failure.cause);
+          return failure?.settled ?? NOTHING_SETTLED;
+        }
+      }
+
+      // The give-up path (a 503 was already retried on the server's schedule):
+      // toast with the server's explanation and leave the chrome up so "+" can
+      // retry.
+      function toastCreateFailure(err: unknown): void {
+        ctx.toast(
+          err instanceof SessionAPIError && err.serverMessage !== undefined
+            ? `Could not open a terminal. ${err.serverMessage}`
+            : "Could not open a terminal",
+        );
+      }
+
+      // Place a settled set: "kept" when a pane already shows a tab (a tap while
+      // the list was in flight outranks the record), "shown" when the address,
+      // the record or a fallback placed one, "none" when nothing could be shown.
+      // toastStale says whether an address naming a closed tab is news to the user.
+      function showSettled(
+        settled: Settled,
+        route: TabRoute | null,
+        toastStale: boolean,
+      ): "kept" | "shown" | "none" {
+        const { sessions, layout } = settled;
+        // ensureActive is deliberately NOT one of this function's callers during
+        // boot (see its bootShowedNothing gate), or the SSE snapshot would win
+        // this race on every load.
         if (anyShown()) {
-          address?.start(listed.status === "fulfilled");
-          return true;
+          return "kept";
         }
         // The record's sessions where they still exist, else the oldest LIVE tab:
         // a reload must not restore onto the corpse of a session that died while
@@ -4337,13 +4660,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         };
         let shown = false;
         // The address outranks the record when it names an open tab: it is the
-        // explicit instruction for this load. Read only with the server's list in
-        // hand, so a failed list never declares a tab gone.
-        const route =
-          address !== null && listed.status === "fulfilled"
-            ? parseTabRoute(win.location.hash)
-            : null;
-        if (route !== null && address !== null) {
+        // explicit instruction for this load.
+        if (route !== null) {
           const [wantLeft, wantRight] =
             route.kind === "single" ? [route.tab, null] : [route.left, route.right];
           const fromRoute = (alias: TabAlias | null): Tab | undefined => {
@@ -4358,7 +4676,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // refused here only because a boot never lands on a corpse.
           const gone = (alias: TabAlias | null): boolean =>
             alias !== null && tabByAlias(alias) === undefined;
-          if ((gone(wantLeft) || gone(wantRight)) && address.bootOrigin() === "deeplink") {
+          if ((gone(wantLeft) || gone(wantRight)) && toastStale) {
             ctx.toast(STALE_TAB_NOTICE);
           }
           applyingRecord = true;
@@ -4427,16 +4745,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             tabList[0];
           shown = startTab !== undefined && showAtBoot(ctx.shell.targetFor(startTab.id), startTab);
         }
-        if (!shown) {
-          bootShowedNothing = true;
-          address?.start(false);
-          return false;
-        }
-        syncChrome();
-        focusInput();
-        address?.start(listed.status === "fulfilled");
-        return true;
-      };
+        return shown ? "shown" : "none";
+      }
       live = { resolveInitialLayout, shownIn, showIn };
 
       return {
