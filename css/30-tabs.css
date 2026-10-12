@@ -474,55 +474,6 @@
   color: var(--tab-active-fg);
 }
 
-/* The split glyph (both split buttons) is filled, never stroked: a stroke is
-   centred on its outline, so its edges sit half a stroke off the shape's.
-   20px is a whole number of device px at 1, 1.25, 1.5 and 2 dppx, and at 1.25
-   and 1.5 the shapes move to that DPR's device grid, written as device px over
-   the ratio (25 and 30 across, both mirrored about the centre). */
-:where(.wt-root) .wt-btn > .wt-split-icon {
-  width: 20px;
-  height: 20px;
-  fill: currentcolor;
-  stroke: none;
-}
-
-@media (resolution: 1.25dppx) {
-  :where(.wt-root) .wt-split-icon-left {
-    x: calc(1px / 1.25);
-    width: calc(8px / 1.25);
-  }
-
-  :where(.wt-root) .wt-split-icon-divider {
-    x: calc(11px / 1.25);
-    y: calc(2px / 1.25);
-    width: calc(3px / 1.25);
-    height: calc(21px / 1.25);
-    rx: calc(1.5px / 1.25);
-  }
-
-  :where(.wt-root) .wt-split-icon-right {
-    x: calc(16px / 1.25);
-    width: calc(8px / 1.25);
-  }
-}
-
-@media (resolution: 1.5dppx) {
-  :where(.wt-root) .wt-split-icon-left {
-    x: calc(2px / 1.5);
-    width: calc(9px / 1.5);
-  }
-
-  :where(.wt-root) .wt-split-icon-divider {
-    x: calc(14px / 1.5);
-    width: calc(2px / 1.5);
-  }
-
-  :where(.wt-root) .wt-split-icon-right {
-    x: calc(19px / 1.5);
-    width: calc(9px / 1.5);
-  }
-}
-
 /* ===== Reorder drop slot (tabs feature, desktop drag) =====
    The dragged chip stays in the strip's flow for the whole gesture and renders as
    the SLOT it will land in: an empty dashed outline in the accent over a faint
