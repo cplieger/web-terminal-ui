@@ -149,14 +149,10 @@ const KB_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" wi
 // background-tab notification dot rides on it (see switchButtonHTML). Same
 // viewBox + stroke=currentcolor treatment as the others.
 const SWITCH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="13" height="13" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3"/></svg>`;
-// The state is the button's aria-expanded, not its icon. The viewBox equals the
-// 20px box 30-tabs.css draws it in, one unit per CSS px: that stylesheet's
-// per-DPR geometry is written in those units.
-const SPLIT_SVG =
-  `<svg class="wt-split-icon" viewBox="0 0 20 20" aria-hidden="true">` +
-  `<rect class="wt-split-icon-left" x="1" y="4" width="6" height="12" rx="1.5"/>` +
-  `<rect class="wt-split-icon-divider" x="9" y="2" width="2" height="16" rx="1"/>` +
-  `<rect class="wt-split-icon-right" x="13" y="4" width="6" height="12" rx="1.5"/></svg>`;
+// The keyboard glyph's rounded square split down the middle, so the two buttons
+// beside each other read as one size and weight. The state is the button's
+// aria-expanded, not its icon.
+const SPLIT_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M12 4v16"/></svg>`;
 
 /** The ONE builder for a tab chip's content (status dot, label, progress bar,
  *  close), shared by the strip chip, the mobile active row and each mobile list

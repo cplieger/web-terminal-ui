@@ -1,6 +1,3 @@
-import type {} from "@vitest/browser-playwright";
-import { cdp } from "vitest/browser";
-
 declare global {
   interface ImportMeta {
     glob(
@@ -55,60 +52,6 @@ export function tabbedStylesheet(): HTMLStyleElement {
   document.head.appendChild(styles);
   return styles;
 }
-
-// An emulated DSF change can leave this frame's parsed sheet on the previous
-// ratio's media results while matchMedia already answers the new one
-// (measured: the 1.25 dppx rule still applied at 1.5), so the sheet is
-// re-inserted after every change, which evaluates it afresh.
-export async function emulateDeviceScale(dpr: number, styles: HTMLStyleElement): Promise<void> {
-  await cdp().send("Emulation.setDeviceMetricsOverride", {
-    width: 1600,
-    height: 900,
-    deviceScaleFactor: dpr,
-    mobile: false,
-  });
-  document.head.appendChild(styles);
-}
-export async function clearDeviceScale(styles: HTMLStyleElement): Promise<void> {
-  await cdp().send("Emulation.clearDeviceMetricsOverride");
-  document.head.appendChild(styles);
-}
-
-export function splitIcon(root: HTMLElement, button = ".wt-tab-split"): SVGSVGElement {
-  const icon = root.querySelector<SVGSVGElement>(`${button} > svg`);
-  if (!icon) {
-    throw new Error(`no ${button} icon`);
-  }
-  return icon;
-}
-export function iconShapes(icon: SVGSVGElement): SVGRectElement[] {
-  return [...icon.querySelectorAll("rect")];
-}
-// To 1/1000 of a device pixel: a whole pixel reads as an integer, a fraction stays visible.
-const toDevice = (n: number): number => Math.round(n * devicePixelRatio * 1000) / 1000;
-export function deviceBox(icon: SVGSVGElement): number[] {
-  const frame = window.frameElement?.getBoundingClientRect();
-  const box = icon.getBoundingClientRect();
-  return [(frame?.left ?? 0) + box.left, (frame?.top ?? 0) + box.top, box.width, box.height].map(
-    toDevice,
-  );
-}
-export function deviceEdges(icon: SVGSVGElement): { across: number[]; down: number[] } {
-  const scale = icon.getBoundingClientRect().width / icon.viewBox.baseVal.width;
-  const boxes = iconShapes(icon).map((r) => r.getBBox());
-  return {
-    across: boxes.flatMap((b) => [toDevice(b.x * scale), toDevice((b.x + b.width) * scale)]),
-    down: boxes.flatMap((b) => [toDevice(b.y * scale), toDevice((b.y + b.height) * scale)]),
-  };
-}
-
-/** Each icon shape's edges from the svg's origin, in device px, per ratio. */
-export const ICON_GRIDS = [
-  { dpr: 1, across: [1, 7, 9, 11, 13, 19], down: [4, 16, 2, 18, 4, 16] },
-  { dpr: 1.25, across: [1, 9, 11, 14, 16, 24], down: [5, 20, 2, 23, 5, 20] },
-  { dpr: 1.5, across: [2, 11, 14, 16, 19, 28], down: [6, 24, 3, 27, 6, 24] },
-  { dpr: 2, across: [2, 14, 18, 22, 26, 38], down: [8, 32, 4, 36, 8, 32] },
-];
 
 export interface SoftKeyboard {
   open(px: number): void;

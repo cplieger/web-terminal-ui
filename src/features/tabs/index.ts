@@ -16,7 +16,6 @@ import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { fromHTML, holdFocusOnPress } from "../dom.js";
 import { createClickSwallow, placeMenuAt } from "../menu-position.js";
-import { snapToDevicePixels } from "./device-snap.js";
 import { centreChipLabels } from "./ink-centre.js";
 import { SWITCH_ANIMATIONS, SWITCH_CLASSES } from "./switch-anim.js";
 import { createAddressBar, type AddressBar, type RouteOrigin } from "./address-bar.js";
@@ -833,12 +832,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // engine produced for THIS font at THIS size, rather than the em constant
       // in 00-tokens.css that can only be right at one size (see ink-centre.ts).
       ctx.defer(centreChipLabels(varRoot, { strip: bar, switcher }));
-      for (const b of splitButtons) {
-        const icon = b.querySelector("svg");
-        if (icon) {
-          ctx.defer(snapToDevicePixels(icon, ctx.shell.root));
-        }
-      }
 
       // Mark the root so the CSS lifts the bottom-anchored chrome (banner, toast,
       // scroll-to-bottom, key grid) above the switcher bar on a coarse pointer.

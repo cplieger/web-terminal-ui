@@ -12,14 +12,8 @@ import {
   type FakeSessionServer,
 } from "./test-helpers/split.js";
 import {
-  ICON_GRIDS,
-  clearDeviceScale,
-  deviceBox,
-  deviceEdges,
-  emulateDeviceScale,
   softKeyboard,
   span,
-  splitIcon,
   switcherBar,
   tabbedStylesheet,
   termOf,
@@ -57,49 +51,6 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
-});
-
-describe("the switcher bar's split icon on the device pixel grid", () => {
-  afterEach(async () => {
-    await clearDeviceScale(styles);
-  });
-
-  // Layout puts this icon at CSS (W - 136, H - 40) in a root at most 500 px
-  // tall, a quarter or half device pixel off at 1.25 and 1.5 dppx; `box` is the
-  // nearest whole device pixel.
-  const button = ".wt-switcher-split";
-  const placements = [
-    { width: 1279, height: 451, dpr: 1, box: [1143, 411, 20, 20] },
-    { width: 1279, height: 451, dpr: 1.25, box: [1429, 514, 25, 25] },
-    { width: 1279, height: 451, dpr: 1.5, box: [1715, 617, 30, 30] },
-    { width: 1279, height: 451, dpr: 2, box: [2286, 822, 40, 40] },
-    { width: 1280, height: 450, dpr: 1, box: [1144, 410, 20, 20] },
-    { width: 1280, height: 450, dpr: 1.25, box: [1430, 513, 25, 25] },
-    { width: 1280, height: 450, dpr: 1.5, box: [1716, 615, 30, 30] },
-    { width: 1280, height: 450, dpr: 2, box: [2288, 820, 40, 40] },
-    { width: 1441, height: 449, dpr: 1, box: [1305, 409, 20, 20] },
-    { width: 1441, height: 449, dpr: 1.25, box: [1631, 511, 25, 25] },
-    { width: 1441, height: 449, dpr: 1.5, box: [1958, 614, 30, 30] },
-    { width: 1441, height: 449, dpr: 2, box: [2610, 818, 40, 40] },
-  ];
-  const edgesAt = new Map(ICON_GRIDS.map((g) => [g.dpr, { across: g.across, down: g.down }]));
-  it.each(placements)(
-    "moves the icon onto whole device pixels in a $width x $height root at $dpr dppx, split closed and open",
-    async ({ width, height, dpr, box }) => {
-      await emulateDeviceScale(dpr, styles);
-      expect(matchMedia(`(resolution: ${String(dpr)}dppx)`).matches).toBe(true);
-      const root = rootIn(width, height);
-      const { term } = await mountTabbed(root, server);
-      await settle();
-      const icon = splitIcon(root, button);
-      expect(deviceBox(icon)).toEqual(box);
-      expect(deviceEdges(icon)).toEqual(edgesAt.get(dpr));
-      root.querySelector<HTMLElement>(button)?.click();
-      expect(term.split?.isOpen()).toBe(true);
-      await settle();
-      expect(deviceBox(icon)).toEqual(box);
-    },
-  );
 });
 
 // The switcher bar is 60 px tall and anchored to the root's bottom edge; the

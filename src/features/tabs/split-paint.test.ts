@@ -17,15 +17,8 @@ import {
   type FakeSessionServer,
 } from "./test-helpers/split.js";
 import {
-  ICON_GRIDS,
-  clearDeviceScale,
-  deviceBox,
-  deviceEdges,
-  emulateDeviceScale,
-  iconShapes,
   softKeyboard,
   span,
-  splitIcon,
   tabbedStylesheet,
   termOf,
   withoutVisualViewport,
@@ -161,159 +154,42 @@ describe("the selected pane's chip", () => {
 });
 
 describe("the split icon", () => {
-  it("is drawn in its own CSS pixels: the viewBox is the 20 px box it renders in", async () => {
-    const root = rootIn();
-    await mountTabbed(root, server);
-    const icon = splitIcon(root);
-    const box = icon.getBoundingClientRect();
-    expect([box.width, box.height]).toEqual([20, 20]);
-    const vb = icon.viewBox.baseVal;
-    expect([vb.x, vb.y, vb.width, vb.height]).toEqual([0, 0, 20, 20]);
-  });
+  function glyph(root: HTMLElement, button: string): SVGSVGElement {
+    const icon = root.querySelector<SVGSVGElement>(`${button} > svg`);
+    if (!icon) {
+      throw new Error(`no ${button} icon`);
+    }
+    return icon;
+  }
 
-  it("is filled in the button's colour and carries no stroke", async () => {
+  it("is outlined in the button's colour, never filled", async () => {
     const root = rootIn();
     await mountTabbed(root, server);
+    const icon = glyph(root, ".wt-tab-split");
     const color = getComputedStyle(stripSplit(root)).color;
-    for (const shape of iconShapes(splitIcon(root))) {
-      expect(getComputedStyle(shape).fill).toBe(color);
-      expect(getComputedStyle(shape).stroke).toBe("none");
+    for (const shape of icon.querySelectorAll("rect, path")) {
+      expect(getComputedStyle(shape).fill).toBe("none");
+      expect(getComputedStyle(shape).stroke).toBe(color);
     }
   });
 
-  it("is two equal panes with a thinner, taller divider centred between them", async () => {
+  // The keyboard button is hidden under a fine pointer, so its glyph is
+  // compared by the size and stroke the stylesheet gives it.
+  it("draws at the keyboard glyph's size and stroke weight, inside the same rounded square", async () => {
     const root = rootIn();
     await mountTabbed(root, server);
-    const [left, divider, right] = iconShapes(splitIcon(root)).map((r) => r.getBBox());
-    expect([left?.x, left?.y, left?.width, left?.height]).toEqual([1, 4, 6, 12]);
-    expect([divider?.x, divider?.y, divider?.width, divider?.height]).toEqual([9, 2, 2, 16]);
-    expect([right?.x, right?.y, right?.width, right?.height]).toEqual([13, 4, 6, 12]);
-  });
-
-  describe("on the device pixel grid", () => {
-    afterEach(async () => {
-      await clearDeviceScale(styles);
-    });
-    async function emulate(dpr: number): Promise<void> {
-      await emulateDeviceScale(dpr, styles);
-      expect(matchMedia(`(resolution: ${String(dpr)}dppx)`).matches).toBe(true);
-    }
-
-    // `box` is the svg's left, top, width and height in the page's device pixels.
-    const boxes = [
-      { dpr: 1, box: [960, 560, 20, 20] },
-      { dpr: 1.25, box: [1200, 700, 25, 25] },
-      { dpr: 1.5, box: [1440, 840, 30, 30] },
-      { dpr: 2, box: [1920, 1120, 40, 40] },
-    ];
-    it.each(boxes)(
-      "puts the icon's box on whole device pixels at $dpr dppx, split closed and open",
-      async ({ dpr, box }) => {
-        await emulate(dpr);
-        const root = rootIn();
-        const { term } = await mountTabbed(root, server);
-        await settle();
-        expect(deviceBox(splitIcon(root))).toEqual(box);
-        stripSplit(root).click();
-        expect(term.split?.isOpen()).toBe(true);
-        expect(deviceBox(splitIcon(root))).toEqual(box);
-      },
-    );
-
-    it.each(ICON_GRIDS)(
-      "puts every shape edge on a whole device pixel at $dpr dppx",
-      async ({ dpr, across, down }) => {
-        await emulate(dpr);
-        const root = rootIn();
-        await mountTabbed(root, server);
-        expect(deviceEdges(splitIcon(root))).toEqual({ across, down });
-      },
-    );
-
-    // Layout puts this icon at CSS (W - 40, H - 40), a quarter or half device
-    // pixel off at 1.25 and 1.5 dppx; `box` is the nearest whole device pixel.
-    // The switcher bar's placements need a coarse pointer and run in
-    // split-paint.touch.test.ts.
-    const button = ".wt-tab-split";
-    const placements = [
-      { width: 1279, height: 601, dpr: 1, box: [1239, 561, 20, 20] },
-      { width: 1279, height: 601, dpr: 1.25, box: [1549, 701, 25, 25] },
-      { width: 1279, height: 601, dpr: 1.5, box: [1859, 842, 30, 30] },
-      { width: 1279, height: 601, dpr: 2, box: [2478, 1122, 40, 40] },
-      { width: 1280, height: 600, dpr: 1, box: [1240, 560, 20, 20] },
-      { width: 1280, height: 600, dpr: 1.25, box: [1550, 700, 25, 25] },
-      { width: 1280, height: 600, dpr: 1.5, box: [1860, 840, 30, 30] },
-      { width: 1280, height: 600, dpr: 2, box: [2480, 1120, 40, 40] },
-      { width: 1441, height: 599, dpr: 1, box: [1401, 559, 20, 20] },
-      { width: 1441, height: 599, dpr: 1.25, box: [1751, 699, 25, 25] },
-      { width: 1441, height: 599, dpr: 1.5, box: [2102, 839, 30, 30] },
-      { width: 1441, height: 599, dpr: 2, box: [2802, 1118, 40, 40] },
-    ];
-    const edgesAt = new Map(ICON_GRIDS.map((g) => [g.dpr, { across: g.across, down: g.down }]));
-    it.each(placements)(
-      "moves the strip's icon onto whole device pixels in a $width x $height root at $dpr dppx, split closed and open",
-      async ({ width, height, dpr, box }) => {
-        await emulate(dpr);
-        const root = rootIn(width, height);
-        const { term } = await mountTabbed(root, server);
-        await settle();
-        const icon = splitIcon(root, button);
-        expect(deviceBox(icon)).toEqual(box);
-        expect(deviceEdges(icon)).toEqual(edgesAt.get(dpr));
-        root.querySelector<HTMLElement>(button)?.click();
-        expect(term.split?.isOpen()).toBe(true);
-        await settle();
-        expect(deviceBox(icon)).toEqual(box);
-      },
-    );
-
-    it("follows the root through a resize, from wherever the last one left it", async () => {
-      await emulate(1.25);
-      const root = rootIn(1280, 600);
-      await mountTabbed(root, server);
-      await settle();
-      const icon = splitIcon(root);
-      expect(deviceBox(icon)).toEqual([1550, 700, 25, 25]);
-      root.style.width = "1279px";
-      await settle();
-      expect(deviceBox(icon)).toEqual([1549, 700, 25, 25]);
-      root.style.width = "1441px";
-      root.style.height = "599px";
-      await settle();
-      expect(deviceBox(icon)).toEqual([1751, 699, 25, 25]);
-    });
-
-    it("follows every change of the device pixel ratio at the same layout", async () => {
-      // CDP's scale-factor emulation fires no media change event in this frame
-      // (measured; a top-level page gets one once a frame runs), so the test
-      // delivers it to the resolution query the page listens on.
-      const queries: MediaQueryList[] = [];
-      const real = window.matchMedia.bind(window);
-      vi.stubGlobal("matchMedia", (query: string) => {
-        const list = real(query);
-        queries.push(list);
-        return list;
-      });
-      const change = (media: string): void => {
-        for (const list of queries.filter((q) => q.media === media)) {
-          list.dispatchEvent(new MediaQueryListEvent("change", { media, matches: false }));
-        }
-      };
-      await emulate(1);
-      const root = rootIn(1279, 601);
-      await mountTabbed(root, server);
-      await settle();
-      const icon = splitIcon(root);
-      expect(deviceBox(icon)).toEqual([1239, 561, 20, 20]);
-      await emulate(1.25);
-      change("(resolution: 1dppx)");
-      await settle();
-      expect(deviceBox(icon)).toEqual([1549, 701, 25, 25]);
-      await emulate(1.5);
-      change("(resolution: 1.25dppx)");
-      await settle();
-      expect(deviceBox(icon)).toEqual([1859, 842, 30, 30]);
-    });
+    const split = glyph(root, ".wt-tab-split");
+    const kb = glyph(root, ".wt-tab-kb");
+    const box = split.getBoundingClientRect();
+    expect([box.width, box.height]).toEqual([18, 18]);
+    const [s, k] = [getComputedStyle(split), getComputedStyle(kb)];
+    expect([s.width, s.height, s.strokeWidth]).toEqual([k.width, k.height, k.strokeWidth]);
+    expect(split.getAttribute("viewBox")).toBe(kb.getAttribute("viewBox"));
+    const frame = (svg: SVGSVGElement): (string | null)[] => {
+      const r = svg.querySelector("rect");
+      return ["x", "y", "width", "height", "rx"].map((a) => r?.getAttribute(a) ?? null);
+    };
+    expect(frame(split)).toEqual(frame(kb));
   });
 });
 
