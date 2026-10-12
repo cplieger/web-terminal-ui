@@ -24,6 +24,10 @@ Switching tabs adds a history entry, so the browser's back and forward buttons m
 
 An address naming a tab that is no longer open keeps what is shown and rewrites the address to match. A fresh load or a hand-edited address also shows "That tab is no longer open". A reload and the back and forward buttons correct the address without a message. While a live tab is open, a fresh load naming a tab whose program has ended opens on a live tab instead, also without a message. An embedded terminal (`layout: "container"`) leaves the page address to its host. [Split view](split-view.md#the-splits-address) describes the address of two panes.
 
+A server that restores its tabs after a restart, such as web-terminal-kiro, keeps their aliases, so an address saved before the restart opens the same tab. A page that loads while the server is not ready waits, shows the server's message, and reads its address only once the tabs are back.
+
+When the server restarts under an open page, the page drops the tabs it had and waits for the restored ones. It then shows the tabs the address names, else the saved layout, as a fresh load does. It creates no tab while it waits, and it shows no "no longer open" message, because the address was not opened just now.
+
 ## The activity dot
 
 Each tab can carry a status dot that the activity monitor drives from the server's status stream. Under `presetTabbed()` the dot appears only once a session reports `OSC 9;4` progress, so a plain shell keeps clean, label-only tabs. Under `presetAgentTabbed()` the idle dot shows from the moment the tab opens.

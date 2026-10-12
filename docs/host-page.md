@@ -102,6 +102,10 @@ Keep the loading overlay in your served HTML so it paints before the module load
 
 Pass the element as the `loading` option. The terminal fades it out and removes it once the first frame renders. On a slow start it writes a status line into the overlay after 5 seconds, then rotates four messages every 20 seconds from the 60-second mark. The `loadingMessages` option rewords those messages. A screen reader hears only the changes that mean something, not every rotation.
 
+A server that is not ready answers 503 with a `Retry-After` header and an `error` message, and the overlay shows that message while the terminal waits. The tabbed presets treat a 503 on the session list, on the layout read or on session creation the same way. They wait on `Retry-After`, then read the layout and list again, for up to 20 minutes before booting on the last list they got.
+
+The layout read is the host's "set is ready" signal, so a host that restores sessions answers it with 503 until the restore is done. Answer 503 only while the server is genuinely not ready, and 404 when it keeps no layout record, or every page load waits on the overlay that long.
+
 ## What ships
 
 | Path | Purpose |
