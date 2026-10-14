@@ -38,24 +38,41 @@ export function shouldNotify(sessionIsActive: boolean, pageVisible: boolean): bo
   return !(sessionIsActive && pageVisible);
 }
 
-/** Bound on the per-session dedupe map: each key is a live session server-side,
- *  so a real page is nowhere near this and a hostile stream cannot grow it. */
+/** Bound on each per-session map: each key is a live session server-side, so a
+ *  real page is nowhere near this and a hostile stream cannot grow it. */
 const MAX_TRACKED_SESSIONS = 200;
 
 export function createNotifier(env: NotifierEnv): Notifier {
   // Highest sequence delivered per session. The engine never replays a
   // notification; this makes a doubled frame unable to notify twice for one event.
   const lastSeq = new Map<string, number>();
+  // The banner on screen per session. A page notification is invisible to
+  // ServiceWorkerRegistration.getNotifications(), so only this reference can
+  // close it once its session is read.
+  const shown = new Map<string, NotificationLike>();
   let armed = false;
   let requested = false;
 
-  function evict(): void {
-    while (lastSeq.size > MAX_TRACKED_SESSIONS) {
-      const oldest = lastSeq.keys().next().value;
+  // `drop` must remove the key, or this never ends.
+  function evict(map: Map<string, unknown>, drop: (id: string) => void): void {
+    while (map.size > MAX_TRACKED_SESSIONS) {
+      const oldest = map.keys().next().value;
       if (oldest === undefined) {
         return;
       }
-      lastSeq.delete(oldest);
+      drop(oldest);
+    }
+  }
+  function retract(id: string): void {
+    const posted = shown.get(id);
+    if (posted === undefined) {
+      return;
+    }
+    shown.delete(id);
+    try {
+      posted.close();
+    } catch {
+      /* a banner the platform already took down */
     }
   }
 
@@ -71,7 +88,7 @@ export function createNotifier(env: NotifierEnv): Notifier {
           return false;
         }
         lastSeq.set(ev.id, seq);
-        evict();
+        evict(lastSeq, (id) => lastSeq.delete(id));
       }
       if (!shouldNotify(view.sessionIsActive, env.pageVisible())) {
         return false;
@@ -90,7 +107,16 @@ export function createNotifier(env: NotifierEnv): Notifier {
         posted.onclick = (): void => {
           view.activate();
           posted.close();
+          if (shown.get(ev.id) === posted) {
+            shown.delete(ev.id);
+          }
         };
+        // Re-inserted so map order is banner age, and the banner evicted is
+        // closed: a dropped reference would leave it (and Android's launcher
+        // dot) up with nothing able to retract it.
+        shown.delete(ev.id);
+        shown.set(ev.id, posted);
+        evict(shown, retract);
         return true;
       } catch {
         // Safari throws on `new Notification` outside an installed PWA.
@@ -117,8 +143,10 @@ export function createNotifier(env: NotifierEnv): Notifier {
         /* a browser that refuses to be asked is a tab-only browser */
       }
     },
+    retract,
     forget(id): void {
       lastSeq.delete(id);
+      retract(id);
     },
   };
 }

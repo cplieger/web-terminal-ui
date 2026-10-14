@@ -26,7 +26,7 @@ import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
-import { CUE_SEEN_KEY } from "./model.js";
+import { storedCueSeen } from "../../test-helpers/cue-seen.js";
 
 /** A status event carrying the secondary-activity fields. They are declared here
  *  rather than on the engine's SessionStatus for the reason model.ts's
@@ -165,7 +165,7 @@ function switchDot(root: HTMLElement): string {
 
 /** This viewer's acknowledgements as they reached storage. */
 function acknowledged(): Record<string, string> {
-  return JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}") as Record<string, string>;
+  return storedCueSeen();
 }
 
 describe("a background task suppresses its session's settled cue", () => {

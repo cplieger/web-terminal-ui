@@ -438,7 +438,7 @@ function createShellInto(
   function attention(options: AttentionOptions): AttentionReporter {
     // A setup still running past destroy() gets a reporter that writes nothing.
     if (destroyed) {
-      return { report: () => undefined };
+      return { report: () => undefined, resync: () => undefined };
     }
     const surface = createAttention(
       browserAttentionSinks(

@@ -16,6 +16,8 @@ import {
   compareTabOrder,
   createSessionAPI,
   createTombstones,
+  cueSeenID,
+  cueSeenKey,
   foldedCueStatus,
   isCueStatus,
   isEndedStatus,
@@ -25,7 +27,6 @@ import {
   orderedInsertIndex,
   parseCueSeen,
   renderedProgress,
-  serializeCueSeen,
   statusOwnsProgress,
   statusPhrase,
   statusRevealsDot,
@@ -203,52 +204,63 @@ describe("SessionAPIError carries what the server said", () => {
  *  the stored arrangement regardless of the order sessions ARRIVE in — which is
  *  not stable, since the status-stream snapshot races the bootstrap's list. */
 describe("parseCueSeen rejects anything the acknowledgement store cannot trust", () => {
-  it("reads a well-formed map back verbatim", () => {
-    expect([...parseCueSeen(JSON.stringify({ s1: "done", s2: "input" }))]).toEqual([
+  it("reads well-formed entries back verbatim", () => {
+    expect([
+      ...parseCueSeen([
+        ["s1", "done"],
+        ["s2", "input"],
+      ]),
+    ]).toEqual([
       ["s1", "done"],
       ["s2", "input"],
     ]);
   });
 
-  it("degrades to nothing acknowledged on unusable values", () => {
-    const cases: Record<string, string | null> = {
-      absent: null,
-      empty: "",
-      "not json": "{oh no",
-      "an array": JSON.stringify(["s1"]),
-      "a bare string": JSON.stringify("s1"),
-      "a number": JSON.stringify(7),
-      null_literal: JSON.stringify(null),
-    };
-    for (const [name, raw] of Object.entries(cases)) {
-      expect(parseCueSeen(raw).size, name).toBe(0);
-    }
-  });
-
   it("drops entries whose value is not a cue status, keeping the rest", () => {
-    // Only the two cue-worthy statuses are acknowledgeable: "working"/"idle"/
+    // Only the cue-worthy statuses are acknowledgeable: "working"/"idle"/
     // "exited" are states nothing ever notified about, and a stored one would
     // silently suppress the NEXT real cue for that session.
-    const raw = JSON.stringify({ s1: "done", s2: "working", s3: 1, s4: "input", "": "done" });
-    expect([...parseCueSeen(raw)]).toEqual([
+    const entries: [string, string][] = [
+      ["s1", "done"],
+      ["s2", "working"],
+      ["s3", ""],
+      ["s4", "input"],
+      ["", "done"],
+    ];
+    expect([...parseCueSeen(entries)]).toEqual([
       ["s1", "done"],
       ["s4", "input"],
     ]);
   });
 
-  it("caps a hostile or corrupted map so the restore cannot do unbounded work", () => {
-    const huge = Object.fromEntries(
-      Array.from({ length: MAX_PERSISTED_CUE_SEEN + 500 }, (_, i) => [`s${String(i)}`, "done"]),
-    );
-    expect(parseCueSeen(JSON.stringify(huge)).size).toBe(MAX_PERSISTED_CUE_SEEN);
+  it("stops reading at the cap so a hostile store cannot cost unbounded work", () => {
+    let read = 0;
+    function* huge(): Generator<[string, string]> {
+      for (let i = 0; i < MAX_PERSISTED_CUE_SEEN + 500; i++) {
+        read++;
+        yield [`s${String(i)}`, "done"];
+      }
+    }
+    expect(parseCueSeen(huge()).size).toBe(MAX_PERSISTED_CUE_SEEN);
+    expect(read).toBe(MAX_PERSISTED_CUE_SEEN + 1);
+  });
+});
+
+describe("cue acknowledgements are stored one key per session", () => {
+  it("reads back the session id each key was written for", () => {
+    for (const id of ["s1", "a/b", "wt-cue-seen/", " "]) {
+      expect(cueSeenID(cueSeenKey(id)), id).toBe(id);
+    }
   });
 
-  it("round-trips through serializeCueSeen", () => {
-    const seen = new Map<string, CueStatus>([
-      ["s3", "input"],
-      ["s1", "done"],
-    ]);
-    expect([...parseCueSeen(serializeCueSeen(seen))]).toEqual([...seen]);
+  it("claims no other key", () => {
+    for (const key of ["wt-cue-seen", "wt-cue-seen/", "x-wt-cue-seen/s1", "wt-swipe-hint", ""]) {
+      expect(cueSeenID(key), key).toBeNull();
+    }
+  });
+
+  it("gives two sessions two keys", () => {
+    expect(cueSeenKey("s1")).not.toBe(cueSeenKey("s2"));
   });
 });
 
@@ -1083,9 +1095,12 @@ describe("the OSC 9;4 percentage", () => {
 
 describe("parseCueSeen accepts the cue statuses and nothing else", () => {
   it("stores a crashed acknowledgement and rejects a non-cue status", () => {
-    const seen = parseCueSeen(
-      JSON.stringify({ s1: "crashed", s2: "done", s3: "working", s4: "exited" }),
-    );
+    const seen = parseCueSeen([
+      ["s1", "crashed"],
+      ["s2", "done"],
+      ["s3", "working"],
+      ["s4", "exited"],
+    ]);
     expect([...seen.entries()]).toEqual([
       ["s1", "crashed"],
       ["s2", "done"],

@@ -14,10 +14,11 @@ import type { NotificationView } from "./types.js";
 function fakeCtor(): {
   ctor: NotificationCtorLike;
   posts: { title: string; body: string | undefined; tag: string | undefined }[];
-  made: { onclick: ((event: Event) => void) | null; closed: boolean }[];
+  made: { onclick: ((event: Event) => void) | null; closed: boolean; close: () => void }[];
 } {
   const posts: { title: string; body: string | undefined; tag: string | undefined }[] = [];
-  const made: { onclick: ((event: Event) => void) | null; closed: boolean }[] = [];
+  const made: { onclick: ((event: Event) => void) | null; closed: boolean; close: () => void }[] =
+    [];
   class Fake {
     onclick: ((event: Event) => void) | null = null;
     closed = false;
@@ -287,6 +288,104 @@ describe("createNotifier click activation", () => {
     made[1]?.onclick?.(new Event("click"));
     expect(first).not.toHaveBeenCalled();
     expect(second).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createNotifier retraction", () => {
+  it("closes the session's delivered notification once that session is read", () => {
+    const { ctor, made } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view());
+    n.deliver({ id: "s2", notification: "Done", notificationSeq: 1 }, view());
+
+    n.retract("s1");
+    expect(made.map((m) => m.closed)).toEqual([true, false]);
+  });
+
+  it("closes only the newest banner of a session that notified twice", () => {
+    // Both carry the session's tag, so the browser already replaced the first.
+    const { ctor, made } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view());
+    n.deliver({ id: "s1", notification: "Input", notificationSeq: 2 }, view());
+
+    n.retract("s1");
+    expect(made.map((m) => m.closed)).toEqual([false, true]);
+  });
+
+  it("retracts a closed session's notification with its dedupe state", () => {
+    const { ctor, made } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view());
+
+    n.forget("s1");
+    expect(made[0]?.closed).toBe(true);
+  });
+
+  it("does nothing for a session with no banner, or one the user already clicked", () => {
+    const { ctor, made } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    expect(() => {
+      n.retract("nobody");
+    }).not.toThrow();
+    n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view());
+    const banner = made[0];
+    if (!banner) {
+      throw new Error("no banner");
+    }
+    banner.onclick?.(new Event("click"));
+    let closes = 0;
+    banner.close = (): void => {
+      closes++;
+    };
+    n.retract("s1");
+    expect(closes).toBe(0);
+  });
+
+  it("closes the oldest banner when it stops holding it, so none is left unretractable", () => {
+    const { ctor, made } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    for (let i = 0; i <= 200; i++) {
+      n.deliver({ id: `s${String(i)}`, notification: "Done", notificationSeq: 1 }, view());
+    }
+    expect(made[0]?.closed, "the 201st session's banner closes the oldest").toBe(true);
+    expect(made[1]?.closed).toBe(false);
+    n.retract("s1");
+    expect(made[1]?.closed).toBe(true);
+  });
+
+  it("counts a session's newest banner as its age, not its first one", () => {
+    const { ctor, made } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    n.deliver({ id: "s0", notification: "Done", notificationSeq: 1 }, view());
+    for (let i = 1; i < 200; i++) {
+      n.deliver({ id: `s${String(i)}`, notification: "Done", notificationSeq: 1 }, view());
+    }
+    n.deliver({ id: "s0", notification: "Input", notificationSeq: 2 }, view());
+    n.deliver({ id: "s200", notification: "Done", notificationSeq: 1 }, view());
+
+    expect(made[1]?.closed, "s1 is now the oldest banner").toBe(true);
+    expect(made[200]?.closed, "s0's fresh banner stays up").toBe(false);
+  });
+
+  it("survives a banner whose close throws", () => {
+    const { ctor, made } = fakeCtor();
+    const n = createNotifier(env({ ctor }));
+    n.deliver({ id: "s1", notification: "Done", notificationSeq: 1 }, view());
+    const banner = made[0];
+    if (!banner) {
+      throw new Error("no banner");
+    }
+    let closes = 0;
+    banner.close = (): void => {
+      closes++;
+      throw new Error("gone");
+    };
+    expect(() => {
+      n.retract("s1");
+    }).not.toThrow();
+    n.retract("s1");
+    expect(closes).toBe(1);
   });
 });
 

@@ -282,52 +282,47 @@ export function summarizeCues(
   return { count, worst };
 }
 
-/** localStorage key for the cues this viewer has SEEN: session id -> the
- *  acknowledged status. Remembered because `input` and `done` are latched on the
- *  server and re-delivered in every snapshot, so a dismissed dot came back on
- *  every reload; client-side because "seen" is the VIEWER's, not the session's;
- *  per session because several background tabs can hold a latch at once. */
-export const CUE_SEEN_KEY = "wt-cue-seen";
+/** localStorage key prefix for the cues this viewer has SEEN: one key per
+ *  session, `cueSeenKey(id)`, holding the acknowledged status. Remembered because
+ *  `input` and `done` are latched on the server and re-delivered in every
+ *  snapshot, so a dismissed dot came back on every reload; client-side because
+ *  "seen" is the VIEWER's, not the session's. One key per session because every
+ *  window of the app writes here: two windows acknowledging different sessions
+ *  write different keys, where one shared map lets the later write drop the
+ *  other's acknowledgement. */
+const CUE_SEEN_PREFIX = "wt-cue-seen/";
 
-/** Bound on the acknowledgement map, so a corrupted or hostile stored value
+/** The storage key holding `id`'s acknowledgement. */
+export function cueSeenKey(id: string): string {
+  return CUE_SEEN_PREFIX + id;
+}
+
+/** The session id a storage key acknowledges, or null for any other key. */
+export function cueSeenID(key: string): string | null {
+  return key.startsWith(CUE_SEEN_PREFIX) && key.length > CUE_SEEN_PREFIX.length
+    ? key.slice(CUE_SEEN_PREFIX.length)
+    : null;
+}
+
+/** Bound on the acknowledgements read back, so a corrupted or hostile store
  *  cannot make the restore path do unbounded work. */
 export const MAX_PERSISTED_CUE_SEEN = 200;
 
-/** Read stored acknowledgements into a clean map, dropping anything untrusted: a
- *  lost acknowledgement only re-lights a dot the user can dismiss again. */
-export function parseCueSeen(raw: string | null): Map<string, CueStatus> {
+/** Read stored [session id, raw status] entries into a clean map, dropping
+ *  anything untrusted (a lost acknowledgement only re-lights a dot the user can
+ *  dismiss again), and stop reading at the cap. */
+export function parseCueSeen(entries: Iterable<readonly [string, string]>): Map<string, CueStatus> {
   const out = new Map<string, CueStatus>();
-  if (raw === null) {
-    return out;
-  }
-  let data: unknown;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    return out;
-  }
-  // Arrays and null are typeof "object" too, and neither is a cue map.
-  if (typeof data !== "object" || data === null || Array.isArray(data)) {
-    return out;
-  }
-  for (const [id, status] of Object.entries(data)) {
-    if (id === "" || typeof status !== "string" || !isCueStatus(status)) {
-      continue;
-    }
-    out.set(id, status);
+  for (const [id, status] of entries) {
     if (out.size >= MAX_PERSISTED_CUE_SEEN) {
       break;
     }
+    if (id === "" || !isCueStatus(status)) {
+      continue;
+    }
+    out.set(id, status);
   }
   return out;
-}
-
-/** serializeCueSeen encodes acknowledgements for storage. The caller keeps the
- *  live map within the cap (see markCueSeen), so this does not truncate: a silent
- *  truncation here would drop whichever entries the parser happened to read last,
- *  which is the opposite of what an eviction should discard. */
-export function serializeCueSeen(seen: ReadonlyMap<string, CueStatus>): string {
-  return JSON.stringify(Object.fromEntries(seen));
 }
 
 /** TabOrderKey is what the strip's order is decided by: the server's shared

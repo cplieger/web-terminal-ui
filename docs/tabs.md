@@ -55,10 +55,10 @@ The state and the count are announced in the tab's accessible name and repeated 
 
 When a program raises an OSC 9 notification and the user is not looking at that terminal, the tabs feature posts a browser notification. Permission is requested on a user gesture. A denied permission leaves the tab dots as the only signal.
 
-Clicking a notification switches to the session that raised it. These are non-persistent notifications. A browser that does not offer the Notification constructor, or refuses it, leaves the tab dots as the signal. iOS Safari outside an installed web app is one such browser.
+Clicking a notification switches to the session that raised it. Reading that session closes its notification: opening its tab, opening the tab list, returning to the page while it is on screen, or reading it in another window of the app. These are non-persistent notifications. A browser that does not offer the Notification constructor, or refuses it, leaves the tab dots as the signal. iOS Safari outside an installed web app is one such browser.
 
 ## Cues outside the page
 
-While a background tab wants the user, the tabs feature puts a `(N)` count at the start of the document title. It also sets the app badge with `navigator.setAppBadge`. A cue the user has already seen stays dismissed across a reload.
+While a background tab wants the user, the tabs feature puts a `(N)` count at the start of the document title. It also sets the app badge with `navigator.setAppBadge`. A page cannot read the badge back, so the feature writes it again whenever the page comes back into view, gains focus or reconnects to the status stream. A cue the user has already seen stays dismissed across a reload, and in every other window of the app.
 
 With `attentionIcons: true`, passed as `features: () => presetTabbed({ attentionIcons: true })`, it also swaps the page's icon links to a status variant. It is off by default, because the variant images are files your page must serve.

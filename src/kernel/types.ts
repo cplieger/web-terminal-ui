@@ -240,6 +240,12 @@ export interface AttentionReporter {
   /** Render `state`. Idempotent: a state equal to the last one reported touches
    *  nothing, so a status sweep may call it every tick. */
   report(state: AttentionState): void;
+  /** Write the latest reported count to the app badge again on the next task,
+   *  changed or not; a `report` that writes the badge before then satisfies it.
+   *  The page cannot read the badge back and a platform may drop a write
+   *  silently, so a caller resyncs wherever the two may have diverged, ahead of
+   *  the report that follows. A no-op before the first report. */
+  resync(): void;
 }
 
 /** The notification a session status event carries (OSC 9 `<message>`). Both
@@ -276,7 +282,10 @@ export interface Notifier {
   arm(): void;
   /** Note a user gesture: the ONLY moment a permission prompt may be raised. */
   gesture(): void;
-  /** Drop a closed session's dedupe state. */
+  /** Close the notification delivered for `id`, if one is still up: the user has
+   *  seen that session, so the banner no longer reports anything unread. */
+  retract(id: string): void;
+  /** Drop a closed session's dedupe state and retract its notification. */
   forget(id: string): void;
 }
 
