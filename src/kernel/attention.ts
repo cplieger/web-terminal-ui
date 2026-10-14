@@ -40,17 +40,18 @@ export function iconVariantHref(href: string, variant: string): string | null {
   return `${href.slice(0, at)}-${variant}${href.slice(at)}`;
 }
 
-/** Render reports onto `sinks`, change-gated on the last rendered value: the
- *  title doubles as the browser-tab label and the bookmark name, and
- *  re-assigning an icon href makes some browsers re-fetch it. `pagehide` restores
- *  the surfaces (a browser remembers ONE icon per URL for the bookmark and the
- *  history row, so a tab closed on a lit cue would leave a status variant standing
- *  in for the app), `pageshow` repaints the last report for a page that came back
- *  from the back-forward cache, and `freeze` changes nothing because a frozen tab
- *  is still in the strip rendering its icon. */
+/** Render reports onto `sinks`. The title and icon are change-gated: the title is
+ *  also the tab label and bookmark name, and re-assigning an icon href makes some
+ *  browsers re-fetch it. The badge is OS state a platform may drop a write to
+ *  without rejecting, so it is also re-asserted on `resync`, a return to visible,
+ *  window focus and `pageshow`. `pagehide` restores the title and icon (a browser
+ *  remembers ONE icon per URL) but leaves the badge, which means "unread" for the
+ *  whole app rather than for this page. */
 export function createAttention(sinks: AttentionSinks, win: Window): AttentionSurface {
-  let reported: AttentionState = NO_ATTENTION;
+  let reported: AttentionState | null = null;
   let rendered: AttentionState | null = null;
+  let badged: number | null = null;
+  let pendingResync: number | null = null;
 
   function render(next: AttentionState): void {
     const countChanged = next.count !== rendered?.count;
@@ -58,24 +59,58 @@ export function createAttention(sinks: AttentionSinks, win: Window): AttentionSu
     rendered = next;
     if (countChanged) {
       sinks.setTitleMark(titleMarkFor(next.count));
-      sinks.setBadge?.(next.count);
     }
     if (iconChanged) {
       sinks.setIcon?.(next.icon);
     }
+  }
+  function cancelResync(): void {
+    if (pendingResync !== null) {
+      win.clearTimeout(pendingResync);
+      pendingResync = null;
+    }
+  }
+  function writeBadge(count: number): void {
+    cancelResync();
+    badged = count;
+    sinks.setBadge?.(count);
+  }
+  const listeners = new AbortController();
+  const { signal } = listeners;
+  // Deferred a task so this surface's listener and the caller's report on one
+  // event write once. Before the first report, a write would wipe the badge
+  // another page or a previous run set; after dispose, it would raise a cleared one.
+  function resync(): void {
+    if (reported === null || signal.aborted || pendingResync !== null) {
+      return;
+    }
+    pendingResync = win.setTimeout(() => {
+      pendingResync = null;
+      if (reported !== null && !signal.aborted) {
+        writeBadge(reported.count);
+      }
+    }, 0);
   }
 
   function onPageGone(): void {
     render(NO_ATTENTION);
   }
   function onPageBack(): void {
-    render(reported);
+    if (reported !== null) {
+      render(reported);
+    }
+    resync();
   }
-  const listeners = new AbortController();
-  const { signal } = listeners;
+  function onVisibility(): void {
+    if (win.document.visibilityState !== "hidden") {
+      resync();
+    }
+  }
   try {
     win.addEventListener("pagehide", onPageGone, { signal });
     win.addEventListener("pageshow", onPageBack, { signal });
+    win.addEventListener("focus", resync, { signal });
+    win.document.addEventListener("visibilitychange", onVisibility, { signal });
   } catch (err) {
     listeners.abort();
     throw err;
@@ -85,10 +120,15 @@ export function createAttention(sinks: AttentionSinks, win: Window): AttentionSu
     report(state) {
       reported = state;
       render(state);
+      if (state.count !== badged) {
+        writeBadge(state.count);
+      }
     },
+    resync,
     dispose() {
       listeners.abort();
       render(NO_ATTENTION);
+      writeBadge(0);
     },
   };
 }

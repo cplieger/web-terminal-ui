@@ -16,7 +16,8 @@ import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
-import { CUE_SEEN_KEY, SWIPE_HINT_KEY } from "./model.js";
+import { SWIPE_HINT_KEY } from "./model.js";
+import { storeCueSeen, storedCueSeen } from "../../test-helpers/cue-seen.js";
 // The reorder preview's timings, imported rather than restated: the tests below pin the
 // SHAPE of the interaction (a sweep rearranges nothing, a stationary dragover opens the
 // slot, the no-events fallback clears the drag loop's cadence, a drop never waits), not
@@ -1645,7 +1646,7 @@ describe("tabs feature", () => {
     // sends on every open, so the fresh page re-raised a cue the user had already
     // resolved. A dismissal is therefore remembered in localStorage — this
     // simulates the reload by pre-seeding what the previous page wrote.
-    localStorage.setItem(CUE_SEEN_KEY, JSON.stringify({ s2: "done" }));
+    storeCueSeen({ s2: "done" });
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1685,7 +1686,7 @@ describe("tabs feature", () => {
     monitor.emit({ id: "s3", status: "done", title: "three", createdAt: "3" });
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
 
-    expect(JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}")).toEqual({
+    expect(storedCueSeen()).toEqual({
       s2: "input",
       s3: "done",
     });
@@ -1701,7 +1702,7 @@ describe("tabs feature", () => {
 
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
     feature.api?.switchTo("s2");
-    expect(JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}")).toEqual({ s2: "done" });
+    expect(storedCueSeen()).toEqual({ s2: "done" });
   });
 
   it("does not notify about a latch that happened on the tab in front of the user", async () => {
@@ -1720,7 +1721,7 @@ describe("tabs feature", () => {
     expect(root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"]).toBe(
       undefined,
     );
-    expect(JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}")).toEqual({ s1: "done" });
+    expect(storedCueSeen()).toEqual({ s1: "done" });
   });
 
   it("forgets the dismissal once the session's status moves on", async () => {
@@ -1741,7 +1742,7 @@ describe("tabs feature", () => {
     expect(dot?.dataset["status"]).toBeUndefined();
 
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toBe("{}");
+    expect(storedCueSeen()).toEqual({});
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
     expect(dot?.dataset["status"]).toBe("done");
   });
@@ -1757,13 +1758,13 @@ describe("tabs feature", () => {
 
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toContain("s2");
+    expect(storedCueSeen()).toHaveProperty("s2");
 
     root
       .querySelectorAll<HTMLElement>(".wt-tab")[1]
       ?.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
     await until(() => root.querySelectorAll(".wt-tab").length === 1);
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toBe("{}");
+    expect(storedCueSeen()).toEqual({});
   });
 
   it("clears the switch-button dot when the tab that raised it is closed", async () => {
@@ -5323,6 +5324,10 @@ describe("tabs: in a second document", () => {
       removeItem: (key: string): void => {
         store.delete(key);
       },
+      get length(): number {
+        return store.size;
+      },
+      key: (index: number): string | null => [...store.keys()][index] ?? null,
     };
     Object.defineProperty(second.win, "localStorage", { configurable: true, value: storage });
     return store;
@@ -5331,7 +5336,7 @@ describe("tabs: in a second document", () => {
   it("honours a cue dismissal recorded in the frame's storage, and not one in the importing page's", async () => {
     // The importing page remembers s2's cue as seen; the frame's own storage
     // holds no such record, so the re-delivered latch is a fresh cue there.
-    localStorage.setItem(CUE_SEEN_KEY, JSON.stringify({ s2: "done" }));
+    storeCueSeen({ s2: "done" });
     const second = secondDocument();
     const store = frameStorage(second);
     const monitor = fakeMonitor();
@@ -5347,7 +5352,7 @@ describe("tabs: in a second document", () => {
     // The same page, remembering the dismissal: the frame's record silences it.
     term.destroy();
     term = undefined;
-    store.set(CUE_SEEN_KEY, JSON.stringify({ s2: "done" }));
+    storeCueSeen({ s2: "done" }, store);
     localStorage.clear();
     const again = fakeMonitor();
     term = await mountTerminal(second.root, {
@@ -5372,8 +5377,8 @@ describe("tabs: in a second document", () => {
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
     second.root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
 
-    expect(JSON.parse(store.get(CUE_SEEN_KEY) ?? "{}")).toEqual({ s2: "input" });
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toBeNull();
+    expect(storedCueSeen(store)).toEqual({ s2: "input" });
+    expect(storedCueSeen()).toEqual({});
   });
 
   it("greets a coarse-pointer frame with the swipe hint once, remembered in the frame's storage", async () => {

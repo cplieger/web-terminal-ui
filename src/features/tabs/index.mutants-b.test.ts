@@ -17,7 +17,7 @@ import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
-import { CUE_SEEN_KEY } from "./model.js";
+import { storedCueSeen } from "../../test-helpers/cue-seen.js";
 import { tick } from "./test-helpers/split.js";
 
 // A fake activityMonitor: lets a test push status events (and stream (re)opens)
@@ -1672,7 +1672,7 @@ describe("tabs: a tab that goes away", () => {
     await until(() => chips(root).length === 1);
 
     expect(dot?.dataset["status"]).toBeUndefined();
-    expect(localStorage.getItem(CUE_SEEN_KEY) ?? "").not.toContain("s3");
+    expect(storedCueSeen()).not.toHaveProperty("s3");
   });
 
   it("drops a bulk-closed tab's stored acknowledgement", async () => {
@@ -1691,13 +1691,13 @@ describe("tabs: a tab that goes away", () => {
     // The ACTIVE tab latching while the page is visible is acknowledged on the
     // spot, which is what puts an entry in storage.
     monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
-    await until(() => (localStorage.getItem(CUE_SEEN_KEY) ?? "").includes("s1"));
-    expect(localStorage.getItem(CUE_SEEN_KEY) ?? "").toContain("s1");
+    await until(() => "s1" in storedCueSeen());
+    expect(storedCueSeen()).toHaveProperty("s1");
 
     item(openMenu(root, 1), "Close others")?.click();
     await until(() => chips(root).length === 1);
 
-    expect(localStorage.getItem(CUE_SEEN_KEY) ?? "").not.toContain("s1");
+    expect(storedCueSeen()).not.toHaveProperty("s1");
   });
 
   it("hands every bulk-closed session's cache back to the embedder", async () => {

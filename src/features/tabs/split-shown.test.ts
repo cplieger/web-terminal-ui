@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { LineStore } from "@cplieger/web-terminal-engine";
 import { connectionBanner } from "../connection-banner.js";
-import { CUE_SEEN_KEY } from "./model.js";
+import { storedCueSeen } from "../../test-helpers/cue-seen.js";
 import type { PersistedScrollback, ScrollbackPersistence } from "../../kernel/types.js";
 import {
   chipOf,
@@ -340,8 +340,7 @@ describe("attention with two shown tabs", () => {
     vi.stubGlobal("Notification", FakeNotification);
     return posts;
   }
-  const cueSeen = (): Record<string, string> =>
-    JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}") as Record<string, string>;
+  const cueSeen = (): Record<string, string> => storedCueSeen();
 
   it("a completion in the unselected pane raises no cue anywhere and is recorded as seen; an ordinary tab's still does", async () => {
     document.title = "Host page";

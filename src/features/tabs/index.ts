@@ -28,7 +28,6 @@ import {
 } from "./route.js";
 import type { CueStatus, PaneLayout, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
-  CUE_SEEN_KEY,
   MAX_PERSISTED_CUE_SEEN,
   MAX_PINNED_NAME,
   PROGRESS_ABSENT,
@@ -39,6 +38,8 @@ import {
   createSessionAPI,
   createTombstones,
   cueIconName,
+  cueSeenID,
+  cueSeenKey,
   foldedCueStatus,
   hasPinnedName,
   isCueStatus,
@@ -51,7 +52,6 @@ import {
   parseCueSeen,
   renderedProgress,
   sanitizePinnedName,
-  serializeCueSeen,
   statusPhrase,
   summarizeCues,
   tabAccessibleName,
@@ -196,26 +196,47 @@ const CATCHUP_SETTLE_MS = 250;
  *  multiple frames; ordinary streaming must never arm the cue. */
 const CATCHUP_MIN_BACKLOG = 400;
 
-/** The acknowledged background-tab cues, or an empty map when storage throws or
- *  holds nothing trustworthy: the dot simply lights again. */
-function readCueSeen(win: Pick<Window, "localStorage">): Map<string, CueStatus> {
+function* storedCueSeen(win: Pick<Window, "localStorage">): Generator<readonly [string, string]> {
   try {
-    return parseCueSeen(win.localStorage.getItem(CUE_SEEN_KEY));
+    const store = win.localStorage;
+    for (let i = 0; i < store.length; i++) {
+      const key = store.key(i);
+      const id = key === null ? null : cueSeenID(key);
+      if (key !== null && id !== null) {
+        yield [id, store.getItem(key) ?? ""];
+      }
+    }
   } catch {
-    return new Map<string, CueStatus>();
+    /* storage unavailable */
   }
 }
 
-/** writeCueSeen persists acknowledgements, best-effort: a full quota must not
- *  break the dismissal the user just performed on screen. */
-function writeCueSeen(
-  win: Pick<Window, "localStorage">,
-  seen: ReadonlyMap<string, CueStatus>,
-): void {
+/** The acknowledged background-tab cues, or an empty map when storage throws or
+ *  holds nothing trustworthy: the dot simply lights again. */
+function readCueSeen(win: Pick<Window, "localStorage">): Map<string, CueStatus> {
+  return parseCueSeen(storedCueSeen(win));
+}
+
+/** Best-effort: a full quota must not break the dismissal the user just
+ *  performed on screen. */
+function writeCueSeen(win: Pick<Window, "localStorage">, id: string, status: CueStatus): void {
   try {
-    win.localStorage.setItem(CUE_SEEN_KEY, serializeCueSeen(seen));
+    win.localStorage.setItem(cueSeenKey(id), status);
   } catch {
-    /* storage unavailable or full — the dismissal still holds for this page */
+    /* storage unavailable or full: the dismissal still holds for this page */
+  }
+}
+
+/** Remove `id`'s stored acknowledgement only while it still holds `status`:
+ *  another window may since have acknowledged the session's next cue. */
+function dropCueSeen(win: Pick<Window, "localStorage">, id: string, status: CueStatus): void {
+  try {
+    const key = cueSeenKey(id);
+    if (win.localStorage.getItem(key) === status) {
+      win.localStorage.removeItem(key);
+    }
+  } catch {
+    /* storage unavailable: nothing stored to remove */
   }
 }
 
@@ -682,36 +703,40 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // The session that raised the pending cue, so arriving on that tab (a
       // swipe or any switch) acknowledges it without opening the list.
       let switchNotifyId: string | null = null;
-      // Cues this viewer has already SEEN, per session (see CUE_SEEN_KEY).
+      // Cues this viewer has already SEEN, per session (see CUE_SEEN_PREFIX).
       // Loaded here so a reload starts from what the user already dismissed:
       // input/done stay LATCHED server-side, and the status stream re-pushes the
       // latch in the snapshot it sends on every open, so without this a
       // dismissed dot came back on the next load — and on every SSE reconnect,
       // which on a phone is just returning to a backgrounded page.
       const cueSeen = readCueSeen(win);
+      // The out-of-page surfaces render the SAME unseen-cue set the switch dot
+      // shows, fed only through paintAttention below.
+      const attention = ctx.shell.attention({ icons: opts.attentionIcons === true });
       // markCueSeen records that this viewer has seen `id` holding `status`:
       // either because that tab is the one on screen, or because the tray listing
-      // every tab's dot was opened. A non-cue status is not an acknowledgeable
-      // event, so it is ignored rather than stored.
+      // every tab's dot was opened. Every read re-asserts the badge, which may
+      // still show a write the platform dropped though the count is unchanged,
+      // and closes the session's banner; a non-cue status stores nothing.
       function markCueSeen(id: string, status: string): void {
+        attention.resync();
+        ctx.shell.notifications.retract(id);
         if (!isCueStatus(status) || cueSeen.get(id) === status) {
           return;
         }
         cueSeen.set(id, status);
-        // Evict the oldest entries so the live map obeys the same cap the parser
-        // does. dropTab prunes a session closed while this page was open, but one
-        // that vanished while the page was CLOSED leaves an entry nothing else
-        // collects; unbounded, that would eventually push the map past the cap and
-        // make the parser discard whatever it read last — dropping fresh
-        // acknowledgements to keep dead ones.
+        writeCueSeen(win, id, status);
+        // Evict the oldest so storage obeys the parser's cap: dropTab prunes a
+        // session closed while this page was open, but one that vanished while the
+        // page was CLOSED leaves an entry nothing else collects.
         while (cueSeen.size > MAX_PERSISTED_CUE_SEEN) {
-          const oldest = cueSeen.keys().next().value;
-          if (oldest === undefined) {
+          const [oldest, held] = cueSeen.entries().next().value ?? [];
+          if (oldest === undefined || held === undefined) {
             break;
           }
           cueSeen.delete(oldest);
+          dropCueSeen(win, oldest, held);
         }
-        writeCueSeen(win, cueSeen);
         // An acknowledgement can change the unseen count without touching the tab
         // list, so syncChrome's sweep is not enough on its own: opening the tray
         // and arriving on a tab both land here and neither adds or removes a chip.
@@ -722,13 +747,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // (a new working phase, an exit) and when the session goes away. Every
       // caller ends in syncChrome, which repaints the out-of-page surfaces.
       function forgetCueSeen(id: string): void {
-        if (cueSeen.delete(id)) {
-          writeCueSeen(win, cueSeen);
+        const known = cueSeen.get(id);
+        if (known === undefined) {
+          return;
         }
+        cueSeen.delete(id);
+        dropCueSeen(win, id, known);
       }
-      // The out-of-page surfaces render the SAME unseen-cue set the switch dot
-      // shows, fed only through paintAttention below.
-      const attention = ctx.shell.attention({ icons: opts.attentionIcons === true });
       // visibilityState, not document.hasFocus(), which is false for a
       // visible-but-unfocused window where the terminal IS on screen.
       function pageVisible(): boolean {
@@ -752,6 +777,36 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       doc.addEventListener("visibilitychange", onPageVisible);
       ctx.defer(() => {
         doc.removeEventListener("visibilitychange", onPageVisible);
+      });
+      // Every page writes the one app badge, so each mirrors the shared map;
+      // otherwise a hidden page keeps counting a cue the reader saw elsewhere.
+      // A null key is another page's localStorage.clear().
+      function onCueSeenStored(e: StorageEvent): void {
+        if (e.key !== null && cueSeenID(e.key) === null) {
+          return;
+        }
+        const stored = readCueSeen(win);
+        for (const id of [...cueSeen.keys()]) {
+          if (!stored.has(id)) {
+            cueSeen.delete(id);
+          }
+        }
+        for (const [id, status] of stored) {
+          if (cueSeen.get(id) !== status) {
+            cueSeen.set(id, status);
+            // Read elsewhere, but only this page can close the banners it posted.
+            ctx.shell.notifications.retract(id);
+          }
+        }
+        if (switchNotifyId !== null && cueSeen.get(switchNotifyId) === switchNotify) {
+          clearSwitchNotify();
+        }
+        attention.resync();
+        paintAttention();
+      }
+      win.addEventListener("storage", onCueSeenStored);
+      ctx.defer(() => {
+        win.removeEventListener("storage", onCueSeenStored);
       });
 
       // A FOLD over the tab list rather than incremental bookkeeping: no state of
@@ -3738,11 +3793,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         let streamOpens = 0;
         const offStreamOpen = monitor.onStreamOpen?.(() => {
           streamOpens++;
-          if (streamOpens === 1) {
-            void reconcileOnce();
-          } else {
-            void withPlacementHold(() => inReconcileSlot(reconcileNow));
-          }
+          const settled =
+            streamOpens === 1
+              ? reconcileOnce()
+              : withPlacementHold(() => inReconcileSlot(reconcileNow));
+          void settled.then(() => {
+            attention.resync();
+          });
         });
         if (offStreamOpen) {
           ctx.defer(offStreamOpen);

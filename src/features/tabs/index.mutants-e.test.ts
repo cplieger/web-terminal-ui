@@ -22,7 +22,8 @@ import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // Plain constants, so reading them through a separate module instance than the
 // (dynamically re-imported) feature under test is safe.
 import { PRESSED_CLASS } from "../dom.js";
-import { CUE_SEEN_KEY, MAX_PERSISTED_CUE_SEEN } from "./model.js";
+import { MAX_PERSISTED_CUE_SEEN, cueSeenKey } from "./model.js";
+import { storeCueSeen, storedCueSeen } from "../../test-helpers/cue-seen.js";
 
 // A fake activityMonitor: lets a test push status events into tabs without the
 // real SSE. tabs reads it via ctx.use, so the same feature value goes into the
@@ -543,21 +544,17 @@ describe("tabs: the keyboard buttons mirror a pending Ctrl", () => {
 // --- The acknowledgement store's write discipline ---
 
 describe("tabs: the acknowledgement store stays bounded and quiet", () => {
-  function storedCueSeen(): Record<string, string> {
-    return JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}") as Record<string, string>;
-  }
-
-  it("evicts the oldest acknowledgement rather than growing past the cap", async () => {
+  it("evicts an acknowledgement it read rather than growing past the cap", async () => {
     // Sessions that vanished while the page was CLOSED leave entries nothing
     // collects (dropTab only prunes what closes while the page is open).
-    // Unbounded, they would push the map past the cap the parser enforces, and
-    // the parser discards whatever it read LAST — dropping fresh
-    // acknowledgements to keep dead ones. So the live map evicts at the cap, and
-    // it evicts from the front.
+    // Unbounded, they would push the store past the cap the parser enforces, and
+    // the parser stops at whatever it reads first, which can drop a fresh
+    // acknowledgement to keep dead ones. So the live map evicts at the cap, from
+    // what it read before its own acknowledgements.
     const stale = Object.fromEntries(
       Array.from({ length: MAX_PERSISTED_CUE_SEEN }, (_, i) => [`gone-${String(i)}`, "done"]),
     );
-    localStorage.setItem(CUE_SEEN_KEY, JSON.stringify(stale));
+    storeCueSeen(stale);
     const { monitor } = await mountWithMonitor();
 
     // One more acknowledgement than the map can hold: the active tab latching a
@@ -566,8 +563,6 @@ describe("tabs: the acknowledgement store stays bounded and quiet", () => {
 
     const seen = storedCueSeen();
     expect(Object.keys(seen)).toHaveLength(MAX_PERSISTED_CUE_SEEN);
-    expect(seen["gone-0"]).toBeUndefined();
-    expect(seen["gone-1"]).toBe("done");
     expect(seen["s1"]).toBe("input");
   });
 
@@ -593,13 +588,13 @@ describe("tabs: the acknowledgement store stays bounded and quiet", () => {
 
     const cue: SessionStatus = { id: "s1", status: "input", title: "one", createdAt: "1" };
     monitor.emit(cue);
-    const afterFirst = writes.filter((k) => k === CUE_SEEN_KEY).length;
+    const afterFirst = writes.filter((k) => k === cueSeenKey("s1")).length;
     monitor.emit(cue);
     monitor.emit(cue);
 
     expect(afterFirst).toBe(1);
-    expect(writes.filter((k) => k === CUE_SEEN_KEY)).toHaveLength(1);
-    expect(JSON.parse(store.get(CUE_SEEN_KEY) ?? "{}")).toEqual({ s1: "input" });
+    expect(writes.filter((k) => k === cueSeenKey("s1"))).toHaveLength(1);
+    expect(storedCueSeen(store)).toEqual({ s1: "input" });
   });
 });
 
@@ -638,7 +633,7 @@ describe("tabs: returning to the page acknowledges what the user can now see", (
 
     document.dispatchEvent(new Event("visibilitychange"));
     expect(document.title).toBe("(1) one · Host page");
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toBeNull();
+    expect(storedCueSeen()).toEqual({});
   });
 });
 
