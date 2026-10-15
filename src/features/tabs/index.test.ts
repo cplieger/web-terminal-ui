@@ -17,7 +17,6 @@ import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
 import { SWIPE_HINT_KEY } from "./model.js";
-import { storeCueSeen, storedCueSeen } from "../../test-helpers/cue-seen.js";
 // The reorder preview's timings, imported rather than restated: the tests below pin the
 // SHAPE of the interaction (a sweep rearranges nothing, a stationary dragover opens the
 // slot, the no-events fallback clears the drag loop's cadence, a drop never waits), not
@@ -29,6 +28,7 @@ import {
   REORDER_SLOT_FADE_MS,
   REORDER_STILL_MS,
 } from "./strip.js";
+import { engineNumbering, seenAcks } from "./test-helpers/sessions-server.js";
 
 // A fake activityMonitor feature: lets a test push status events into tabs
 // without the real SSE. tabs reads it via ctx.use, so passing the same feature
@@ -40,6 +40,7 @@ function fakeMonitor(): {
   open: () => void;
 } {
   const subs = new Set<(s: SessionStatus) => void>();
+  const number = engineNumbering();
   const openSubs = new Set<() => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
@@ -64,8 +65,9 @@ function fakeMonitor(): {
   return {
     feature,
     emit: (s) => {
+      const rec = number(s);
       for (const cb of [...subs]) {
-        cb(s);
+        cb(rec);
       }
     },
     open: () => {
@@ -1639,14 +1641,10 @@ describe("tabs feature", () => {
     expect(dot?.dataset["status"]).toBeUndefined();
   });
 
-  it("does not re-raise the switch-button dot for a cue already dismissed (reload)", async () => {
-    // The reported bug: dismissing the dot, then reloading, brought it back.
-    // "input"/"done" are LATCHED server-side (cleared only by the session's next
-    // working phase) and the status stream re-pushes the latch in the snapshot it
-    // sends on every open, so the fresh page re-raised a cue the user had already
-    // resolved. A dismissal is therefore remembered in localStorage — this
-    // simulates the reload by pre-seeding what the previous page wrote.
-    storeCueSeen({ s2: "done" });
+  it("does not raise the switch-button dot for a cue another reader already read", async () => {
+    // "input"/"done" stay LATCHED server-side and the stream re-pushes them on
+    // every open; the server's seen floor is what keeps a read one from lighting
+    // the dot again on a reload or on another device.
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1656,19 +1654,32 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
-    // The re-delivered latch for s2 raises nothing: this viewer saw it already.
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    monitor.emit({
+      id: "s2",
+      status: "done",
+      title: "two",
+      createdAt: "2",
+      statusSeq: 1,
+      seenSeq: 1,
+    });
     expect(dot?.dataset["status"]).toBeUndefined();
-    // A DIFFERENT latch on the same session is a new event and still notifies.
-    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    // The session's next occurrence is news and still notifies.
+    monitor.emit({
+      id: "s2",
+      status: "input",
+      title: "two",
+      createdAt: "2",
+      statusSeq: 2,
+      seenSeq: 1,
+    });
     expect(dot?.dataset["status"]).toBe("input");
   });
 
-  it("persists the dismissal of every listed tab when the switcher opens", async () => {
+  it("acknowledges every listed tab when the switcher opens", async () => {
     // The tray shows each tab's own dot, so opening it acknowledges all of them,
     // not just the cue's latest subject: several tabs can hold a latch at once
-    // while the dot only ever shows the newest, and an unacknowledged sibling
-    // would re-raise it on the next load.
+    // while the dot only ever shows the newest, and an unread sibling would stay
+    // unread on every device.
     const monitor = fakeMonitor();
     listBody = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
@@ -1686,13 +1697,10 @@ describe("tabs feature", () => {
     monitor.emit({ id: "s3", status: "done", title: "three", createdAt: "3" });
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
 
-    expect(storedCueSeen()).toEqual({
-      s2: "input",
-      s3: "done",
-    });
+    expect(seenAcks(fetchMock.mock.calls)).toEqual({ s2: 1, s3: 1 });
   });
 
-  it("persists the dismissal when a switch arrives on the raising tab", async () => {
+  it("acknowledges the cue when a switch arrives on the raising tab", async () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1702,7 +1710,7 @@ describe("tabs feature", () => {
 
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
     feature.api?.switchTo("s2");
-    expect(storedCueSeen()).toEqual({ s2: "done" });
+    expect(seenAcks(fetchMock.mock.calls)).toEqual({ s2: 1 });
   });
 
   it("does not notify about a latch that happened on the tab in front of the user", async () => {
@@ -1721,13 +1729,12 @@ describe("tabs feature", () => {
     expect(root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"]).toBe(
       undefined,
     );
-    expect(storedCueSeen()).toEqual({ s1: "done" });
+    expect(seenAcks(fetchMock.mock.calls)).toEqual({ s1: 1 });
   });
 
-  it("forgets the dismissal once the session's status moves on", async () => {
-    // The acknowledgement is on the (session, latch) pair: a new working phase
-    // clears the latch server-side, so the NEXT done is a fresh cue rather than a
-    // re-delivery of the dismissed one.
+  it("raises the next occurrence after the session's status moves on", async () => {
+    // A new working phase is a new occurrence, so the NEXT done is a fresh cue
+    // rather than a re-delivery of the acknowledged one.
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1742,29 +1749,8 @@ describe("tabs feature", () => {
     expect(dot?.dataset["status"]).toBeUndefined();
 
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
-    expect(storedCueSeen()).toEqual({});
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
     expect(dot?.dataset["status"]).toBe("done");
-  });
-
-  it("drops a closed session's dismissal instead of leaving it in storage", async () => {
-    const monitor = fakeMonitor();
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = await mountTerminal(root, {
-      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
-    });
-    await until(() => root.querySelectorAll(".wt-tab").length === 2);
-
-    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
-    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
-    expect(storedCueSeen()).toHaveProperty("s2");
-
-    root
-      .querySelectorAll<HTMLElement>(".wt-tab")[1]
-      ?.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
-    await until(() => root.querySelectorAll(".wt-tab").length === 1);
-    expect(storedCueSeen()).toEqual({});
   });
 
   it("clears the switch-button dot when the tab that raised it is closed", async () => {
@@ -2016,8 +2002,8 @@ describe("tabs feature", () => {
   // so every viewer of one server shares it and it outlives a reload without the
   // client storing anything. The localStorage arrangement this section used to
   // pin is gone with it. What remains worth pinning is that the strip still
-  // works when Storage itself is hostile, which the active-tab and cue-seen
-  // writes still touch.
+  // works when Storage itself is hostile, which the active-tab write still
+  // touches.
 
   it("survives storage that throws (Safari private mode) without losing the reorder", async () => {
     stubHostileStorage();
@@ -5333,41 +5319,10 @@ describe("tabs: in a second document", () => {
     return store;
   }
 
-  it("honours a cue dismissal recorded in the frame's storage, and not one in the importing page's", async () => {
-    // The importing page remembers s2's cue as seen; the frame's own storage
-    // holds no such record, so the re-delivered latch is a fresh cue there.
-    storeCueSeen({ s2: "done" });
+  it("sends a cue's acknowledgement through the frame's own fetch, not the importing page's", async () => {
     const second = secondDocument();
-    const store = frameStorage(second);
-    const monitor = fakeMonitor();
-    term = await mountTerminal(second.root, {
-      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
-    });
-    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
-    const dot = second.root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
-
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
-    expect(dot?.dataset["status"]).toBe("done");
-
-    // The same page, remembering the dismissal: the frame's record silences it.
-    term.destroy();
-    term = undefined;
-    storeCueSeen({ s2: "done" }, store);
-    localStorage.clear();
-    const again = fakeMonitor();
-    term = await mountTerminal(second.root, {
-      features: () => [again.feature, tabs({ activityMonitor: again.feature })],
-    });
-    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
-    again.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
-    expect(
-      second.root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"],
-    ).toBeUndefined();
-  });
-
-  it("records a cue dismissal in the frame's storage, not the importing page's", async () => {
-    const second = secondDocument();
-    const store = frameStorage(second);
+    const outer = vi.fn(fetchMock.getMockImplementation() ?? (() => Promise.reject(new Error())));
+    vi.stubGlobal("fetch", outer);
     const monitor = fakeMonitor();
     term = await mountTerminal(second.root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
@@ -5377,8 +5332,8 @@ describe("tabs: in a second document", () => {
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
     second.root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
 
-    expect(storedCueSeen(store)).toEqual({ s2: "input" });
-    expect(storedCueSeen()).toEqual({});
+    expect(seenAcks(fetchMock.mock.calls)).toEqual({ s2: 1 });
+    expect(outer).not.toHaveBeenCalled();
   });
 
   it("greets a coarse-pointer frame with the swipe hint once, remembered in the frame's storage", async () => {

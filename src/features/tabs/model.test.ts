@@ -9,23 +9,21 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import fc from "fast-check";
 import type { CueStatus, PaneLayout, TabOrderKey } from "./model.js";
 import {
-  MAX_PERSISTED_CUE_SEEN,
   PROGRESS_ABSENT,
   SessionAPIError,
   activityPhrase,
   compareTabOrder,
   createSessionAPI,
   createTombstones,
-  cueSeenID,
-  cueSeenKey,
   foldedCueStatus,
   isCueStatus,
   isEndedStatus,
+  isUnread,
   normalizeActivity,
   normalizeActivityCount,
   normalizeProgress,
+  normalizeSeq,
   orderedInsertIndex,
-  parseCueSeen,
   renderedProgress,
   statusOwnsProgress,
   statusPhrase,
@@ -203,67 +201,6 @@ describe("SessionAPIError carries what the server said", () => {
  *  always a valid strip) rather than to a corrupted strip, and a tab is placed by
  *  the stored arrangement regardless of the order sessions ARRIVE in — which is
  *  not stable, since the status-stream snapshot races the bootstrap's list. */
-describe("parseCueSeen rejects anything the acknowledgement store cannot trust", () => {
-  it("reads well-formed entries back verbatim", () => {
-    expect([
-      ...parseCueSeen([
-        ["s1", "done"],
-        ["s2", "input"],
-      ]),
-    ]).toEqual([
-      ["s1", "done"],
-      ["s2", "input"],
-    ]);
-  });
-
-  it("drops entries whose value is not a cue status, keeping the rest", () => {
-    // Only the cue-worthy statuses are acknowledgeable: "working"/"idle"/
-    // "exited" are states nothing ever notified about, and a stored one would
-    // silently suppress the NEXT real cue for that session.
-    const entries: [string, string][] = [
-      ["s1", "done"],
-      ["s2", "working"],
-      ["s3", ""],
-      ["s4", "input"],
-      ["", "done"],
-    ];
-    expect([...parseCueSeen(entries)]).toEqual([
-      ["s1", "done"],
-      ["s4", "input"],
-    ]);
-  });
-
-  it("stops reading at the cap so a hostile store cannot cost unbounded work", () => {
-    let read = 0;
-    function* huge(): Generator<[string, string]> {
-      for (let i = 0; i < MAX_PERSISTED_CUE_SEEN + 500; i++) {
-        read++;
-        yield [`s${String(i)}`, "done"];
-      }
-    }
-    expect(parseCueSeen(huge()).size).toBe(MAX_PERSISTED_CUE_SEEN);
-    expect(read).toBe(MAX_PERSISTED_CUE_SEEN + 1);
-  });
-});
-
-describe("cue acknowledgements are stored one key per session", () => {
-  it("reads back the session id each key was written for", () => {
-    for (const id of ["s1", "a/b", "wt-cue-seen/", " "]) {
-      expect(cueSeenID(cueSeenKey(id)), id).toBe(id);
-    }
-  });
-
-  it("claims no other key", () => {
-    for (const key of ["wt-cue-seen", "wt-cue-seen/", "x-wt-cue-seen/s1", "wt-swipe-hint", ""]) {
-      expect(cueSeenID(key), key).toBeNull();
-    }
-  });
-
-  it("gives two sessions two keys", () => {
-    expect(cueSeenKey("s1")).not.toBe(cueSeenKey("s2"));
-  });
-});
-
 describe("isCueStatus declares the cue-worthy statuses in one place", () => {
   it("accepts exactly the four states that want the user, and nothing else", () => {
     // The switcher's aggregate dot and the out-of-page attention surfaces are
@@ -277,34 +214,25 @@ describe("isCueStatus declares the cue-worthy statuses in one place", () => {
 });
 
 describe("summarizeCues folds the tab list into one attention summary", () => {
-  const seen = (entries: [string, CueStatus][] = []): Map<string, CueStatus> => new Map(entries);
-
-  it("reports nothing for an empty list and for a list with no cue", () => {
-    expect(summarizeCues([], seen())).toEqual({ count: 0, worst: "" });
-    expect(
-      summarizeCues(
-        [
-          { id: "a", status: "working" },
-          { id: "b", status: "idle" },
-          { id: "c", status: "warning" },
-          { id: "d", status: "exited" },
-        ],
-        seen(),
-      ),
-    ).toEqual({ count: 0, worst: "" });
+  // An unread occurrence: numbered 1, nothing seen, nothing in flight.
+  const tab = (status: string, seq = { statusSeq: 1, seenSeq: 0, ackSeq: 0 }) => ({
+    status,
+    ...seq,
   });
 
-  it("counts every unacknowledged cue and keeps the most severe", () => {
-    expect(
-      summarizeCues(
-        [
-          { id: "a", status: "done" },
-          { id: "b", status: "input" },
-          { id: "c", status: "working" },
-        ],
-        seen(),
-      ),
-    ).toEqual({ count: 2, worst: "input" });
+  it("reports nothing for an empty list and for a list with no cue", () => {
+    expect(summarizeCues([])).toEqual({ count: 0, worst: "" });
+    expect(summarizeCues([tab("working"), tab("idle"), tab("warning"), tab("exited")])).toEqual({
+      count: 0,
+      worst: "",
+    });
+  });
+
+  it("counts every unread cue and keeps the most severe", () => {
+    expect(summarizeCues([tab("done"), tab("input"), tab("working")])).toEqual({
+      count: 2,
+      worst: "input",
+    });
   });
 
   it("orders severity crashed over failed over input over done", () => {
@@ -318,54 +246,47 @@ describe("summarizeCues folds the tab list into one attention summary", () => {
       ["crashed", "done", "crashed"],
     ];
     for (const [first, second, worst] of pairs) {
-      expect(
-        summarizeCues(
-          [
-            { id: "a", status: first },
-            { id: "b", status: second },
-          ],
-          seen(),
-        ).worst,
-        `${first} vs ${second}`,
-      ).toBe(worst);
-      expect(
-        summarizeCues(
-          [
-            { id: "a", status: second },
-            { id: "b", status: first },
-          ],
-          seen(),
-        ).worst,
-        `${second} vs ${first}`,
-      ).toBe(worst);
+      expect(summarizeCues([tab(first), tab(second)]).worst, `${first} vs ${second}`).toBe(worst);
+      expect(summarizeCues([tab(second), tab(first)]).worst, `${second} vs ${first}`).toBe(worst);
     }
   });
 
-  it("excludes a cue this viewer already acknowledged", () => {
-    const list = [
-      { id: "a", status: "input" },
-      { id: "b", status: "crashed" },
-    ];
-    expect(summarizeCues(list, seen([["a", "input"]]))).toEqual({ count: 1, worst: "crashed" });
-    expect(
-      summarizeCues(
-        list,
-        seen([
-          ["a", "input"],
-          ["b", "crashed"],
-        ]),
-      ),
-    ).toEqual({ count: 0, worst: "" });
+  it("excludes a cue whose occurrence a reader acknowledged", () => {
+    const read = tab("input", { statusSeq: 3, seenSeq: 3, ackSeq: 0 });
+    expect(summarizeCues([read, tab("crashed")])).toEqual({ count: 1, worst: "crashed" });
+  });
+});
+
+describe("isUnread compares the occurrence with the read floor", () => {
+  it("is unread only above both the confirmed floor and this page's ack", () => {
+    expect(isUnread({ status: "done", statusSeq: 3, seenSeq: 2, ackSeq: 0 })).toBe(true);
+    expect(isUnread({ status: "done", statusSeq: 3, seenSeq: 3, ackSeq: 0 })).toBe(false);
+    expect(isUnread({ status: "done", statusSeq: 3, seenSeq: 0, ackSeq: 3 })).toBe(false);
+    expect(isUnread({ status: "done", statusSeq: 3, seenSeq: 4, ackSeq: 0 })).toBe(false);
   });
 
-  it("counts a cue again once the session moves to a DIFFERENT cue", () => {
-    // The acknowledgement is per (session, status), so a tab that was
-    // acknowledged as done and then blocks on input is news again. This is the
-    // half that a plain "have I seen this session" flag would get wrong.
-    expect(summarizeCues([{ id: "a", status: "input" }], seen([["a", "done"]]))).toEqual({
-      count: 1,
-      worst: "input",
-    });
+  it("counts a new occurrence of the same cue again", () => {
+    // A second "done" in a row is a new turn: the floor covers the first only.
+    expect(isUnread({ status: "done", statusSeq: 4, seenSeq: 3, ackSeq: 0 })).toBe(true);
+  });
+
+  it("never counts a status that is not a cue, nor a server that sends no numbers", () => {
+    expect(isUnread({ status: "working", statusSeq: 3, seenSeq: 0, ackSeq: 0 })).toBe(false);
+    expect(isUnread({ status: "done", statusSeq: 0, seenSeq: 0, ackSeq: 0 })).toBe(false);
+  });
+});
+
+describe("normalizeSeq accepts a non-negative safe integer and nothing else", () => {
+  it("passes a valid number through", () => {
+    expect(normalizeSeq(0)).toBe(0);
+    expect(normalizeSeq(7)).toBe(7);
+    expect(normalizeSeq(2 ** 53 - 1)).toBe(2 ** 53 - 1);
+  });
+
+  it("answers null for anything a server should not send", () => {
+    for (const raw of ["3", -1, 1.5, 2 ** 53, Number.NaN, Infinity, null, undefined, {}]) {
+      expect(normalizeSeq(raw), String(raw)).toBeNull();
+    }
   });
 });
 
@@ -778,6 +699,33 @@ describe("the session API's requests", () => {
     expect(calls[0]?.init?.headers).toEqual({ "Content-Type": "application/json" });
   });
 
+  it("marks a session read with a keepalive JSON PUT under its escaped path", async () => {
+    // keepalive lets a read made just before the page goes away still land.
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+
+    await createSessionAPI("/api/sessions", window).markSeen("a/b", 3);
+
+    expect(calls[0]?.url).toBe("/api/sessions/a%2Fb/seen");
+    expect(calls[0]?.init?.method).toBe("PUT");
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ seq: 3 }));
+    expect(calls[0]?.init?.keepalive).toBe(true);
+    expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("rejects a failed seen mark with its status", async () => {
+    stubFetch(response(404));
+    await expect(createSessionAPI("/api/sessions", window).markSeen("s1", 1)).rejects.toMatchObject(
+      {
+        name: "SessionAPIError",
+        status: 404,
+      },
+    );
+  });
+
   it("rejects a 200 whose body is not an array", async () => {
     // A Go server marshals a nil session slice as JSON `null`, and a proxy can
     // answer 200 with an error object. Either one reaching the bootstrap's
@@ -973,12 +921,7 @@ describe("a live background task blanks a SETTLED cue and nothing else", () => {
     expect(foldedCueStatus("done", "WORKING")).toBe("done");
   });
 
-  it("never answers idle for a blanked cue", () => {
-    // "" is NO INFORMATION and `idle` is a real non-cue state that FORGETS the
-    // acknowledgement, so the sentinel may not drift onto a status value: a caller
-    // testing `=== ""` would stop suppressing and one testing isCueStatus would
-    // drop the viewer's dismissal.
-    expect(foldedCueStatus("done", "working")).not.toBe("idle");
+  it("blanks to no cue at all", () => {
     expect(isCueStatus(foldedCueStatus("done", "working"))).toBe(false);
   });
 });
@@ -1090,21 +1033,6 @@ describe("the OSC 9;4 percentage", () => {
     expect(renderedProgress("failed", 42)).toBe(42);
     expect(renderedProgress("warning", 25)).toBe(25);
     expect(renderedProgress("working", 0)).toBe(0);
-  });
-});
-
-describe("parseCueSeen accepts the cue statuses and nothing else", () => {
-  it("stores a crashed acknowledgement and rejects a non-cue status", () => {
-    const seen = parseCueSeen([
-      ["s1", "crashed"],
-      ["s2", "done"],
-      ["s3", "working"],
-      ["s4", "exited"],
-    ]);
-    expect([...seen.entries()]).toEqual([
-      ["s1", "crashed"],
-      ["s2", "done"],
-    ]);
   });
 });
 

@@ -28,7 +28,6 @@ import {
 } from "./route.js";
 import type { CueStatus, PaneLayout, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
-  MAX_PERSISTED_CUE_SEEN,
   MAX_PINNED_NAME,
   PROGRESS_ABSENT,
   SWIPE_HINT_KEY,
@@ -38,18 +37,16 @@ import {
   createSessionAPI,
   createTombstones,
   cueIconName,
-  cueSeenID,
-  cueSeenKey,
   foldedCueStatus,
   hasPinnedName,
   isCueStatus,
   isEndedStatus,
-  isUnseenCue,
+  isUnread,
   normalizeActivity,
   normalizeActivityCount,
   normalizeProgress,
+  normalizeSeq,
   orderedInsertIndex,
-  parseCueSeen,
   renderedProgress,
   sanitizePinnedName,
   statusPhrase,
@@ -196,50 +193,6 @@ const CATCHUP_SETTLE_MS = 250;
  *  multiple frames; ordinary streaming must never arm the cue. */
 const CATCHUP_MIN_BACKLOG = 400;
 
-function* storedCueSeen(win: Pick<Window, "localStorage">): Generator<readonly [string, string]> {
-  try {
-    const store = win.localStorage;
-    for (let i = 0; i < store.length; i++) {
-      const key = store.key(i);
-      const id = key === null ? null : cueSeenID(key);
-      if (key !== null && id !== null) {
-        yield [id, store.getItem(key) ?? ""];
-      }
-    }
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-/** The acknowledged background-tab cues, or an empty map when storage throws or
- *  holds nothing trustworthy: the dot simply lights again. */
-function readCueSeen(win: Pick<Window, "localStorage">): Map<string, CueStatus> {
-  return parseCueSeen(storedCueSeen(win));
-}
-
-/** Best-effort: a full quota must not break the dismissal the user just
- *  performed on screen. */
-function writeCueSeen(win: Pick<Window, "localStorage">, id: string, status: CueStatus): void {
-  try {
-    win.localStorage.setItem(cueSeenKey(id), status);
-  } catch {
-    /* storage unavailable or full: the dismissal still holds for this page */
-  }
-}
-
-/** Remove `id`'s stored acknowledgement only while it still holds `status`:
- *  another window may since have acknowledged the session's next cue. */
-function dropCueSeen(win: Pick<Window, "localStorage">, id: string, status: CueStatus): void {
-  try {
-    const key = cueSeenKey(id);
-    if (win.localStorage.getItem(key) === status) {
-      win.localStorage.removeItem(key);
-    }
-  } catch {
-    /* storage unavailable: nothing stored to remove */
-  }
-}
-
 /** A wait the feature's teardown ends early: the timer goes with the feature. */
 function retryWait(win: Window, ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -254,6 +207,10 @@ function retryWait(win: Window, ms: number, signal: AbortSignal): Promise<void> 
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
+
+/** Where a status record came from: the stream, or a list requested when the
+ *  stream epoch read `listedAt`. */
+type RecordSource = { readonly stream: true } | { readonly listedAt: number };
 
 /** How long a run of refusals has waited and when it last told the user. */
 interface RefusalWait {
@@ -481,8 +438,8 @@ type SplitOpening =
  *  `/api/sessions`, `?session=<id>` on the WebSocket, ideally the status SSE).
  *  It registers as the terminal's `paneLayoutOwner`, so it decides which session
  *  the first connect attaches to; two owners fail at `kernel-init`. The strip's
- *  order and the pane layout are SERVER state every viewer shares; the dismissed
- *  cues are per-viewer in `localStorage`. Teardown removes the chrome and leaves
+ *  order and the pane layout are SERVER state every viewer shares; which cues
+ *  each session's readers have seen is server state too. Teardown removes the chrome and leaves
  *  the sessions running; closing a tab is what kills a process. */
 export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
@@ -697,62 +654,91 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const swSwitchDot = pick(swSwitch, ".wt-switcher-switch-dot");
       const swNew = makeNewButton("wt-switcher-new wt-btn wt-switcher-new-btn");
       swBar.append(swKb, ...(swSplit === null ? [] : [swSplit]), swSwitch, swNew);
-      // Latest-wins cue for the switch button's dot, cleared when the list opens or
-      // the raising tab is visited or closed; "" is no pending cue.
+      // Latest-wins cue for the switch button's dot, cleared when the list opens,
+      // the raising tab is visited or closed, or its occurrence (switchNotifySeq)
+      // is read on any window or device; "" is no pending cue.
       let switchNotify: "" | CueStatus = "";
       // The session that raised the pending cue, so arriving on that tab (a
       // swipe or any switch) acknowledges it without opening the list.
       let switchNotifyId: string | null = null;
-      // Cues this viewer has already SEEN, per session (see CUE_SEEN_PREFIX).
-      // Loaded here so a reload starts from what the user already dismissed:
-      // input/done stay LATCHED server-side, and the status stream re-pushes the
-      // latch in the snapshot it sends on every open, so without this a
-      // dismissed dot came back on the next load — and on every SSE reconnect,
-      // which on a phone is just returning to a backgrounded page.
-      const cueSeen = readCueSeen(win);
-      // The out-of-page surfaces render the SAME unseen-cue set the switch dot
+      let switchNotifySeq = 0;
+      // Counts status-stream records; applyStatus compares a list's reading of it
+      // with each tab's streamAt to skip a list older than the stream.
+      let streamEpoch = 0;
+      let warnedSeen = false;
+      // The out-of-page surfaces render the SAME unread-cue set the switch dot
       // shows, fed only through paintAttention below.
       const attention = ctx.shell.attention({ icons: opts.attentionIcons === true });
-      // markCueSeen records that this viewer has seen `id` holding `status`:
-      // either because that tab is the one on screen, or because the tray listing
-      // every tab's dot was opened. Every read re-asserts the badge, which may
-      // still show a write the platform dropped though the count is unchanged,
-      // and closes the session's banner; a non-cue status stores nothing.
-      function markCueSeen(id: string, status: string): void {
+      // markCueSeen acknowledges t's current occurrence for every reader: the tab
+      // is on screen, or the tray listing every tab's dot was opened. Every read
+      // re-asserts the badge, which may still show a write the platform dropped,
+      // and closes the session's banner. The surfaces clear before the round trip,
+      // so a cue landing on the watched tab never paints a count. The automatic
+      // path (retry false) skips an occurrence whose ack already failed, so a
+      // failing server sees one PUT per occurrence rather than one per record.
+      function markCueSeen(t: Tab, how: { readonly retry: boolean }): void {
         attention.resync();
-        ctx.shell.notifications.retract(id);
-        if (!isCueStatus(status) || cueSeen.get(id) === status) {
+        ctx.shell.notifications.retract(t.id);
+        t.bannerSeq = 0;
+        if (!isCueStatus(statusOf(t)) || t.statusSeq <= Math.max(t.seenSeq, t.ackSeq)) {
           return;
         }
-        cueSeen.set(id, status);
-        writeCueSeen(win, id, status);
-        // Evict the oldest so storage obeys the parser's cap: dropTab prunes a
-        // session closed while this page was open, but one that vanished while the
-        // page was CLOSED leaves an entry nothing else collects.
-        while (cueSeen.size > MAX_PERSISTED_CUE_SEEN) {
-          const [oldest, held] = cueSeen.entries().next().value ?? [];
-          if (oldest === undefined || held === undefined) {
-            break;
-          }
-          cueSeen.delete(oldest);
-          dropCueSeen(win, oldest, held);
+        if (!how.retry && t.failedSeq === t.statusSeq) {
+          return;
         }
-        // An acknowledgement can change the unseen count without touching the tab
-        // list, so syncChrome's sweep is not enough on its own: opening the tray
-        // and arriving on a tab both land here and neither adds or removes a chip.
+        const seq = t.statusSeq;
+        t.ackSeq = seq;
+        closeReadSurfaces(t);
         paintAttention();
+        api.markSeen(t.id, seq).then(
+          () => {
+            if (tornDown() || !tabList.includes(t)) {
+              return;
+            }
+            // seq came from the server, so a 204 means its floor is at least seq.
+            t.seenSeq = Math.max(t.seenSeq, seq);
+            if (t.ackSeq <= t.seenSeq) {
+              t.ackSeq = 0;
+            }
+            if (t.failedSeq <= seq) {
+              t.failedSeq = 0;
+            }
+          },
+          (err: unknown) => {
+            if (tornDown() || !tabList.includes(t)) {
+              return;
+            }
+            if (err instanceof SessionAPIError && err.status === 404) {
+              return; // the session is gone; its removal drops the tab
+            }
+            // A later ack owns ackSeq, and seenSeq is never written here: a
+            // broadcast may already carry this ack though its response was lost.
+            if (t.ackSeq === seq) {
+              t.ackSeq = 0;
+            }
+            t.failedSeq = Math.max(t.failedSeq, seq);
+            if (!warnedSeen) {
+              warnedSeen = true;
+              console.warn("web-terminal-ui: marking a session read failed", err);
+            }
+            paintAttention();
+          },
+        );
       }
-      // forgetCueSeen drops an acknowledgement, so the session's NEXT input/done
-      // is a fresh cue: called when its status moves off the acknowledged value
-      // (a new working phase, an exit) and when the session goes away. Every
-      // caller ends in syncChrome, which repaints the out-of-page surfaces.
-      function forgetCueSeen(id: string): void {
-        const known = cueSeen.get(id);
-        if (known === undefined) {
-          return;
+      // A surface this page raised for an occurrence closes once the page's read
+      // floor reaches that occurrence, keyed on the number rather than the fold: a
+      // done held by background activity folds to "" yet may own a banner, and a
+      // late ack of an older occurrence must not close one raised for a newer.
+      function closeReadSurfaces(t: Tab): void {
+        const floor = Math.max(t.seenSeq, t.ackSeq);
+        if (t.bannerSeq !== 0 && floor >= t.bannerSeq) {
+          ctx.shell.notifications.retract(t.id); // only this page can close its own banners
+          t.bannerSeq = 0;
         }
-        cueSeen.delete(id);
-        dropCueSeen(win, id, known);
+        if (switchNotifyId === t.id && floor >= switchNotifySeq) {
+          clearSwitchNotify();
+        }
+        attention.resync();
       }
       // visibilityState, not document.hasFocus(), which is false for a
       // visible-but-unfocused window where the terminal IS on screen.
@@ -763,59 +749,46 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // The DEFERRED half of the shown-tab acknowledgement: a cue that latched on
       // a hidden page raised the out-of-page surfaces and is acknowledged when the
       // user can see the terminal. The SHOWN tabs only: blanking a background
-      // tab's cue the viewer never saw loses the thing they came back for.
+      // tab's cue the viewer never saw loses the thing they came back for. Also
+      // the retry point for a failed ack.
       function onPageVisible(): void {
         if (!pageVisible()) {
           return;
         }
         for (const t of tabList) {
           if (isShown(t.id)) {
-            markCueSeen(t.id, statusOf(t));
+            markCueSeen(t, { retry: true });
           }
         }
       }
       doc.addEventListener("visibilitychange", onPageVisible);
+      // A desktop window can regain focus while it stays visible, which fires no
+      // visibilitychange.
+      win.addEventListener("focus", onPageVisible);
       ctx.defer(() => {
         doc.removeEventListener("visibilitychange", onPageVisible);
+        win.removeEventListener("focus", onPageVisible);
       });
-      // Every page writes the one app badge, so each mirrors the shared map;
-      // otherwise a hidden page keeps counting a cue the reader saw elsewhere.
-      // A null key is another page's localStorage.clear().
-      function onCueSeenStored(e: StorageEvent): void {
-        if (e.key !== null && cueSeenID(e.key) === null) {
-          return;
-        }
-        const stored = readCueSeen(win);
-        for (const id of [...cueSeen.keys()]) {
-          if (!stored.has(id)) {
-            cueSeen.delete(id);
-          }
-        }
-        for (const [id, status] of stored) {
-          if (cueSeen.get(id) !== status) {
-            cueSeen.set(id, status);
-            // Read elsewhere, but only this page can close the banners it posted.
-            ctx.shell.notifications.retract(id);
-          }
-        }
-        if (switchNotifyId !== null && cueSeen.get(switchNotifyId) === switchNotify) {
-          clearSwitchNotify();
-        }
-        attention.resync();
-        paintAttention();
+
+      /** The cue fold's view of a tab (isUnread), shared by the count and the raise. */
+      function fold(t: Tab): {
+        status: string;
+        statusSeq: number;
+        seenSeq: number;
+        ackSeq: number;
+      } {
+        return {
+          status: cueStatusOf(t),
+          statusSeq: t.statusSeq,
+          seenSeq: t.seenSeq,
+          ackSeq: t.ackSeq,
+        };
       }
-      win.addEventListener("storage", onCueSeenStored);
-      ctx.defer(() => {
-        win.removeEventListener("storage", onCueSeenStored);
-      });
 
       // A FOLD over the tab list rather than incremental bookkeeping: no state of
       // its own can go stale, and the shell no-ops when nothing changed.
       function paintAttention(): void {
-        const { count, worst } = summarizeCues(
-          tabList.map((t) => ({ id: t.id, status: cueStatusOf(t) })),
-          cueSeen,
-        );
+        const { count, worst } = summarizeCues(tabList.map(fold));
         attention.report({ count, icon: worst === "" ? null : cueIconName(worst) });
       }
       function paintSwitchDot(): void {
@@ -833,11 +806,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       function clearSwitchNotify(): void {
         switchNotify = "";
         switchNotifyId = null;
+        switchNotifySeq = 0;
         paintSwitchDot();
       }
       // The pending cue is resolved when its session is reached (a switch, a swipe
       // arriving on it) and moot when the session ceases to exist (a close, a
-      // reap); opening the list alone does not clear it.
+      // reap).
       function acknowledgeSwitchNotify(id: string): void {
         if (switchNotifyId === id) {
           clearSwitchNotify();
@@ -1592,9 +1566,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // The tray lists EVERY tab with its own status dot, so every latched tab
         // is acknowledged here, not just the cue's latest subject — several tabs
         // can be latched at once while the dot only ever showed the newest, and an
-        // unacknowledged sibling would re-raise it on the next load.
+        // unread sibling would stay unread on every device.
         for (const t of tabList) {
-          markCueSeen(t.id, t.dot.dataset["status"] ?? "");
+          markCueSeen(t, { retry: true });
         }
         clearSwitchNotify();
         renderSwitcherList();
@@ -1673,6 +1647,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           aria,
           view: null,
           reports: reportsOf(info.reportsActivity),
+          // The boot list adopts without applyStatus, so these carry its numbers.
+          statusSeq: normalizeSeq(info.statusSeq) ?? 0,
+          seenSeq: normalizeSeq(info.seenSeq) ?? 0,
+          ackSeq: 0,
+          failedSeq: 0,
+          bannerSeq: 0,
+          streamAt: 0,
         };
         paintProgress(progressEl, renderedProgress(info.status, tab.progress));
         paintActivityMark(activityEl, tab.activity, tab.activityCount);
@@ -1890,7 +1871,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // The terminal is now on screen, so a reload must not notify about a state
         // the user just looked at.
         acknowledgeSwitchNotify(next.id);
-        markCueSeen(next.id, next.dot.dataset["status"] ?? "");
+        markCueSeen(next, { retry: true });
         const moveSelection = how.keepSelection !== true || selectedId() === null;
         // The view goes in WITH the bind, which makes the swap atomic: the pane's
         // follow flag is one per renderer, so a bind without it gated the first
@@ -2780,11 +2761,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // the server reaping it cannot re-adopt the just-closed tab.
         tombstones.add(id);
         // A pending switch-button cue whose subject just closed is moot: clear
-        // it rather than leaving a dot no tab visit can ever resolve. Its stored
-        // acknowledgement goes too — the session is gone, so the entry would only
-        // sit in storage forever.
+        // it rather than leaving a dot no tab visit can ever resolve.
         acknowledgeSwitchNotify(id);
-        forgetCueSeen(id);
         ctx.shell.notifications.forget(id);
         tab.aria.remove();
         // Remove immediately (no exit animation): a lingering element made the
@@ -2888,7 +2866,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // re-adopt a just-closed tab.
           tombstones.add(t.id);
           acknowledgeSwitchNotify(t.id);
-          forgetCueSeen(t.id);
           ctx.shell.notifications.forget(t.id);
           t.aria.remove();
           abortReorderFor(t.el); // a live drag holds this node
@@ -3324,13 +3301,28 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       // Takes the record whole: its title fields are interchangeable strings that
       // as positional parameters would be swappable. `reports` travels separately
-      // because it is normalised (reportsOf) first.
-      function applyStatus(rec: StatusRecord, reports: boolean): void {
+      // because it is normalised (reportsOf) first. `source` says whether the
+      // record came off the stream or from a list requested at stream epoch
+      // `listedAt`.
+      function applyStatus(rec: StatusRecord, reports: boolean, source: RecordSource): void {
         const t = tabList.find((tab) => tab.id === rec.id);
         if (!t) {
           return;
         }
-        t.reports = reports;
+        if ("stream" in source) {
+          t.streamAt = streamEpoch;
+        }
+        // The stream-owned tuple is skipped from a list older than the stream's
+        // last record for the tab, or carrying an older occurrence: anything such a
+        // list could add arrives on the stream anyway, and applying it can hide a
+        // cue no later frame restores.
+        const seq = normalizeSeq(rec.statusSeq);
+        const stale =
+          ("listedAt" in source && t.streamAt > source.listedAt) ||
+          (seq !== null && seq < t.statusSeq);
+        if (!stale) {
+          applyStreamTuple(t, rec, reports, seq);
+        }
         // The server's shared position. Only an explicitly PRESENT value updates
         // the tab, for the same reason as progressValue below: an engine that
         // keeps no order sends no field, and reading that absence as "position 0"
@@ -3347,6 +3339,60 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             t.alias = alias;
             scheduleAddress("replace");
           }
+        }
+        // The seen floor only rises, so a lower value is an older record.
+        const seen = normalizeSeq(rec.seenSeq);
+        if (seen !== null && seen > t.seenSeq) {
+          t.seenSeq = seen;
+          closeReadSurfaces(t);
+        }
+        // A program that speaks OSC 9 may also post a notification: arm the
+        // permission request for the next user gesture.
+        if (reports) {
+          ctx.shell.notifications.arm();
+        }
+        // The switch button's latest-wins dot. The acknowledgement reads the RAW
+        // status; the raise reads the FOLDED one, so a done held by background
+        // activity raises nothing.
+        const folded = fold(t);
+        if (isShown(rec.id) && pageVisible() && isCueStatus(statusOf(t))) {
+          // BOTH halves: keyed on the shown tabs alone, this swallowed the cue of
+          // the one session the user left running on a hidden page, the case the
+          // out-of-page surfaces exist for.
+          markCueSeen(t, { retry: false });
+        } else if (isUnread(folded)) {
+          switchNotify = folded.status;
+          switchNotifyId = rec.id;
+          switchNotifySeq = t.statusSeq;
+          paintSwitchDot();
+        }
+        // A BLANK title (a status sweep, or the process clearing its OSC 0/2
+        // title) must not drop an idle tab back to "New tab". The typeof check is
+        // live: rec is unvalidated server JSON, and a missing title would abort
+        // the caller's whole reconcile loop.
+        if (typeof rec.title === "string" && rec.title.trim() !== "") {
+          t.title = rec.title;
+        }
+        // "" is meaningful here: it is how a clear made in ANOTHER browser reaches
+        // this one. It never bumps nameSeq: SSE delivery and REST mutation are not
+        // one total order, so a record arriving during a pending request may
+        // predate our own PUT, and a bump would suppress that request's rollback.
+        if (rec.pinnedTitle !== undefined) {
+          t.pinnedTitle = rec.pinnedTitle;
+        }
+      }
+
+      // The fields only the stream decides: the status and its dot, its
+      // occurrence number, the reveal gate, the percentage and the activity pair.
+      function applyStreamTuple(
+        t: Tab,
+        rec: StatusRecord,
+        reports: boolean,
+        seq: number | null,
+      ): void {
+        t.reports = reports;
+        if (seq !== null) {
+          t.statusSeq = seq;
         }
         paintStatusDot(t.dot, rec.status, reports);
         // Only a PRESENT percentage updates the tab: the polling fallback lists
@@ -3368,46 +3414,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           t.activityCount = normalizeActivityCount(rec.activityCount);
         }
         paintActivityMark(t.activityEl, t.activity, t.activityCount);
-        // A program that speaks OSC 9 may also post a notification: arm the
-        // permission request for the next user gesture.
-        if (reports) {
-          ctx.shell.notifications.arm();
-        }
-        // The switch button's latest-wins dot. Cue statuses are LATCHED server-side
-        // and re-delivered on every snapshot, so cueSeen is what makes a dismissal
-        // stick. The acknowledgement reads the RAW status (a non-cue must reach the
-        // forget below); the raise and the forget read the FOLDED one.
-        const raw = statusOf(t);
-        const cue = cueStatusOf(t);
-        if (isShown(rec.id) && pageVisible() && isCueStatus(raw)) {
-          // BOTH halves: keyed on the shown tabs alone, this swallowed the cue of
-          // the one session the user left running on a hidden page, the case the
-          // out-of-page surfaces exist for.
-          markCueSeen(rec.id, raw);
-        } else if (cue === "") {
-          // NO INFORMATION: forgetting here would re-raise the cue from scratch
-          // the moment the background task ended.
-        } else if (!isCueStatus(cue)) {
-          forgetCueSeen(rec.id);
-        } else if (isUnseenCue(cue, rec.id, cueSeen)) {
-          switchNotify = cue;
-          switchNotifyId = rec.id;
-          paintSwitchDot();
-        }
-        // A BLANK title (a status sweep, or the process clearing its OSC 0/2
-        // title) must not drop an idle tab back to "New tab". The typeof check is
-        // live: rec is unvalidated server JSON, and a missing title would abort
-        // the caller's whole reconcile loop.
-        if (typeof rec.title === "string" && rec.title.trim() !== "") {
-          t.title = rec.title;
-        }
-        // "" is meaningful here: it is how a clear made in ANOTHER browser reaches
-        // this one. It never bumps nameSeq: SSE delivery and REST mutation are not
-        // one total order, so a record arriving during a pending request may
-        // predate our own PUT, and a bump would suppress that request's rollback.
-        if (rec.pinnedTitle !== undefined) {
-          t.pinnedTitle = rec.pinnedTitle;
-        }
       }
 
       // One list reconcile for both status sources: adopt every session the
@@ -3468,6 +3474,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // requested: a tab adopted while the GET was in flight is invisible to
         // it, and dropping it here cascaded into a duplicate replacement session.
         const epochAtList = tabEpoch;
+        const listedAt = streamEpoch;
         let list: SessionInfo[];
         try {
           list = await api.list();
@@ -3490,7 +3497,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         for (const info of list) {
           adoptSession(info); // add sessions created elsewhere (no local tab)
-          applyStatus(info, reportsOf(info.reportsActivity));
+          applyStatus(info, reportsOf(info.reportsActivity), { listedAt });
         }
         // Already gone server-side, so no DELETE; tabs born after the snapshot
         // wait for the next reconcile.
@@ -3527,13 +3534,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
                 applyingRecord = false;
               }
             }
+            const listedAt = streamEpoch;
             const settled = await settleOrToast();
             if (tornDown()) {
               return;
             }
             for (const info of settled.sessions) {
               adoptSession(info);
-              applyStatus(info, reportsOf(info.reportsActivity));
+              applyStatus(info, reportsOf(info.reportsActivity), { listedAt });
             }
             // Read now, so an address the user navigated to during the wait wins.
             const route =
@@ -3769,14 +3777,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             void dropTab(s.id, { remote: false }); // already gone server-side; no DELETE
             return;
           }
+          streamEpoch++;
           adoptSession(s);
-          applyStatus(s, reportsOf(s.reportsActivity));
+          applyStatus(s, reportsOf(s.reportsActivity), { stream: true });
           ensureActive();
           syncChrome();
           // A notification is an EVENT delivered once, so it is handled here and
           // not in applyStatus, which also runs on re-delivered STATE. After
           // syncChrome, so its title is the label the user would see.
-          ctx.shell.notifications.deliver(s, {
+          const posted = ctx.shell.notifications.deliver(s, {
             sessionIsActive: isShown(s.id),
             label: tabList.find((t) => t.id === s.id)?.display ?? s.title,
             // switchTo no-ops on an id that is gone, which is the case that
@@ -3785,6 +3794,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
               switchTo(s.id);
             },
           });
+          const shownFor = posted ? tabList.find((t) => t.id === s.id) : undefined;
+          if (shownFor) {
+            // The event's own number: a skipped tuple leaves the tab's newer.
+            shownFor.bannerSeq = normalizeSeq(s.statusSeq) ?? shownFor.statusSeq;
+          }
         });
         ctx.defer(offStatus);
         // The first open joins the boot's reconcile. A reopen queues a fresh one
@@ -3799,6 +3813,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
               : withPlacementHold(() => inReconcileSlot(reconcileNow));
           void settled.then(() => {
             attention.resync();
+            onPageVisible(); // re-acks the shown tabs, now reconciled
           });
         });
         if (offStreamOpen) {
