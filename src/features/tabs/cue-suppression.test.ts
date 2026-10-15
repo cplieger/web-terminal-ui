@@ -1,7 +1,7 @@
 // A settled turn raises no cue while a background task it launched is still
 // running (foldedCueStatus), and this file drives that through the REAL cue path
 // rather than against the fold in isolation: a mobile switch dot, a document-title
-// count and the wt-cue-seen acknowledgement map are three surfaces reached by two
+// count and the seen acknowledgement sent to the server are three surfaces reached by two
 // different code paths (applyStatus's latest-wins raise, and paintAttention's fold
 // over the whole strip), so a suppression that landed on one and not the other
 // would read as fixed while still nagging.
@@ -21,12 +21,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import { tabs } from "./index.js";
+import { seenAcks } from "./test-helpers/sessions-server.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
 import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
-// A plain string constant, so reading it through a separate module instance than
-// the (dynamically re-imported) feature under test is safe.
-import { storedCueSeen } from "../../test-helpers/cue-seen.js";
 
 /** A status event carrying the secondary-activity fields. They are declared here
  *  rather than on the engine's SessionStatus for the reason model.ts's
@@ -163,9 +161,9 @@ function switchDot(root: HTMLElement): string {
   return root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"] ?? "";
 }
 
-/** This viewer's acknowledgements as they reached storage. */
-function acknowledged(): Record<string, string> {
-  return storedCueSeen();
+/** The highest occurrence this page acknowledged per session. */
+function acknowledged(): Record<string, number> {
+  return seenAcks(fetchMock.mock.calls);
 }
 
 describe("a background task suppresses its session's settled cue", () => {
@@ -180,6 +178,7 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s2",
       status: "done",
+      statusSeq: 1,
       title: "two",
       createdAt: "2",
       activity: "working",
@@ -193,6 +192,7 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s2",
       status: "done",
+      statusSeq: 1,
       title: "two",
       createdAt: "2",
       activity: "",
@@ -212,6 +212,7 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s2",
       status: "done",
+      statusSeq: 1,
       title: "two",
       createdAt: "2",
       activity: "working",
@@ -226,33 +227,32 @@ describe("a background task suppresses its session's settled cue", () => {
   });
 
   it("does not re-raise a cue this viewer had already dismissed", async () => {
-    // The decision the "" sentinel exists for. A suppressed cue is NO INFORMATION,
-    // so it must leave the acknowledgement map alone; blanking with a real non-cue
-    // state instead (`idle`) would FORGET the dismissal while the task ran and
-    // re-raise the cue from scratch the moment it ended — for a session the viewer
-    // had already visited.
+    // The task starting and ending moves only the activity, never the occurrence
+    // number, so the read made before it still covers the cue once it lifts.
     const { root, monitor } = await mount();
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    monitor.emit({ id: "s2", status: "done", statusSeq: 1, title: "two", createdAt: "2" });
     expect(switchDot(root)).toBe("done");
 
     // Opening the tray lists every tab's own dot, which is what acknowledges them.
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
     expect(switchDot(root)).toBe("");
-    expect(acknowledged()).toEqual({ s2: "done" });
+    expect(acknowledged()).toEqual({ s2: 1 });
 
     monitor.emit({
       id: "s2",
       status: "done",
+      statusSeq: 1,
       title: "two",
       createdAt: "2",
       activity: "working",
       activityCount: 1,
     });
-    expect(acknowledged(), "the dismissal survives the task starting").toEqual({ s2: "done" });
+    expect(acknowledged(), "the task starting sends nothing").toEqual({ s2: 1 });
 
     monitor.emit({
       id: "s2",
       status: "done",
+      statusSeq: 1,
       title: "two",
       createdAt: "2",
       activity: "",
@@ -260,7 +260,7 @@ describe("a background task suppresses its session's settled cue", () => {
     });
     expect(switchDot(root), "the task ending re-raises nothing").toBe("");
     expect(document.title, "and adds nothing to the count").toBe("one · Host page");
-    expect(acknowledged()).toEqual({ s2: "done" });
+    expect(acknowledged()).toEqual({ s2: 1 });
   });
 
   it("raises nothing for the tab the user is looking at when its task ends", async () => {
@@ -274,6 +274,7 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s1",
       status: "done",
+      statusSeq: 1,
       title: "one",
       createdAt: "1",
       activity: "working",
@@ -284,6 +285,7 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s1",
       status: "done",
+      statusSeq: 1,
       title: "one",
       createdAt: "1",
       activity: "",
@@ -291,7 +293,7 @@ describe("a background task suppresses its session's settled cue", () => {
     });
     expect(switchDot(root), "the active tab raises no cue when its task ends").toBe("");
     expect(document.title).toBe("one · Host page");
-    expect(acknowledged()).toEqual({ s1: "done" });
+    expect(acknowledged()).toEqual({ s1: 1 });
   });
 
   it("acknowledges the watched turn while it is suppressed, so leaving cannot arm it", async () => {
@@ -305,14 +307,13 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s1",
       status: "done",
+      statusSeq: 1,
       title: "one",
       createdAt: "1",
       activity: "working",
       activityCount: 1,
     });
-    expect(acknowledged(), "the watched turn is acknowledged as it settles").toEqual({
-      s1: "done",
-    });
+    expect(acknowledged(), "the watched turn is acknowledged as it settles").toEqual({ s1: 1 });
 
     root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
     expect(root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.className).toContain("wt-tab-active");
@@ -320,25 +321,26 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s1",
       status: "done",
+      statusSeq: 1,
       title: "one",
       createdAt: "1",
       activity: "",
       activityCount: 0,
     });
-    expect(acknowledged(), "the acknowledgement outlives the switch").toEqual({ s1: "done" });
+    expect(acknowledged(), "the acknowledgement outlives the switch").toEqual({ s1: 1 });
     expect(switchDot(root), "so the switch dot stays dark once the task ends").toBe("");
     expect(document.title, "and the title counts nothing").toBe("two · Host page");
   });
 
-  it("still forgets the watched tab's acknowledgement when its turn moves on", async () => {
-    // The acknowledgement is on the (session, latch) PAIR and the watched tab is
-    // no exception: a new working phase drops it, whether or not a task is
-    // running, or the NEXT turn to finish in the background reads as the one the
-    // reader already saw.
+  it("counts the watched tab's next turn as a new occurrence", async () => {
+    // A new working phase is a new occurrence on the server, whether or not a
+    // task is running, so the NEXT turn to finish in the background is unread
+    // although the reader saw the one before it.
     const { root, monitor } = await mount();
     monitor.emit({
       id: "s1",
       status: "done",
+      statusSeq: 1,
       title: "one",
       createdAt: "1",
       activity: "working",
@@ -347,17 +349,19 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s1",
       status: "working",
+      statusSeq: 2,
       title: "one",
       createdAt: "1",
       activity: "working",
       activityCount: 1,
     });
-    expect(acknowledged(), "a new working phase drops the acknowledgement").toEqual({});
+    expect(acknowledged(), "the working phase is no cue to acknowledge").toEqual({ s1: 1 });
 
     root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.click();
     monitor.emit({
       id: "s1",
       status: "done",
+      statusSeq: 3,
       title: "one",
       createdAt: "1",
       activity: "",
@@ -376,6 +380,7 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s2",
       status: "input",
+      statusSeq: 1,
       title: "two",
       createdAt: "2",
       activity: "working",
@@ -387,6 +392,7 @@ describe("a background task suppresses its session's settled cue", () => {
     monitor.emit({
       id: "s2",
       status: "crashed",
+      statusSeq: 2,
       title: "two",
       createdAt: "2",
       activity: "working",

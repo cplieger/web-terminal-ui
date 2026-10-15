@@ -17,8 +17,8 @@ import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
-import { storedCueSeen } from "../../test-helpers/cue-seen.js";
 import { tick } from "./test-helpers/split.js";
+import { engineNumbering } from "./test-helpers/sessions-server.js";
 
 // A fake activityMonitor: lets a test push status events (and stream (re)opens)
 // into tabs without the real SSE. tabs reads it via ctx.use, so the same feature
@@ -31,6 +31,7 @@ function fakeMonitor(): {
   open: () => void;
 } {
   const subs = new Set<(s: SessionStatus) => void>();
+  const number = engineNumbering();
   const openSubs = new Set<() => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
@@ -55,8 +56,9 @@ function fakeMonitor(): {
   return {
     feature,
     emit: (s) => {
+      const rec = number(s);
       for (const cb of [...subs]) {
-        cb(s);
+        cb(rec);
       }
     },
     open: () => {
@@ -1650,8 +1652,7 @@ describe("tabs: a tab that goes away", () => {
 
   it("clears the switch-button cue a bulk close made moot", async () => {
     // A dot the user can no longer resolve by visiting the tab is worse than no
-    // dot: nothing they do will clear it. Its stored acknowledgement goes too, or
-    // the entry sits in storage for a session that no longer exists.
+    // dot: nothing they do will clear it.
     vi.stubGlobal("confirm", () => true);
     server.list = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
@@ -1672,32 +1673,6 @@ describe("tabs: a tab that goes away", () => {
     await until(() => chips(root).length === 1);
 
     expect(dot?.dataset["status"]).toBeUndefined();
-    expect(storedCueSeen()).not.toHaveProperty("s3");
-  });
-
-  it("drops a bulk-closed tab's stored acknowledgement", async () => {
-    // An acknowledgement is per session, so once the session is gone the entry can
-    // only sit in storage until the 200-entry cap evicts it.
-    vi.stubGlobal("confirm", () => true);
-    server.list = [
-      { id: "s1", title: "one", createdAt: "1", status: "idle" },
-      { id: "s2", title: "two", createdAt: "2", status: "idle" },
-      { id: "s3", title: "three", createdAt: "3", status: "idle" },
-    ];
-    const monitor = fakeMonitor();
-    const root = document.createElement("div");
-    await mount(root, monitor.feature);
-
-    // The ACTIVE tab latching while the page is visible is acknowledged on the
-    // spot, which is what puts an entry in storage.
-    monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
-    await until(() => "s1" in storedCueSeen());
-    expect(storedCueSeen()).toHaveProperty("s1");
-
-    item(openMenu(root, 1), "Close others")?.click();
-    await until(() => chips(root).length === 1);
-
-    expect(storedCueSeen()).not.toHaveProperty("s1");
   });
 
   it("hands every bulk-closed session's cache back to the embedder", async () => {

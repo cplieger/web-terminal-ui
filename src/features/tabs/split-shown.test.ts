@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { LineStore } from "@cplieger/web-terminal-engine";
 import { connectionBanner } from "../connection-banner.js";
-import { storedCueSeen } from "../../test-helpers/cue-seen.js";
 import type { PersistedScrollback, ScrollbackPersistence } from "../../kernel/types.js";
 import {
   chipOf,
@@ -21,6 +20,7 @@ import {
   until,
   type FakeSessionServer,
 } from "./test-helpers/split.js";
+import { seenAcks } from "./test-helpers/sessions-server.js";
 
 const fake = await vi.hoisted(async () => {
   const { createEngineFake } = await import("../../test-helpers/fake-engine.js");
@@ -340,7 +340,7 @@ describe("attention with two shown tabs", () => {
     vi.stubGlobal("Notification", FakeNotification);
     return posts;
   }
-  const cueSeen = (): Record<string, string> => storedCueSeen();
+  const cueSeen = (): Record<string, number> => seenAcks(server.fetch.mock.calls);
 
   it("a completion in the unselected pane raises no cue anywhere and is recorded as seen; an ordinary tab's still does", async () => {
     document.title = "Host page";
@@ -374,12 +374,12 @@ describe("attention with two shown tabs", () => {
       expect(ownIcon.getAttribute("href")).toBe("/favicon.svg");
       expect(dot?.dataset["status"]).toBeUndefined();
       expect(posts).toEqual([]);
-      expect(cueSeen()["s1"]).toBe("done");
+      expect(cueSeen()["s1"]).toBe(1);
 
       // s2, the selected pane's tab, likewise.
       monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
       expect(dot?.dataset["status"]).toBeUndefined();
-      expect(cueSeen()["s2"]).toBe("done");
+      expect(cueSeen()["s2"]).toBe(1);
 
       // s3 is an ordinary tab: its completion is a background event.
       monitor.emit({
@@ -421,8 +421,8 @@ describe("attention with two shown tabs", () => {
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
     expect(document.title).toBe("(1) two · Host page");
-    expect(cueSeen()["s1"]).toBe("input");
-    expect(cueSeen()["s2"]).toBe("input");
+    expect(cueSeen()["s1"]).toBe(1);
+    expect(cueSeen()["s2"]).toBe(1);
     expect(cueSeen()["s3"]).toBeUndefined();
   });
 });

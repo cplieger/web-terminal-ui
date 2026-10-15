@@ -10,7 +10,7 @@ The core shows terminal output in a display-only element, so native text selecti
 
 ## The engine version
 
-`@cplieger/web-terminal-engine` is a peer dependency, so your page pins the engine version itself. The supported range is 6.x. Whether an engine and this UI can talk is decided by the engine's [wire contract](https://github.com/cplieger/web-terminal-engine#wire-protocol), not by matching package versions. When the two cannot talk, the connection banner stays up and asks the user to update the server or reload the page.
+`@cplieger/web-terminal-engine` is a peer dependency, so your page pins the engine version itself. The supported range is 6.4.0 or later on both halves: unread cues need the server's seen route and the two status-stream fields that number each status, which no wire floor checks. Whether an engine and this UI can talk is decided by the engine's [wire contract](https://github.com/cplieger/web-terminal-engine#wire-protocol), not by matching package versions. When the two cannot talk, the connection banner stays up and asks the user to update the server or reload the page.
 
 ## Choose the CSS bundle
 

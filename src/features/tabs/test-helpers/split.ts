@@ -13,6 +13,7 @@ import type {
   TerminalHandle,
 } from "../../../kernel/types.js";
 import type { ActivityMonitorApi } from "../../activity-monitor.js";
+import { engineNumbering } from "./sessions-server.js";
 
 /** The engine driving the pane on `side` right now: the one whose `.term` sits
  *  in that pane's root. Sides are assigned at every open, so this is read when
@@ -200,6 +201,7 @@ export interface FakeMonitor {
 /** A shell-scoped stand-in for the activity monitor, driven by `emit` and `open`. */
 export function fakeMonitor(): FakeMonitor {
   const subs = new Set<(s: SessionStatus) => void>();
+  const number = engineNumbering();
   const openSubs = new Set<() => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
@@ -224,8 +226,9 @@ export function fakeMonitor(): FakeMonitor {
   return {
     feature,
     emit: (s) => {
+      const rec = number(s);
       for (const cb of [...subs]) {
-        cb(s);
+        cb(rec);
       }
     },
     open: () => {

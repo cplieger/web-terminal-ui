@@ -183,7 +183,7 @@ export const SWIPE_HINT_KEY = "wt-swipe-hint-seen";
  *  a notification. `working` and `warning` are ongoing and informational, so a
  *  dot for them would nag with nothing to act on; `failed` is a parked result the
  *  program does not revisit, so it belongs. Declared once so the raise test, the
- *  acknowledgement store and every attention sink cannot disagree. */
+ *  acknowledgement and every attention sink cannot disagree. */
 export type CueStatus = "input" | "done" | "crashed" | "failed";
 
 /** Severity order, most severe first, AND the complete set isCueStatus tests
@@ -226,10 +226,8 @@ export function cueIconName(status: CueStatus): "input" | "done" | "alert" {
 const SETTLED_CUES: ReadonlySet<string> = new Set<CueStatus>(["done"]);
 
 /** The status the CUE surfaces see: the session's own, unless a settled turn's
- *  background task is still running, in which case "". "" and NOT "idle": "" means
- *  NO INFORMATION, so the seen map is left alone, where "idle" is a real non-cue
- *  state that would forget the acknowledgement and re-raise the cue when the task
- *  ends. The status DOT keeps rendering the real state. */
+ *  background task is still running, in which case "" (no cue). The status DOT
+ *  keeps rendering the real state. */
 export function foldedCueStatus(status: string, activity: string): string {
   if (!SETTLED_CUES.has(status) || normalizeActivity(activity) === "") {
     return status;
@@ -237,25 +235,29 @@ export function foldedCueStatus(status: string, activity: string): string {
   return "";
 }
 
-/** Whether a session's CURRENT status is a cue this viewer has not acknowledged;
- *  the one predicate behind the raise and the attention count. A latch arriving
- *  on a shown tab is acknowledged at arrival, so no caller needs a special case. */
-export function isUnseenCue(
-  status: string,
-  id: string,
-  seen: ReadonlyMap<string, CueStatus>,
-): status is CueStatus {
-  return isCueStatus(status) && seen.get(id) !== status;
-}
-
 /** What the cue fold reads per tab; structural, so a caller passes its own tab
- *  objects. */
+ *  objects. `status` is the FOLDED status (foldedCueStatus). */
 interface CueCandidate {
-  readonly id: string;
   readonly status: string;
+  /** the server's number for that status's occurrence */
+  readonly statusSeq: number;
+  /** the server-confirmed seen floor */
+  readonly seenSeq: number;
+  /** this page's optimistic read floor, 0 when none */
+  readonly ackSeq: number;
 }
 
-/** The unseen cues over the tab list: a COUNT for the title and the badge, one
+/** Whether a session's CURRENT status is a cue no reader has acknowledged; the
+ *  one predicate behind the raise and the attention count. The floor is the
+ *  higher of what the server confirmed and what this page has already sent, so
+ *  a read paints at once and a lagging record cannot relight it. */
+export function isUnread<T extends CueCandidate>(
+  tab: T,
+): tab is T & { readonly status: CueStatus } {
+  return isCueStatus(tab.status) && tab.statusSeq > Math.max(tab.seenSeq, tab.ackSeq);
+}
+
+/** The unread cues over the tab list: a COUNT for the title and the badge, one
  *  WORST for the icon. A count is set-valued and needs no rule for choosing among
  *  sessions; severity is a total order, so the icon's choice is not arbitrary.
  *  Neither names a session, the standing constraint on a page-wide surface. */
@@ -264,16 +266,12 @@ interface CueSummary {
   readonly worst: CueStatus | "";
 }
 
-/** Fold the tab list and this viewer's acknowledgements into the one summary
- *  every attention surface renders. */
-export function summarizeCues(
-  tabs: readonly CueCandidate[],
-  seen: ReadonlyMap<string, CueStatus>,
-): CueSummary {
+/** Fold the tab list into the one summary every attention surface renders. */
+export function summarizeCues(tabs: readonly CueCandidate[]): CueSummary {
   let count = 0;
   let worst: CueStatus | "" = "";
   for (const tab of tabs) {
-    if (!isUnseenCue(tab.status, tab.id, seen)) {
+    if (!isUnread(tab)) {
       continue;
     }
     count += 1;
@@ -282,47 +280,10 @@ export function summarizeCues(
   return { count, worst };
 }
 
-/** localStorage key prefix for the cues this viewer has SEEN: one key per
- *  session, `cueSeenKey(id)`, holding the acknowledged status. Remembered because
- *  `input` and `done` are latched on the server and re-delivered in every
- *  snapshot, so a dismissed dot came back on every reload; client-side because
- *  "seen" is the VIEWER's, not the session's. One key per session because every
- *  window of the app writes here: two windows acknowledging different sessions
- *  write different keys, where one shared map lets the later write drop the
- *  other's acknowledgement. */
-const CUE_SEEN_PREFIX = "wt-cue-seen/";
-
-/** The storage key holding `id`'s acknowledgement. */
-export function cueSeenKey(id: string): string {
-  return CUE_SEEN_PREFIX + id;
-}
-
-/** The session id a storage key acknowledges, or null for any other key. */
-export function cueSeenID(key: string): string | null {
-  return key.startsWith(CUE_SEEN_PREFIX) && key.length > CUE_SEEN_PREFIX.length
-    ? key.slice(CUE_SEEN_PREFIX.length)
-    : null;
-}
-
-/** Bound on the acknowledgements read back, so a corrupted or hostile store
- *  cannot make the restore path do unbounded work. */
-export const MAX_PERSISTED_CUE_SEEN = 200;
-
-/** Read stored [session id, raw status] entries into a clean map, dropping
- *  anything untrusted (a lost acknowledgement only re-lights a dot the user can
- *  dismiss again), and stop reading at the cap. */
-export function parseCueSeen(entries: Iterable<readonly [string, string]>): Map<string, CueStatus> {
-  const out = new Map<string, CueStatus>();
-  for (const [id, status] of entries) {
-    if (out.size >= MAX_PERSISTED_CUE_SEEN) {
-      break;
-    }
-    if (id === "" || !isCueStatus(status)) {
-      continue;
-    }
-    out.set(id, status);
-  }
-  return out;
+/** A status-occurrence number off the wire: a non-negative safe integer, or null
+ *  for anything else, which leaves the tab's value unchanged. */
+export function normalizeSeq(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
 }
 
 /** TabOrderKey is what the strip's order is decided by: the server's shared
@@ -452,6 +413,25 @@ export interface Tab {
    *  tab menu's "use the automatic name" action. Undefined or empty means the tab
    *  has no user-set name. */
   pinnedTitle?: string | undefined;
+  /** The server's number for the status this tab holds (0: none yet). */
+  statusSeq: number;
+  /** The server-confirmed seen floor. Only rises: a record carrying a lower one
+   *  is older, never a retraction. */
+  seenSeq: number;
+  /** This page's optimistic read floor: the occurrence its latest ack sent, 0
+   *  when none. A 204 clears it once seenSeq covers it, and a non-404 failure
+   *  only while it still holds the failed number; a 404 keeps it until the
+   *  vanished tab is removed. */
+  ackSeq: number;
+  /** The occurrence whose ack last failed with a non-404, 0 when none; the
+   *  automatic ack skips it so a failing server sees one PUT per occurrence. */
+  failedSeq: number;
+  /** The occurrence a banner this page posted for the session belongs to, 0
+   *  when none. */
+  bannerSeq: number;
+  /** The stream epoch at which a status-stream record last updated this tab, 0
+   *  when none: a list requested before it is older. */
+  streamAt: number;
   /** Monotonic per-tab rename counter. A rename or clear increments it and
    *  captures the value; the response is applied only if it is still current when
    *  it lands, so a slow failure cannot roll back a newer rename, a later clear,
@@ -513,6 +493,12 @@ interface SessionAPI {
   /** Replace the shared pane layout. Throws on non-2xx as `setOrder` does: a 409
    *  means a side names a session that is not live. */
   setLayout(layout: PaneLayout): Promise<void>;
+  /** Acknowledge `seq` for every reader. The server keeps the higher floor and
+   *  caps it at its own statusSeq, so a resolve confirms the floor reached `seq`
+   *  only for a `seq` this page received. Throws a SessionAPIError on non-2xx; a
+   *  404 means the session is gone. Sent with `keepalive`, so a read just before
+   *  the page goes away still lands. */
+  markSeen(id: string, seq: number): Promise<void>;
 }
 
 /** The server's pane-layout record: which session each pane shows, the handle's
@@ -747,6 +733,17 @@ export function createSessionAPI(apiBase: string, realm: SessionAPIRealm): Sessi
       });
       if (!r.ok) {
         throw await sessionError("set layout", r);
+      }
+    },
+    async markSeen(id: string, seq: number): Promise<void> {
+      const r = await request(`${apiBase}/${encodeURIComponent(id)}/seen`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seq }),
+        keepalive: true,
+      });
+      if (!r.ok) {
+        throw await sessionError("mark seen", r);
       }
     },
   };
