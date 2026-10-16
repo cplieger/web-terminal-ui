@@ -113,7 +113,6 @@ export default defineConfig({
     // keep the name.
     setupFiles: [
       "./src/fc-strict-setup.ts",
-      "./src/page-lifecycle-setup.ts",
       "./src/mounted-terminal-setup.ts",
     ],
     printConsoleTrace: true,
