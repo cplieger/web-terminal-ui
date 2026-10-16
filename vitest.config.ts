@@ -111,10 +111,7 @@ export default defineConfig({
     // publish and analysis filter (package.json `files`, jsr.json, stryker, the
     // coverage exclude, deadset.json, scripts/verify.sh) excludes `*-setup.ts`:
     // keep the name.
-    setupFiles: [
-      "./src/fc-strict-setup.ts",
-      "./src/mounted-terminal-setup.ts",
-    ],
+    setupFiles: ["./src/fc-strict-setup.ts", "./src/mounted-terminal-setup.ts"],
     printConsoleTrace: true,
     expandSnapshotDiff: true,
     coverage: {
