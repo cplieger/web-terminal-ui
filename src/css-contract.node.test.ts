@@ -54,11 +54,11 @@ describe("engine-toggled class contract", () => {
     expect(terminal).toContain(".term-cursor-overlay:not(.visible)");
   });
 
-  it("gives app-declared links (.term-link) an affordance where nothing can hover", () => {
+  it("gives app-declared links (.term-link) an affordance where the primary pointer cannot hover", () => {
     // The engine anchors OSC 8 runs as .term-link and auto-detected URLs as
     // .term-autolink. .term-link's underline is hover-only, so on a touch device
     // an app-declared link renders as plain text, and a TUI that emits OSC 8 for
-    // every markdown link fills a phone session with tappable invisible links.
+    // every link it renders fills a phone session with tappable invisible links.
     // A `hover: none` block restores the affordance; deleted, mobile silently
     // regresses with no other signal anywhere.
     const block = /@media \(hover: none\) \{([\s\S]*?)\n\}/.exec(terminal);

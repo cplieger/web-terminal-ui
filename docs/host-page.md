@@ -67,7 +67,7 @@ The package ships TypeScript source. Your build compiles it with the rest of you
     loading: document.getElementById("loading"),
   });
   // For a server that exposes the WebSocket elsewhere, or a custom font:
-  // createTerminal("#terminal", { features: presetTabbed, wsPath: "/api/shell/ws", fontReady: '14px "MyMono"' });
+  // createTerminal("#terminal", { features: presetTabbed, wsPath: "/api/term/ws", fontReady: '14px "MyMono"' });
 </script>
 ```
 

@@ -1015,8 +1015,8 @@ describe("the OSC 9;4 percentage", () => {
     // Clear 2: the status is not one the progress channel owns. A dead process,
     // and equally a latch or a return to idle — a percentage under any of those
     // is a claim about a different channel than the reader is looking at.
-    // A program that parks state 4 at a standing percentage when idle would
-    // otherwise paint a green done dot beside a 72% bar after a finished turn.
+    // A state-4 percentage persists under a latch, which state 4 does not
+    // clear, so it would otherwise paint a bar beside a done dot.
     expect(renderedProgress("exited", 100)).toBe(PROGRESS_ABSENT);
     expect(renderedProgress("crashed", 60)).toBe(PROGRESS_ABSENT);
     expect(renderedProgress("done", 72)).toBe(PROGRESS_ABSENT);

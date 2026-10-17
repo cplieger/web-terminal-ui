@@ -1007,9 +1007,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           pageTitle.release();
         });
       }
-      // Twin of marotte static-src/tabs-drag.ts; when changing drag behaviour or its
-      // constants, check the other app. Both judge a live drag's viewport against the
-      // PRESS-time frame, so a move a hold lifted across still ends the drag.
+      // A live drag's viewport is judged against the PRESS-time frame, so a move a
+      // hold lifted across still ends the drag.
       let draggingEl: HTMLElement | null = null;
       // The chips currently carrying an inline displacement from the commit slide.
       // A set plus one settle function, so whatever a slide wrote can always be handed

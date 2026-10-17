@@ -14,7 +14,6 @@ import { activityPhrase, normalizeActivity, statusPhrase, statusRevealsDot } fro
 // motion is spelled in — index.ts owns the mechanism, strip.ts owns the values,
 // the same split switcher.ts keeps for the mobile swipe.
 
-// Twin of marotte static-src/tabs-drag.ts's constants; change both or neither.
 /** How long (ms) the pointer must have been un-moved before a position report at an
  *  unchanged position (a `dragover`, or the pointer path's re-report on this tick) is
  *  believed as "stopped". Small, because such a report is positive evidence of rest;

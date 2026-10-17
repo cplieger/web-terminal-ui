@@ -410,7 +410,7 @@
 
 /* Mobile "+": the primary action, carried in the accent colour so it reads as
    permanent and prominent. Hover fill is gated on any-hover (see the note in
-   10-primitives.css): on a bare touchscreen any-hover is none, so the purple
+   10-primitives.css): on a bare touchscreen any-hover is none, so the accent
    cannot linger after a tap and the press feedback comes from :active; a trackpad
    or Pencil reports hover and gets the wash, which a (hover: hover) gate denied it.
    */

@@ -73,7 +73,7 @@
      receiving frequent replaceChildren() updates can drop paint
      invalidations for inline children whose styling-only changes
      don't trigger layout — most visibly the inverse-styled "cursor"
-     span Ink draws inside our rows, which would visually stick at
+     span a program draws inside our rows, which would visually stick at
      its old column on space/arrow key presses until a content-
      changing keystroke forced a repaint. Without `contain`, every
      row update participates in normal paint flow and the cursor
@@ -215,8 +215,8 @@
 
 /* Clickable URLs. OSC 8 hyperlinks (base .term-link) underline on HOVER where a
    pointer can hover: an application can attach one OSC 8 link to a whole
-   padded/bordered region — e.g. a markdown link whose URL wraps inside a table
-   cell, where the terminal keeps the link open across the cell padding, the
+   padded/bordered region — e.g. a link whose URL wraps inside a table cell,
+   where the terminal keeps the link open across the cell padding, the
    borders and the empty adjacent column — so a persistent underline risks
    bleeding across the whole cell and, on wrap, the full row. Hover-only matches
    iTerm2 / VTE / kitty. The app's own text colour (which the engine renders)
@@ -238,14 +238,13 @@
   text-decoration: underline solid;
 }
 
-/* Where nothing can hover, a hover-only underline is no affordance: a TUI that
-   emits OSC 8 for every markdown link (a program may enable hyperlinks for the
-   iTerm2 identity the engine advertises) fills a phone session with tappable,
+/* Where the primary pointing device cannot hover, a hover-only underline gives
+   a touch interaction no persistent affordance: a TUI that emits OSC 8 for
+   every link it renders (a program may enable hyperlinks for the iTerm2
+   identity the engine advertises) fills a phone session with tappable,
    invisible links. The bleed risk above stays small because the engine anchors
-   no run without real link text, so padding, borders and indent cells a wrapped
-   link leaks onto stay unmarked. `hover: none` is the pointing device's
-   capability, not a viewport width, so a narrow desktop window keeps hover
-   styling. */
+   no run without real link text. `hover: none` describes the primary pointing
+   device, not viewport width, so a narrow desktop window keeps hover styling. */
 @media (hover: none) {
   :where(.wt-root) .term-link {
     text-decoration: underline dotted;

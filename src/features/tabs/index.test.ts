@@ -591,9 +591,9 @@ describe("tabs feature", () => {
   });
 
   it("spawns and activates a fresh session when every listed session is exited", async () => {
-    // The agent died in every listed session (e.g. a sign-in dead end). The
-    // bootstrap must not wedge on a corpse: it spawns a fresh live session,
-    // activates it, and keeps the exited one around as a viewable tab.
+    // The program exited in every listed session. The bootstrap must not
+    // wedge on a corpse: it spawns a fresh live session, activates it, and
+    // keeps the exited one around as a viewable tab.
     listBody = [{ id: "s1", title: "", createdAt: "1", status: "exited" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1177,7 +1177,7 @@ describe("tabs feature", () => {
     openTabMenu(root, 0);
     expect(menu?.classList.contains("visible")).toBe(true);
 
-    // A background agent printing into the TUI scrolls the terminal surface to
+    // Background output printing into the TUI scrolls the terminal surface to
     // the bottom on every chunk. That scroll moves neither the menu (placed
     // root-relative) nor the chip it is anchored to, so it must not dismiss.
     root.querySelector(".term")?.dispatchEvent(new Event("scroll"));
@@ -2542,10 +2542,9 @@ describe("tabs OSC 9 status chrome", async () => {
 
   it("hides the bar under a status the progress channel does not own", async () => {
     // A latch is the NOTIFICATION channel talking, so a percentage retained from
-    // the progress channel must not be painted underneath it. A program that
-    // leaves a state-4 percentage up once done would paint a green done dot
-    // beside a 72% bar after a finished turn, and a full one beside a pending
-    // input request, neither of which is how far along anything is. The engine
+    // the progress channel must not be painted underneath it. A state-4
+    // percentage does not clear a latch, so it would paint a bar beside a done
+    // or input dot, neither of which is how far along anything is. The engine
     // is right to keep sending the value (a progress state persists); this is
     // the consumer deciding it is not the current word.
     for (const status of ["done", "input", "idle"] as const) {
