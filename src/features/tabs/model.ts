@@ -104,10 +104,10 @@ export function statusOwnsProgress(status: string): boolean {
 
 /** The percentage a status may SHOW. Two things clear it: the program's own
  *  OSC 9;4;0 (arriving as PROGRESS_ABSENT) and a status the channel does not own
- *  (kiro-cli parks state 4 at its context-usage percentage when idle, which once
- *  painted a done dot beside a 72% bar). Deliberately no third clear: 100% is a
- *  STATE that persists, and a timeout would assert a change the program never
- *  reported. */
+ *  (a program that parks state 4 at a standing percentage while idle would
+ *  otherwise paint a done dot beside a 72% bar). Deliberately no third clear:
+ *  100% is a STATE that persists, and a timeout would assert a change the
+ *  program never reported. */
 export function renderedProgress(status: string, progress: number): number {
   return statusOwnsProgress(status) ? progress : PROGRESS_ABSENT;
 }

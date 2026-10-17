@@ -1,7 +1,7 @@
 # web-terminal-ui CSS — the REFERENCE FULL-PAGE bundle.
-# What the full-page product serves (web-terminal-server, web-terminal-kiro,
-# scaffold/index.html): the page kit (page.css — html/body reset + @font-face;
-# full-page hosts ONLY) plus the complete tabbed component set. An EMBEDDING
+# What a full-page host serves (as scaffold/index.html does): the page kit
+# (page.css — html/body reset + @font-face; full-page hosts ONLY) plus the
+# complete tabbed component set. An EMBEDDING
 # consumer must NOT serve this file's bundle — it concatenates the per-preset
 # manifest matching its composition instead (MANIFEST.single / MANIFEST.touch /
 # MANIFEST.tabbed), which contains no page-level rules.

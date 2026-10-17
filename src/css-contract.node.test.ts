@@ -57,8 +57,8 @@ describe("engine-toggled class contract", () => {
   it("gives app-declared links (.term-link) an affordance where nothing can hover", () => {
     // The engine anchors OSC 8 runs as .term-link and auto-detected URLs as
     // .term-autolink. .term-link's underline is hover-only, so on a touch device
-    // an app-declared link renders as plain text: kiro-cli emits OSC 8 for every
-    // markdown link, which made a phone session full of tappable invisible links.
+    // an app-declared link renders as plain text, and a TUI that emits OSC 8 for
+    // every markdown link fills a phone session with tappable invisible links.
     // A `hover: none` block restores the affordance; deleted, mobile silently
     // regresses with no other signal anywhere.
     const block = /@media \(hover: none\) \{([\s\S]*?)\n\}/.exec(terminal);
@@ -600,35 +600,13 @@ describe("activity-dot vocabulary (the OSC 9 states)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The theme-token contract: is the API this package DOCUMENTS actually wired?
-//
-// `theme` is an open Record, so a consumer's override is a string this library
-// copies onto the root and never validates. Two ways that goes silently wrong,
-// and only the second needs generated data to catch:
-//
-//   1. The consumer names a token this library does not declare. Its brand color
-//      lands in a dead custom property and the terminal renders in the library's
-//      neutral defaults. A consumer can catch this itself by asserting its keys
-//      against PUBLIC_THEME_TOKENS.
-//   2. This library declares a public token that no rule ever READS. Then the
-//      override is accepted, applies to nothing, and BOTH sides are green: the
-//      consumer's key is on the documented list, and the list is on the
-//      library's declared list. The token looks supported and is dead.
-//
-// (2) is why the declared/referenced inventory below is generated from the
-// stylesheets instead of hand-listed: a hand-maintained list of "tokens we
-// support" cannot notice that a rule stopped reading one. web-terminal-kiro's
-// app.test.ts used to derive this by reaching into node_modules for this
-// package's css/MANIFEST and regexing its comment-stripped text — coupling a
-// consumer's suite to this package's file layout and comment syntax, and able to
-// silently cover nothing while still passing. The scrape belongs here, where the
-// layout is owned.
-//
-// Scope, deliberately: ONE bundle (css/MANIFEST, the full-page superset) and two
-// flat token sets. Not a per-file or per-preset schema. A `presetTouch` embedder
-// serves MANIFEST.touch, which has no tab chrome, so it can pass --status-* and
-// see nothing — that is a property of what it chose to serve, not a broken
-// promise by the tokens, and modelling it would cost more than the bug it finds.
+// The theme-token contract. `theme` is an open Record copied onto the root
+// unvalidated, so a public token no rule READS is accepted, applies to nothing,
+// and leaves both the consumer's key check and the declared list green. Hence
+// the declared/referenced inventory is scraped from the stylesheets, here where
+// the layout is owned, not hand-listed. Scope: ONE bundle (css/MANIFEST, the
+// full-page superset); MANIFEST.touch has no tab chrome, so --status-* reading
+// nothing there is the embedder's choice, not a dead token.
 
 /** Schema revision of the inventory FILE, independent of what it reports. A
  *  reader must reject a version it does not understand rather than guess. */

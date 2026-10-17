@@ -1,8 +1,7 @@
 /**
  * presetTabbed (and the shared tabbed composition builder): the full
  * multi-session UI. Requires a server that speaks the session API
- * (`/api/sessions`, `/ws?session=`, and the status SSE `/api/sessions/events`),
- * such as `web-terminal-server` or `web-terminal-kiro`.
+ * (`/api/sessions`, `/ws?session=`, and the status SSE `/api/sessions/events`).
  *
  * @module
  */

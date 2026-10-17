@@ -21,7 +21,7 @@ createTerminal("#terminal", {
 });
 ```
 
-web-terminal-kiro, web-terminal-server and marotte's shell panel all turn it on this way. web-terminal-server also gives its operator a switch to turn it off, because it runs a command its operator chooses.
+A host that runs a command its operator chooses can also give the operator a switch to turn it off.
 
 ## Why it is off by default
 

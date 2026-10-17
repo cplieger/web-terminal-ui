@@ -1,9 +1,9 @@
 /* ===== Page kit (full-page hosts ONLY — never ship this to an embedder) =====
    The page-level half of the full-page terminal product: what the HOST PAGE
-   owns when the terminal IS the page (web-terminal-server, web-terminal-kiro,
-   scaffold/index.html). The component bundle (00-10) never touches the host
-   document; everything here is deliberately page-scoped. An embedding consumer
-   (marotte) serves a per-preset manifest instead and owns its own page.
+   owns when the terminal IS the page (as in scaffold/index.html). The component
+   bundle (00-10) never touches the host document; everything here is
+   deliberately page-scoped. An embedding consumer serves a per-preset manifest
+   instead and owns its own page.
    Concatenated FIRST by the reference MANIFEST. */
 
 *,
@@ -39,12 +39,8 @@ body {
 }
 
 /* ===== The pre-JS loading overlay =====
-   ONE definition of the loading screen, owned here. Before this, the library
-   only PRESCRIBED it in scaffold/index.html and every full-page consumer carried
-   its own copy in an inline <style> — web-terminal-server's was byte-identical to
-   the scaffold's, web-terminal-kiro's had drifted (renamed keyframe, extra
-   states) — so the "one" loading screen existed three times and none of them
-   could be improved without editing three files.
+   ONE definition of the loading screen, owned here, so a full-page consumer
+   links it instead of carrying its own copy in an inline <style> that drifts.
 
    Why it can live in a stylesheet at all, since the overlay's whole job is to be
    on screen before the app is: a full-page host loads this bundle through a plain
@@ -56,8 +52,7 @@ body {
 
    Consumer overrides work the same way the component tokens do, except simpler:
    the overlay is the consumer's OWN element, so it sets the tokens on #loading in
-   its own CSS and needs no JS. web-terminal-kiro already did exactly this with
-   --accent before any of this was tokenised.
+   its own CSS and needs no JS.
 
    Selected by CLASS, never by the consumer's `id`: the library owns .wt-loading*
    and must not reach into a host document's own identifiers (the same
@@ -225,12 +220,11 @@ body {
 }
 
 /* ===== Fonts =====
-   The bundled web font, served by the full-page host at /vendor/fonts (both
-   web-terminal-server and web-terminal-kiro ship these files there; see their
-   Dockerfiles). It backs BOTH --font-mono (the terminal display) and --font-ui
-   (the chrome), the latter deliberately: chip-label ink centring is a per-font
-   constant, so the chrome cannot afford a system-font stack that resolves to a
-   different typeface per engine (see --label-ink-shift in 00-tokens.css). An
+   The bundled web font, served by the full-page host at /vendor/fonts. It
+   backs BOTH --font-mono (the terminal display) and --font-ui (the chrome), the
+   latter deliberately: chip-label ink centring is a per-font constant, so the
+   chrome cannot afford a system-font stack that resolves to a different
+   typeface per engine (see --label-ink-shift in 00-tokens.css). An
    embedder does not serve these files and never inherits these URLs, so it
    either ships its own @font-face or lets both tokens fall back to the platform
    monospace stack.

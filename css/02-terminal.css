@@ -239,10 +239,10 @@
 }
 
 /* Where nothing can hover, hover-only is no affordance at all: a touch user sees
-   an app-declared link as plain text and has to guess. Measured on kiro-cli at 41
-   columns: it emits OSC 8 for every markdown link (its hyperlink capability
-   unlocks on the TERM_PROGRAM=iTerm.app identity the engine advertises), so a
-   phone session is full of tappable, invisible links. Give them the same subtle
+   an app-declared link as plain text and has to guess. A TUI that renders
+   markdown at 41 columns emits OSC 8 for every link (programs unlock hyperlinks
+   on the TERM_PROGRAM=iTerm.app identity the engine advertises), so a phone
+   session is full of tappable, invisible links. Give them the same subtle
    dotted underline the auto-detected ones carry.
 
    The bleed risk above is what kept this off, and it is narrower than it reads:

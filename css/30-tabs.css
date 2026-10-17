@@ -188,7 +188,7 @@
 
 /* The active tab reads clearly above the inactive chips: a stronger fill plus an
    accent-coloured edge (inactive chips carry a faint white --border; the active
-   one gets the accent equivalent). Themeable via --accent (web-terminal-kiro -> purple). */
+   one gets the accent equivalent). Themeable via --accent. */
 :where(.wt-root) .wt-tab-active {
   background: var(--tab-active-bg);
   border-color: var(--tab-active-border);
@@ -672,7 +672,7 @@
    (OSC 9;4 progress, or a classified OSC 9 notification), at which point the
    tabs feature adds .wt-reports to that dot (paintStatusDot). A program that
    emits no OSC 9 signal (a plain bash/sh) has no activity concept, so its tabs
-   stay clean, label-only; a progress-reporting agent (kiro-cli, Claude Code)
+   stay clean, label-only; a program that reports progress with OSC 9;4
    lights up. An agent-shell consumer can PRESUME the report instead (tabs'
    presumeReports option, on in presetAgentTabbed): .wt-reports is then set
    from tab creation, so the idle dot shows immediately rather than popping in
@@ -876,8 +876,8 @@
 }
 
 /* Agent done / ready: solid disc (--status-done), no motion. The default green
-   matches Kiro IDE's "Ready" (#22c55e). It sits at almost exactly working's
-   default lightness now that working is the accent blue (both ~72% OKLab L), so
+   (#22c55e) sits at almost exactly working's default lightness now that
+   working is the accent blue (both ~72% OKLab L), so
    the pair separates by hue plus the wave's motion rather than by lightness —
    and under prefers-reduced-motion by shape, since working becomes a donut. */
 :where(.wt-root) .wt-status-dot[data-status="done"] {

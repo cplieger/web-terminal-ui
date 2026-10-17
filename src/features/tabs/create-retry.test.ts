@@ -1,16 +1,11 @@
-// createSessionHonouringRetry: the loop that answers a host which TEMPORARILY
-// refuses session creation (web-terminal-kiro's 503 + Retry-After while its tool
-// engine installs the manifest's tools on first boot). index.test.ts covers the
-// happy shape of that retry — it retries on the server's hint, it repeats the
-// server's words, and a 500 fails fast. What is pinned here is the loop's own
-// arithmetic, which those tests never reach: the ELAPSED-TIME bound that ends the
-// wait, the throttle that keeps a twenty-minute wait from becoming a toast storm,
-// the fallback delay when the server sent no usable hint, and the teardown check
-// that stops a destroyed page from resurrecting a create.
-//
-// Every case here drives the real feature through the real kernel; the only fake
-// is fetch at the REST boundary, using real Response objects so Retry-After and
-// the error envelope are parsed by the production parser.
+// createSessionHonouringRetry against a host that TEMPORARILY refuses session
+// creation (a 503 + Retry-After during first-boot setup). index.test.ts covers
+// the retry's happy shape; this pins the arithmetic those tests never reach:
+// the ELAPSED-TIME bound that ends the wait, the throttle that keeps a
+// twenty-minute wait from becoming a toast storm, the fallback delay when the
+// server sent no usable hint, and the teardown check that stops a destroyed
+// page from resurrecting a create. The only fake is fetch at the REST boundary,
+// with real Response objects so the production parser reads Retry-After.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tabs } from "./index.js";

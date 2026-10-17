@@ -2,9 +2,8 @@
  *
  *  These pin what a caller can LEARN from a failed session call, which is the
  *  whole point of SessionAPIError: a host may refuse session creation
- *  temporarily and say so (web-terminal-kiro answers 503 + Retry-After while its
- *  tool engine installs on first boot). Flattening that into a message string
- *  made it indistinguishable from a 500 and threw away the retry hint. */
+ *  temporarily and say so (503 + Retry-After). Flattened into a message string,
+ *  that is indistinguishable from a 500 and loses the retry hint. */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import fc from "fast-check";
 import type { CueStatus, PaneLayout, TabOrderKey } from "./model.js";
@@ -104,8 +103,7 @@ describe("SessionAPIError carries what the server said", () => {
 
   it("surfaces the envelope's message so the host's own words reach the user", async () => {
     // The first-party Go envelope (webhttp ErrorResponse) writes `error`; this is
-    // the field every server in this family actually returns, and the shape
-    // web-terminal-kiro's tools-installing 503 uses.
+    // the field every server in this family actually returns.
     stubFetch(response(503, { error: "tools installing", code: "", request_id: "abc" }));
     await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
       serverMessage: "tools installing",
@@ -1017,8 +1015,8 @@ describe("the OSC 9;4 percentage", () => {
     // Clear 2: the status is not one the progress channel owns. A dead process,
     // and equally a latch or a return to idle — a percentage under any of those
     // is a claim about a different channel than the reader is looking at.
-    // Measured: kiro-cli parks state 4 at its context-usage percentage when
-    // idle, so a finished turn painted a green done dot beside a 72% bar.
+    // A program that parks state 4 at a standing percentage when idle would
+    // otherwise paint a green done dot beside a 72% bar after a finished turn.
     expect(renderedProgress("exited", 100)).toBe(PROGRESS_ABSENT);
     expect(renderedProgress("crashed", 60)).toBe(PROGRESS_ABSENT);
     expect(renderedProgress("done", 72)).toBe(PROGRESS_ABSENT);
