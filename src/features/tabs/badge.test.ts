@@ -341,7 +341,7 @@ describe("the app badge follows the real unread state", () => {
       title: "two",
       createdAt: "2",
       statusSeq: 1,
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
     expect(os.badge).toBe(1);
@@ -383,7 +383,7 @@ describe("a delivered notification closes once its session is read", () => {
       title: "two",
       createdAt: "2",
       statusSeq: 1,
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
     expect(banners.map((b) => [b.tag, b.closed])).toEqual([["s2", false]]);
@@ -401,7 +401,7 @@ describe("a delivered notification closes once its session is read", () => {
       title: "one",
       createdAt: "1",
       statusSeq: 1,
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
     expect(banners.map((b) => [b.tag, b.closed])).toEqual([["s1", false]]);
@@ -419,7 +419,7 @@ describe("a delivered notification closes once its session is read", () => {
       title: "two",
       createdAt: "2",
       statusSeq: 1,
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
     expect(banners.map((b) => [b.tag, b.closed])).toEqual([["s2", false]]);
@@ -454,7 +454,7 @@ describe("a delivered notification closes once its session is read", () => {
       title: "one",
       createdAt: "1",
       statusSeq: 1,
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
     chip(root, 1).click();

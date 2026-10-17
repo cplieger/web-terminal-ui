@@ -238,25 +238,14 @@
   text-decoration: underline solid;
 }
 
-/* Where nothing can hover, hover-only is no affordance at all: a touch user sees
-   an app-declared link as plain text and has to guess. A TUI that renders
-   markdown at 41 columns emits OSC 8 for every link (programs unlock hyperlinks
-   on the TERM_PROGRAM=iTerm.app identity the engine advertises), so a phone
-   session is full of tappable, invisible links. Give them the same subtle
-   dotted underline the auto-detected ones carry.
-
-   The bleed risk above is what kept this off, and it is narrower than it reads:
-   the engine refuses to anchor a run with no real link text, so the padding, the
-   box-drawing borders and the indent cells a wrapped link leaks onto the next row
-   stay unanchored and unmarked (verified against a captured OSC 8 link that wraps
-   mid-URL: the three leaked indent cells carry the href on the wire and get no
-   anchor). What remains is an app leaving one link open across genuine text in an
-   adjacent column, which would be underlined too. On a device that cannot hover,
-   an occasional over-underline beats a link with no affordance.
-
-   `hover: none` is the pointing device's capability, not a viewport width, so a
-   narrow window on a desktop keeps hover styling and a tablet with a trackpad is
-   treated as hoverable. */
+/* Where nothing can hover, a hover-only underline is no affordance: a TUI that
+   emits OSC 8 for every markdown link (a program may enable hyperlinks for the
+   iTerm2 identity the engine advertises) fills a phone session with tappable,
+   invisible links. The bleed risk above stays small because the engine anchors
+   no run without real link text, so padding, borders and indent cells a wrapped
+   link leaks onto stay unmarked. `hover: none` is the pointing device's
+   capability, not a viewport width, so a narrow desktop window keeps hover
+   styling. */
 @media (hover: none) {
   :where(.wt-root) .term-link {
     text-decoration: underline dotted;

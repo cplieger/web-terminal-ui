@@ -39,7 +39,7 @@ async function twoPagesUnread(notify = false): Promise<{ a: Page; b: Page }> {
   a.setVisible(false);
   b.setVisible(false);
   if (notify) {
-    server.notify("x", "Response complete", "done");
+    server.notify("x", "Task finished", "done");
   } else {
     server.setStatus("x", "done");
   }
@@ -84,7 +84,7 @@ describe("a read on one page clears the cue on every page", () => {
     b.show(1);
     b.setVisible(false);
     server.setStatus("x", "done");
-    server.notify("x", "Permission required", "input");
+    server.notify("x", "Approval needed", "input");
     await settle(b);
     expect(b.switchDot()).toBe("input");
     expect(b.banners.map((n) => n.closed)).toEqual([false]);
@@ -294,7 +294,7 @@ describe("this page's own ack", () => {
     a.reopen();
     await settle(a, () => a.puts.length === 3);
     expect(a.puts).toHaveLength(3);
-    server.notify("x", "Permission required", "input");
+    server.notify("x", "Approval needed", "input");
     await settle(a, () => a.puts.length === 4);
     expect(a.puts.at(-1)).toEqual({ id: "x", seq: 2 });
   });

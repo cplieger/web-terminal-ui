@@ -74,11 +74,11 @@ describe("createNotifier delivery", () => {
     const n = createNotifier(env({ ctor }));
     expect(
       n.deliver(
-        { id: "s1", notification: "Response complete", notificationSeq: 1 },
+        { id: "s1", notification: "Task finished", notificationSeq: 1 },
         view({ label: "agent" }),
       ),
     ).toBe(true);
-    expect(posts).toEqual([{ title: "agent", body: "Response complete", tag: "s1" }]);
+    expect(posts).toEqual([{ title: "agent", body: "Task finished", tag: "s1" }]);
   });
 
   it("suppresses the active session's notification while the page is visible", () => {
@@ -86,7 +86,7 @@ describe("createNotifier delivery", () => {
     const n = createNotifier(env({ ctor, pageVisible: () => true }));
     expect(
       n.deliver(
-        { id: "s1", notification: "Response complete", notificationSeq: 1 },
+        { id: "s1", notification: "Task finished", notificationSeq: 1 },
         view({ sessionIsActive: true, label: "agent" }),
       ),
     ).toBe(false);
@@ -98,7 +98,7 @@ describe("createNotifier delivery", () => {
     const n = createNotifier(env({ ctor, pageVisible: () => false }));
     expect(
       n.deliver(
-        { id: "s1", notification: "Permission required", notificationSeq: 1 },
+        { id: "s1", notification: "Approval needed", notificationSeq: 1 },
         view({ sessionIsActive: true, label: "agent" }),
       ),
     ).toBe(true);
@@ -240,7 +240,7 @@ describe("createNotifier click activation", () => {
     const n = createNotifier(env({ ctor }));
     expect(
       n.deliver(
-        { id: "s1", notification: "Permission required", notificationSeq: 1 },
+        { id: "s1", notification: "Approval needed", notificationSeq: 1 },
         view({ activate }),
       ),
     ).toBe(true);

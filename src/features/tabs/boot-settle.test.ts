@@ -35,8 +35,8 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
 
 const STALE = "That tab is no longer open";
 const basePath = location.pathname + location.search;
-const A = row("A", "sess_A", "1");
-const B = row("B", "sess_B", "2");
+const A = row("A", "tab_A", "1");
+const B = row("B", "tab_B", "2");
 
 let server: ScriptedServer;
 let monitor: FakeMonitor;
@@ -104,14 +104,14 @@ describe("boot settles before it reads the address", () => {
         writesWhenListed = historyWrites;
       }
     };
-    const m = await boot("#sess_B");
+    const m = await boot("#tab_B");
 
     await until(() => shown(m.ctx(), "left") !== null, 120);
     expect(shown(m.ctx(), "left")).toBe("B");
     expect(writesWhenListed).toBe(0);
     expect(server.count("GET", "/api/sessions/layout")).toBe(3);
     expect(server.count("POST", "/api/sessions")).toBe(0);
-    expect(location.hash).toBe("#sess_B");
+    expect(location.hash).toBe("#tab_B");
   });
 
   it("restores the persisted split from a layout read that first answered 503", async () => {
@@ -161,13 +161,13 @@ describe("boot settles before it reads the address", () => {
   it("falls back to the record's tab for an address no restored tab holds, telling a deep link", async () => {
     server.layout = [ok({ left: "B", right: null, selected: "left", handle: 0.5, open: false })];
     server.list = [ok([A, B])];
-    const m = await boot("#sess_Z");
+    const m = await boot("#tab_Z");
 
     await until(() => anyPaneShows(m), 120);
     await tick();
     expect(shown(m.ctx(), "left")).toBe("B");
     expect(toastText(m.root)).toBe(STALE);
-    expect(location.hash).toBe("#sess_B");
+    expect(location.hash).toBe("#tab_B");
   });
 
   it("falls back silently on a reload", async () => {
@@ -176,13 +176,13 @@ describe("boot settles before it reads the address", () => {
     ]);
     server.layout = [ok({ left: "B", right: null, selected: "left", handle: 0.5, open: false })];
     server.list = [ok([A, B])];
-    const m = await boot("#sess_Z");
+    const m = await boot("#tab_Z");
 
     await until(() => anyPaneShows(m), 120);
     await tick();
     expect(shown(m.ctx(), "left")).toBe("B");
     expect(toastText(m.root)).toBe("");
-    expect(location.hash).toBe("#sess_B");
+    expect(location.hash).toBe("#tab_B");
   });
 
   it("waits out a 503 on the list and reads the layout again before listing again", async () => {

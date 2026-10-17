@@ -223,7 +223,7 @@ describe("switching writes the address", () => {
   it("rewrites the address in place when a shown tab's alias changes, and not for a tab off screen", async () => {
     await mount();
     const before = history.length;
-    monitor.emit(session("s3", "sess_offscreen", "3"));
+    monitor.emit(session("s3", "tab_offscreen", "3"));
     await tick();
     expect(location.hash).toBe(`#${A}`);
 

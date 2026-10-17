@@ -2543,10 +2543,11 @@ describe("tabs OSC 9 status chrome", async () => {
   it("hides the bar under a status the progress channel does not own", async () => {
     // A latch is the NOTIFICATION channel talking, so a percentage retained from
     // the progress channel must not be painted underneath it. A program that
-    // parks progress state 4 at a standing percentage once idle would paint a
-    // green done dot beside a 72% bar after a finished turn, and a full one
-    // beside a pending approval, neither of which is how far along anything is. The engine is right to keep sending the value (a progress state
-    // persists); this is the consumer deciding it is not the current word.
+    // leaves a state-4 percentage up once done would paint a green done dot
+    // beside a 72% bar after a finished turn, and a full one beside a pending
+    // input request, neither of which is how far along anything is. The engine
+    // is right to keep sending the value (a progress state persists); this is
+    // the consumer deciding it is not the current word.
     for (const status of ["done", "input", "idle"] as const) {
       const { root, monitor } = await withMonitor();
       monitor.emit({
@@ -3094,10 +3095,10 @@ describe("tabs OSC 9 notifications", () => {
       status: "done",
       title: "two",
       createdAt: "2",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
-    expect(posts).toEqual([{ title: "two", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "two", body: "Task finished" }]);
   });
 
   it("titles a notification with the tab's own name, and a click on it opens that tab", async () => {
@@ -3109,10 +3110,10 @@ describe("tabs OSC 9 notifications", () => {
       title: "two",
       pinnedTitle: "Build box",
       createdAt: "2",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
-    expect(posts).toEqual([{ title: "Build box", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "Build box", body: "Task finished" }]);
 
     shown[0]?.onclick?.(new Event("click"));
     expect(root.querySelector(".wt-tab-active .wt-tab-label")?.textContent).toBe("Build box");
@@ -3127,7 +3128,7 @@ describe("tabs OSC 9 notifications", () => {
       status: "done",
       title: "one",
       createdAt: "1",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
     expect(posts).toEqual([]);
@@ -3144,10 +3145,10 @@ describe("tabs OSC 9 notifications", () => {
       status: "done",
       title: "one",
       createdAt: "1",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
-    expect(posts).toEqual([{ title: "one", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "one", body: "Task finished" }]);
   });
 
   it("lets a closed session's id notify again from sequence one", async () => {
@@ -3275,7 +3276,7 @@ describe("tabs OSC 9 notifications", () => {
         title: "two",
         createdAt: "2",
         reportsActivity: true,
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 1,
       });
     }).not.toThrow();
@@ -3295,7 +3296,7 @@ describe("tabs OSC 9 notifications", () => {
         status: "done",
         title: "two",
         createdAt: "2",
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 1,
       });
     }).not.toThrow();
