@@ -659,25 +659,14 @@
   bottom: calc(var(--wt-tabbar-h, 44px) + var(--safe-bottom, 0px));
 }
 
-/* ===== Activity dots (activityMonitor via tabs) =====
-   Eight-state, distinguishable without color (shape + motion, not hue alone),
-   per section 12 / WCAG 1.4.1: three ANIMATED progress states (working /
-   warning / failed — one object, three hues, spread across lightness so they
-   survive greyscale and deuteranopia), a frozen ringed disc (input), two static
-   discs (green done, red crashed), and two hollow ones (idle, dim exited).
-   The one .wt-status-dot vocabulary is shared by the desktop strip, the mobile
-   switcher, and the overview sheet rows.
-
-   Revealed PER TAB: the dot is hidden until its own session reports activity
-   (OSC 9;4 progress, or a classified OSC 9 notification), at which point the
-   tabs feature adds .wt-reports to that dot (paintStatusDot). A program that
-   emits no OSC 9 signal (a plain bash/sh) has no activity concept, so its tabs
-   stay clean, label-only; a program that reports progress with OSC 9;4
-   lights up. An agent-shell consumer can PRESUME the report instead (tabs'
-   presumeReports option, on in presetAgentTabbed): .wt-reports is then set
-   from tab creation, so the idle dot shows immediately rather than popping in
-   after the agent's first signal. The element stays in the DOM either way (JS
-   sets data-status regardless), so revealing it is a pure CSS switch. */
+/* ===== Activity dots: one .wt-status-dot vocabulary for the strip, the
+   switcher and the overview rows. Eight states told apart without colour
+   (WCAG 1.4.1, by shape and motion): three animated progress hues (working,
+   warning, failed) spread across lightness, a ringed disc (input), two static
+   discs (done, crashed) and two hollow ones (idle, exited). A dot shows once
+   its session reports OSC 9;4 progress or a classified OSC 9 notification
+   (.wt-reports, set by paintStatusDot), or from creation under tabs'
+   presumeReports option; data-status is set either way. */
 :where(.wt-root) .wt-status-dot {
   display: none;
   width: 9px;
