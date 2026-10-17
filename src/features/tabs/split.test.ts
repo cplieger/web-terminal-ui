@@ -1418,7 +1418,7 @@ describe("drag and drop onto a half", () => {
         ok: false,
         status: 503,
         headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? "0" : null) },
-        json: () => Promise.resolve({ error: "installing tools" }),
+        json: () => Promise.resolve({ error: "service starting" }),
       } as unknown as Response);
     });
     const chip = chipOf(root, "one");

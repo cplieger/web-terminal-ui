@@ -192,7 +192,7 @@ describe("boot settles before it reads the address", () => {
     let overlaySaid = "";
     const record = ok({ left: "A", right: null, selected: "left", handle: 0.5, open: false });
     server.layout = [record];
-    server.list = [refuse("tools installing"), ok([A])];
+    server.list = [refuse("service starting"), ok([A])];
     server.onRequest = (method, path) => {
       if (method === "GET" && path === "/api/sessions/layout" && server.count(method, path) === 2) {
         overlaySaid = loading.textContent ?? "";
@@ -212,7 +212,7 @@ describe("boot settles before it reads the address", () => {
       "GET /api/sessions",
     ]);
     expect(shown(m.ctx(), "left")).toBe("A");
-    expect(overlaySaid).toContain("tools installing");
+    expect(overlaySaid).toContain("service starting");
   });
 
   it("issues no list until a layout read has answered, and exactly one after it", async () => {

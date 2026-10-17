@@ -2046,9 +2046,9 @@ describe("tabs feature", () => {
 
 describe("tabs feature: a host that temporarily refuses session creation (503)", () => {
   // A host can hold session creation with 503 + Retry-After for minutes while
-  // it finishes first-boot setup. A fixed "Couldn't open a terminal" toast with
-  // no retry would leave an empty tab bar and a page that reads as broken while
-  // the server is deliberately waiting.
+  // it starts up. A fixed "Couldn't open a terminal" toast with no retry would
+  // leave an empty tab bar and a page that reads as broken while the server is
+  // deliberately waiting.
   it("retries on the server's own hint and opens the terminal once it is ready", async () => {
     listBody = []; // nothing live, so the bootstrap must create
     let posts = 0;
@@ -2059,7 +2059,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
         // covered in model.test.ts), then succeed.
         if (posts <= 2) {
           return Promise.resolve(
-            jsonResponse({ error: "tools installing" }, 503, { "Retry-After": "0" }),
+            jsonResponse({ error: "service starting" }, 503, { "Retry-After": "0" }),
           );
         }
         return Promise.resolve(
@@ -2083,7 +2083,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
     fetchMock.mockImplementation((_url: string | URL, init?: RequestInit) => {
       if ((init?.method ?? "GET") === "POST") {
         return Promise.resolve(
-          jsonResponse({ error: "tools installing" }, 503, { "Retry-After": "0" }),
+          jsonResponse({ error: "service starting" }, 503, { "Retry-After": "0" }),
         );
       }
       return Promise.resolve(jsonResponse(listBody, 200));
@@ -2094,8 +2094,8 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
     term = await mountTerminal(root, { features: () => [tabs()] });
 
     // The host's own words reach the page; the library hardcodes no reason.
-    await until(() => root.textContent?.includes("tools installing") === true, 200);
-    expect(root.textContent).toContain("tools installing");
+    await until(() => root.textContent?.includes("service starting") === true, 200);
+    expect(root.textContent).toContain("service starting");
   });
 
   it("does NOT retry a 500: that is not 'come back shortly'", async () => {

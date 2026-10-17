@@ -104,9 +104,9 @@ describe("SessionAPIError carries what the server said", () => {
   it("surfaces the envelope's message so the host's own words reach the user", async () => {
     // The first-party Go envelope (webhttp ErrorResponse) writes `error`; this is
     // the field every server in this family actually returns.
-    stubFetch(response(503, { error: "tools installing", code: "", request_id: "abc" }));
+    stubFetch(response(503, { error: "service starting", code: "", request_id: "abc" }));
     await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
-      serverMessage: "tools installing",
+      serverMessage: "service starting",
     });
   });
 
@@ -769,9 +769,9 @@ describe("the session API's requests", () => {
   it("trims the server's own padding out of the message it hands to the UI", async () => {
     // The string goes straight into chrome, and a host that pads its JSON field
     // would otherwise push the visible text off its own baseline.
-    stubFetch(response(503, { error: "  tools installing\n" }));
+    stubFetch(response(503, { error: "  service starting\n" }));
     await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
-      serverMessage: "tools installing",
+      serverMessage: "service starting",
     });
   });
 });

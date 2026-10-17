@@ -227,9 +227,9 @@ describe("switching writes the address", () => {
     await tick();
     expect(location.hash).toBe(`#${A}`);
 
-    monitor.emit(session("s1", "sess_thread", "1"));
+    monitor.emit(session("s1", "host_alias", "1"));
     await tick();
-    expect(location.hash).toBe("#sess_thread");
+    expect(location.hash).toBe("#host_alias");
     expect(history.length).toBe(before);
   });
 

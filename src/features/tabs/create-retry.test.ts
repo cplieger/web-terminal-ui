@@ -1,5 +1,5 @@
 // createSessionHonouringRetry against a host that TEMPORARILY refuses session
-// creation (a 503 + Retry-After during first-boot setup). index.test.ts covers
+// creation (a 503 + Retry-After while it starts up). index.test.ts covers
 // the retry's happy shape; this pins the arithmetic those tests never reach:
 // the ELAPSED-TIME bound that ends the wait, the throttle that keeps a
 // twenty-minute wait from becoming a toast storm, the fallback delay when the
@@ -178,8 +178,8 @@ describe("session-create retry: the elapsed-time bound", () => {
     // Two refusals: the first well inside the budget, the second landing exactly
     // ON the ceiling. The bound is inclusive, so the second is the last one.
     script = [
-      { status: 503, message: "installing tools", retryAfter: "0", at: 10 },
-      { status: 503, message: "installing tools", retryAfter: "0", at: MAX_TOTAL_MS },
+      { status: 503, message: "service starting", retryAfter: "0", at: 10 },
+      { status: 503, message: "service starting", retryAfter: "0", at: MAX_TOTAL_MS },
     ];
     const root = await mount();
 
@@ -188,7 +188,7 @@ describe("session-create retry: the elapsed-time bound", () => {
     expect(posts).toBe(2);
     // The give-up message repeats the host's own explanation rather than the
     // generic wording, which is the only thing a user can act on.
-    expect(toastText(root)).toBe("Could not open a terminal. installing tools");
+    expect(toastText(root)).toBe("Could not open a terminal. service starting");
   });
 
   it("keeps waiting while the budget still has a millisecond left", async () => {
@@ -239,8 +239,8 @@ describe("session-create retry: the wait runs on the frame's clock", () => {
       frameNow = t;
     };
     script = [
-      { status: 503, message: "installing tools", retryAfter: "0", at: 10 },
-      { status: 503, message: "installing tools", retryAfter: "0", at: MAX_TOTAL_MS },
+      { status: 503, message: "service starting", retryAfter: "0", at: 10 },
+      { status: 503, message: "service starting", retryAfter: "0", at: MAX_TOTAL_MS },
     ];
     const root = inner.createElement("div");
     inner.body.appendChild(root);
@@ -249,7 +249,7 @@ describe("session-create retry: the wait runs on the frame's clock", () => {
       await until(() => toastText(root).startsWith("Could not open a terminal"), 120);
       await settle();
       expect(posts).toBe(2);
-      expect(toastText(root)).toBe("Could not open a terminal. installing tools");
+      expect(toastText(root)).toBe("Could not open a terminal. service starting");
       expect(now).toBe(0);
     } finally {
       term?.destroy();
@@ -285,7 +285,7 @@ describe("session-create retry: what the user is told", () => {
     // The toast is decoration to a screen-reader user; the live region is the
     // channel that reaches them, and it carries the same sentence.
     script = [
-      { status: 503, message: "installing tools", retryAfter: "0", at: 10 },
+      { status: 503, message: "service starting", retryAfter: "0", at: 10 },
       { status: 201, at: 20 },
     ];
     const root = await mount();
@@ -295,7 +295,7 @@ describe("session-create retry: what the user is told", () => {
     // sentence lands a beat after the call.
     await shortAnnounced();
     expect(root.querySelector("[aria-live=polite]")?.textContent).toContain(
-      "installing tools, waiting…",
+      "service starting, waiting…",
     );
   });
 
@@ -335,16 +335,16 @@ describe("session-create retry: what the user is told", () => {
     // The toast and the banner both paint UNDER the consumer's loading overlay,
     // so before the first frame this is the one channel a user can actually read.
     script = [
-      { status: 503, message: "installing tools", retryAfter: "0", at: 10 },
+      { status: 503, message: "service starting", retryAfter: "0", at: 10 },
       { status: 201, at: 20 },
     ];
     const loading = document.createElement("div");
     document.body.appendChild(loading);
     const root = await mount(loading);
 
-    await until(() => (loading.textContent ?? "").includes("installing tools"), 120);
+    await until(() => (loading.textContent ?? "").includes("service starting"), 120);
     expect(loading.querySelector(".wt-loading-text")?.textContent).toBe(
-      "installing tools, waiting…",
+      "service starting, waiting…",
     );
     await until(() => root.querySelectorAll(".wt-tab").length === 1, 120);
     expect(root.querySelectorAll(".wt-tab").length).toBe(1);
@@ -399,7 +399,7 @@ describe("session-create retry: teardown", () => {
     // A reload or a destroy during the wait must not resurrect a create: the
     // session would be spawned for a page that is already gone, and nothing
     // would ever close it.
-    script = [{ status: 503, message: "installing tools", retryAfter: "0", at: 10 }];
+    script = [{ status: 503, message: "service starting", retryAfter: "0", at: 10 }];
     destroyOnPost = 1;
     await mount();
 
@@ -413,7 +413,7 @@ describe("session-create retry: teardown", () => {
     // feature's closure for as long as the server's hint said, on a page that
     // has already torn the feature down.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    script = [{ status: 503, message: "installing tools", retryAfter: "5", at: 10 }];
+    script = [{ status: 503, message: "service starting", retryAfter: "5", at: 10 }];
     await mount();
     for (let i = 0; i < 20 && posts < 1; i++) {
       await vi.advanceTimersByTimeAsync(0);

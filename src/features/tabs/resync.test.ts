@@ -295,7 +295,7 @@ describe("explicit requests during a wait", () => {
     server.layout = [ok(closed("X"))];
     server.list = [ok([X])];
     const m = await page("#a");
-    server.post = [refuse("tools installing"), created(row("N", "n", "9"))];
+    server.post = [refuse("service starting"), created(row("N", "n", "9"))];
 
     await m.api.create();
 

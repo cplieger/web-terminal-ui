@@ -565,8 +565,8 @@ const SESSION_API_TIMEOUT_MS = 15000;
 
 /** A non-2xx response from the session API, carrying what the server said. A
  *  host may TEMPORARILY refuse session creation (a 503 with `Retry-After` and a
- *  body message while it installs tools on first boot), and a caller that only
- *  saw an `Error` read that as a broken page. */
+ *  body message while it starts up), and a caller that only saw an `Error`
+ *  read that as a broken page. */
 export class SessionAPIError extends Error {
   /** HTTP status, so a caller can branch on 503 (retry) vs 429 vs 5xx. */
   readonly status: number;

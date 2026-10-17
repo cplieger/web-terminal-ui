@@ -4,7 +4,7 @@ This page describes what `presetTabbed()` and `presetAgentTabbed()` show on each
 
 ## What the tabbed presets need
 
-Both presets need a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`. A server built on the engine serves it. The server also keeps the tab order and, for the split view, the pane layout, so both travel between devices.
+Both presets need a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`. A server that mounts the engine's `SessionManager` routes (`MountSessionRoutes` or `MountAPI`) serves them. The server also keeps the tab order and, for the split view, the pane layout, so both travel between devices.
 
 ## Tabs on a phone
 

@@ -138,16 +138,16 @@ describe("loading overlay status text", () => {
     settleSwap();
 
     // The server's own words, arriving from the session owner's retry loop.
-    status.reason("tools installing, waiting…");
+    status.reason("service starting, waiting…");
     settleSwap();
-    expect(visibleText(o)).toBe("tools installing, waiting…");
-    expect(announcedText(o)).toBe("tools installing, waiting…");
+    expect(visibleText(o)).toBe("service starting, waiting…");
+    expect(announcedText(o)).toBe("service starting, waiting…");
 
     // Rotation must not resume and overwrite a real reason with reassurance:
-    // alternating between "installing tools" and "almost there" is incoherent.
+    // alternating between "service starting" and "almost there" is incoherent.
     vi.advanceTimersByTime(ROTATE_EVERY_MS * 3);
     settleSwap();
-    expect(visibleText(o)).toBe("tools installing, waiting…");
+    expect(visibleText(o)).toBe("service starting, waiting…");
   });
 
   it("keeps an EARLY reason when the rotation threshold arrives later", () => {
@@ -157,18 +157,18 @@ describe("loading overlay status text", () => {
     // This is the real production sequence, and the previous test is not it: the
     // server refuses session creation within a second or two, so the reason is
     // known LONG before the 60s rotation threshold. If the threshold ignored it,
-    // a user reading "tools installing" at 0:05 would see it replaced by generic
+    // a user reading "service starting" at 0:05 would see it replaced by generic
     // reassurance at 1:00 -- losing the only useful information on the screen.
     vi.advanceTimersByTime(1500);
-    status.reason("tools installing, waiting…");
+    status.reason("service starting, waiting…");
     settleSwap();
-    expect(visibleText(o)).toBe("tools installing, waiting…");
+    expect(visibleText(o)).toBe("service starting, waiting…");
 
     vi.advanceTimersByTime(WAITING_AFTER_MS + ROTATE_EVERY_MS * 4);
     settleSwap();
-    expect(visibleText(o)).toBe("tools installing, waiting…");
+    expect(visibleText(o)).toBe("service starting, waiting…");
     // ...and the initial scripted line never appeared either.
-    expect(announcedText(o)).toBe("tools installing, waiting…");
+    expect(announcedText(o)).toBe("service starting, waiting…");
   });
 
   it("is idempotent per reason, so a retry loop may call it every tick", () => {
@@ -176,7 +176,7 @@ describe("loading overlay status text", () => {
     status = attachLoadingStatus(o);
     vi.advanceTimersByTime(INITIAL_DELAY_MS);
 
-    status.reason("tools installing");
+    status.reason("service starting");
     settleSwap();
     const live = o.querySelector(".wt-loading-live") as HTMLElement;
     const spy = vi.spyOn(live, "textContent", "set");
@@ -185,7 +185,7 @@ describe("loading overlay status text", () => {
     // announced line each time would re-read the same sentence to a screen
     // reader every few seconds, so an unchanged string must do nothing at all.
     for (let i = 0; i < 20; i++) {
-      status.reason("tools installing");
+      status.reason("service starting");
     }
     expect(spy).not.toHaveBeenCalled();
 
@@ -294,14 +294,14 @@ describe("loading overlay status text", () => {
     const o = overlayIn();
     status = attachLoadingStatus(o);
     vi.advanceTimersByTime(INITIAL_DELAY_MS);
-    status.reason("tools installing");
+    status.reason("service starting");
     settleSwap();
 
     status.reason("");
     settleSwap();
 
-    expect(visibleText(o)).toBe("tools installing");
-    expect(announcedText(o)).toBe("tools installing");
+    expect(visibleText(o)).toBe("service starting");
+    expect(announcedText(o)).toBe("service starting");
   });
 
   it("clears the thresholds it armed but never reached", () => {
@@ -338,7 +338,7 @@ describe("loading overlay status text", () => {
     vi.advanceTimersByTime(INITIAL_DELAY_MS);
     status.stop();
 
-    status.reason("tools installing");
+    status.reason("service starting");
 
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -367,7 +367,7 @@ describe("loading overlay status text", () => {
         name: "mid-fade, swapping to a reason",
         go: (s) => {
           vi.advanceTimersByTime(INITIAL_DELAY_MS);
-          s.reason("tools installing");
+          s.reason("service starting");
         },
       },
       {
