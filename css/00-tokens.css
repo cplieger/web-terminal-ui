@@ -61,10 +61,8 @@
      accent-derived fill (--tab-active-bg) rather than on the bar. Measured
      (sRGB, WCAG 1.4.3 formula, each layer composited over the page's #000):
      8.0:1 against the bar, but only 2.6:1 against the active-tab fill -- under
-     the 3:1 non-text minimum. This comment previously claimed 5.2:1 for the
-     active-tab case, which was wrong by ~2x; a consumer's code review quoted the
-     figure back as its baseline and built a finding on it, so treat the number
-     here as load-bearing and re-measure rather than adjust it by eye.
+     the 3:1 non-text minimum. Treat the number as load-bearing and re-measure
+     rather than adjust it by eye.
 
      Why it is nevertheless not a 1.4.1 failure, and why the fill is not simply
      darkened: hue never carries state on its own here -- working is a travelling

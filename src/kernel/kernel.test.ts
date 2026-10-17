@@ -3478,8 +3478,8 @@ describe("a stale composition gate must not leak control bytes (desktop/iOS CJK)
   it("still sends CR for an Android Enter, which reports 229 with no composition", async () => {
     // Android reports keyCode 229 for nearly every soft-keyboard key, so an
     // UNGATED 229 guard swallowed ordinary Enter and the terminal then received
-    // the textarea's own LF instead of CR. That regression shipped in this branch
-    // and was caught in review; the guard is gated on an open composition.
+    // the textarea's own LF instead of CR; the guard is gated on an open
+    // composition.
     await mountTerminal(rootIn(), { features: () => [] });
     const el = ta();
     el.dispatchEvent(

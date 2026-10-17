@@ -874,17 +874,11 @@
   border-color: var(--status-done);
 }
 
-/* User action required (permission / approval): a solid dot inside a static,
-   HARD-edged 2px ring, motionless (--status-input; the default orange is
-   shifted away from the old amber so it separates from both blue working and
-   green done). The stillness plus the hard edge is the message: the
-   agent's turn is mid-flight but blocked on you, and the surround is a fixed
-   outline rather than working's soft travelling wave. (Before the wave landed,
-   working's ripple was a 2px ring too and this state was literally that ping
-   frozen at its birth frame; the two now differ by edge quality as well as
-   motion, which reads more distinctly at 9px.) The ring derives from the same
-   token as the dot, so a theme override recolors both together. It persists
-   until you act on or switch into the tab. */
+/* User action required: a solid dot inside a static, hard-edged 2px ring
+   (--status-input). Stillness and the hard edge separate it from working's
+   soft travelling wave. The ring derives from the dot's token, so a theme
+   override recolors both. It persists until you act on or switch into the
+   tab. */
 :where(.wt-root) .wt-status-dot[data-status="input"] {
   background: var(--status-input);
   border-color: var(--status-input);

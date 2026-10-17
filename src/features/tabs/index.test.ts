@@ -3309,7 +3309,7 @@ describe("tabs OSC 9 notifications", () => {
 // animations feature or reduced motion set (no animation runs at all), and a
 // consumer stylesheet without the rules.
 //
-// Fidelity notes, each one a correction from adversarial review:
+// Fidelity notes:
 //   - The event is dispatched from `.term-output`, which is where all three rules
 //     actually declare the animation (css/40-animations.css), and it BUBBLES to
 //     `.term` where the listener lives. Manufacturing it on `.term` tested a path
