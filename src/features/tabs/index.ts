@@ -173,12 +173,11 @@ export interface TabsOptions {
 
 /** The layout read, the session list and session creation can be TEMPORARILY
  *  refused: a host answers 503 with `Retry-After` and a body message while it
- *  installs tools on first boot or restores its sessions, a window that can run
- *  twenty minutes. Only 503 retries, on the server's own
- *  schedule and repeating its own explanation. The bound is ELAPSED TIME, not an
- *  attempt count, which at `Retry-After: 5` would give up in a minute; every
- *  iteration sleeps at least the hint, so this is never a hot loop, and the user
- *  is re-told periodically. */
+ *  starts up or restores its sessions, a window that can run twenty minutes.
+ *  Only 503 retries, on the server's own schedule and repeating its own
+ *  explanation. The bound is ELAPSED TIME, not an attempt count, which at
+ *  `Retry-After: 5` would give up in a minute; every iteration sleeps at least
+ *  the hint, so this is never a hot loop, and the user is re-told periodically. */
 const CREATE_RETRY_MAX_TOTAL_MS = 1200000;
 const CREATE_RETRY_FALLBACK_MS = 5000;
 const CREATE_RETRY_REANNOUNCE_MS = 60000;
@@ -1008,9 +1007,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           pageTitle.release();
         });
       }
-      // Twin of marotte static-src/tabs-drag.ts; when changing drag behaviour or its
-      // constants, check the other app. Both judge a live drag's viewport against the
-      // PRESS-time frame, so a move a hold lifted across still ends the drag.
+      // A live drag's viewport is judged against the PRESS-time frame, so a move a
+      // hold lifted across still ends the drag.
       let draggingEl: HTMLElement | null = null;
       // The chips currently carrying an inline displacement from the commit slide.
       // A set plus one settle function, so whatever a slide wrote can always be handed

@@ -18,7 +18,7 @@ The CSS ships as separate files plus manifests that list them. Concatenate the f
 
 ### A full-page terminal
 
-When the terminal is the whole page, as in web-terminal-server and web-terminal-kiro, concatenate `css/MANIFEST` into the `style.css` your page links. It holds `css/page.css` and the complete component set. A full-page terminal with tabs also owns the page address fragment, so keep your own page state out of `location.hash`.
+When the terminal is the whole page, concatenate `css/MANIFEST` into the `style.css` your page links. It holds `css/page.css` and the complete component set. A full-page terminal with tabs also owns the page address fragment, so keep your own page state out of `location.hash`.
 
 `css/page.css` is the page kit. It resets `html` and `body`, styles the loading overlay and declares the `@font-face` rules for two font families, expecting the font files at `/vendor/fonts/`:
 
@@ -67,7 +67,7 @@ The package ships TypeScript source. Your build compiles it with the rest of you
     loading: document.getElementById("loading"),
   });
   // For a server that exposes the WebSocket elsewhere, or a custom font:
-  // createTerminal("#terminal", { features: presetTabbed, wsPath: "/api/shell/ws", fontReady: '14px "MyMono"' });
+  // createTerminal("#terminal", { features: presetTabbed, wsPath: "/api/term/ws", fontReady: '14px "MyMono"' });
 </script>
 ```
 
@@ -87,8 +87,8 @@ Four presets are provided. Each is a plain function that returns an array of fea
 
 - `presetSingle()` is the single-pane desktop UI, with the context menu, clipboard, scroll-to-bottom, predictive echo and the connection banner.
 - `presetTouch()` is `presetSingle()` plus the on-screen key bar.
-- `presetTabbed()` is `presetTouch()` plus tabs, the activity monitor and animations. It needs a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`. web-terminal-server serves it.
-- `presetAgentTabbed()` has the same features as `presetTabbed()`, tuned for an agent shell such as web-terminal-kiro. Each tab's activity dot shows from the moment the tab opens instead of waiting for the program's first progress report.
+- `presetTabbed()` is `presetTouch()` plus tabs, the activity monitor and animations. It needs a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`.
+- `presetAgentTabbed()` has the same features as `presetTabbed()`, tuned for an agent shell, a host whose every tab runs a program that reports its activity. Each tab's activity dot shows from the moment the tab opens instead of waiting for the program's first progress report.
 
 [Tabs, activity dots and notifications](tabs.md) describes what the two tabbed presets show.
 

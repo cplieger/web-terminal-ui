@@ -1,8 +1,7 @@
 /**
  * presetTabbed (and the shared tabbed composition builder): the full
  * multi-session UI. Requires a server that speaks the session API
- * (`/api/sessions`, `/ws?session=`, and the status SSE `/api/sessions/events`),
- * such as `web-terminal-server` or `web-terminal-kiro`.
+ * (`/api/sessions`, `/ws?session=`, and the status SSE `/api/sessions/events`).
  *
  * @module
  */
@@ -26,22 +25,14 @@ export interface TabbedPresetOptions {
   attentionIcons?: boolean;
 }
 
-/** buildTabbed composes the tabbed UI: the single-pane touch features, an
- *  externally-driven mobile toolbar (its grid is opened from a keyboard button
- *  in the tab bar, not its own toggle), the activity monitor (the status-SSE
- *  data source), tabs wired to both, and animations. The activity dot reveals
- *  itself per tab only when a session reports activity (OSC 9;4) — or from tab
- *  creation when the agent composition presumes it — so the monitor is always
- *  included; a plain shell under presetTabbed just never shows a dot. The
- *  toolbar and monitor are ordered before tabs because tabs reads their APIs
- *  via ctx.use. Shared by presetTabbed and presetAgentTabbed (agent-tabbed.ts),
- *  which now differ only in presumed activity reporting (presumeReports).
- *
- *  Titles are not a preset concern. The ENGINE resolves a session's name — its
- *  pinned name, a title its host pushed, the program's OSC window title, or its
- *  own foreground-process/cwd inference — and both presets render what it reports. A
- *  browser that re-derived any of that could only disagree with the server and
- *  with every other client attached to the same session. */
+/** buildTabbed composes the tabbed UI: the single-pane touch features, a mobile
+ *  toolbar opened from the tab bar's keyboard button, the activity monitor (the
+ *  status SSE), tabs wired to both, and animations. The monitor is always
+ *  included: a tab's dot shows only once its session reports activity (OSC
+ *  9;4), or from creation under presumeReports. The toolbar and monitor precede
+ *  tabs, which reads their APIs via ctx.use. Titles are the engine's: a browser
+ *  that re-derived one would disagree with the server and every other client.
+ *  Shared by presetTabbed and presetAgentTabbed (agent-tabbed.ts). */
 export function buildTabbed(
   agentShell: boolean,
   opts: TabbedPresetOptions = {},

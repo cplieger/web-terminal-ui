@@ -75,10 +75,10 @@ describe("pointerDragActivation: how a press becomes a drag", () => {
   });
 });
 
-describe("the reorder vocabulary shared with marotte's tabs-drag.ts", () => {
-  // These values are a twin of marotte's: both strips must reorder at one cadence
-  // and one activation, so a change here is a change there.
-  it("names the activation rules and the reorder timings at their shared values", () => {
+describe("the reorder vocabulary", () => {
+  // These values are the strip's reorder feel: a change to any of them is a
+  // visible change to how a drag activates and how tabs settle.
+  it("names the activation rules and the reorder timings at their pinned values", () => {
     expect(TOUCH_DRAG).toEqual({ holdMs: 150, slopPx: 8 });
     expect(PEN_DRAG).toEqual({ holdMs: 150, slopPx: 8 });
     expect({

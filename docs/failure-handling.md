@@ -51,7 +51,7 @@ Some hosts work differently. Your endpoint may hand out a new session on the nex
 ```ts
 const term = createTerminal("#terminal", {
   features: presetTouch,
-  wsPath: "/api/shell/ws",
+  wsPath: "/api/term/ws",
   onSessionEnded: () => {
     // Your endpoint's own restart call goes here if it needs one, then:
     term.reattach();

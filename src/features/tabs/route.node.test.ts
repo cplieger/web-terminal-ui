@@ -15,7 +15,7 @@ describe("parseTabAlias", () => {
   // The same table as the engine's TestSetSessionAlias (terminal/session_alias_test.go):
   // the grammar is a cross-language contract.
   it.each([
-    ["sess_6f1c2b9e-0d4a-4e7b-9a51-3c2d1e0f9a8b", true],
+    ["task_0b8e4f12-7c3d-4a59-8e21-5f6a7b8c9d0e", true],
     ["k3q7m2xa", true],
     ["x".repeat(64), true],
     ["x".repeat(65), false],

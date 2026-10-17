@@ -140,7 +140,7 @@
   /* Right padding reserves room for the close (x) overlaid inside the row. */
   padding: 0 var(--touch-target) 0 var(--sp-2);
   /* The bar row always represents the active tab, so it wears the active-tab
-     fill/foreground the desktop strip uses (themeable; purple in web-terminal-kiro). */
+     fill/foreground the desktop strip uses (themeable). */
   background: var(--tab-active-bg);
   color: var(--tab-active-fg);
   border: 1px solid var(--tab-active-border);
@@ -410,7 +410,7 @@
 
 /* Mobile "+": the primary action, carried in the accent colour so it reads as
    permanent and prominent. Hover fill is gated on any-hover (see the note in
-   10-primitives.css): on a bare touchscreen any-hover is none, so the purple
+   10-primitives.css): on a bare touchscreen any-hover is none, so the accent
    cannot linger after a tap and the press feedback comes from :active; a trackpad
    or Pencil reports hover and gets the wash, which a (hover: hover) gate denied it.
    */

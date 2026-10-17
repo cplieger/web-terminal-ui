@@ -104,10 +104,10 @@ export function statusOwnsProgress(status: string): boolean {
 
 /** The percentage a status may SHOW. Two things clear it: the program's own
  *  OSC 9;4;0 (arriving as PROGRESS_ABSENT) and a status the channel does not own
- *  (kiro-cli parks state 4 at its context-usage percentage when idle, which once
- *  painted a done dot beside a 72% bar). Deliberately no third clear: 100% is a
- *  STATE that persists, and a timeout would assert a change the program never
- *  reported. */
+ *  (a state-4 percentage persists under a done latch, which state 4 does not
+ *  clear, and would otherwise paint a bar beside a done dot). Deliberately
+ *  no third clear: 100% is a STATE that persists, and a timeout would assert a
+ *  change the program never reported. */
 export function renderedProgress(status: string, progress: number): number {
   return statusOwnsProgress(status) ? progress : PROGRESS_ABSENT;
 }
@@ -565,8 +565,8 @@ const SESSION_API_TIMEOUT_MS = 15000;
 
 /** A non-2xx response from the session API, carrying what the server said. A
  *  host may TEMPORARILY refuse session creation (a 503 with `Retry-After` and a
- *  body message while it installs tools on first boot), and a caller that only
- *  saw an `Error` read that as a broken page. */
+ *  body message while it starts up), and a caller that only saw an `Error`
+ *  read that as a broken page. */
 export class SessionAPIError extends Error {
   /** HTTP status, so a caller can branch on 503 (retry) vs 429 vs 5xx. */
   readonly status: number;

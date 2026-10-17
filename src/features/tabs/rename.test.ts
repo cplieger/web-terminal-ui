@@ -581,7 +581,7 @@ describe("inline rename", () => {
     const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[0];
     const termInput = root.querySelector<HTMLTextAreaElement>(".term-input");
 
-    // F2 means the user was navigating the strip; keep them there (R9).
+    // F2 means the user was navigating the strip; keep them there.
     chip?.dispatchEvent(
       new KeyboardEvent("keydown", { key: "F2", bubbles: true, cancelable: true }),
     );

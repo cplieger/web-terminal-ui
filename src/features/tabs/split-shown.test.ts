@@ -367,7 +367,7 @@ describe("attention with two shown tabs", () => {
         status: "done",
         title: "one",
         createdAt: "1",
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 1,
       });
       expect(document.title).toBe("two · Host page");
@@ -387,13 +387,13 @@ describe("attention with two shown tabs", () => {
         status: "done",
         title: "three",
         createdAt: "3",
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 1,
       });
       expect(document.title).toBe("(1) two · Host page");
       expect(ownIcon.getAttribute("href")).toBe("/favicon-done.svg");
       expect(dot?.dataset["status"]).toBe("done");
-      expect(posts).toEqual([{ title: "three", body: "Response complete" }]);
+      expect(posts).toEqual([{ title: "three", body: "Task finished" }]);
       expect(cueSeen()["s3"]).toBeUndefined();
     } finally {
       ownIcon.remove();

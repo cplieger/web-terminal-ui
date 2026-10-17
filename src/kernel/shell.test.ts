@@ -166,10 +166,10 @@ describe("ctx.shell.notifications: one notifier per page", () => {
     const [a] = await mountWithTwoProbes();
 
     const posted = a.shell.notifications.deliver(
-      { id: "s1", notification: "Response complete", notificationSeq: 1 },
+      { id: "s1", notification: "Task finished", notificationSeq: 1 },
       { sessionIsActive: false, label: "agent", activate: vi.fn() },
     );
     expect(posted).toBe(true);
-    expect(posts).toEqual([{ title: "agent", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "agent", body: "Task finished" }]);
   });
 });

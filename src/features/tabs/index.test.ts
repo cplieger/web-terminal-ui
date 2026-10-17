@@ -591,9 +591,9 @@ describe("tabs feature", () => {
   });
 
   it("spawns and activates a fresh session when every listed session is exited", async () => {
-    // The agent died in every listed session (e.g. a sign-in dead end). The
-    // bootstrap must not wedge on a corpse: it spawns a fresh live session,
-    // activates it, and keeps the exited one around as a viewable tab.
+    // The program exited in every listed session. The bootstrap must not
+    // wedge on a corpse: it spawns a fresh live session, activates it, and
+    // keeps the exited one around as a viewable tab.
     listBody = [{ id: "s1", title: "", createdAt: "1", status: "exited" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -710,10 +710,10 @@ describe("tabs feature", () => {
   });
 
   it("opens one terminal when one press delivers two + activations", async () => {
-    // iPadOS can deliver two activations for a single press on the strip (the
-    // web-terminal-kiro server logged two POST /api/sessions 0-3ms apart for one
-    // "+" tap), which used to spawn two sessions. Unique POST ids so a second
-    // create cannot hide behind the shared-id dedup in create().
+    // iPadOS can deliver two activations for a single press on the strip (a
+    // server logs two POST /api/sessions 0-3ms apart for one "+" tap). Unique
+    // POST ids so a second create cannot hide behind the shared-id dedup in
+    // create().
     let posts = 0;
     vi.stubGlobal(
       "fetch",
@@ -1177,7 +1177,7 @@ describe("tabs feature", () => {
     openTabMenu(root, 0);
     expect(menu?.classList.contains("visible")).toBe(true);
 
-    // A background agent printing into the TUI scrolls the terminal surface to
+    // Background output printing into the TUI scrolls the terminal surface to
     // the bottom on every chunk. That scroll moves neither the menu (placed
     // root-relative) nor the chip it is anchored to, so it must not dismiss.
     root.querySelector(".term")?.dispatchEvent(new Event("scroll"));
@@ -1324,7 +1324,7 @@ describe("tabs feature", () => {
 
   it("labels tabs from the server title and shows 'New tab' for untitled ones", async () => {
     listBody = [
-      { id: "s1", title: "kiro: fix bug", createdAt: "1", status: "idle" },
+      { id: "s1", title: "agent: fix bug", createdAt: "1", status: "idle" },
       { id: "s2", title: "", createdAt: "2", status: "idle" },
     ];
     const root = document.createElement("div");
@@ -1333,7 +1333,7 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
-    expect(labels[0]).toBe("kiro: fix bug");
+    expect(labels[0]).toBe("agent: fix bug");
     // An untitled session reads "New tab" (no "Tab N" number).
     expect(labels[1]).toBe("New tab");
   });
@@ -1355,8 +1355,8 @@ describe("tabs feature", () => {
 
   it("de-duplicates identical tab titles with a numeric suffix", async () => {
     listBody = [
-      { id: "s1", title: "kiro: workspace", createdAt: "1", status: "idle" },
-      { id: "s2", title: "kiro: workspace", createdAt: "2", status: "idle" },
+      { id: "s1", title: "agent: workspace", createdAt: "1", status: "idle" },
+      { id: "s2", title: "agent: workspace", createdAt: "2", status: "idle" },
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1364,8 +1364,8 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
-    expect(labels[0]).toBe("kiro: workspace");
-    expect(labels[1]).toBe("kiro: workspace (2)");
+    expect(labels[0]).toBe("agent: workspace");
+    expect(labels[1]).toBe("agent: workspace (2)");
   });
 
   it("keeps the suffix with its own session across a reorder", async () => {
@@ -1382,8 +1382,8 @@ describe("tabs feature", () => {
     // compareTabOrder) and deliberately NOT to the identity: feeding the custom
     // order into the numbering is exactly what made the reorder invisible.
     listBody = [
-      { id: "s1", title: "kiro: workspace", createdAt: "1", status: "idle" },
-      { id: "s2", title: "kiro: workspace", createdAt: "2", status: "idle" },
+      { id: "s1", title: "agent: workspace", createdAt: "1", status: "idle" },
+      { id: "s2", title: "agent: workspace", createdAt: "2", status: "idle" },
     ];
     const feature = tabs();
     const root = document.createElement("div");
@@ -1392,14 +1392,14 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     const labels = (): (string | null)[] =>
       [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
-    expect(labels()).toEqual(["kiro: workspace", "kiro: workspace (2)"]);
+    expect(labels()).toEqual(["agent: workspace", "agent: workspace (2)"]);
 
     // Move the younger tab to the front. Its number must travel with it, so the
     // strip now reads "(2)" FIRST -- which is what makes the move visible at all.
     menuItem(openTabMenu(root, 1), "Move left")?.click();
 
     expect(feature.api?.list().map((t) => t.id)).toEqual(["s2", "s1"]);
-    expect(labels()).toEqual(["kiro: workspace (2)", "kiro: workspace"]);
+    expect(labels()).toEqual(["agent: workspace (2)", "agent: workspace"]);
   });
 
   it("creates one session when the list is empty", async () => {
@@ -1486,18 +1486,18 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // The process sets a window title.
-    monitor.emit({ id: "s1", status: "working", title: "kiro: building", createdAt: "1" });
-    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("kiro: building");
+    monitor.emit({ id: "s1", status: "working", title: "agent: building", createdAt: "1" });
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("agent: building");
 
     // A later sweep reports a BLANK title (the process cleared its OSC 0/2
     // title, or an idle-session record has none). It must NOT revert the label
     // to "New tab": the last good title is held until a real one replaces it.
     monitor.emit({ id: "s1", status: "idle", title: "", createdAt: "1" });
-    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("kiro: building");
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("agent: building");
 
     // A genuine new non-blank title still replaces it.
-    monitor.emit({ id: "s1", status: "idle", title: "kiro: tests", createdAt: "1" });
-    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("kiro: tests");
+    monitor.emit({ id: "s1", status: "idle", title: "agent: tests", createdAt: "1" });
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("agent: tests");
   });
 
   it("closes a tab from an expanded list row (DELETE)", async () => {
@@ -2045,12 +2045,10 @@ describe("tabs feature", () => {
 });
 
 describe("tabs feature: a host that temporarily refuses session creation (503)", () => {
-  // web-terminal-kiro holds session creation with 503 + Retry-After while its
-  // tool engine installs the manifest's tools on first boot, a window its own
-  // HEALTHCHECK budgets 20 minutes for. That used to surface as the same fixed
-  // "Couldn't open a terminal" toast as a 500, with no retry: an empty tab bar
-  // and a page that read as broken while the server was deliberately waiting
-  // (and /api/health reported healthy at the same time).
+  // A host can hold session creation with 503 + Retry-After for minutes while
+  // it starts up. A fixed "Couldn't open a terminal" toast with no retry would
+  // leave an empty tab bar and a page that reads as broken while the server is
+  // deliberately waiting.
   it("retries on the server's own hint and opens the terminal once it is ready", async () => {
     listBody = []; // nothing live, so the bootstrap must create
     let posts = 0;
@@ -2061,7 +2059,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
         // covered in model.test.ts), then succeed.
         if (posts <= 2) {
           return Promise.resolve(
-            jsonResponse({ error: "tools installing" }, 503, { "Retry-After": "0" }),
+            jsonResponse({ error: "service starting" }, 503, { "Retry-After": "0" }),
           );
         }
         return Promise.resolve(
@@ -2085,7 +2083,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
     fetchMock.mockImplementation((_url: string | URL, init?: RequestInit) => {
       if ((init?.method ?? "GET") === "POST") {
         return Promise.resolve(
-          jsonResponse({ error: "tools installing" }, 503, { "Retry-After": "0" }),
+          jsonResponse({ error: "service starting" }, 503, { "Retry-After": "0" }),
         );
       }
       return Promise.resolve(jsonResponse(listBody, 200));
@@ -2095,10 +2093,9 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
     document.body.appendChild(root);
     term = await mountTerminal(root, { features: () => [tabs()] });
 
-    // The host's own words reach the page; the library never hardcodes "tools",
-    // which is a web-terminal-kiro concept it knows nothing about.
-    await until(() => root.textContent?.includes("tools installing") === true, 200);
-    expect(root.textContent).toContain("tools installing");
+    // The host's own words reach the page; the library hardcodes no reason.
+    await until(() => root.textContent?.includes("service starting") === true, 200);
+    expect(root.textContent).toContain("service starting");
   });
 
   it("does NOT retry a 500: that is not 'come back shortly'", async () => {
@@ -2545,12 +2542,11 @@ describe("tabs OSC 9 status chrome", async () => {
 
   it("hides the bar under a status the progress channel does not own", async () => {
     // A latch is the NOTIFICATION channel talking, so a percentage retained from
-    // the progress channel must not be painted underneath it. Measured against
-    // kiro-cli, which parks progress state 4 at its context-window usage once
-    // idle: a finished turn painted a green done dot beside a 72% bar, and a
-    // pending approval a full one, neither of which was how far along anything
-    // was. The engine is right to keep sending the value (a progress state
-    // persists); this is the consumer deciding it is not the current word.
+    // the progress channel must not be painted underneath it. A state-4
+    // percentage does not clear a latch, so it would paint a bar beside a done
+    // or input dot, neither of which is how far along anything is. The engine
+    // is right to keep sending the value (a progress state persists); this is
+    // the consumer deciding it is not the current word.
     for (const status of ["done", "input", "idle"] as const) {
       const { root, monitor } = await withMonitor();
       monitor.emit({
@@ -3098,10 +3094,10 @@ describe("tabs OSC 9 notifications", () => {
       status: "done",
       title: "two",
       createdAt: "2",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
-    expect(posts).toEqual([{ title: "two", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "two", body: "Task finished" }]);
   });
 
   it("titles a notification with the tab's own name, and a click on it opens that tab", async () => {
@@ -3113,10 +3109,10 @@ describe("tabs OSC 9 notifications", () => {
       title: "two",
       pinnedTitle: "Build box",
       createdAt: "2",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
-    expect(posts).toEqual([{ title: "Build box", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "Build box", body: "Task finished" }]);
 
     shown[0]?.onclick?.(new Event("click"));
     expect(root.querySelector(".wt-tab-active .wt-tab-label")?.textContent).toBe("Build box");
@@ -3131,7 +3127,7 @@ describe("tabs OSC 9 notifications", () => {
       status: "done",
       title: "one",
       createdAt: "1",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
     expect(posts).toEqual([]);
@@ -3148,10 +3144,10 @@ describe("tabs OSC 9 notifications", () => {
       status: "done",
       title: "one",
       createdAt: "1",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
-    expect(posts).toEqual([{ title: "one", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "one", body: "Task finished" }]);
   });
 
   it("lets a closed session's id notify again from sequence one", async () => {
@@ -3279,7 +3275,7 @@ describe("tabs OSC 9 notifications", () => {
         title: "two",
         createdAt: "2",
         reportsActivity: true,
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 1,
       });
     }).not.toThrow();
@@ -3299,7 +3295,7 @@ describe("tabs OSC 9 notifications", () => {
         status: "done",
         title: "two",
         createdAt: "2",
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 1,
       });
     }).not.toThrow();
@@ -3313,7 +3309,7 @@ describe("tabs OSC 9 notifications", () => {
 // animations feature or reduced motion set (no animation runs at all), and a
 // consumer stylesheet without the rules.
 //
-// Fidelity notes, each one a correction from adversarial review:
+// Fidelity notes:
 //   - The event is dispatched from `.term-output`, which is where all three rules
 //     actually declare the animation (css/40-animations.css), and it BUBBLES to
 //     `.term` where the listener lives. Manufacturing it on `.term` tested a path

@@ -4,7 +4,7 @@ This page describes what `presetTabbed()` and `presetAgentTabbed()` show on each
 
 ## What the tabbed presets need
 
-Both presets need a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`. web-terminal-server and web-terminal-kiro serve it. The server also keeps the tab order and, for the split view, the pane layout, so both travel between devices.
+Both presets need a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`. A server that mounts the engine's `SessionManager` routes (`MountSessionRoutes` or `MountAPI`) serves them. The server also keeps the tab order and, for the split view, the pane layout, so both travel between devices.
 
 ## Tabs on a phone
 
@@ -18,13 +18,13 @@ A full-page terminal also names the browser tab after the active tab, the select
 
 ## Each tab's address
 
-A full-page terminal (`layout: "viewport"`) puts the shown tab in the page address, after a `#`. The name is the session's alias, which the server reports with each session: a random 8-character name on web-terminal-server, and the kiro-cli session id on web-terminal-kiro. Opening that address, reloading it or pasting it into another browser tab shows that tab. The address needs engine 6.2 or later on the server. With an older server the address carries no fragment.
+A full-page terminal (`layout: "viewport"`) puts the shown tab in the page address, after a `#`. The name is the session's alias, which the server reports with each session, such as a random 8-character name or the running program's own session id. Opening that address, reloading it or pasting it into another browser tab shows that tab. The address needs engine 6.2 or later on the server. With an older server the address carries no fragment.
 
-Switching tabs adds a history entry, so the browser's back and forward buttons move between the tabs you looked at. Editing the fragment by hand shows the tab it names without reloading the page. A change of alias, such as kiro-cli starting a new session in the same tab, rewrites the current entry instead of adding one. The address only shows tabs that are already open. It never opens or closes a terminal.
+Switching tabs adds a history entry, so the browser's back and forward buttons move between the tabs you looked at. Editing the fragment by hand shows the tab it names without reloading the page. A change of alias, such as the program in the tab starting a new session of its own, rewrites the current entry instead of adding one. The address only shows tabs that are already open. It never opens or closes a terminal.
 
 An address naming a tab that is no longer open keeps what is shown and rewrites the address to match. A fresh load or a hand-edited address also shows "That tab is no longer open". A reload and the back and forward buttons correct the address without a message. While a live tab is open, a fresh load naming a tab whose program has ended opens on a live tab instead, also without a message. An embedded terminal (`layout: "container"`) leaves the page address to its host. [Split view](split-view.md#the-splits-address) describes the address of two panes.
 
-A server that restores its tabs after a restart, such as web-terminal-kiro, keeps their aliases, so an address saved before the restart opens the same tab. A page that loads while the server is not ready waits, shows the server's message, and reads its address only once the tabs are back.
+A server that restores its tabs after a restart keeps their aliases, so an address saved before the restart opens the same tab. A page that loads while the server is not ready waits, shows the server's message, and reads its address only once the tabs are back.
 
 When the server restarts under an open page, the page drops the tabs it had and waits for the restored ones. It then shows the tabs the address names, else the saved layout, as a fresh load does. It creates no tab while it waits, and it shows no "no longer open" message, because the address was not opened just now.
 
@@ -43,7 +43,7 @@ When a program reports a percentage, the chip also draws a 2px progress bar. It 
 
 ## The background-activity mark
 
-Beside the dot, every chip can carry a second mark for a host-reported background task that outlives a turn. web-terminal-kiro uses it for a workflow run. The mark is a rounded-square ring, so it does not read as a second status dot. The width of its band carries three states:
+Beside the dot, every chip can carry a second mark for a host-reported background task that outlives a turn, such as a long-running workflow. The mark is a rounded-square ring, so it does not read as a second status dot. The width of its band carries three states:
 
 - While a task runs, a 2px band whose center closes and reopens on each beat.
 - While a task is paused and resumable, a 1px band with a halo.

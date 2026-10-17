@@ -188,7 +188,7 @@
 
 /* The active tab reads clearly above the inactive chips: a stronger fill plus an
    accent-coloured edge (inactive chips carry a faint white --border; the active
-   one gets the accent equivalent). Themeable via --accent (web-terminal-kiro -> purple). */
+   one gets the accent equivalent). Themeable via --accent. */
 :where(.wt-root) .wt-tab-active {
   background: var(--tab-active-bg);
   border-color: var(--tab-active-border);
@@ -659,25 +659,14 @@
   bottom: calc(var(--wt-tabbar-h, 44px) + var(--safe-bottom, 0px));
 }
 
-/* ===== Activity dots (activityMonitor via tabs) =====
-   Eight-state, distinguishable without color (shape + motion, not hue alone),
-   per section 12 / WCAG 1.4.1: three ANIMATED progress states (working /
-   warning / failed — one object, three hues, spread across lightness so they
-   survive greyscale and deuteranopia), a frozen ringed disc (input), two static
-   discs (green done, red crashed), and two hollow ones (idle, dim exited).
-   The one .wt-status-dot vocabulary is shared by the desktop strip, the mobile
-   switcher, and the overview sheet rows.
-
-   Revealed PER TAB: the dot is hidden until its own session reports activity
-   (OSC 9;4 progress, or a classified OSC 9 notification), at which point the
-   tabs feature adds .wt-reports to that dot (paintStatusDot). A program that
-   emits no OSC 9 signal (a plain bash/sh) has no activity concept, so its tabs
-   stay clean, label-only; a progress-reporting agent (kiro-cli, Claude Code)
-   lights up. An agent-shell consumer can PRESUME the report instead (tabs'
-   presumeReports option, on in presetAgentTabbed): .wt-reports is then set
-   from tab creation, so the idle dot shows immediately rather than popping in
-   after the agent's first signal. The element stays in the DOM either way (JS
-   sets data-status regardless), so revealing it is a pure CSS switch. */
+/* ===== Activity dots: one .wt-status-dot vocabulary for the strip, the
+   switcher and the overview rows. Eight states told apart without colour
+   (WCAG 1.4.1, by shape and motion): three animated progress hues (working,
+   warning, failed) spread across lightness, a ringed disc (input), two static
+   discs (done, crashed) and two hollow ones (idle, exited). A dot shows once
+   its session reports OSC 9;4 progress or a classified OSC 9 notification
+   (.wt-reports, set by paintStatusDot), or from creation under tabs'
+   presumeReports option; data-status is set either way. */
 :where(.wt-root) .wt-status-dot {
   display: none;
   width: 9px;
@@ -876,8 +865,8 @@
 }
 
 /* Agent done / ready: solid disc (--status-done), no motion. The default green
-   matches Kiro IDE's "Ready" (#22c55e). It sits at almost exactly working's
-   default lightness now that working is the accent blue (both ~72% OKLab L), so
+   (#22c55e) sits at almost exactly working's default lightness now that
+   working is the accent blue (both ~72% OKLab L), so
    the pair separates by hue plus the wave's motion rather than by lightness —
    and under prefers-reduced-motion by shape, since working becomes a donut. */
 :where(.wt-root) .wt-status-dot[data-status="done"] {
@@ -885,17 +874,11 @@
   border-color: var(--status-done);
 }
 
-/* User action required (permission / approval): a solid dot inside a static,
-   HARD-edged 2px ring, motionless (--status-input; the default orange is
-   shifted away from the old amber so it separates from both blue working and
-   green done). The stillness plus the hard edge is the message: the
-   agent's turn is mid-flight but blocked on you, and the surround is a fixed
-   outline rather than working's soft travelling wave. (Before the wave landed,
-   working's ripple was a 2px ring too and this state was literally that ping
-   frozen at its birth frame; the two now differ by edge quality as well as
-   motion, which reads more distinctly at 9px.) The ring derives from the same
-   token as the dot, so a theme override recolors both together. It persists
-   until you act on or switch into the tab. */
+/* User action required: a solid dot inside a static, hard-edged 2px ring
+   (--status-input). Stillness and the hard edge separate it from working's
+   soft travelling wave. The ring derives from the dot's token, so a theme
+   override recolors both. It persists until you act on or switch into the
+   tab. */
 :where(.wt-root) .wt-status-dot[data-status="input"] {
   background: var(--status-input);
   border-color: var(--status-input);

@@ -1846,13 +1846,13 @@ describe("tabs: a status record's position and title", () => {
     const root = document.createElement("div");
     await mount(root, monitor.feature);
 
-    monitor.emit({ id: "s1", status: "working", title: "kiro: building", createdAt: "1" });
-    await until(() => labels(root)[0] === "kiro: building");
+    monitor.emit({ id: "s1", status: "working", title: "agent: building", createdAt: "1" });
+    await until(() => labels(root)[0] === "agent: building");
 
     monitor.emit({ id: "s1", status: "idle", title: "   ", createdAt: "1" });
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(labels(root)[0]).toBe("kiro: building");
+    expect(labels(root)[0]).toBe("agent: building");
   });
 
   it("survives a record whose title is not a string at all", async () => {
@@ -1863,8 +1863,8 @@ describe("tabs: a status record's position and title", () => {
     const root = document.createElement("div");
     await mount(root, monitor.feature);
 
-    monitor.emit({ id: "s1", status: "working", title: "kiro: building", createdAt: "1" });
-    await until(() => labels(root)[0] === "kiro: building");
+    monitor.emit({ id: "s1", status: "working", title: "agent: building", createdAt: "1" });
+    await until(() => labels(root)[0] === "agent: building");
 
     monitor.emit({
       id: "s1",
@@ -1876,7 +1876,7 @@ describe("tabs: a status record's position and title", () => {
 
     // The label survives, and so does the rest of the strip: a throw here would
     // have taken the sweep's remaining work with it.
-    expect(labels(root)[0]).toBe("kiro: building");
+    expect(labels(root)[0]).toBe("agent: building");
     expect(labels(root)).toHaveLength(2);
   });
 });
