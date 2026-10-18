@@ -399,7 +399,7 @@ describe("createNotifier permission request", () => {
     n.gesture();
     expect(request).not.toHaveBeenCalled();
 
-    // A session reported activity -> its program speaks OSC 9 -> worth asking.
+    // A session reported activity -> its program may notify -> worth asking.
     n.arm();
     n.gesture();
     expect(request).toHaveBeenCalledTimes(1);

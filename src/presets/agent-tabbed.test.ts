@@ -35,8 +35,9 @@ describe("presetAgentTabbed", () => {
   it("presumes every session reports activity, so a tab's dot is there from creation", async () => {
     // The one thing this preset exists to say. Without it an agent's tab grows
     // its idle dot seconds late, when the agent has booted far enough to first
-    // report OSC 9;4 — and the server's sticky flag then merely confirms what
-    // the tab already showed.
+    // report OSC 7501 status, OSC 9;4 progress or a classified OSC 9
+    // notification — and the server's sticky flag
+    // then merely confirms what the tab already showed.
     const { presetAgentTabbed } = await import("./agent-tabbed.js");
 
     presetAgentTabbed();

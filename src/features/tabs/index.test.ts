@@ -858,8 +858,8 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // An agent shell presumes every session reports (presetAgentTabbed): the
-    // dot is revealed as idle immediately, without waiting for the agent's
-    // first OSC 9;4 signal.
+    // dot is revealed as idle immediately, without waiting for the session's
+    // first OSC 7501 status, OSC 9;4 progress or classified OSC 9 notification.
     for (const dot of root.querySelectorAll<HTMLElement>(".wt-tab .wt-tab-dot")) {
       expect(dot.classList.contains("wt-reports")).toBe(true);
       expect(dot.dataset["status"]).toBe("idle");
@@ -2418,11 +2418,11 @@ describe("tabs feature: a request that settles after teardown", () => {
   });
 });
 
-// OSC 9 chrome: the progress states, the percentage's two display modes, the
+// Status chrome: the progress states, the percentage's two display modes, the
 // notification, the aggregate cue's allowed set, and the accessible name.
 // Driven through the real feature in a real browser, so what is asserted is the
 // DOM a browser does paint.
-describe("tabs OSC 9 status chrome", async () => {
+describe("tabs status chrome", async () => {
   /** Build a terminal with a fake status monitor and wait for both tabs. */
   async function withMonitor(
     opts: Parameters<typeof tabs>[0] = {},
@@ -2503,7 +2503,7 @@ describe("tabs OSC 9 status chrome", async () => {
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 60 });
     expect(tabBar(root, 0)?.hidden).toBe(false);
 
-    // The spec's own clear (OSC 9;4;0 / the abbreviated form) arrives as -1.
+    // OSC 9;4's own clear (9;4;0 / the abbreviated form) arrives as -1.
     monitor.emit({ id: "s1", status: "idle", title: "one", createdAt: "1", progressValue: -1 });
     const bar = tabBar(root, 0);
     expect(bar?.hidden).toBe(true);
@@ -2520,8 +2520,8 @@ describe("tabs OSC 9 status chrome", async () => {
 
   it("keeps 100% until the program clears it: no completion signal, no timeout", async () => {
     // 100% is not a completion signal: state 1 at 100 is a STATE that persists,
-    // and the progress channel carries no "done" of its own (our done is a
-    // classified notification on a separate channel). So a program that pins 100
+    // and OSC 9;4 carries no "done" of its own (done comes from an OSC 7501
+    // report or a notification). So a program that pins 100
     // and goes quiet keeps its bar — asserting otherwise would report a state
     // change the program never made.
     const { root, monitor } = await withMonitor();
@@ -2540,31 +2540,16 @@ describe("tabs OSC 9 status chrome", async () => {
     expect(tabBar(root, 0)?.style.width).toBe("100%");
   });
 
-  it("hides the bar under a status the progress channel does not own", async () => {
-    // A latch is the NOTIFICATION channel talking, so a percentage retained from
-    // the progress channel must not be painted underneath it. A state-4
-    // percentage does not clear a latch, so it would paint a bar beside a done
-    // or input dot, neither of which is how far along anything is. The engine
-    // is right to keep sending the value (a progress state persists); this is
-    // the consumer deciding it is not the current word.
+  it("paints the bar beside a done, input or idle dot", async () => {
+    // An OSC 7501 report or a notification sets these statuses while OSC 9;4
+    // keeps drawing the bar, so the bar stays.
     for (const status of ["done", "input", "idle"] as const) {
       const { root, monitor } = await withMonitor();
-      monitor.emit({
-        id: "s1",
-        status: "working",
-        title: "one",
-        createdAt: "1",
-        progressValue: 72,
-      });
-      expect(tabBar(root, 0)?.hidden, `working precondition for ${status}`).toBe(false);
-
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: 72 });
-      expect(tabBar(root, 0)?.hidden, status).toBe(true);
-      expect(tabLabel(root, 0)?.textContent, status).toBe("one");
-      // The value is not forgotten, only unshown: the program's own progress
-      // states paint it again without needing a fresh report.
-      monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1" });
+      expect(tabDot(root, 0)?.dataset["status"], status).toBe(status);
+      expect(tabBar(root, 0)?.hidden, status).toBe(false);
       expect(tabBar(root, 0)?.style.width, status).toBe("72%");
+      expect(tabLabel(root, 0)?.textContent, status).toBe("one");
 
       term?.destroy();
       term = undefined;
@@ -2572,7 +2557,7 @@ describe("tabs OSC 9 status chrome", async () => {
     }
   });
 
-  it("keeps the bar under the three statuses the progress channel does own", async () => {
+  it("keeps the bar under the working, warning and failed statuses", async () => {
     for (const status of ["working", "warning", "failed"] as const) {
       const { root, monitor } = await withMonitor();
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: 40 });
@@ -2585,7 +2570,31 @@ describe("tabs OSC 9 status chrome", async () => {
     }
   });
 
-  it("clears the bar and the prefix when the process ends (the second clear)", async () => {
+  it("renders a status outside the built-in vocabulary as a live state with no cue", async () => {
+    // A host's notification classifier may return any status string.
+    document.title = "Host page";
+    const { root, monitor } = await withMonitor();
+    const status = "hibernating" as SessionStatus["status"];
+    monitor.emit({ id: "s2", status, title: "two", createdAt: "2", progressValue: 55 });
+
+    const dot = tabDot(root, 1);
+    expect(dot?.dataset["status"]).toBe("hibernating");
+    expect(dot?.title).toBe("hibernating");
+    expect(dot?.classList.contains("wt-reports"), "no reveal of its own").toBe(false);
+    expect(tabBar(root, 1)?.hidden, "a live process keeps its bar").toBe(false);
+    expect(tabBar(root, 1)?.style.width).toBe("55%");
+    expect(root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.getAttribute("aria-label")).toBe(
+      "two, hibernating, 55%",
+    );
+    expect(document.title, "no title count").toBe("one · Host page");
+    const switchDot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    expect(switchDot?.dataset["status"], "no switch-button cue").toBeUndefined();
+
+    monitor.emit({ id: "s2", status, title: "two", createdAt: "2", reportsActivity: true });
+    expect(dot?.classList.contains("wt-reports"), "shown once the session reports").toBe(true);
+  });
+
+  it("clears the bar when the process ends (the second clear)", async () => {
     // The only clear the UI applies itself: a dead process's progress is
     // meaningless, and nothing will ever arrive to clear it. Both ends count.
     for (const ended of ["exited", "crashed"] as const) {
@@ -2810,10 +2819,12 @@ describe("tabs OSC 9 status chrome", async () => {
     expect(chip?.getAttribute("aria-label")).toBe("one, working, 30%");
     expect(tabLabel(root, 0)?.textContent).toBe("one");
 
-    // A percentage the tab is not SHOWING is not announced either: the announced
-    // name follows the same statusOwnsProgress rule the bar does.
+    // The announced name follows the bar's rule (renderedProgress): a done tab
+    // still showing its bar announces the percentage, an ended one does not.
     monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1", progressValue: 30 });
-    expect(chip?.getAttribute("aria-label")).toBe("one, turn finished");
+    expect(chip?.getAttribute("aria-label")).toBe("one, turn finished, 30%");
+    monitor.emit({ id: "s1", status: "exited", title: "one", createdAt: "1", progressValue: 30 });
+    expect(chip?.getAttribute("aria-label")).toBe("one, session ended");
 
     // Both halves come from ONE wording map, so hover text and announced text
     // cannot drift apart. Asserted for every state, in both directions.
@@ -3249,7 +3260,7 @@ describe("tabs OSC 9 notifications", () => {
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
     expect(arm).not.toHaveBeenCalled();
 
-    // A session that reports activity speaks OSC 9, so it may notify.
+    // A session that reports activity is a program that may also notify.
     monitor.emit({
       id: "s1",
       status: "working",

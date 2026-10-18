@@ -24,7 +24,6 @@ import {
   normalizeSeq,
   orderedInsertIndex,
   renderedProgress,
-  statusOwnsProgress,
   statusPhrase,
   statusRevealsDot,
   summarizeCues,
@@ -203,9 +202,10 @@ describe("isCueStatus declares the cue-worthy statuses in one place", () => {
   it("accepts exactly the four states that want the user, and nothing else", () => {
     // The switcher's aggregate dot and the out-of-page attention surfaces are
     // "like a notification": they show only the states that ask something of the
-    // user. `failed` is one of them — OSC 9;4 state 2 is a result the program
-    // parked, not an ongoing phase — while `working` and `warning` are genuinely
-    // ongoing, and idle and a clean exit ask nothing of anyone.
+    // user. `failed` is one of them — an error the program reported is a
+    // result it parked, not an ongoing phase —
+    // while `working` and `warning` are genuinely ongoing, and idle and a clean
+    // exit ask nothing of anyone.
     expect(["input", "done", "crashed", "failed"].every(isCueStatus)).toBe(true);
     expect(["working", "warning", "idle", "exited", "", "DONE"].some(isCueStatus)).toBe(false);
   });
@@ -776,7 +776,7 @@ describe("the session API's requests", () => {
   });
 });
 
-describe("the status vocabulary (the OSC 9 states)", () => {
+describe("the status vocabulary", () => {
   it("treats both ways a process ENDS as ended", () => {
     // A crashed session is exactly as unable to produce output as an exited one,
     // so session selection must not read it as live (reloading onto a corpse was
@@ -806,9 +806,25 @@ describe("the status vocabulary (the OSC 9 states)", () => {
     expect(statusPhrase("crashed")).toBe("process crashed");
     expect(statusPhrase("idle")).toBe("idle");
     expect(statusPhrase("")).toBe("idle");
-    // A newer server's unknown status is surfaced raw rather than hidden: the
-    // wire is parsed, not validated.
+    // A status outside the built-in vocabulary is surfaced raw rather than
+    // hidden: the wire is parsed, not validated.
     expect(statusPhrase("hibernating")).toBe("hibernating");
+  });
+
+  it("reads a status outside the built-in vocabulary as live, uncued and unrevealed", () => {
+    // A host's notification classifier may return any status string.
+    const status = "hibernating";
+    expect(isEndedStatus(status)).toBe(false);
+    expect(statusRevealsDot(status)).toBe(false);
+    expect(isCueStatus(status)).toBe(false);
+    expect(foldedCueStatus(status, "")).toBe(status);
+    expect(summarizeCues([{ status, statusSeq: 2, seenSeq: 0, ackSeq: 0 }])).toEqual({
+      count: 0,
+      worst: "",
+    });
+    expect(tabAccessibleName({ label: "agent", status, progress: 40 })).toBe(
+      "agent, hibernating, 40%",
+    );
   });
 
   it("puts the state into a tab's accessible name", () => {
@@ -959,7 +975,7 @@ describe("a tab's accessible name carries both marks", () => {
   });
 });
 
-describe("the OSC 9;4 percentage", () => {
+describe("the session's percentage", () => {
   it("reads an absent or untrustworthy value as absent, never as 0%", () => {
     // -1 is the engine's own absence marker, and absence must render NO bar
     // rather than an empty one, so it may never be normalised to 0.
@@ -995,36 +1011,30 @@ describe("the OSC 9;4 percentage", () => {
     expect(tabAccessibleName({ label: "agent", status: "working" })).toBe("agent, working");
   });
 
-  it("shows a percentage only under a status the progress channel owns", () => {
-    // The three statuses the OSC 9;4 channel itself produces.
-    expect(statusOwnsProgress("working")).toBe(true);
-    expect(statusOwnsProgress("failed")).toBe(true);
-    expect(statusOwnsProgress("warning")).toBe(true);
-    // Everything else comes from somewhere else: the notification channel
-    // (done/input), the absence of a progress state (idle), or the process
-    // (exited/crashed).
-    for (const status of ["done", "input", "idle", "exited", "crashed", "bogus"]) {
-      expect(statusOwnsProgress(status), status).toBe(false);
-    }
+  it("shows a percentage under done, input and idle", () => {
+    // An OSC 7501 report or a notification sets these while OSC 9;4 keeps
+    // drawing the bar, so the bar stays beside them.
+    expect(renderedProgress("done", 72)).toBe(72);
+    expect(renderedProgress("input", 100)).toBe(100);
+    expect(renderedProgress("idle", 15)).toBe(15);
+    // A status this build does not know is still a live process.
+    expect(renderedProgress("bogus", 33)).toBe(33);
+  });
+
+  it("hides a percentage once the process has exited or crashed", () => {
+    expect(renderedProgress("exited", 100)).toBe(PROGRESS_ABSENT);
+    expect(renderedProgress("crashed", 60)).toBe(PROGRESS_ABSENT);
   });
 
   it("clears a percentage on exactly two things, and nothing else", () => {
-    // Clear 1 is the program's own OSC 9;4;0 (the value arrives as -1), so it
-    // needs no status rule at all — it is simply carried through.
+    // Clear 1 is the server's -1 (the program cleared or never reported a
+    // percentage, e.g. OSC 9;4;0), so it needs no status rule: it is carried through.
     expect(renderedProgress("working", PROGRESS_ABSENT)).toBe(PROGRESS_ABSENT);
-    // Clear 2: the status is not one the progress channel owns. A dead process,
-    // and equally a latch or a return to idle — a percentage under any of those
-    // is a claim about a different channel than the reader is looking at.
-    // A state-4 percentage persists under a latch, which state 4 does not
-    // clear, so it would otherwise paint a bar beside a done dot.
-    expect(renderedProgress("exited", 100)).toBe(PROGRESS_ABSENT);
-    expect(renderedProgress("crashed", 60)).toBe(PROGRESS_ABSENT);
-    expect(renderedProgress("done", 72)).toBe(PROGRESS_ABSENT);
-    expect(renderedProgress("input", 100)).toBe(PROGRESS_ABSENT);
-    expect(renderedProgress("idle", 100)).toBe(PROGRESS_ABSENT);
+    expect(renderedProgress("done", PROGRESS_ABSENT)).toBe(PROGRESS_ABSENT);
+    // Clear 2 is an ended process (the test above).
 
     // NOTHING else clears it. 100% is not a completion signal (state 1 at 100 is
-    // a state that persists), the progress channel carries no "done" at all, and
+    // a state that persists), a reported "done" keeps the bar (above), and
     // there is no timeout — so a program that pins a value and goes quiet keeps
     // its bar rather than having a change asserted it never made.
     expect(renderedProgress("working", 100)).toBe(100);

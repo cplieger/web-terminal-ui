@@ -80,11 +80,12 @@
   --status-working: #52a9fe; /* agent working (waves): the same blue as the default --accent */
   --status-done: #22c55e; /* turn finished: solid green */
   --status-input: #fb923c; /* action required: solid orange + ring */
-  /* OSC 9;4 progress states 4 (warning) and 2 (error). Both render as the SAME
-     object as working -- identical glow + travelling wave, one shared rule and
-     one shared pair of keyframes (30-tabs.css) -- differing ONLY in hue, because
-     the escape code models one progress indicator with several states rather
-     than three unrelated dots. Neither wears a ring: the frozen hard ring is
+  /* The warning and failed statuses (STATUS_WARNING and STATUS_FAILED in
+     features/tabs/model.ts name their sources). Both render as the SAME object
+     as working -- identical glow + travelling wave, one shared rule and one
+     shared pair of keyframes (30-tabs.css) -- differing ONLY in hue, because
+     OSC 9;4 models one progress indicator with several states rather than three
+     unrelated dots. Neither wears a ring: the frozen hard ring is
      --status-input's exclusive meaning ("blocked, waiting on you"), and neither
      warning nor error asks the user to act.
      LIGHTNESS SEPARATION IS LOAD-BEARING, NOT DECORATIVE. Three states that
@@ -100,8 +101,8 @@
      indistinguishable to a colour-blind user, whatever their hues. warning is
      YELLOW, deliberately not amber -- amber would collide with --status-input's
      orange (L 75.8%), which sits between working and warning. */
-  --status-warning: #facc15; /* OSC 9;4 state 4: yellow disc, working's wave */
-  --status-failed: #dc2626; /* OSC 9;4 state 2: red disc, working's wave; crashed reuses it solid and static */
+  --status-warning: #facc15; /* warning: yellow disc, working's wave */
+  --status-failed: #dc2626; /* a reported error: red disc, working's wave; crashed reuses it solid and static */
   --radius: 0.75rem;
   --radius-inner: 0.5rem;
   /* Small square icon buttons (e.g. the 24px tab-close x): at that size the

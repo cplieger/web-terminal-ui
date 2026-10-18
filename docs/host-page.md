@@ -88,7 +88,7 @@ Four presets are provided. Each is a plain function that returns an array of fea
 - `presetSingle()` is the single-pane desktop UI, with the context menu, clipboard, scroll-to-bottom, predictive echo and the connection banner.
 - `presetTouch()` is `presetSingle()` plus the on-screen key bar.
 - `presetTabbed()` is `presetTouch()` plus tabs, the activity monitor and animations. It needs a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`.
-- `presetAgentTabbed()` has the same features as `presetTabbed()`, tuned for an agent shell, a host whose every tab runs a program that reports its activity. Each tab's activity dot shows from the moment the tab opens instead of waiting for the program's first progress report.
+- `presetAgentTabbed()` has the same features as `presetTabbed()`, tuned for an agent shell, a host whose every tab runs a program that reports its activity. Each tab's activity dot shows from the moment the tab opens instead of waiting for the program's first status or progress report.
 
 [Tabs, activity dots and notifications](tabs.md) describes what the two tabbed presets show.
 

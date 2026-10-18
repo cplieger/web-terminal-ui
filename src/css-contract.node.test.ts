@@ -462,11 +462,11 @@ describe("reorder drop-slot contract", () => {
 });
 
 // The activity-dot vocabulary is CSS-only, and no unit suite loads the stylesheet,
-// so the visual decisions the OSC 9 states rest on have no other automated guard. Same
+// so the visual decisions the status states rest on have no other automated guard. Same
 // grep-level posture as the rules above, plus one genuinely computed check: the
 // lightness spread between the three animated hues is a correctness requirement,
 // not a taste one, so it is measured rather than described.
-describe("activity-dot vocabulary (the OSC 9 states)", () => {
+describe("activity-dot vocabulary", () => {
   /** Relative-luminance-and-OKLab-L pair for a #rrggbb token: the greyscale read
    *  and the perceptual-lightness read of the same colour. */
   function lightness(hex: string): { L: number; Y: number } {

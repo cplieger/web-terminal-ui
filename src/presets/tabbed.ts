@@ -29,10 +29,11 @@ export interface TabbedPresetOptions {
  *  toolbar opened from the tab bar's keyboard button, the activity monitor (the
  *  status SSE), tabs wired to both, and animations. The monitor is always
  *  included: a tab's dot shows only once its session reports activity (OSC
- *  9;4), or from creation under presumeReports. The toolbar and monitor precede
- *  tabs, which reads their APIs via ctx.use. Titles are the engine's: a browser
- *  that re-derived one would disagree with the server and every other client.
- *  Shared by presetTabbed and presetAgentTabbed (agent-tabbed.ts). */
+ *  7501 status, OSC 9;4 progress or a classified OSC 9 notification), or from
+ *  creation under presumeReports.
+ *  The toolbar and monitor precede tabs, which reads their APIs via ctx.use.
+ *  Titles are the engine's: a browser that re-derived one would disagree with
+ *  the server and every other client. Shared with presetAgentTabbed. */
 export function buildTabbed(
   agentShell: boolean,
   opts: TabbedPresetOptions = {},
