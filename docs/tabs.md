@@ -30,16 +30,18 @@ When the server restarts under an open page, the page drops the tabs it had and 
 
 ## The activity dot
 
-Each tab can carry a status dot that the activity monitor drives from the server's status stream. Under `presetTabbed()` the dot appears only once a session reports `OSC 9;4` progress, so a plain shell keeps clean, label-only tabs. Under `presetAgentTabbed()` the idle dot shows from the moment the tab opens.
+Each tab can carry a status dot that the activity monitor drives from the server's status stream. Under `presetTabbed()` the dot appears only once a session reports `OSC 7501` status, `OSC 9;4` progress or a classified `OSC 9` notification, so a plain shell keeps clean, label-only tabs. Under `presetAgentTabbed()` the idle dot shows from the moment the tab opens.
 
-The dot has eight states:
+The dot has eight built-in states:
 
-- three animated progress states from `OSC 9;4`, for working, warning and error
+- three animated states for working, warning and error: working and error from `OSC 7501` status, all three from `OSC 9;4` progress or a classified `OSC 9` notification
 - a still, ringed dot for a program waiting on the user
 - a green disc for a finished turn and a red disc for a crashed process
 - two hollow dots, one for idle and a dim one for an ended session
 
-When a program reports a percentage, the chip also draws a 2px progress bar. It shows only while one of the three progress states is current. The number itself is announced in the tab's accessible name and drawn nowhere. A chip that shrinks toward a 100px minimum has no room for it. It is never written to the browser's document title either, since one page title cannot represent several sessions.
+A host's notification classifier can return a status outside these. Such a status shows as the idle dot, with the status itself as its tooltip and in the tab's accessible name, and raises no cue.
+
+When a program reports a percentage, as `OSC 7501` progress or with `OSC 9;4`, the chip also draws a 2px progress bar. It shows under every status until the program clears it or the process ends, because a program can report its status with `OSC 7501` and its progress with `OSC 9;4`. The number itself is announced in the tab's accessible name and drawn nowhere. A chip that shrinks toward a 100px minimum has no room for it. It is never written to the browser's document title either, since one page title cannot represent several sessions.
 
 ## The background-activity mark
 

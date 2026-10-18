@@ -19,7 +19,9 @@ export type StatusRecord = SessionInfo & {
 };
 
 // The status vocabulary is module-private so a status's MEANING has one home:
-// every consumer asks a predicate below instead of comparing strings.
+// every consumer asks a predicate below instead of comparing strings. The
+// protocol states named below are the built-in sources; a classified OSC 9
+// notification may set any status.
 //
 // An exited session is viewable history that can never produce output again, so
 // session selection prefers live sessions everywhere.
@@ -30,11 +32,14 @@ const STATUS_EXITED = "exited";
  *  restart never paints as a failure. Terminal, like "exited". */
 const STATUS_CRASHED = "crashed";
 
-/** OSC 9;4 progress state 2, the error state (iTerm2 semantics). A STATE that
- *  persists until the program reports another, or the process dies. */
+/** An error the program reported: OSC 7501 state `error`, or OSC 9;4 progress
+ *  state 2 (iTerm2 semantics). A STATE that persists until the program reports
+ *  another, or the process dies. */
 const STATUS_FAILED = "failed";
 
-/** OSC 9;4 progress state 4, the warning state (iTerm2 semantics). */
+/** OSC 9;4 progress state 4, the warning state (iTerm2 semantics). OSC 9;4
+ *  cannot set it once the session has sent an OSC 7501 report, until a
+ *  terminal reset (RIS): OSC 7501 outranks OSC 9;4 until a RIS forgets it. */
 const STATUS_WARNING = "warning";
 
 /** Whether the session's process is GONE, whichever way it went: reloading onto
@@ -51,8 +56,9 @@ export function statusRevealsDot(status: string): boolean {
 }
 
 /** The human wording for a status, for BOTH the dot's tooltip and the tab's
- *  accessible name, so they cannot disagree. An unknown status (a newer server)
- *  falls back to the raw value rather than being hidden. */
+ *  accessible name, so they cannot disagree. A status outside the built-in
+ *  vocabulary (a host classifier's, or a newer server's) falls back to the raw
+ *  value rather than being hidden. */
 export function statusPhrase(status: string): string {
   switch (status) {
     case "working":
@@ -94,22 +100,16 @@ export function normalizeProgress(value: unknown): number {
   return Math.min(100, Math.round(value));
 }
 
-/** Whether the OSC 9;4 progress channel is speaking through this status; only
- *  these may show a bar. The server keeps sending the last percentage while the
- *  state persists, and `input`, `done`, `idle`, `exited` and `crashed` come from
- *  other channels, so a percentage under them is a claim about the wrong one. */
-export function statusOwnsProgress(status: string): boolean {
-  return status === "working" || status === STATUS_FAILED || status === STATUS_WARNING;
-}
-
-/** The percentage a status may SHOW. Two things clear it: the program's own
- *  OSC 9;4;0 (arriving as PROGRESS_ABSENT) and a status the channel does not own
- *  (a state-4 percentage persists under a done latch, which state 4 does not
- *  clear, and would otherwise paint a bar beside a done dot). Deliberately
- *  no third clear: 100% is a STATE that persists, and a timeout would assert a
- *  change the program never reported. */
+/** The percentage a status may SHOW. Under any live status it is the server's
+ *  value, because the status and the percentage can come from different
+ *  channels: OSC 7501 or a notification can set the status while OSC 9;4
+ *  supplies the percentage. Two things clear it: the server's PROGRESS_ABSENT
+ *  (the program cleared or never reported a percentage, e.g. OSC 9;4;0) and an
+ *  ended process, whose percentage nothing will ever clear. No timeout clears
+ *  it: 100% is a STATE that persists, and a timeout would assert a change the
+ *  program never reported. */
 export function renderedProgress(status: string, progress: number): number {
-  return statusOwnsProgress(status) ? progress : PROGRESS_ABSENT;
+  return isEndedStatus(status) ? PROGRESS_ABSENT : progress;
 }
 
 // The secondary-activity vocabulary: a host-reported background activity that
@@ -221,8 +221,8 @@ export function cueIconName(status: CueStatus): "input" | "done" | "alert" {
 
 /** The cue statuses meaning the turn is OVER WITHOUT INCIDENT, the only ones a
  *  live background task may blank. `done` is the whole set: every other cue must
- *  reach the viewer AT ONCE, and `failed` here is OSC 9;4 state 2 rather than a
- *  turn verdict. */
+ *  reach the viewer AT ONCE, and `failed` is an error the program reported,
+ *  not a clean end of the turn. */
 const SETTLED_CUES: ReadonlySet<string> = new Set<CueStatus>(["done"]);
 
 /** The status the CUE surfaces see: the session's own, unless a settled turn's
@@ -380,10 +380,9 @@ export interface Tab {
   /** The chip's determinate progress bar (the 2px line on its bottom edge).
    *  Present on every chip, hidden until a percentage exists. */
   progressEl: HTMLElement;
-  /** The last OSC 9;4 percentage the server reported for this session, or
+  /** The last percentage the server reported for this session, or
    *  PROGRESS_ABSENT. Held raw: whether it is currently SHOWN is a render-time
-   *  question (renderedProgress), and the prefix it produces is never stored on
-   *  any title field. */
+   *  question (renderedProgress). */
   progress: number;
   /** The chip's secondary activity mark (the rounded-square ring beside the
    *  status dot). Present on every chip, and costing no layout until a state
@@ -403,9 +402,10 @@ export interface Tab {
    *  offset away, and it stopped meaning the same line once the session produced
    *  output while backgrounded. In memory only. */
   view: ViewMemory | null;
-  /** Sticky: true once this session emitted a genuine activity signal (OSC 9;4).
-   *  Its activity dot is shown only while true; a session that never reports
-   *  activity (a plain shell) keeps a clean, dot-less tab. Fed from the server's
+  /** Sticky: true once this session emitted a genuine activity signal (OSC 7501
+   *  status, OSC 9;4 progress or a classified OSC 9 notification). Its activity
+   *  dot is shown only while true; a session that never reports activity (a
+   *  plain shell) keeps a clean, dot-less tab. Fed from the server's
    *  reportsActivity via applyStatus. */
   reports: boolean;
   /** The user's pinned name (the server's `pinnedTitle` wire field). Outranks

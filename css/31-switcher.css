@@ -360,7 +360,7 @@
    process crashed or reported an error. Those four only (CueStatus) — the rule
    the user set is "only states that want the user, like a notification", so the
    ongoing progress states (working / warning) never raise it. `failed` DOES,
-   because OSC 9;4 state 2 is a result the program parked rather than a phase in
+   because a reported error is a result the program parked rather than a phase in
    progress; the override below is what keeps it looking like a notification here.
    Reuses the exact .wt-status-dot rules (30-tabs.css, --status-* tokens) so it
    matches the per-tab dots. Hidden until the tabs feature sets data-status;

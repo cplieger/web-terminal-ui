@@ -235,7 +235,7 @@ export function paintStatusDot(el: HTMLElement, status: string, reports: boolean
  *  a tooltip worded by activityPhrase. No state REMOVES the attribute, which is
  *  what collapses the mark's footprint to zero. The reveal is the mark's OWN
  *  state, not the status dot's reportsActivity gate: a background run is a fact
- *  independent of whether the program ever spoke OSC 9. */
+ *  independent of whether the program ever reported status. */
 export function paintActivityMark(el: HTMLElement, state: string, count: number): void {
   const phrase = activityPhrase(state, count);
   if (phrase === "") {

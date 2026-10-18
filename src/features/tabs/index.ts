@@ -330,14 +330,13 @@ class SettleCreateFailed extends Error {
 }
 
 /** Read the layout, then list, then (when nothing live is listed) create one
- *  session, starting the turn again after any 503, so a
- *  create refused mid-restore never adds a tab beside the restored ones. A
- *  non-503 layout read proves the host was not restoring when it was served, so
- *  a list issued after it sees the whole restored set. Past
- *  `CREATE_RETRY_MAX_TOTAL_MS` a refused layout read or list returns the last
- *  good list, or rethrows the 503; a create that fails for good, a spent 503
- *  included, throws `SettleCreateFailed` carrying the list, an abort its
- *  reason. */
+ *  session, starting the turn again after any 503, so a create refused
+ *  mid-restore never adds a tab beside the restored ones. A non-503 layout read
+ *  proves the host was not restoring when it was served, so a list issued after
+ *  it sees the whole restored set. Past `CREATE_RETRY_MAX_TOTAL_MS` a refused
+ *  layout read or list returns the last good list, or rethrows the 503; a create
+ *  that fails for good, a spent 503 included, throws `SettleCreateFailed`
+ *  carrying the list, an abort its reason. */
 async function settleSessionSet(
   api: SessionAPIClient,
   ctx: TerminalContext,
@@ -1068,9 +1067,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const prefersReduce = (): boolean =>
         win.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-      // Recomputes every display label with de-duplication. The percentage prefix
-      // is applied at render time and stored nowhere, so de-duplication and the
-      // rename field see real names and clearing it needs no cleanup.
+      // Recomputes every display label with de-duplication.
       function relabelAll(): void {
         // The "(k)" suffix is numbered by the session's AGE, never by its slot:
         // numbered by encounter order, the labels stayed put while the sessions
@@ -1140,11 +1137,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return foldedCueStatus(statusOf(t), t.activity);
       }
 
-      /** shownProgress is a tab's percentage as it may currently be DISPLAYED:
-       *  the last value the server reported, dropped unless the current status is
-       *  one the progress channel owns. Those are the only two ways a percentage
-       *  stops showing — the program's own OSC 9;4;0 (an explicit -1) and a status
-       *  from another channel; see renderedProgress for why there is no third. */
+      /** shownProgress is a tab's percentage as it may currently be DISPLAYED;
+       *  renderedProgress owns when that is. */
       function shownProgress(t: Tab): number {
         return renderedProgress(statusOf(t), t.progress);
       }
@@ -3344,8 +3338,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           t.seenSeq = seen;
           closeReadSurfaces(t);
         }
-        // A program that speaks OSC 9 may also post a notification: arm the
-        // permission request for the next user gesture.
+        // A program that reports activity may also post an OSC 9 notification:
+        // arm the permission request for the next user gesture.
         if (reports) {
           ctx.shell.notifications.arm();
         }
