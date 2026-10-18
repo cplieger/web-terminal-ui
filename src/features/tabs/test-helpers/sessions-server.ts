@@ -102,7 +102,7 @@ export function createSessionsServer(): SessionsServer {
     id: s.id,
     title: s.title,
     createdAt: s.createdAt,
-    status: s.status as SessionStatus["status"],
+    status: s.status,
     activity: s.activity,
     activityCount: s.activity === "" ? 0 : 1,
     reportsActivity: true,
