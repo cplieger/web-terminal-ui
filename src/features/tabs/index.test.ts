@@ -2574,7 +2574,7 @@ describe("tabs status chrome", async () => {
     // A host's notification classifier may return any status string.
     document.title = "Host page";
     const { root, monitor } = await withMonitor();
-    const status = "hibernating" as SessionStatus["status"];
+    const status = "hibernating";
     monitor.emit({ id: "s2", status, title: "two", createdAt: "2", progressValue: 55 });
 
     const dot = tabDot(root, 1);
