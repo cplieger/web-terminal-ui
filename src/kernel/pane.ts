@@ -77,6 +77,18 @@ function typedChar(ev: KeyboardEvent): string | null {
   return first !== undefined && String.fromCodePoint(first) === ev.key ? ev.key : null;
 }
 
+/** Ctrl+C (Shift allowed) or Ctrl+Insert: the chords that copy a selection. A
+ *  non-Latin layout's C is its physical KeyC; a Latin layout's is `key`. */
+function isCopyChord(ev: KeyboardEvent): boolean {
+  if (!ev.ctrlKey || ev.altKey || ev.metaKey) {
+    return false;
+  }
+  if (ev.key === "Insert" || ev.key === "c" || ev.key === "C") {
+    return true;
+  }
+  return ev.code === "KeyC" && !/^[a-z]$/i.test(ev.key);
+}
+
 /** iOS sends U+00A0 where a space was typed; shared by every send path so one
  *  physical key cannot produce two byte sequences. */
 function normalizeTypedText(text: string): string {
@@ -986,8 +998,9 @@ function buildPaneInto(
       if (!ownsSelection() && !keysUnclaimed()) {
         return;
       }
-      // Features while the selection is STILL INTACT and before the modifier
-      // gate: clipboard's Ctrl+Shift+C is a modified key that reads the selection.
+      // Features while the selection is STILL INTACT and before the key is
+      // encoded: clipboard's Ctrl+Shift+C reads the selection, and its claim on
+      // Ctrl+V keeps 0x16 off the wire.
       if (runKeydownChain(ev)) {
         return;
       }
@@ -995,7 +1008,7 @@ function buildPaneInto(
       // beforeinput or input, `_tryToHandlePressesEvent:` in
       // https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/ios/WKContentViewInteraction.mm),
       // so a dead key or an IME takes focus and passes through, ahead of the
-      // modifier gate that would keep Option+e.
+      // decision below, which drops a key that types nothing.
       if (
         ev.key === "Dead" ||
         ev.key === "Process" ||
@@ -1010,21 +1023,25 @@ function buildPaneInto(
         return;
       }
       // Decided before taking focus, because a bare modifier press (Shift on its
-      // way to Shift+click) must leave the selection alone. Computed only for an
-      // "ignore", so the encoder always wins a key it maps.
+      // way to Shift+click) must leave the selection alone. Modifiers alone never
+      // reject a key the encoder maps, as on the focused path.
       const result = mapKeyboardEvent(ev, engine.modes);
       const char = result.kind === "ignore" ? typedChar(ev) : null;
-      if (result.kind === "ignore" && char === null) {
-        return;
+      if (result.kind === "ignore") {
+        if (char === null) {
+          return;
+        }
+        // An unencoded character with Ctrl, Alt or Cmd is the browser's (Cmd+V,
+        // Ctrl+1). A desktop AltGr character needs no exception: it arrives with
+        // neither modifier (the engine's encodeKittyDisambiguate cites why), and
+        // Firefox sets AltGraph on every macOS Option chord.
+        if (ev.ctrlKey || ev.metaKey || ev.altKey) {
+          return;
+        }
       }
-      // Modified keys stay with the browser except an AltGr CHARACTER, the way
-      // some layouts type it; AltGraph alone is not a reliable signal (Firefox
-      // reports it for plain Option on macOS), and Alt+ArrowLeft is browser back.
-      const altGraphChar = char !== null && ev.getModifierState("AltGraph");
-      if ((ev.ctrlKey || ev.metaKey || ev.altKey) && !altGraphChar) {
-        return;
-      }
-      if (ev.key === "Tab") {
+      // Tab leaves the page (no keyboard trap); a copy chord over this
+      // terminal's selection is the browser's copy, not a key for the shell.
+      if (ev.key === "Tab" || (ownsSelection() && isCopyChord(ev))) {
         return;
       }
       doc.getSelection()?.removeAllRanges();
