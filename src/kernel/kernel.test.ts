@@ -57,15 +57,12 @@ function rootIn(): HTMLElement {
 
 /** Declare a scroll container's geometry, INCLUDING a writable scrollTop.
  *
- *  All three readings are INPUTS to the paging arithmetic, and the arithmetic is
- *  the subject: production reads clientHeight/scrollHeight and writes the offset
- *  it computed. In a real browser `scrollTop` is clamped by actual overflow, so an
- *  assignment to a container with nothing to scroll silently stays 0 and the
- *  offset production wrote is unobservable — which would let a helper that only
- *  called preventDefault pass every assertion below. The own accessor records what
- *  production wrote and deliberately does NOT clamp, because production clamping
- *  for itself is exactly what is under test (see the ceiling note: WebKit does not
- *  reliably clamp an out-of-range offset). */
+ *  All three readings are inputs to the paging arithmetic under test. A real
+ *  browser clamps `scrollTop` to actual overflow, so a write to a container with
+ *  nothing to scroll stays 0, and a helper that only called preventDefault would
+ *  pass. The own accessor records what production wrote and does NOT clamp,
+ *  because production's own clamping is under test (see the ceiling note: WebKit
+ *  does not reliably clamp an out-of-range offset). */
 function declareScrollGeometry(
   el: HTMLElement,
   geom: { clientHeight: number; scrollHeight: number; scrollTop: number },
@@ -725,16 +722,11 @@ describe("fatal startup (a feature's setup threw or rejected)", () => {
 
   it("refuses the modal panel's Escape close request, which would leave a blank root", async () => {
     // showModal() makes Escape a close request, and the kernel has already
-    // cleared the root — a closed panel is an empty page with no way back.
-    //
-    // Modal only, and the container half is deliberately absent rather than
-    // written as its own test: no single kernel change can redden it. A
-    // non-modal <dialog open> gets no close watcher, so Escape never reaches it;
-    // and if container mode ever called showModal(), this same handler would
-    // refuse that close request too. `open` stays true either way. The property
-    // that half was reaching for is `:modal === false`, pinned by the container
-    // test above, by the synchronous-throw one, and by fatal-panel.test.ts's
-    // container geometry.
+    // cleared the root, so a closed panel is an empty page with no way back.
+    // Modal only: a non-modal <dialog open> gets no close watcher, so no kernel
+    // change can redden a container twin. Its property, `:modal === false`, is
+    // pinned by the container test above, the synchronous-throw one and
+    // fatal-panel.test.ts's container geometry.
     const root = rootIn();
     await mountTerminal(root, { features: () => [boom] });
     await tick();
@@ -1510,14 +1502,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
   // stops receiving keys. Select one cell and typing silently does nothing. The
   // click handler cannot fix it (focusing collapses the selection, so it declines
   // while one exists), so a document-level listener takes the keyboard back on the
-  // first typed character, sending that character itself.
-  //
-  // Load-bearing for these tests: every event below pins getModifierState
-  // explicitly rather than leaving it derived from the modifier flags, so a test
-  // asserts the kernel's rule and not one engine's derivation of the modifier
-  // state. Real engines differ from each other here, which is why the kernel
-  // grants the AltGraph exception only to a printable character: Firefox reports
-  // AltGraph for plain Option on macOS and for ordinary Ctrl+Alt on Windows.
+  // first key that delivers something, sending that key itself.
   const ta = (root: HTMLElement): HTMLTextAreaElement =>
     root.querySelector(".term-input") as HTMLTextAreaElement;
 
@@ -1541,7 +1526,13 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(sel.isCollapsed).toBe(false);
   }
 
-  /** A keydown on the document, as a body-targeted key arrives in a browser. */
+  /**
+   * A keydown on the document, as a body-targeted key arrives in a browser. It
+   * pins getModifierState rather than deriving it from the modifier flags, so a
+   * test asserts the kernel's rule and not one engine's derivation: Chromium and
+   * Firefox on Windows fold Ctrl+Alt into AltGraph only when the chord types a
+   * character, while Firefox on macOS reports AltGraph for every Option chord.
+   */
   function typeOnDocument(
     init: KeyboardEventInit & { key: string },
     opts: { altGraph?: boolean } = {},
@@ -1561,6 +1552,162 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     selectInOutput(root);
     return root;
   };
+
+  /** The other arming state: nothing selected, the last press inside the shell. */
+  const pressArmed = async (): Promise<HTMLElement> => {
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    root
+      .querySelector(".term-output")
+      ?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    ta(root).blur();
+    window.getSelection()?.removeAllRanges();
+    return root;
+  };
+
+  const fresh = (): void => {
+    sendBinary.mockClear();
+    destroyMounted();
+    document.body.replaceChildren();
+  };
+
+  const setKeyboardFlags = (keyboardFlags: number): void => {
+    fake.callbacks().onMessage({
+      type: "modes",
+      bracketedPaste: false,
+      applicationCursor: false,
+      applicationKeypad: false,
+      mouseSGR: false,
+      focusReporting: false,
+      reverseVideo: false,
+      mousePixels: false,
+      mouseMode: 0,
+      keyboardFlags,
+    });
+  };
+
+  /** What the focused textarea sends for this key: the oracle for the body path. */
+  async function focusedBytes(
+    init: KeyboardEventInit & { key: string },
+    keyboardFlags = 0,
+  ): Promise<string> {
+    fresh();
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [] });
+    setKeyboardFlags(keyboardFlags);
+    ta(root).focus();
+    const ev = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    Object.defineProperty(ev, "getModifierState", { value: () => false });
+    ta(root).dispatchEvent(ev);
+    return sentText();
+  }
+
+  it("delivers Ctrl+G and Ctrl+X and takes the keyboard back, in both arming states", async () => {
+    for (const arm of [armed, pressArmed]) {
+      for (const [init, bytes] of [
+        [{ key: "g", code: "KeyG", ctrlKey: true }, "\x07"],
+        [{ key: "x", code: "KeyX", ctrlKey: true }, "\x18"],
+      ] as [KeyboardEventInit & { key: string }, string][]) {
+        fresh();
+        const root = await arm();
+        const ev = typeOnDocument(init);
+        expect(sentText()).toBe(bytes);
+        expect(sendBinary).toHaveBeenCalledOnce();
+        expect(ev.defaultPrevented).toBe(true);
+        expect(document.activeElement).toBe(ta(root));
+        expect(window.getSelection()?.isCollapsed).toBe(true);
+      }
+    }
+  });
+
+  it("sends every encoded chord exactly as the focused textarea does", async () => {
+    for (const init of [
+      { key: "g", code: "KeyG", ctrlKey: true },
+      { key: "x", code: "KeyX", ctrlKey: true },
+      { key: "a", code: "KeyA", ctrlKey: true },
+      { key: "A", code: "KeyA", ctrlKey: true, shiftKey: true },
+      { key: "[", code: "BracketLeft", ctrlKey: true },
+      { key: " ", code: "Space", ctrlKey: true },
+      { key: "x", code: "KeyX", altKey: true },
+      { key: "ArrowLeft", code: "ArrowLeft", altKey: true },
+      { key: "ArrowLeft", code: "ArrowLeft", ctrlKey: true },
+      { key: "ArrowLeft", code: "ArrowLeft", metaKey: true },
+      { key: "Backspace", code: "Backspace", altKey: true },
+      { key: "Backspace", code: "Backspace", ctrlKey: true },
+      { key: "Enter", code: "Enter", altKey: true },
+      { key: "Delete", code: "Delete", ctrlKey: true },
+    ]) {
+      const oracle = await focusedBytes(init);
+      expect(oracle, init.key).not.toBe("");
+      fresh();
+      await armed();
+      typeOnDocument(init);
+      expect(sentText(), JSON.stringify(init)).toBe(oracle);
+    }
+  });
+
+  it("sends the kitty form of a chord under the disambiguate flag, as the focused path does", async () => {
+    const init = { key: "g", code: "KeyG", ctrlKey: true };
+    expect(await focusedBytes(init, 1)).toBe("\x1b[103;5u");
+    fresh();
+    await armed();
+    setKeyboardFlags(1);
+    typeOnDocument(init);
+    expect(sentText()).toBe("\x1b[103;5u");
+  });
+
+  it("delivers a real Ctrl+G keystroke once, with no second copy through the textarea", async () => {
+    const root = await armed();
+    await userEvent.keyboard("{Control>}g{/Control}");
+    expect(sentText()).toBe("\x07");
+    expect(sendBinary).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(ta(root));
+  });
+
+  it("leaves a copy chord to the browser while this terminal owns the selection", async () => {
+    for (const [init, keyboardFlags] of [
+      [{ key: "c", code: "KeyC", ctrlKey: true }, 0],
+      [{ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }, 0],
+      [{ key: "Insert", code: "Insert", ctrlKey: true }, 0],
+      // Unencoded on the legacy path; kitty encodes it from its physical key.
+      [{ key: "\u0441", code: "KeyC", ctrlKey: true }, 1],
+      [{ key: "c", code: "KeyC", metaKey: true }, 0],
+    ] as [KeyboardEventInit & { key: string }, number][]) {
+      fresh();
+      const root = await armed();
+      setKeyboardFlags(keyboardFlags);
+      const ev = typeOnDocument(init);
+      expect(sentText(), JSON.stringify(init)).toBe("");
+      expect(ev.defaultPrevented).toBe(false);
+      // The selection has to survive, or the copy would copy nothing.
+      expect(window.getSelection()?.isCollapsed).toBe(false);
+      expect(document.activeElement).not.toBe(ta(root));
+    }
+  });
+
+  it("sends Ctrl+C as 0x03 when nothing is selected, as the focused path does", async () => {
+    const root = await pressArmed();
+    typeOnDocument({ key: "c", code: "KeyC", ctrlKey: true });
+    expect(sentText()).toBe("\x03");
+    expect(document.activeElement).toBe(ta(root));
+  });
+
+  it("leaves a modified key the terminal does not encode to the browser", async () => {
+    for (const init of [
+      { key: "v", code: "KeyV", metaKey: true },
+      { key: "a", code: "KeyA", metaKey: true },
+      { key: "1", code: "Digit1", ctrlKey: true },
+      { key: "e", code: "KeyE", ctrlKey: true, altKey: true },
+    ]) {
+      fresh();
+      const root = await armed();
+      const ev = typeOnDocument(init);
+      expect(sentText(), JSON.stringify(init)).toBe("");
+      expect(ev.defaultPrevented).toBe(false);
+      expect(window.getSelection()?.isCollapsed).toBe(false);
+      expect(document.activeElement).not.toBe(ta(root));
+    }
+  });
 
   it("sends the character and takes the keyboard back", async () => {
     const root = await armed();
@@ -1635,17 +1782,36 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
         sr.appendChild(i);
         i.focus();
       },
+      () => {
+        const e = document.createElement("div");
+        e.contentEditable = "true";
+        document.body.appendChild(e);
+        e.focus();
+      },
     ];
     for (const focusSomething of cases) {
-      sendBinary.mockClear();
-      destroyMounted();
-      document.body.replaceChildren();
-      const root = await armed();
-      focusSomething();
-      typeOnDocument({ key: "x" });
-      expect(sentText()).toBe("");
-      expect(document.activeElement).not.toBe(ta(root));
+      for (const init of [{ key: "x" }, { key: "g", code: "KeyG", ctrlKey: true }]) {
+        fresh();
+        const root = await armed();
+        focusSomething();
+        const focused = document.activeElement;
+        typeOnDocument(init);
+        expect(sentText()).toBe("");
+        expect(document.activeElement).toBe(focused);
+        expect(document.activeElement).not.toBe(ta(root));
+      }
     }
+  });
+
+  it("leaves a real Ctrl+G typed into a host input with that input", async () => {
+    const root = await armed();
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    field.focus();
+    await userEvent.keyboard("{Control>}g{/Control}");
+    expect(sentText()).toBe("");
+    expect(document.activeElement).toBe(field);
+    expect(document.activeElement).not.toBe(ta(root));
   });
 
   it("sends nothing unless this terminal owns a real selection", async () => {
@@ -1705,39 +1871,46 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     }
   });
 
-  it("leaves modified keys to the browser, so Ctrl+C still copies the selection", async () => {
-    for (const init of [
-      { key: "c", ctrlKey: true },
-      { key: "c", metaKey: true },
-      { key: "ArrowLeft", altKey: true },
-      { key: "ArrowLeft", ctrlKey: true },
-      { key: "Backspace", altKey: true },
-    ]) {
-      sendBinary.mockClear();
-      destroyMounted();
-      document.body.replaceChildren();
+  it("sends an AltGr character, which arrives with AltGraph and neither Ctrl nor Alt", async () => {
+    for (const keyboardFlags of [0, 1]) {
+      fresh();
       await armed();
-      typeOnDocument(init);
-      expect(sentText()).toBe("");
-      // The selection has to survive, or Ctrl+C would copy nothing.
-      expect(window.getSelection()?.isCollapsed).toBe(false);
+      setKeyboardFlags(keyboardFlags);
+      typeOnDocument({ key: "\u20AC", code: "KeyE" }, { altGraph: true });
+      expect(sentText(), String(keyboardFlags)).toBe("\u20AC");
     }
   });
 
-  it("recovers an AltGr character, which arrives with the AltGraph modifier", async () => {
-    await armed();
-    typeOnDocument({ key: "\u20AC", ctrlKey: true, altKey: true }, { altGraph: true });
-    expect(sentText()).toBe("\u20AC");
+  it("leaves a Firefox macOS Option chord the terminal does not encode to the browser", async () => {
+    // Firefox reports AltGraph with Option, so AltGraph must not make Ctrl+Option+a
+    // or Cmd+Option+a typeable here: an unencoded Ctrl or Cmd chord is the browser's.
+    for (const init of [
+      { key: "\u00E5", code: "KeyA", ctrlKey: true, altKey: true },
+      { key: "\u00E5", code: "KeyA", metaKey: true, altKey: true },
+    ]) {
+      fresh();
+      const root = await armed();
+      const ev = typeOnDocument(init, { altGraph: true });
+      expect(sentText(), JSON.stringify(init)).toBe("");
+      expect(ev.defaultPrevented).toBe(false);
+      expect(window.getSelection()?.isCollapsed).toBe(false);
+      expect(document.activeElement).not.toBe(ta(root));
+    }
   });
 
   it("leaves Tab to the browser, so a keyboard user can move on", async () => {
-    for (const init of [{ key: "Tab" }, { key: "Tab", shiftKey: true }]) {
-      sendBinary.mockClear();
-      destroyMounted();
-      document.body.replaceChildren();
-      await armed();
-      typeOnDocument(init);
+    for (const init of [
+      { key: "Tab" },
+      { key: "Tab", shiftKey: true },
+      { key: "Tab", ctrlKey: true },
+      { key: "Tab", altKey: true },
+    ]) {
+      fresh();
+      const root = await armed();
+      const ev = typeOnDocument(init);
       expect(sentText()).toBe("");
+      expect(ev.defaultPrevented).toBe(false);
+      expect(document.activeElement).not.toBe(ta(root));
     }
   });
 
@@ -1892,23 +2065,19 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
   it("leaves a key the host page already handled", async () => {
     // preventDefault is the platform's own way to say "handled", so an embedder
     // with a document-level keymap needs no option to opt out of this listener.
-    await armed();
-    const ev = new KeyboardEvent("keydown", { key: "j", bubbles: true, cancelable: true });
-    Object.defineProperty(ev, "getModifierState", { value: () => false });
-    document.addEventListener("keydown", (e) => e.preventDefault(), { capture: true, once: true });
-    document.body.dispatchEvent(ev);
-    expect(sentText()).toBe("");
-    expect(window.getSelection()?.isCollapsed).toBe(false);
-  });
-
-  it("grants the AltGraph exception to a character, never to a mapped key", async () => {
-    // AltGraph is not a reliable signal by itself: Firefox reports it for plain
-    // Option on macOS and for ordinary Ctrl+Alt on Windows. Admitting every
-    // AltGraph event would hand the terminal Option+ArrowLeft, which is back.
-    await armed();
-    typeOnDocument({ key: "ArrowLeft", altKey: true }, { altGraph: true });
-    expect(sentText()).toBe("");
-    expect(window.getSelection()?.isCollapsed).toBe(false);
+    for (const init of [{ key: "j" }, { key: "g", code: "KeyG", ctrlKey: true }]) {
+      fresh();
+      await armed();
+      const ev = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+      Object.defineProperty(ev, "getModifierState", { value: () => false });
+      document.addEventListener("keydown", (e) => e.preventDefault(), {
+        capture: true,
+        once: true,
+      });
+      document.body.dispatchEvent(ev);
+      expect(sentText()).toBe("");
+      expect(window.getSelection()?.isCollapsed).toBe(false);
+    }
   });
 
   it("leaves the keystroke to the IME while a composition is running", async () => {
@@ -1937,10 +2106,13 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     // Focus can fail to land: an inert subtree under an open modal dialog, or a
     // released root. Bytes whose effect the user cannot see must not reach the
     // shell, so the listener fails closed rather than sending blind.
-    const root = await armed();
-    Object.defineProperty(ta(root), "focus", { value: () => undefined });
-    typeOnDocument({ key: "x" });
-    expect(sentText()).toBe("");
+    for (const init of [{ key: "x" }, { key: "g", code: "KeyG", ctrlKey: true }]) {
+      fresh();
+      const root = await armed();
+      Object.defineProperty(ta(root), "focus", { value: () => undefined });
+      typeOnDocument(init);
+      expect(sentText()).toBe("");
+    }
   });
 
   it("scrolls the viewport for Shift+PageUp and Shift+PageDown", async () => {
@@ -1991,6 +2163,33 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(writeText).toHaveBeenCalledWith("line 1 ");
     expect(sentText()).toBe("");
     vi.unstubAllGlobals();
+  });
+
+  it("lets the real clipboard feature paste on Ctrl+Shift+V with focus on the body", async () => {
+    const readText = vi.fn(() => Promise.resolve("pasted"));
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [clipboard()] });
+    ta(root).blur();
+    selectInOutput(root);
+    const ev = typeOnDocument({ key: "V", code: "KeyV", ctrlKey: true, shiftKey: true });
+    expect(readText).toHaveBeenCalledOnce();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(sentText()).not.toContain("\x16");
+    await tick();
+    expect(sentText()).toContain("pasted");
+    vi.unstubAllGlobals();
+  });
+
+  it("leaves plain Ctrl+V to the browser's paste, never sending 0x16", async () => {
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [clipboard()] });
+    ta(root).blur();
+    selectInOutput(root);
+    const ev = typeOnDocument({ key: "v", code: "KeyV", ctrlKey: true });
+    expect(sentText()).toBe("");
+    expect(ev.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("runs the feature keydown chain with the selection still intact", async () => {

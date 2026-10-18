@@ -662,6 +662,29 @@ describe("contextMenu — Escape belongs to the menu only while it is open", () 
     expect(sendBinary).toHaveBeenCalledTimes(1);
   });
 
+  it("closes the menu on an Escape that reaches the body, sending no ESC", async () => {
+    // The body-path twin: after a mouse selection blurs the input, the kernel's
+    // document listener encodes Escape, so the menu must claim it there too.
+    const { root, surface } = await mount();
+    surface.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }),
+    );
+    expect(isOpen(root)).toBe(true);
+    root.querySelector<HTMLTextAreaElement>(".term-input")?.blur();
+    const output = root.querySelector(".term-output");
+    const text = document.createTextNode("selected output");
+    output?.appendChild(text);
+    window.getSelection()?.setBaseAndExtent(text, 0, text, 8);
+    expect(document.activeElement).toBe(document.body);
+
+    const ev = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    document.body.dispatchEvent(ev);
+
+    expect(ev.defaultPrevented).toBe(true);
+    expect(isOpen(root)).toBe(false);
+    expect(sendBinary).not.toHaveBeenCalled();
+  });
+
   it("leaves every other key to the terminal", async () => {
     const { root, surface } = await mount();
     surface.dispatchEvent(
