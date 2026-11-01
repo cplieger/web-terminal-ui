@@ -3,8 +3,8 @@
 // misplacement fails loudly: a test needing Node (`node:fs`, a golden write)
 // throws in the browser, while a test needing a browser capability ABSENT passes
 // vacuously in Node too, so it stays in the browser and removes it at the site.
+import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
-import { alwaysOnInterception } from "./src/test-helpers/always-on-interception.js";
 
 // VITEST_TRACE=1 turns on trace view and the html reporter together, so one
 // variable yields an openable report (.vitest/index.html). Off by default: the
@@ -62,7 +62,7 @@ export default defineConfig({
           ],
           browser: {
             ...browserCommon,
-            provider: alwaysOnInterception({ launchOptions }),
+            provider: playwright({ launchOptions }),
             instances: [{ browser: "chromium" }],
           },
         },
@@ -77,14 +77,10 @@ export default defineConfig({
         test: {
           name: "browser-touch",
           include: ["src/**/*.touch.test.ts"],
-          // A later group, so this project never runs beside `browser`: a bail that
-          // lands while the other project is resolving a `vi.mock` factory can end
-          // the vitest process (https://github.com/vitest-dev/vitest/issues/11467).
-          sequence: { groupOrder: 1 },
           exclude: ["node_modules/**", "**/.stryker-tmp/**"],
           browser: {
             ...browserCommon,
-            provider: alwaysOnInterception({ launchOptions, contextOptions: { hasTouch: true } }),
+            provider: playwright({ launchOptions, contextOptions: { hasTouch: true } }),
             instances: [{ browser: "chromium" }],
           },
         },

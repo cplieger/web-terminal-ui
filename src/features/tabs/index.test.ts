@@ -16,7 +16,7 @@ import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
-import { CUE_SEEN_KEY, SWIPE_HINT_KEY } from "./model.js";
+import { SWIPE_HINT_KEY } from "./model.js";
 // The reorder preview's timings, imported rather than restated: the tests below pin the
 // SHAPE of the interaction (a sweep rearranges nothing, a stationary dragover opens the
 // slot, the no-events fallback clears the drag loop's cadence, a drop never waits), not
@@ -28,6 +28,7 @@ import {
   REORDER_SLOT_FADE_MS,
   REORDER_STILL_MS,
 } from "./strip.js";
+import { engineNumbering, seenAcks } from "./test-helpers/sessions-server.js";
 
 // A fake activityMonitor feature: lets a test push status events into tabs
 // without the real SSE. tabs reads it via ctx.use, so passing the same feature
@@ -39,6 +40,7 @@ function fakeMonitor(): {
   open: () => void;
 } {
   const subs = new Set<(s: SessionStatus) => void>();
+  const number = engineNumbering();
   const openSubs = new Set<() => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
@@ -63,8 +65,9 @@ function fakeMonitor(): {
   return {
     feature,
     emit: (s) => {
+      const rec = number(s);
       for (const cb of [...subs]) {
-        cb(s);
+        cb(rec);
       }
     },
     open: () => {
@@ -588,9 +591,9 @@ describe("tabs feature", () => {
   });
 
   it("spawns and activates a fresh session when every listed session is exited", async () => {
-    // The agent died in every listed session (e.g. a sign-in dead end). The
-    // bootstrap must not wedge on a corpse: it spawns a fresh live session,
-    // activates it, and keeps the exited one around as a viewable tab.
+    // The program exited in every listed session. The bootstrap must not
+    // wedge on a corpse: it spawns a fresh live session, activates it, and
+    // keeps the exited one around as a viewable tab.
     listBody = [{ id: "s1", title: "", createdAt: "1", status: "exited" }];
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -707,10 +710,10 @@ describe("tabs feature", () => {
   });
 
   it("opens one terminal when one press delivers two + activations", async () => {
-    // iPadOS can deliver two activations for a single press on the strip (the
-    // web-terminal-kiro server logged two POST /api/sessions 0-3ms apart for one
-    // "+" tap), which used to spawn two sessions. Unique POST ids so a second
-    // create cannot hide behind the shared-id dedup in create().
+    // iPadOS can deliver two activations for a single press on the strip (a
+    // server logs two POST /api/sessions 0-3ms apart for one "+" tap). Unique
+    // POST ids so a second create cannot hide behind the shared-id dedup in
+    // create().
     let posts = 0;
     vi.stubGlobal(
       "fetch",
@@ -855,8 +858,8 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // An agent shell presumes every session reports (presetAgentTabbed): the
-    // dot is revealed as idle immediately, without waiting for the agent's
-    // first OSC 9;4 signal.
+    // dot is revealed as idle immediately, without waiting for the session's
+    // first OSC 7501 status, OSC 9;4 progress or classified OSC 9 notification.
     for (const dot of root.querySelectorAll<HTMLElement>(".wt-tab .wt-tab-dot")) {
       expect(dot.classList.contains("wt-reports")).toBe(true);
       expect(dot.dataset["status"]).toBe("idle");
@@ -1174,7 +1177,7 @@ describe("tabs feature", () => {
     openTabMenu(root, 0);
     expect(menu?.classList.contains("visible")).toBe(true);
 
-    // A background agent printing into the TUI scrolls the terminal surface to
+    // Background output printing into the TUI scrolls the terminal surface to
     // the bottom on every chunk. That scroll moves neither the menu (placed
     // root-relative) nor the chip it is anchored to, so it must not dismiss.
     root.querySelector(".term")?.dispatchEvent(new Event("scroll"));
@@ -1321,7 +1324,7 @@ describe("tabs feature", () => {
 
   it("labels tabs from the server title and shows 'New tab' for untitled ones", async () => {
     listBody = [
-      { id: "s1", title: "kiro: fix bug", createdAt: "1", status: "idle" },
+      { id: "s1", title: "agent: fix bug", createdAt: "1", status: "idle" },
       { id: "s2", title: "", createdAt: "2", status: "idle" },
     ];
     const root = document.createElement("div");
@@ -1330,7 +1333,7 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
-    expect(labels[0]).toBe("kiro: fix bug");
+    expect(labels[0]).toBe("agent: fix bug");
     // An untitled session reads "New tab" (no "Tab N" number).
     expect(labels[1]).toBe("New tab");
   });
@@ -1352,8 +1355,8 @@ describe("tabs feature", () => {
 
   it("de-duplicates identical tab titles with a numeric suffix", async () => {
     listBody = [
-      { id: "s1", title: "kiro: workspace", createdAt: "1", status: "idle" },
-      { id: "s2", title: "kiro: workspace", createdAt: "2", status: "idle" },
+      { id: "s1", title: "agent: workspace", createdAt: "1", status: "idle" },
+      { id: "s2", title: "agent: workspace", createdAt: "2", status: "idle" },
     ];
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1361,8 +1364,8 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const labels = [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
-    expect(labels[0]).toBe("kiro: workspace");
-    expect(labels[1]).toBe("kiro: workspace (2)");
+    expect(labels[0]).toBe("agent: workspace");
+    expect(labels[1]).toBe("agent: workspace (2)");
   });
 
   it("keeps the suffix with its own session across a reorder", async () => {
@@ -1379,8 +1382,8 @@ describe("tabs feature", () => {
     // compareTabOrder) and deliberately NOT to the identity: feeding the custom
     // order into the numbering is exactly what made the reorder invisible.
     listBody = [
-      { id: "s1", title: "kiro: workspace", createdAt: "1", status: "idle" },
-      { id: "s2", title: "kiro: workspace", createdAt: "2", status: "idle" },
+      { id: "s1", title: "agent: workspace", createdAt: "1", status: "idle" },
+      { id: "s2", title: "agent: workspace", createdAt: "2", status: "idle" },
     ];
     const feature = tabs();
     const root = document.createElement("div");
@@ -1389,14 +1392,14 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
     const labels = (): (string | null)[] =>
       [...root.querySelectorAll(".wt-tab-label")].map((e) => e.textContent);
-    expect(labels()).toEqual(["kiro: workspace", "kiro: workspace (2)"]);
+    expect(labels()).toEqual(["agent: workspace", "agent: workspace (2)"]);
 
     // Move the younger tab to the front. Its number must travel with it, so the
     // strip now reads "(2)" FIRST -- which is what makes the move visible at all.
     menuItem(openTabMenu(root, 1), "Move left")?.click();
 
     expect(feature.api?.list().map((t) => t.id)).toEqual(["s2", "s1"]);
-    expect(labels()).toEqual(["kiro: workspace (2)", "kiro: workspace"]);
+    expect(labels()).toEqual(["agent: workspace (2)", "agent: workspace"]);
   });
 
   it("creates one session when the list is empty", async () => {
@@ -1483,18 +1486,18 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     // The process sets a window title.
-    monitor.emit({ id: "s1", status: "working", title: "kiro: building", createdAt: "1" });
-    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("kiro: building");
+    monitor.emit({ id: "s1", status: "working", title: "agent: building", createdAt: "1" });
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("agent: building");
 
     // A later sweep reports a BLANK title (the process cleared its OSC 0/2
     // title, or an idle-session record has none). It must NOT revert the label
     // to "New tab": the last good title is held until a real one replaces it.
     monitor.emit({ id: "s1", status: "idle", title: "", createdAt: "1" });
-    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("kiro: building");
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("agent: building");
 
     // A genuine new non-blank title still replaces it.
-    monitor.emit({ id: "s1", status: "idle", title: "kiro: tests", createdAt: "1" });
-    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("kiro: tests");
+    monitor.emit({ id: "s1", status: "idle", title: "agent: tests", createdAt: "1" });
+    expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("agent: tests");
   });
 
   it("closes a tab from an expanded list row (DELETE)", async () => {
@@ -1638,14 +1641,10 @@ describe("tabs feature", () => {
     expect(dot?.dataset["status"]).toBeUndefined();
   });
 
-  it("does not re-raise the switch-button dot for a cue already dismissed (reload)", async () => {
-    // The reported bug: dismissing the dot, then reloading, brought it back.
-    // "input"/"done" are LATCHED server-side (cleared only by the session's next
-    // working phase) and the status stream re-pushes the latch in the snapshot it
-    // sends on every open, so the fresh page re-raised a cue the user had already
-    // resolved. A dismissal is therefore remembered in localStorage — this
-    // simulates the reload by pre-seeding what the previous page wrote.
-    localStorage.setItem(CUE_SEEN_KEY, JSON.stringify({ s2: "done" }));
+  it("does not raise the switch-button dot for a cue another reader already read", async () => {
+    // "input"/"done" stay LATCHED server-side and the stream re-pushes them on
+    // every open; the server's seen floor is what keeps a read one from lighting
+    // the dot again on a reload or on another device.
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1655,19 +1654,32 @@ describe("tabs feature", () => {
     await until(() => root.querySelectorAll(".wt-tab").length === 2);
 
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
-    // The re-delivered latch for s2 raises nothing: this viewer saw it already.
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    monitor.emit({
+      id: "s2",
+      status: "done",
+      title: "two",
+      createdAt: "2",
+      statusSeq: 1,
+      seenSeq: 1,
+    });
     expect(dot?.dataset["status"]).toBeUndefined();
-    // A DIFFERENT latch on the same session is a new event and still notifies.
-    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    // The session's next occurrence is news and still notifies.
+    monitor.emit({
+      id: "s2",
+      status: "input",
+      title: "two",
+      createdAt: "2",
+      statusSeq: 2,
+      seenSeq: 1,
+    });
     expect(dot?.dataset["status"]).toBe("input");
   });
 
-  it("persists the dismissal of every listed tab when the switcher opens", async () => {
+  it("acknowledges every listed tab when the switcher opens", async () => {
     // The tray shows each tab's own dot, so opening it acknowledges all of them,
     // not just the cue's latest subject: several tabs can hold a latch at once
-    // while the dot only ever shows the newest, and an unacknowledged sibling
-    // would re-raise it on the next load.
+    // while the dot only ever shows the newest, and an unread sibling would stay
+    // unread on every device.
     const monitor = fakeMonitor();
     listBody = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
@@ -1685,13 +1697,10 @@ describe("tabs feature", () => {
     monitor.emit({ id: "s3", status: "done", title: "three", createdAt: "3" });
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
 
-    expect(JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}")).toEqual({
-      s2: "input",
-      s3: "done",
-    });
+    expect(seenAcks(fetchMock.mock.calls)).toEqual({ s2: 1, s3: 1 });
   });
 
-  it("persists the dismissal when a switch arrives on the raising tab", async () => {
+  it("acknowledges the cue when a switch arrives on the raising tab", async () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1701,7 +1710,7 @@ describe("tabs feature", () => {
 
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
     feature.api?.switchTo("s2");
-    expect(JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}")).toEqual({ s2: "done" });
+    expect(seenAcks(fetchMock.mock.calls)).toEqual({ s2: 1 });
   });
 
   it("does not notify about a latch that happened on the tab in front of the user", async () => {
@@ -1720,13 +1729,12 @@ describe("tabs feature", () => {
     expect(root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"]).toBe(
       undefined,
     );
-    expect(JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}")).toEqual({ s1: "done" });
+    expect(seenAcks(fetchMock.mock.calls)).toEqual({ s1: 1 });
   });
 
-  it("forgets the dismissal once the session's status moves on", async () => {
-    // The acknowledgement is on the (session, latch) pair: a new working phase
-    // clears the latch server-side, so the NEXT done is a fresh cue rather than a
-    // re-delivery of the dismissed one.
+  it("raises the next occurrence after the session's status moves on", async () => {
+    // A new working phase is a new occurrence, so the NEXT done is a fresh cue
+    // rather than a re-delivery of the acknowledged one.
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1741,29 +1749,8 @@ describe("tabs feature", () => {
     expect(dot?.dataset["status"]).toBeUndefined();
 
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toBe("{}");
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
     expect(dot?.dataset["status"]).toBe("done");
-  });
-
-  it("drops a closed session's dismissal instead of leaving it in storage", async () => {
-    const monitor = fakeMonitor();
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    term = await mountTerminal(root, {
-      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
-    });
-    await until(() => root.querySelectorAll(".wt-tab").length === 2);
-
-    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
-    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toContain("s2");
-
-    root
-      .querySelectorAll<HTMLElement>(".wt-tab")[1]
-      ?.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
-    await until(() => root.querySelectorAll(".wt-tab").length === 1);
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toBe("{}");
   });
 
   it("clears the switch-button dot when the tab that raised it is closed", async () => {
@@ -2015,8 +2002,8 @@ describe("tabs feature", () => {
   // so every viewer of one server shares it and it outlives a reload without the
   // client storing anything. The localStorage arrangement this section used to
   // pin is gone with it. What remains worth pinning is that the strip still
-  // works when Storage itself is hostile, which the active-tab and cue-seen
-  // writes still touch.
+  // works when Storage itself is hostile, which the active-tab write still
+  // touches.
 
   it("survives storage that throws (Safari private mode) without losing the reorder", async () => {
     stubHostileStorage();
@@ -2058,12 +2045,10 @@ describe("tabs feature", () => {
 });
 
 describe("tabs feature: a host that temporarily refuses session creation (503)", () => {
-  // web-terminal-kiro holds session creation with 503 + Retry-After while its
-  // tool engine installs the manifest's tools on first boot, a window its own
-  // HEALTHCHECK budgets 20 minutes for. That used to surface as the same fixed
-  // "Couldn't open a terminal" toast as a 500, with no retry: an empty tab bar
-  // and a page that read as broken while the server was deliberately waiting
-  // (and /api/health reported healthy at the same time).
+  // A host can hold session creation with 503 + Retry-After for minutes while
+  // it starts up. A fixed "Couldn't open a terminal" toast with no retry would
+  // leave an empty tab bar and a page that reads as broken while the server is
+  // deliberately waiting.
   it("retries on the server's own hint and opens the terminal once it is ready", async () => {
     listBody = []; // nothing live, so the bootstrap must create
     let posts = 0;
@@ -2074,7 +2059,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
         // covered in model.test.ts), then succeed.
         if (posts <= 2) {
           return Promise.resolve(
-            jsonResponse({ error: "tools installing" }, 503, { "Retry-After": "0" }),
+            jsonResponse({ error: "service starting" }, 503, { "Retry-After": "0" }),
           );
         }
         return Promise.resolve(
@@ -2098,7 +2083,7 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
     fetchMock.mockImplementation((_url: string | URL, init?: RequestInit) => {
       if ((init?.method ?? "GET") === "POST") {
         return Promise.resolve(
-          jsonResponse({ error: "tools installing" }, 503, { "Retry-After": "0" }),
+          jsonResponse({ error: "service starting" }, 503, { "Retry-After": "0" }),
         );
       }
       return Promise.resolve(jsonResponse(listBody, 200));
@@ -2108,10 +2093,9 @@ describe("tabs feature: a host that temporarily refuses session creation (503)",
     document.body.appendChild(root);
     term = await mountTerminal(root, { features: () => [tabs()] });
 
-    // The host's own words reach the page; the library never hardcodes "tools",
-    // which is a web-terminal-kiro concept it knows nothing about.
-    await until(() => root.textContent?.includes("tools installing") === true, 200);
-    expect(root.textContent).toContain("tools installing");
+    // The host's own words reach the page; the library hardcodes no reason.
+    await until(() => root.textContent?.includes("service starting") === true, 200);
+    expect(root.textContent).toContain("service starting");
   });
 
   it("does NOT retry a 500: that is not 'come back shortly'", async () => {
@@ -2434,11 +2418,11 @@ describe("tabs feature: a request that settles after teardown", () => {
   });
 });
 
-// OSC 9 chrome: the progress states, the percentage's two display modes, the
+// Status chrome: the progress states, the percentage's two display modes, the
 // notification, the aggregate cue's allowed set, and the accessible name.
 // Driven through the real feature in a real browser, so what is asserted is the
 // DOM a browser does paint.
-describe("tabs OSC 9 status chrome", async () => {
+describe("tabs status chrome", async () => {
   /** Build a terminal with a fake status monitor and wait for both tabs. */
   async function withMonitor(
     opts: Parameters<typeof tabs>[0] = {},
@@ -2519,7 +2503,7 @@ describe("tabs OSC 9 status chrome", async () => {
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 60 });
     expect(tabBar(root, 0)?.hidden).toBe(false);
 
-    // The spec's own clear (OSC 9;4;0 / the abbreviated form) arrives as -1.
+    // OSC 9;4's own clear (9;4;0 / the abbreviated form) arrives as -1.
     monitor.emit({ id: "s1", status: "idle", title: "one", createdAt: "1", progressValue: -1 });
     const bar = tabBar(root, 0);
     expect(bar?.hidden).toBe(true);
@@ -2536,8 +2520,8 @@ describe("tabs OSC 9 status chrome", async () => {
 
   it("keeps 100% until the program clears it: no completion signal, no timeout", async () => {
     // 100% is not a completion signal: state 1 at 100 is a STATE that persists,
-    // and the progress channel carries no "done" of its own (our done is a
-    // classified notification on a separate channel). So a program that pins 100
+    // and OSC 9;4 carries no "done" of its own (done comes from an OSC 7501
+    // report or a notification). So a program that pins 100
     // and goes quiet keeps its bar — asserting otherwise would report a state
     // change the program never made.
     const { root, monitor } = await withMonitor();
@@ -2556,32 +2540,16 @@ describe("tabs OSC 9 status chrome", async () => {
     expect(tabBar(root, 0)?.style.width).toBe("100%");
   });
 
-  it("hides the bar under a status the progress channel does not own", async () => {
-    // A latch is the NOTIFICATION channel talking, so a percentage retained from
-    // the progress channel must not be painted underneath it. Measured against
-    // kiro-cli, which parks progress state 4 at its context-window usage once
-    // idle: a finished turn painted a green done dot beside a 72% bar, and a
-    // pending approval a full one, neither of which was how far along anything
-    // was. The engine is right to keep sending the value (a progress state
-    // persists); this is the consumer deciding it is not the current word.
+  it("paints the bar beside a done, input or idle dot", async () => {
+    // An OSC 7501 report or a notification sets these statuses while OSC 9;4
+    // keeps drawing the bar, so the bar stays.
     for (const status of ["done", "input", "idle"] as const) {
       const { root, monitor } = await withMonitor();
-      monitor.emit({
-        id: "s1",
-        status: "working",
-        title: "one",
-        createdAt: "1",
-        progressValue: 72,
-      });
-      expect(tabBar(root, 0)?.hidden, `working precondition for ${status}`).toBe(false);
-
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: 72 });
-      expect(tabBar(root, 0)?.hidden, status).toBe(true);
-      expect(tabLabel(root, 0)?.textContent, status).toBe("one");
-      // The value is not forgotten, only unshown: the program's own progress
-      // states paint it again without needing a fresh report.
-      monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1" });
+      expect(tabDot(root, 0)?.dataset["status"], status).toBe(status);
+      expect(tabBar(root, 0)?.hidden, status).toBe(false);
       expect(tabBar(root, 0)?.style.width, status).toBe("72%");
+      expect(tabLabel(root, 0)?.textContent, status).toBe("one");
 
       term?.destroy();
       term = undefined;
@@ -2589,7 +2557,7 @@ describe("tabs OSC 9 status chrome", async () => {
     }
   });
 
-  it("keeps the bar under the three statuses the progress channel does own", async () => {
+  it("keeps the bar under the working, warning and failed statuses", async () => {
     for (const status of ["working", "warning", "failed"] as const) {
       const { root, monitor } = await withMonitor();
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: 40 });
@@ -2602,7 +2570,31 @@ describe("tabs OSC 9 status chrome", async () => {
     }
   });
 
-  it("clears the bar and the prefix when the process ends (the second clear)", async () => {
+  it("renders a status outside the built-in vocabulary as a live state with no cue", async () => {
+    // A host's notification classifier may return any status string.
+    document.title = "Host page";
+    const { root, monitor } = await withMonitor();
+    const status = "hibernating";
+    monitor.emit({ id: "s2", status, title: "two", createdAt: "2", progressValue: 55 });
+
+    const dot = tabDot(root, 1);
+    expect(dot?.dataset["status"]).toBe("hibernating");
+    expect(dot?.title).toBe("hibernating");
+    expect(dot?.classList.contains("wt-reports"), "no reveal of its own").toBe(false);
+    expect(tabBar(root, 1)?.hidden, "a live process keeps its bar").toBe(false);
+    expect(tabBar(root, 1)?.style.width).toBe("55%");
+    expect(root.querySelectorAll<HTMLElement>(".wt-tab")[1]?.getAttribute("aria-label")).toBe(
+      "two, hibernating, 55%",
+    );
+    expect(document.title, "no title count").toBe("one · Host page");
+    const switchDot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
+    expect(switchDot?.dataset["status"], "no switch-button cue").toBeUndefined();
+
+    monitor.emit({ id: "s2", status, title: "two", createdAt: "2", reportsActivity: true });
+    expect(dot?.classList.contains("wt-reports"), "shown once the session reports").toBe(true);
+  });
+
+  it("clears the bar when the process ends (the second clear)", async () => {
     // The only clear the UI applies itself: a dead process's progress is
     // meaningless, and nothing will ever arrive to clear it. Both ends count.
     for (const ended of ["exited", "crashed"] as const) {
@@ -2827,10 +2819,12 @@ describe("tabs OSC 9 status chrome", async () => {
     expect(chip?.getAttribute("aria-label")).toBe("one, working, 30%");
     expect(tabLabel(root, 0)?.textContent).toBe("one");
 
-    // A percentage the tab is not SHOWING is not announced either: the announced
-    // name follows the same statusOwnsProgress rule the bar does.
+    // The announced name follows the bar's rule (renderedProgress): a done tab
+    // still showing its bar announces the percentage, an ended one does not.
     monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1", progressValue: 30 });
-    expect(chip?.getAttribute("aria-label")).toBe("one, turn finished");
+    expect(chip?.getAttribute("aria-label")).toBe("one, turn finished, 30%");
+    monitor.emit({ id: "s1", status: "exited", title: "one", createdAt: "1", progressValue: 30 });
+    expect(chip?.getAttribute("aria-label")).toBe("one, session ended");
 
     // Both halves come from ONE wording map, so hover text and announced text
     // cannot drift apart. Asserted for every state, in both directions.
@@ -3111,10 +3105,10 @@ describe("tabs OSC 9 notifications", () => {
       status: "done",
       title: "two",
       createdAt: "2",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
-    expect(posts).toEqual([{ title: "two", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "two", body: "Task finished" }]);
   });
 
   it("titles a notification with the tab's own name, and a click on it opens that tab", async () => {
@@ -3126,10 +3120,10 @@ describe("tabs OSC 9 notifications", () => {
       title: "two",
       pinnedTitle: "Build box",
       createdAt: "2",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
-    expect(posts).toEqual([{ title: "Build box", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "Build box", body: "Task finished" }]);
 
     shown[0]?.onclick?.(new Event("click"));
     expect(root.querySelector(".wt-tab-active .wt-tab-label")?.textContent).toBe("Build box");
@@ -3144,7 +3138,7 @@ describe("tabs OSC 9 notifications", () => {
       status: "done",
       title: "one",
       createdAt: "1",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
     expect(posts).toEqual([]);
@@ -3161,10 +3155,10 @@ describe("tabs OSC 9 notifications", () => {
       status: "done",
       title: "one",
       createdAt: "1",
-      notification: "Response complete",
+      notification: "Task finished",
       notificationSeq: 1,
     });
-    expect(posts).toEqual([{ title: "one", body: "Response complete" }]);
+    expect(posts).toEqual([{ title: "one", body: "Task finished" }]);
   });
 
   it("lets a closed session's id notify again from sequence one", async () => {
@@ -3266,7 +3260,7 @@ describe("tabs OSC 9 notifications", () => {
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
     expect(arm).not.toHaveBeenCalled();
 
-    // A session that reports activity speaks OSC 9, so it may notify.
+    // A session that reports activity is a program that may also notify.
     monitor.emit({
       id: "s1",
       status: "working",
@@ -3292,7 +3286,7 @@ describe("tabs OSC 9 notifications", () => {
         title: "two",
         createdAt: "2",
         reportsActivity: true,
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 1,
       });
     }).not.toThrow();
@@ -3312,7 +3306,7 @@ describe("tabs OSC 9 notifications", () => {
         status: "done",
         title: "two",
         createdAt: "2",
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 1,
       });
     }).not.toThrow();
@@ -3326,7 +3320,7 @@ describe("tabs OSC 9 notifications", () => {
 // animations feature or reduced motion set (no animation runs at all), and a
 // consumer stylesheet without the rules.
 //
-// Fidelity notes, each one a correction from adversarial review:
+// Fidelity notes:
 //   - The event is dispatched from `.term-output`, which is where all three rules
 //     actually declare the animation (css/40-animations.css), and it BUBBLES to
 //     `.term` where the listener lives. Manufacturing it on `.term` tested a path
@@ -5323,46 +5317,19 @@ describe("tabs: in a second document", () => {
       removeItem: (key: string): void => {
         store.delete(key);
       },
+      get length(): number {
+        return store.size;
+      },
+      key: (index: number): string | null => [...store.keys()][index] ?? null,
     };
     Object.defineProperty(second.win, "localStorage", { configurable: true, value: storage });
     return store;
   }
 
-  it("honours a cue dismissal recorded in the frame's storage, and not one in the importing page's", async () => {
-    // The importing page remembers s2's cue as seen; the frame's own storage
-    // holds no such record, so the re-delivered latch is a fresh cue there.
-    localStorage.setItem(CUE_SEEN_KEY, JSON.stringify({ s2: "done" }));
+  it("sends a cue's acknowledgement through the frame's own fetch, not the importing page's", async () => {
     const second = secondDocument();
-    const store = frameStorage(second);
-    const monitor = fakeMonitor();
-    term = await mountTerminal(second.root, {
-      features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
-    });
-    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
-    const dot = second.root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
-
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
-    expect(dot?.dataset["status"]).toBe("done");
-
-    // The same page, remembering the dismissal: the frame's record silences it.
-    term.destroy();
-    term = undefined;
-    store.set(CUE_SEEN_KEY, JSON.stringify({ s2: "done" }));
-    localStorage.clear();
-    const again = fakeMonitor();
-    term = await mountTerminal(second.root, {
-      features: () => [again.feature, tabs({ activityMonitor: again.feature })],
-    });
-    await until(() => second.root.querySelectorAll(".wt-tab").length === 2);
-    again.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
-    expect(
-      second.root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"],
-    ).toBeUndefined();
-  });
-
-  it("records a cue dismissal in the frame's storage, not the importing page's", async () => {
-    const second = secondDocument();
-    const store = frameStorage(second);
+    const outer = vi.fn(fetchMock.getMockImplementation() ?? (() => Promise.reject(new Error())));
+    vi.stubGlobal("fetch", outer);
     const monitor = fakeMonitor();
     term = await mountTerminal(second.root, {
       features: () => [monitor.feature, tabs({ activityMonitor: monitor.feature })],
@@ -5372,8 +5339,8 @@ describe("tabs: in a second document", () => {
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
     second.root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
 
-    expect(JSON.parse(store.get(CUE_SEEN_KEY) ?? "{}")).toEqual({ s2: "input" });
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toBeNull();
+    expect(seenAcks(fetchMock.mock.calls)).toEqual({ s2: 1 });
+    expect(outer).not.toHaveBeenCalled();
   });
 
   it("greets a coarse-pointer frame with the swipe hint once, remembered in the frame's storage", async () => {

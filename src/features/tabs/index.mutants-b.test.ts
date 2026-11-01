@@ -17,7 +17,8 @@ import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 // A plain string constant, so reading it through a separate module instance than
 // the (dynamically re-imported) feature under test is safe.
-import { CUE_SEEN_KEY } from "./model.js";
+import { tick } from "./test-helpers/split.js";
+import { engineNumbering } from "./test-helpers/sessions-server.js";
 
 // A fake activityMonitor: lets a test push status events (and stream (re)opens)
 // into tabs without the real SSE. tabs reads it via ctx.use, so the same feature
@@ -30,6 +31,7 @@ function fakeMonitor(): {
   open: () => void;
 } {
   const subs = new Set<(s: SessionStatus) => void>();
+  const number = engineNumbering();
   const openSubs = new Set<() => void>();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
@@ -54,8 +56,9 @@ function fakeMonitor(): {
   return {
     feature,
     emit: (s) => {
+      const rec = number(s);
       for (const cb of [...subs]) {
-        cb(s);
+        cb(rec);
       }
     },
     open: () => {
@@ -95,11 +98,15 @@ interface ServerBehaviour {
   /** Delay before the pinned-title answer resolves, so a test can land a status
    *  event while the request is genuinely in flight. */
   pinnedDelayMs: number;
-  /** Delay before GET /api/sessions answers, so a test can trigger a second
-   *  reconcile while the first one's list is still out. */
-  listDelayMs: number;
+  /** Hold each GET /api/sessions until the test calls the next of
+   *  `listReleases`, so a test can trigger a second reconcile while the first
+   *  one's list is still out. */
+  holdLists: boolean;
 }
 let server: ServerBehaviour;
+const listReleases: (() => void)[] = [];
+let listsInFlight = 0;
+let maxListsInFlight = 0;
 
 function delayed<T>(value: T, ms: number): Promise<T> {
   return ms <= 0 ? Promise.resolve(value) : new Promise((r) => setTimeout(() => r(value), ms));
@@ -147,7 +154,15 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
       ),
     );
   }
-  return delayed(jsonResponse(server.list, 200), server.listDelayMs);
+  if (!server.holdLists) {
+    return Promise.resolve(jsonResponse(server.list, 200));
+  }
+  listsInFlight++;
+  maxListsInFlight = Math.max(maxListsInFlight, listsInFlight);
+  return new Promise<void>((r) => listReleases.push(r)).then(() => {
+    listsInFlight--;
+    return jsonResponse(server.list, 200);
+  });
 });
 
 beforeEach(async () => {
@@ -164,8 +179,11 @@ beforeEach(async () => {
     deleteStatus: 204,
     pinnedStatus: 204,
     pinnedDelayMs: 0,
-    listDelayMs: 0,
+    holdLists: false,
   };
+  listReleases.length = 0;
+  listsInFlight = 0;
+  maxListsInFlight = 0;
   vi.stubGlobal("fetch", fetchMock);
   document.body.replaceChildren();
   localStorage.clear();
@@ -547,14 +565,16 @@ describe("tabs: closing one tab", () => {
   });
 
   it("opens a fresh terminal when the only tab is removed server-side", async () => {
-    // An SSE `removed` for the last session: nothing is left to re-home to, so a
-    // replacement is spawned rather than leaving the page with no terminal. No
-    // DELETE — the session is already gone.
+    // An SSE `removed` for the last session: nothing is left to re-home to, so the
+    // page settles against the server and spawns a replacement when it lists
+    // nothing live, rather than leaving the page with no terminal. No DELETE —
+    // the session is already gone.
     server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     await mount(root, monitor.feature);
 
+    server.list = [];
     monitor.emit({ id: "s1", status: "exited", title: "one", createdAt: "1", removed: true });
     await until(() => labels(root).includes("fresh"));
 
@@ -1632,8 +1652,7 @@ describe("tabs: a tab that goes away", () => {
 
   it("clears the switch-button cue a bulk close made moot", async () => {
     // A dot the user can no longer resolve by visiting the tab is worse than no
-    // dot: nothing they do will clear it. Its stored acknowledgement goes too, or
-    // the entry sits in storage for a session that no longer exists.
+    // dot: nothing they do will clear it.
     vi.stubGlobal("confirm", () => true);
     server.list = [
       { id: "s1", title: "one", createdAt: "1", status: "idle" },
@@ -1654,32 +1673,6 @@ describe("tabs: a tab that goes away", () => {
     await until(() => chips(root).length === 1);
 
     expect(dot?.dataset["status"]).toBeUndefined();
-    expect(localStorage.getItem(CUE_SEEN_KEY) ?? "").not.toContain("s3");
-  });
-
-  it("drops a bulk-closed tab's stored acknowledgement", async () => {
-    // An acknowledgement is per session, so once the session is gone the entry can
-    // only sit in storage until the 200-entry cap evicts it.
-    vi.stubGlobal("confirm", () => true);
-    server.list = [
-      { id: "s1", title: "one", createdAt: "1", status: "idle" },
-      { id: "s2", title: "two", createdAt: "2", status: "idle" },
-      { id: "s3", title: "three", createdAt: "3", status: "idle" },
-    ];
-    const monitor = fakeMonitor();
-    const root = document.createElement("div");
-    await mount(root, monitor.feature);
-
-    // The ACTIVE tab latching while the page is visible is acknowledged on the
-    // spot, which is what puts an entry in storage.
-    monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
-    await until(() => (localStorage.getItem(CUE_SEEN_KEY) ?? "").includes("s1"));
-    expect(localStorage.getItem(CUE_SEEN_KEY) ?? "").toContain("s1");
-
-    item(openMenu(root, 1), "Close others")?.click();
-    await until(() => chips(root).length === 1);
-
-    expect(localStorage.getItem(CUE_SEEN_KEY) ?? "").not.toContain("s1");
   });
 
   it("hands every bulk-closed session's cache back to the embedder", async () => {
@@ -1853,13 +1846,13 @@ describe("tabs: a status record's position and title", () => {
     const root = document.createElement("div");
     await mount(root, monitor.feature);
 
-    monitor.emit({ id: "s1", status: "working", title: "kiro: building", createdAt: "1" });
-    await until(() => labels(root)[0] === "kiro: building");
+    monitor.emit({ id: "s1", status: "working", title: "agent: building", createdAt: "1" });
+    await until(() => labels(root)[0] === "agent: building");
 
     monitor.emit({ id: "s1", status: "idle", title: "   ", createdAt: "1" });
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(labels(root)[0]).toBe("kiro: building");
+    expect(labels(root)[0]).toBe("agent: building");
   });
 
   it("survives a record whose title is not a string at all", async () => {
@@ -1870,8 +1863,8 @@ describe("tabs: a status record's position and title", () => {
     const root = document.createElement("div");
     await mount(root, monitor.feature);
 
-    monitor.emit({ id: "s1", status: "working", title: "kiro: building", createdAt: "1" });
-    await until(() => labels(root)[0] === "kiro: building");
+    monitor.emit({ id: "s1", status: "working", title: "agent: building", createdAt: "1" });
+    await until(() => labels(root)[0] === "agent: building");
 
     monitor.emit({
       id: "s1",
@@ -1883,7 +1876,7 @@ describe("tabs: a status record's position and title", () => {
 
     // The label survives, and so does the rest of the strip: a throw here would
     // have taken the sweep's remaining work with it.
-    expect(labels(root)[0]).toBe("kiro: building");
+    expect(labels(root)[0]).toBe("agent: building");
     expect(labels(root)).toHaveLength(2);
   });
 });
@@ -1950,22 +1943,32 @@ describe("tabs: the physical-keyboard observer", () => {
 
 // --- The reconcile's overlap guard ---
 describe("tabs: the list reconcile", () => {
-  it("skips a run that overlaps one already in flight", async () => {
+  it("never runs two at once: a reopen queues behind the run in flight", async () => {
     // A server slower than the trigger cadence would otherwise have two runs
-    // mutating tabList at once. The extra run is dropped, not queued.
-    server.listDelayMs = 20;
+    // mutating tabList at once. A reopen's run waits for the one in flight, and
+    // its list is issued after the reopen, so each reopen gets its own.
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     await mount(root, monitor.feature);
+    server.holdLists = true;
     fetchMock.mockClear();
 
     monitor.open();
     monitor.open();
     monitor.open();
-    await until(() => calls("GET", "/api/sessions").length > 0);
-    await new Promise((r) => setTimeout(r, 40));
-
-    expect(calls("GET", "/api/sessions")).toHaveLength(1);
+    for (let n = 1; n <= 3; n++) {
+      await until(() => listReleases.length === 1);
+      for (let i = 0; i < 5; i++) {
+        await tick();
+      }
+      expect(calls("GET", "/api/sessions"), `lists while list ${n} is held`).toHaveLength(n);
+      listReleases.shift()?.();
+    }
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+    expect(calls("GET", "/api/sessions")).toHaveLength(3);
+    expect(maxListsInFlight).toBe(1);
   });
 
   it("relabels the strip after adopting what the server listed", async () => {

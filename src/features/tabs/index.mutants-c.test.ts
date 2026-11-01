@@ -19,6 +19,7 @@ import { mountTerminal } from "../../test-helpers/mount.js";
 import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
+import { engineNumbering } from "./test-helpers/sessions-server.js";
 
 // A fake activityMonitor: lets a test push status events (a new title, a new
 // server `order`, a status change) into tabs without the real SSE.
@@ -27,6 +28,7 @@ function fakeMonitor(): {
   emit: (s: SessionStatus) => void;
 } {
   const subs = new Set<(s: SessionStatus) => void>();
+  const number = engineNumbering();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
     scope: "shell",
@@ -47,8 +49,9 @@ function fakeMonitor(): {
   return {
     feature,
     emit: (s) => {
+      const rec = number(s);
       for (const cb of [...subs]) {
-        cb(s);
+        cb(rec);
       }
     },
   };

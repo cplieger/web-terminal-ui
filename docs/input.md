@@ -6,7 +6,9 @@ This page describes how the terminal takes keyboard, mouse and touch input, for 
 
 The terminal output is display-only and is never focused. A hidden `<textarea>` is the single keyboard target, and it also receives IME composition, dictation and autocorrect. Keeping the two apart lets the first touch-drag scroll instead of placing a caret, and lets a text selection survive a redraw.
 
-When a mouse selection leaves focus on the page body, the first key that types something takes the keyboard back for the terminal. A page with its own document-level shortcuts opts out by calling `preventDefault()` on the keys it owns. In that state Tab and modified keys such as Ctrl+C stay with the browser, so copying the selection still works.
+When a mouse selection leaves focus on the page body, the first key the terminal acts on takes the keyboard back and reaches the terminal. That covers typed characters and the Ctrl, Alt and Cmd combinations the terminal encodes, such as Ctrl+G. A page with its own document-level shortcuts opts out by calling `preventDefault()` on the keys it owns.
+
+In that state Tab stays with the browser. While the terminal holds a selection, Ctrl+C and Ctrl+Insert copy it, as Cmd+C does. Combinations the terminal does not encode, such as Cmd+V, also stay with the browser.
 
 Every preset adds a scroll-to-bottom button that returns to live output.
 

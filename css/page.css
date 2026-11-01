@@ -1,9 +1,9 @@
 /* ===== Page kit (full-page hosts ONLY — never ship this to an embedder) =====
    The page-level half of the full-page terminal product: what the HOST PAGE
-   owns when the terminal IS the page (web-terminal-server, web-terminal-kiro,
-   scaffold/index.html). The component bundle (00-10) never touches the host
-   document; everything here is deliberately page-scoped. An embedding consumer
-   (marotte) serves a per-preset manifest instead and owns its own page.
+   owns when the terminal IS the page (as in scaffold/index.html). The component
+   bundle (00-10) never touches the host document; everything here is
+   deliberately page-scoped. An embedding consumer serves a per-preset manifest
+   instead and owns its own page.
    Concatenated FIRST by the reference MANIFEST. */
 
 *,
@@ -39,30 +39,13 @@ body {
 }
 
 /* ===== The pre-JS loading overlay =====
-   ONE definition of the loading screen, owned here. Before this, the library
-   only PRESCRIBED it in scaffold/index.html and every full-page consumer carried
-   its own copy in an inline <style> — web-terminal-server's was byte-identical to
-   the scaffold's, web-terminal-kiro's had drifted (renamed keyframe, extra
-   states) — so the "one" loading screen existed three times and none of them
-   could be improved without editing three files.
-
-   Why it can live in a stylesheet at all, since the overlay's whole job is to be
-   on screen before the app is: a full-page host loads this bundle through a plain
-   render-blocking <link rel="stylesheet"> in <head>, so NOTHING paints until it
-   arrives. An inline copy buys no earlier paint. What an inline copy does buy is
-   the case where this stylesheet FAILS to load, which a consumer's own bootstrap
-   watchdog reports — so a consumer keeps a deliberately minimal inline fallback
-   for that failure surface only, not a second copy of everything below.
-
-   Consumer overrides work the same way the component tokens do, except simpler:
-   the overlay is the consumer's OWN element, so it sets the tokens on #loading in
-   its own CSS and needs no JS. web-terminal-kiro already did exactly this with
-   --accent before any of this was tokenised.
-
-   Selected by CLASS, never by the consumer's `id`: the library owns .wt-loading*
-   and must not reach into a host document's own identifiers (the same
-   no-element-id-contract rule the kernel follows for the terminal subtree), and
-   an unnamespaced `.bar` in a host page would collide with anything. */
+   The one definition, so a full-page consumer links it rather than carrying a
+   drifting inline copy. A full-page host loads this bundle render-blocking in
+   <head>, so an inline copy paints no earlier; a consumer keeps only a minimal
+   inline fallback for a failed stylesheet load. The overlay is the consumer's
+   own element, so it overrides by setting the tokens on it. Selected by CLASS,
+   never by id: the library owns .wt-loading* and does not reach into the host
+   document's identifiers, and an unnamespaced .bar would collide. */
 .wt-loading {
   /* The overlay's accent: the bar and the status text derive from it, so one
      override recolors the whole screen. Defaults to the component --accent
@@ -225,44 +208,12 @@ body {
 }
 
 /* ===== Fonts =====
-   The bundled web font, served by the full-page host at /vendor/fonts (both
-   web-terminal-server and web-terminal-kiro ship these files there; see their
-   Dockerfiles). It backs BOTH --font-mono (the terminal display) and --font-ui
-   (the chrome), the latter deliberately: chip-label ink centring is a per-font
-   constant, so the chrome cannot afford a system-font stack that resolves to a
-   different typeface per engine (see --label-ink-shift in 00-tokens.css). An
-   embedder does not serve these files and never inherits these URLs, so it
-   either ships its own @font-face or lets both tokens fall back to the platform
-   monospace stack.
-
-   No face carries ascent-override or descent-override: the terminal's cell
-   background is the run padding in 02-terminal.css, never these metrics.
-
-   The tiling overlay, "Web Terminal Glyphs", is the second family below, and it
-   is ONE file declared under FOUR descriptor sets. The released face is a single
-   upright 400 weight, so a lone rule would leave the engine free to synthesise a
-   stand-in for a bold or italic run. What the four sets (400/700 x normal/italic)
-   against the same URL foreclose is the EMBOLDENED stand-in, in Blink and in
-   Gecko both: a bold run resolves a real face where the same asset under one rule
-   is thickened. They do NOT foreclose the OBLIQUE one in Blink, which honours the
-   italic descriptor for face SELECTION and slants the run anyway; the only thing
-   keeping an italic box-drawing corner upright there is font-synthesis: none on
-   .term (02-terminal.css). Both mechanisms are load-bearing and neither is the
-   whole guarantee. All four rules point at one file, so the bytes download once.
-
-   No overlay face declares unicode-range, and that absence is deliberate: the
-   font's own cmap IS its range (1,098 tiling codepoints, no letters, no digits,
-   no space), so a letter falls through to Monaspace by ordinary family fallback,
-   and a range here would only narrow that fallback to a list somebody has to
-   maintain against the next release of the font.
-
-   The overlay is listed FIRST in --font-mono and never in --font-ui
-   (00-tokens.css owns why). A full-page host must serve
-   WebTerminalGlyphs.woff2 beside the Monaspace faces, along with that font's
-   LICENSE and NOTICE: it is a separate Apache-2.0 work, and §4 binds whoever
-   ships the bytes. This package ships none, it only names the URL — so a host
-   that has not caught up errors the face out and renders exactly as it did
-   before, with the tiling ranges coming from Monaspace and the system font. */
+   The bundled faces, served by the full-page host at /vendor/fonts
+   (docs/host-page.md owns the files and their licences). They back BOTH
+   --font-mono and --font-ui: chip-label ink centring is a per-font constant
+   (--label-ink-shift, 00-tokens.css), so the chrome cannot take a system stack
+   that resolves differently per engine. No face sets ascent- or
+   descent-override: the cell background is the run padding in 02-terminal.css. */
 @font-face {
   font-family: "Monaspace Neon NF";
   src: url("/vendor/fonts/MonaspaceNeonNF-Regular.woff2") format("woff2");
@@ -295,6 +246,14 @@ body {
   font-display: block;
 }
 
+/* "Web Terminal Glyphs" is ONE upright 400 file under FOUR descriptor sets, so
+   a bold run resolves a real face instead of an emboldened stand-in (Blink and
+   Gecko). Blink still slants an italic run; font-synthesis: none on .term
+   (02-terminal.css) keeps it upright, and both are needed. The bytes download
+   once. No unicode-range: the font's cmap is its range (tiling codepoints
+   only), so letters fall through to Monaspace by family fallback, and a list
+   here would need upkeep against each font release. 00-tokens.css owns why it
+   is first in --font-mono and absent from --font-ui. */
 @font-face {
   font-family: "Web Terminal Glyphs";
   src: url("/vendor/fonts/WebTerminalGlyphs.woff2") format("woff2");

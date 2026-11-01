@@ -48,6 +48,7 @@ import {
   SWIPE_VELOCITY,
   VELOCITY_STALE_MS,
 } from "./switcher.js";
+import { engineNumbering } from "./test-helpers/sessions-server.js";
 
 // The engine is a fake, as in index.test.ts: a switch re-points the renderer
 // and reconnects the socket, and neither belongs in a DOM-only test. getMouseMode
@@ -1485,6 +1486,7 @@ describe("tabs: destroy hands the out-of-page surfaces back", () => {
     emit: (s: SessionStatus) => void;
   } {
     const subs = new Set<(s: SessionStatus) => void>();
+    const number = engineNumbering();
     return {
       feature: {
         name: "activityMonitor",
@@ -1503,8 +1505,9 @@ describe("tabs: destroy hands the out-of-page surfaces back", () => {
         },
       },
       emit: (s) => {
+        const rec = number(s);
         for (const cb of [...subs]) {
-          cb(s);
+          cb(rec);
         }
       },
     };

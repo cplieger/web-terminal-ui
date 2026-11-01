@@ -42,6 +42,11 @@ function attention(sinks: AttentionSinks): AttentionSurface {
   live.push(surface);
   return surface;
 }
+/** A badge re-assert lands on the next task, so negative assertions wait one. */
+function nextTask(): Promise<void> {
+  return new Promise((r) => setTimeout(r, 0));
+}
+
 afterEach(() => {
   // A surface left listening would answer the next test's pagehide too.
   for (const surface of live.splice(0)) {
@@ -147,6 +152,20 @@ describe("the page lifecycle", () => {
     expect(rec.icons).toEqual(["input", null, "input"]);
   });
 
+  it("leaves the badge up when the page goes away, and re-asserts it when it comes back", async () => {
+    // The badge means "unread" for the whole app: a page closed on an unread cue
+    // must not clear it, and the bfcache return re-writes it in case the OS lost it.
+    const rec = recorder();
+    attention(rec.sinks).report({ count: 1, icon: "input" });
+
+    window.dispatchEvent(new Event("pagehide"));
+    expect(rec.badges).toEqual([1]);
+
+    window.dispatchEvent(new Event("pageshow"));
+    await nextTask();
+    expect(rec.badges).toEqual([1, 1]);
+  });
+
   it("keeps the surfaces when the browser merely freezes the tab", () => {
     // A frozen tab is still in the strip rendering its icon and its title.
     const rec = recorder();
@@ -193,6 +212,144 @@ describe("the page lifecycle", () => {
 
     window.dispatchEvent(new Event("pagehide"));
     expect(rec.titles).toEqual([]);
+  });
+});
+
+describe("the badge is re-asserted, because the page cannot read it back", () => {
+  function setVisibility(state: "visible" | "hidden"): void {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+  }
+  afterEach(() => {
+    setVisibility("visible");
+  });
+
+  /** An OS badge that can lose one write without telling the page, as WebKit's
+   *  webpushd does when its web-clip lookup fails. */
+  function lossyBadge(): { sinks: AttentionSinks; os: { badge: number; dropNext: boolean } } {
+    const os = { badge: 0, dropNext: false };
+    return {
+      os,
+      sinks: {
+        setTitleMark: () => undefined,
+        setBadge: (count) => {
+          if (os.dropNext) {
+            os.dropNext = false;
+            return;
+          }
+          os.badge = count;
+        },
+      },
+    };
+  }
+
+  it("repairs a dropped clear on resync though the count did not change", async () => {
+    const { sinks, os } = lossyBadge();
+    const surface = attention(sinks);
+    surface.report({ count: 1, icon: null });
+    os.dropNext = true;
+    surface.report({ count: 0, icon: null });
+    surface.report({ count: 0, icon: null });
+    expect(os.badge).toBe(1);
+
+    surface.resync();
+    await nextTask();
+    expect(os.badge).toBe(0);
+  });
+
+  it("repairs it when the page becomes visible, and not while it is hidden", async () => {
+    const { sinks, os } = lossyBadge();
+    const surface = attention(sinks);
+    surface.report({ count: 1, icon: null });
+    os.dropNext = true;
+    surface.report({ count: 0, icon: null });
+
+    setVisibility("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await nextTask();
+    expect(os.badge).toBe(1);
+
+    setVisibility("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await nextTask();
+    expect(os.badge).toBe(0);
+  });
+
+  it("repairs it when the window gains focus", async () => {
+    const { sinks, os } = lossyBadge();
+    const surface = attention(sinks);
+    surface.report({ count: 2, icon: null });
+    os.dropNext = true;
+    surface.report({ count: 1, icon: null });
+
+    window.dispatchEvent(new Event("focus"));
+    await nextTask();
+    expect(os.badge).toBe(1);
+  });
+
+  it("repairs it on pageshow", async () => {
+    const { sinks, os } = lossyBadge();
+    const surface = attention(sinks);
+    surface.report({ count: 1, icon: null });
+    os.dropNext = true;
+    surface.report({ count: 0, icon: null });
+
+    window.dispatchEvent(new Event("pageshow"));
+    await nextTask();
+    expect(os.badge).toBe(0);
+  });
+
+  it("writes nothing before the first report, so a booting page keeps the badge it found", async () => {
+    const rec = recorder();
+    const surface = attention(rec.sinks);
+    surface.resync();
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("pageshow"));
+    await nextTask();
+    expect(rec.badges).toEqual([]);
+  });
+
+  it("writes nothing after dispose, so a late resync cannot raise a cleared badge", async () => {
+    const rec = recorder();
+    const surface = attention(rec.sinks);
+    surface.report({ count: 2, icon: null });
+    surface.dispose();
+    surface.resync();
+    window.dispatchEvent(new Event("focus"));
+    await nextTask();
+    expect(rec.badges).toEqual([2, 0]);
+  });
+
+  it("drops a re-assert already pending when dispose clears the badge", async () => {
+    const rec = recorder();
+    const surface = attention(rec.sinks);
+    surface.report({ count: 2, icon: null });
+    surface.resync();
+    surface.dispose();
+    await nextTask();
+    expect(rec.badges).toEqual([2, 0]);
+  });
+
+  it("makes one write when a report follows the re-assert in the same task", async () => {
+    // A return to visible fires this surface's listener and then the caller's,
+    // whose acknowledgement reports the new count.
+    const rec = recorder();
+    const surface = attention(rec.sinks);
+    surface.report({ count: 2, icon: null });
+    document.dispatchEvent(new Event("visibilitychange"));
+    surface.report({ count: 1, icon: null });
+    await nextTask();
+    expect(rec.badges).toEqual([2, 1]);
+  });
+
+  it("makes one write for several re-asserts in the same task", async () => {
+    const rec = recorder();
+    const surface = attention(rec.sinks);
+    surface.report({ count: 2, icon: null });
+    window.dispatchEvent(new Event("focus"));
+    document.dispatchEvent(new Event("visibilitychange"));
+    surface.resync();
+    await nextTask();
+    expect(rec.badges).toEqual([2, 2]);
   });
 });
 

@@ -11,13 +11,14 @@
  * The tabbed presets (presetTabbed / presetAgentTabbed) share the same feature
  * set (both include the activity monitor, which drives the per-tab activity
  * dot). They differ in one flag, `presumeReports`: presetAgentTabbed presumes
- * every session's program is an agent that WILL report OSC 9;4 progress, so the
- * idle dot shows from tab creation instead of appearing seconds later on the
- * first report, while presetTabbed keeps the evidence-driven reveal so a plain
- * shell never grows a meaningless dot. Session NAMES are not a preset concern:
- * the engine resolves them, including a title its host pushes.
- * The generic-vs-agent STATUS distinction stays server-side — an agent server
- * sets a classifier mapping OSC 9 notifications to done/needs-input.
+ * every session's program is an agent that WILL report activity (OSC 7501
+ * status, OSC 9;4 progress or a classified OSC 9 notification), so the idle dot
+ * shows from tab creation instead of appearing seconds later on the first
+ * report, while presetTabbed keeps the evidence-driven reveal so a plain shell
+ * never grows a meaningless dot.
+ * Session NAMES are not a preset concern: the engine resolves them, including a
+ * title its host pushes. Which status a session holds is the server's: the UI
+ * renders the status it is sent.
  *
  * @module
  */

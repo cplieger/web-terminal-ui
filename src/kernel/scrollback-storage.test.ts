@@ -349,13 +349,13 @@ describe("localScrollbackStorage: orphan collection", () => {
   });
 
   it("leaves other applications' keys alone", () => {
-    localStorage.setItem("marotte.ui-state", "{}");
+    localStorage.setItem("other-app.ui-state", "{}");
     localStorage.setItem("unrelated", "x");
     seed("old", entryFor(777, Date.now() - 9 * DAY));
 
     localScrollbackStorage();
 
-    expect(localStorage.getItem("marotte.ui-state")).toBe("{}");
+    expect(localStorage.getItem("other-app.ui-state")).toBe("{}");
     expect(localStorage.getItem("unrelated")).toBe("x");
   });
 });

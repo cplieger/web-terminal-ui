@@ -22,7 +22,7 @@ import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // Plain constants, so reading them through a separate module instance than the
 // (dynamically re-imported) feature under test is safe.
 import { PRESSED_CLASS } from "../dom.js";
-import { CUE_SEEN_KEY, MAX_PERSISTED_CUE_SEEN } from "./model.js";
+import { engineNumbering, seenAcks } from "./test-helpers/sessions-server.js";
 
 // A fake activityMonitor: lets a test push status events into tabs without the
 // real SSE. tabs reads it via ctx.use, so the same feature value goes into the
@@ -34,6 +34,7 @@ function fakeMonitor(): {
   emit: (s: SessionStatus) => void;
 } {
   const subs = new Set<(s: SessionStatus) => void>();
+  const number = engineNumbering();
   const feature: TerminalFeature<ActivityMonitorApi> = {
     name: "activityMonitor",
     scope: "shell",
@@ -56,8 +57,9 @@ function fakeMonitor(): {
   return {
     feature,
     emit: (s) => {
+      const rec = number(s);
       for (const cb of [...subs]) {
-        cb(s);
+        cb(rec);
       }
     },
   };
@@ -540,69 +542,6 @@ describe("tabs: the keyboard buttons mirror a pending Ctrl", () => {
   });
 });
 
-// --- The acknowledgement store's write discipline ---
-
-describe("tabs: the acknowledgement store stays bounded and quiet", () => {
-  function storedCueSeen(): Record<string, string> {
-    return JSON.parse(localStorage.getItem(CUE_SEEN_KEY) ?? "{}") as Record<string, string>;
-  }
-
-  it("evicts the oldest acknowledgement rather than growing past the cap", async () => {
-    // Sessions that vanished while the page was CLOSED leave entries nothing
-    // collects (dropTab only prunes what closes while the page is open).
-    // Unbounded, they would push the map past the cap the parser enforces, and
-    // the parser discards whatever it read LAST — dropping fresh
-    // acknowledgements to keep dead ones. So the live map evicts at the cap, and
-    // it evicts from the front.
-    const stale = Object.fromEntries(
-      Array.from({ length: MAX_PERSISTED_CUE_SEEN }, (_, i) => [`gone-${String(i)}`, "done"]),
-    );
-    localStorage.setItem(CUE_SEEN_KEY, JSON.stringify(stale));
-    const { monitor } = await mountWithMonitor();
-
-    // One more acknowledgement than the map can hold: the active tab latching a
-    // cue while the user is looking at it.
-    monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
-
-    const seen = storedCueSeen();
-    expect(Object.keys(seen)).toHaveLength(MAX_PERSISTED_CUE_SEEN);
-    expect(seen["gone-0"]).toBeUndefined();
-    expect(seen["gone-1"]).toBe("done");
-    expect(seen["s1"]).toBe("input");
-  });
-
-  it("does not rewrite the store when the same latch is re-delivered", async () => {
-    // input/done are LATCHED server-side and the stream re-pushes the snapshot on
-    // every open, with the poll fallback re-listing on top of that. Every one of
-    // those re-deliveries reaches the active tab's acknowledgement, so without
-    // the "already seen" test each becomes a synchronous localStorage write.
-    const writes: string[] = [];
-    const store = new Map<string, string>();
-    vi.stubGlobal("localStorage", {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => {
-        writes.push(k);
-        store.set(k, v);
-      },
-      removeItem: (k: string) => store.delete(k),
-      clear: () => store.clear(),
-      key: () => null,
-      length: 0,
-    });
-    const { monitor } = await mountWithMonitor();
-
-    const cue: SessionStatus = { id: "s1", status: "input", title: "one", createdAt: "1" };
-    monitor.emit(cue);
-    const afterFirst = writes.filter((k) => k === CUE_SEEN_KEY).length;
-    monitor.emit(cue);
-    monitor.emit(cue);
-
-    expect(afterFirst).toBe(1);
-    expect(writes.filter((k) => k === CUE_SEEN_KEY)).toHaveLength(1);
-    expect(JSON.parse(store.get(CUE_SEEN_KEY) ?? "{}")).toEqual({ s1: "input" });
-  });
-});
-
 // --- Coming back to the page ---
 
 describe("tabs: returning to the page acknowledges what the user can now see", () => {
@@ -638,7 +577,7 @@ describe("tabs: returning to the page acknowledges what the user can now see", (
 
     document.dispatchEvent(new Event("visibilitychange"));
     expect(document.title).toBe("(1) one · Host page");
-    expect(localStorage.getItem(CUE_SEEN_KEY)).toBeNull();
+    expect(seenAcks(fetchMock.mock.calls)).toEqual({});
   });
 });
 

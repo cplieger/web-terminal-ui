@@ -2,14 +2,12 @@
  *
  *  These pin what a caller can LEARN from a failed session call, which is the
  *  whole point of SessionAPIError: a host may refuse session creation
- *  temporarily and say so (web-terminal-kiro answers 503 + Retry-After while its
- *  tool engine installs on first boot). Flattening that into a message string
- *  made it indistinguishable from a 500 and threw away the retry hint. */
+ *  temporarily and say so (503 + Retry-After). Flattened into a message string,
+ *  that is indistinguishable from a 500 and loses the retry hint. */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import fc from "fast-check";
 import type { CueStatus, PaneLayout, TabOrderKey } from "./model.js";
 import {
-  MAX_PERSISTED_CUE_SEEN,
   PROGRESS_ABSENT,
   SessionAPIError,
   activityPhrase,
@@ -19,14 +17,13 @@ import {
   foldedCueStatus,
   isCueStatus,
   isEndedStatus,
+  isUnread,
   normalizeActivity,
   normalizeActivityCount,
   normalizeProgress,
+  normalizeSeq,
   orderedInsertIndex,
-  parseCueSeen,
   renderedProgress,
-  serializeCueSeen,
-  statusOwnsProgress,
   statusPhrase,
   statusRevealsDot,
   summarizeCues,
@@ -105,11 +102,10 @@ describe("SessionAPIError carries what the server said", () => {
 
   it("surfaces the envelope's message so the host's own words reach the user", async () => {
     // The first-party Go envelope (webhttp ErrorResponse) writes `error`; this is
-    // the field every server in this family actually returns, and the shape
-    // web-terminal-kiro's tools-installing 503 uses.
-    stubFetch(response(503, { error: "tools installing", code: "", request_id: "abc" }));
+    // the field every server in this family actually returns.
+    stubFetch(response(503, { error: "service starting", code: "", request_id: "abc" }));
     await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
-      serverMessage: "tools installing",
+      serverMessage: "service starting",
     });
   });
 
@@ -202,97 +198,39 @@ describe("SessionAPIError carries what the server said", () => {
  *  always a valid strip) rather than to a corrupted strip, and a tab is placed by
  *  the stored arrangement regardless of the order sessions ARRIVE in — which is
  *  not stable, since the status-stream snapshot races the bootstrap's list. */
-describe("parseCueSeen rejects anything the acknowledgement store cannot trust", () => {
-  it("reads a well-formed map back verbatim", () => {
-    expect([...parseCueSeen(JSON.stringify({ s1: "done", s2: "input" }))]).toEqual([
-      ["s1", "done"],
-      ["s2", "input"],
-    ]);
-  });
-
-  it("degrades to nothing acknowledged on unusable values", () => {
-    const cases: Record<string, string | null> = {
-      absent: null,
-      empty: "",
-      "not json": "{oh no",
-      "an array": JSON.stringify(["s1"]),
-      "a bare string": JSON.stringify("s1"),
-      "a number": JSON.stringify(7),
-      null_literal: JSON.stringify(null),
-    };
-    for (const [name, raw] of Object.entries(cases)) {
-      expect(parseCueSeen(raw).size, name).toBe(0);
-    }
-  });
-
-  it("drops entries whose value is not a cue status, keeping the rest", () => {
-    // Only the two cue-worthy statuses are acknowledgeable: "working"/"idle"/
-    // "exited" are states nothing ever notified about, and a stored one would
-    // silently suppress the NEXT real cue for that session.
-    const raw = JSON.stringify({ s1: "done", s2: "working", s3: 1, s4: "input", "": "done" });
-    expect([...parseCueSeen(raw)]).toEqual([
-      ["s1", "done"],
-      ["s4", "input"],
-    ]);
-  });
-
-  it("caps a hostile or corrupted map so the restore cannot do unbounded work", () => {
-    const huge = Object.fromEntries(
-      Array.from({ length: MAX_PERSISTED_CUE_SEEN + 500 }, (_, i) => [`s${String(i)}`, "done"]),
-    );
-    expect(parseCueSeen(JSON.stringify(huge)).size).toBe(MAX_PERSISTED_CUE_SEEN);
-  });
-
-  it("round-trips through serializeCueSeen", () => {
-    const seen = new Map<string, CueStatus>([
-      ["s3", "input"],
-      ["s1", "done"],
-    ]);
-    expect([...parseCueSeen(serializeCueSeen(seen))]).toEqual([...seen]);
-  });
-});
-
 describe("isCueStatus declares the cue-worthy statuses in one place", () => {
   it("accepts exactly the four states that want the user, and nothing else", () => {
     // The switcher's aggregate dot and the out-of-page attention surfaces are
     // "like a notification": they show only the states that ask something of the
-    // user. `failed` is one of them — OSC 9;4 state 2 is a result the program
-    // parked, not an ongoing phase — while `working` and `warning` are genuinely
-    // ongoing, and idle and a clean exit ask nothing of anyone.
+    // user. `failed` is one of them — an error the program reported is a
+    // result it parked, not an ongoing phase —
+    // while `working` and `warning` are genuinely ongoing, and idle and a clean
+    // exit ask nothing of anyone.
     expect(["input", "done", "crashed", "failed"].every(isCueStatus)).toBe(true);
     expect(["working", "warning", "idle", "exited", "", "DONE"].some(isCueStatus)).toBe(false);
   });
 });
 
 describe("summarizeCues folds the tab list into one attention summary", () => {
-  const seen = (entries: [string, CueStatus][] = []): Map<string, CueStatus> => new Map(entries);
-
-  it("reports nothing for an empty list and for a list with no cue", () => {
-    expect(summarizeCues([], seen())).toEqual({ count: 0, worst: "" });
-    expect(
-      summarizeCues(
-        [
-          { id: "a", status: "working" },
-          { id: "b", status: "idle" },
-          { id: "c", status: "warning" },
-          { id: "d", status: "exited" },
-        ],
-        seen(),
-      ),
-    ).toEqual({ count: 0, worst: "" });
+  // An unread occurrence: numbered 1, nothing seen, nothing in flight.
+  const tab = (status: string, seq = { statusSeq: 1, seenSeq: 0, ackSeq: 0 }) => ({
+    status,
+    ...seq,
   });
 
-  it("counts every unacknowledged cue and keeps the most severe", () => {
-    expect(
-      summarizeCues(
-        [
-          { id: "a", status: "done" },
-          { id: "b", status: "input" },
-          { id: "c", status: "working" },
-        ],
-        seen(),
-      ),
-    ).toEqual({ count: 2, worst: "input" });
+  it("reports nothing for an empty list and for a list with no cue", () => {
+    expect(summarizeCues([])).toEqual({ count: 0, worst: "" });
+    expect(summarizeCues([tab("working"), tab("idle"), tab("warning"), tab("exited")])).toEqual({
+      count: 0,
+      worst: "",
+    });
+  });
+
+  it("counts every unread cue and keeps the most severe", () => {
+    expect(summarizeCues([tab("done"), tab("input"), tab("working")])).toEqual({
+      count: 2,
+      worst: "input",
+    });
   });
 
   it("orders severity crashed over failed over input over done", () => {
@@ -306,54 +244,47 @@ describe("summarizeCues folds the tab list into one attention summary", () => {
       ["crashed", "done", "crashed"],
     ];
     for (const [first, second, worst] of pairs) {
-      expect(
-        summarizeCues(
-          [
-            { id: "a", status: first },
-            { id: "b", status: second },
-          ],
-          seen(),
-        ).worst,
-        `${first} vs ${second}`,
-      ).toBe(worst);
-      expect(
-        summarizeCues(
-          [
-            { id: "a", status: second },
-            { id: "b", status: first },
-          ],
-          seen(),
-        ).worst,
-        `${second} vs ${first}`,
-      ).toBe(worst);
+      expect(summarizeCues([tab(first), tab(second)]).worst, `${first} vs ${second}`).toBe(worst);
+      expect(summarizeCues([tab(second), tab(first)]).worst, `${second} vs ${first}`).toBe(worst);
     }
   });
 
-  it("excludes a cue this viewer already acknowledged", () => {
-    const list = [
-      { id: "a", status: "input" },
-      { id: "b", status: "crashed" },
-    ];
-    expect(summarizeCues(list, seen([["a", "input"]]))).toEqual({ count: 1, worst: "crashed" });
-    expect(
-      summarizeCues(
-        list,
-        seen([
-          ["a", "input"],
-          ["b", "crashed"],
-        ]),
-      ),
-    ).toEqual({ count: 0, worst: "" });
+  it("excludes a cue whose occurrence a reader acknowledged", () => {
+    const read = tab("input", { statusSeq: 3, seenSeq: 3, ackSeq: 0 });
+    expect(summarizeCues([read, tab("crashed")])).toEqual({ count: 1, worst: "crashed" });
+  });
+});
+
+describe("isUnread compares the occurrence with the read floor", () => {
+  it("is unread only above both the confirmed floor and this page's ack", () => {
+    expect(isUnread({ status: "done", statusSeq: 3, seenSeq: 2, ackSeq: 0 })).toBe(true);
+    expect(isUnread({ status: "done", statusSeq: 3, seenSeq: 3, ackSeq: 0 })).toBe(false);
+    expect(isUnread({ status: "done", statusSeq: 3, seenSeq: 0, ackSeq: 3 })).toBe(false);
+    expect(isUnread({ status: "done", statusSeq: 3, seenSeq: 4, ackSeq: 0 })).toBe(false);
   });
 
-  it("counts a cue again once the session moves to a DIFFERENT cue", () => {
-    // The acknowledgement is per (session, status), so a tab that was
-    // acknowledged as done and then blocks on input is news again. This is the
-    // half that a plain "have I seen this session" flag would get wrong.
-    expect(summarizeCues([{ id: "a", status: "input" }], seen([["a", "done"]]))).toEqual({
-      count: 1,
-      worst: "input",
-    });
+  it("counts a new occurrence of the same cue again", () => {
+    // A second "done" in a row is a new turn: the floor covers the first only.
+    expect(isUnread({ status: "done", statusSeq: 4, seenSeq: 3, ackSeq: 0 })).toBe(true);
+  });
+
+  it("never counts a status that is not a cue, nor a server that sends no numbers", () => {
+    expect(isUnread({ status: "working", statusSeq: 3, seenSeq: 0, ackSeq: 0 })).toBe(false);
+    expect(isUnread({ status: "done", statusSeq: 0, seenSeq: 0, ackSeq: 0 })).toBe(false);
+  });
+});
+
+describe("normalizeSeq accepts a non-negative safe integer and nothing else", () => {
+  it("passes a valid number through", () => {
+    expect(normalizeSeq(0)).toBe(0);
+    expect(normalizeSeq(7)).toBe(7);
+    expect(normalizeSeq(2 ** 53 - 1)).toBe(2 ** 53 - 1);
+  });
+
+  it("answers null for anything a server should not send", () => {
+    for (const raw of ["3", -1, 1.5, 2 ** 53, Number.NaN, Infinity, null, undefined, {}]) {
+      expect(normalizeSeq(raw), String(raw)).toBeNull();
+    }
   });
 });
 
@@ -766,6 +697,33 @@ describe("the session API's requests", () => {
     expect(calls[0]?.init?.headers).toEqual({ "Content-Type": "application/json" });
   });
 
+  it("marks a session read with a keepalive JSON PUT under its escaped path", async () => {
+    // keepalive lets a read made just before the page goes away still land.
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+
+    await createSessionAPI("/api/sessions", window).markSeen("a/b", 3);
+
+    expect(calls[0]?.url).toBe("/api/sessions/a%2Fb/seen");
+    expect(calls[0]?.init?.method).toBe("PUT");
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ seq: 3 }));
+    expect(calls[0]?.init?.keepalive).toBe(true);
+    expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("rejects a failed seen mark with its status", async () => {
+    stubFetch(response(404));
+    await expect(createSessionAPI("/api/sessions", window).markSeen("s1", 1)).rejects.toMatchObject(
+      {
+        name: "SessionAPIError",
+        status: 404,
+      },
+    );
+  });
+
   it("rejects a 200 whose body is not an array", async () => {
     // A Go server marshals a nil session slice as JSON `null`, and a proxy can
     // answer 200 with an error object. Either one reaching the bootstrap's
@@ -811,14 +769,14 @@ describe("the session API's requests", () => {
   it("trims the server's own padding out of the message it hands to the UI", async () => {
     // The string goes straight into chrome, and a host that pads its JSON field
     // would otherwise push the visible text off its own baseline.
-    stubFetch(response(503, { error: "  tools installing\n" }));
+    stubFetch(response(503, { error: "  service starting\n" }));
     await expect(createSessionAPI("/api/sessions", window).create()).rejects.toMatchObject({
-      serverMessage: "tools installing",
+      serverMessage: "service starting",
     });
   });
 });
 
-describe("the status vocabulary (the OSC 9 states)", () => {
+describe("the status vocabulary", () => {
   it("treats both ways a process ENDS as ended", () => {
     // A crashed session is exactly as unable to produce output as an exited one,
     // so session selection must not read it as live (reloading onto a corpse was
@@ -848,9 +806,25 @@ describe("the status vocabulary (the OSC 9 states)", () => {
     expect(statusPhrase("crashed")).toBe("process crashed");
     expect(statusPhrase("idle")).toBe("idle");
     expect(statusPhrase("")).toBe("idle");
-    // A newer server's unknown status is surfaced raw rather than hidden: the
-    // wire is parsed, not validated.
+    // A status outside the built-in vocabulary is surfaced raw rather than
+    // hidden: the wire is parsed, not validated.
     expect(statusPhrase("hibernating")).toBe("hibernating");
+  });
+
+  it("reads a status outside the built-in vocabulary as live, uncued and unrevealed", () => {
+    // A host's notification classifier may return any status string.
+    const status = "hibernating";
+    expect(isEndedStatus(status)).toBe(false);
+    expect(statusRevealsDot(status)).toBe(false);
+    expect(isCueStatus(status)).toBe(false);
+    expect(foldedCueStatus(status, "")).toBe(status);
+    expect(summarizeCues([{ status, statusSeq: 2, seenSeq: 0, ackSeq: 0 }])).toEqual({
+      count: 0,
+      worst: "",
+    });
+    expect(tabAccessibleName({ label: "agent", status, progress: 40 })).toBe(
+      "agent, hibernating, 40%",
+    );
   });
 
   it("puts the state into a tab's accessible name", () => {
@@ -961,12 +935,7 @@ describe("a live background task blanks a SETTLED cue and nothing else", () => {
     expect(foldedCueStatus("done", "WORKING")).toBe("done");
   });
 
-  it("never answers idle for a blanked cue", () => {
-    // "" is NO INFORMATION and `idle` is a real non-cue state that FORGETS the
-    // acknowledgement, so the sentinel may not drift onto a status value: a caller
-    // testing `=== ""` would stop suppressing and one testing isCueStatus would
-    // drop the viewer's dismissal.
-    expect(foldedCueStatus("done", "working")).not.toBe("idle");
+  it("blanks to no cue at all", () => {
     expect(isCueStatus(foldedCueStatus("done", "working"))).toBe(false);
   });
 });
@@ -1006,7 +975,7 @@ describe("a tab's accessible name carries both marks", () => {
   });
 });
 
-describe("the OSC 9;4 percentage", () => {
+describe("the session's percentage", () => {
   it("reads an absent or untrustworthy value as absent, never as 0%", () => {
     // -1 is the engine's own absence marker, and absence must render NO bar
     // rather than an empty one, so it may never be normalised to 0.
@@ -1042,54 +1011,36 @@ describe("the OSC 9;4 percentage", () => {
     expect(tabAccessibleName({ label: "agent", status: "working" })).toBe("agent, working");
   });
 
-  it("shows a percentage only under a status the progress channel owns", () => {
-    // The three statuses the OSC 9;4 channel itself produces.
-    expect(statusOwnsProgress("working")).toBe(true);
-    expect(statusOwnsProgress("failed")).toBe(true);
-    expect(statusOwnsProgress("warning")).toBe(true);
-    // Everything else comes from somewhere else: the notification channel
-    // (done/input), the absence of a progress state (idle), or the process
-    // (exited/crashed).
-    for (const status of ["done", "input", "idle", "exited", "crashed", "bogus"]) {
-      expect(statusOwnsProgress(status), status).toBe(false);
-    }
+  it("shows a percentage under done, input and idle", () => {
+    // An OSC 7501 report or a notification sets these while OSC 9;4 keeps
+    // drawing the bar, so the bar stays beside them.
+    expect(renderedProgress("done", 72)).toBe(72);
+    expect(renderedProgress("input", 100)).toBe(100);
+    expect(renderedProgress("idle", 15)).toBe(15);
+    // A status this build does not know is still a live process.
+    expect(renderedProgress("bogus", 33)).toBe(33);
+  });
+
+  it("hides a percentage once the process has exited or crashed", () => {
+    expect(renderedProgress("exited", 100)).toBe(PROGRESS_ABSENT);
+    expect(renderedProgress("crashed", 60)).toBe(PROGRESS_ABSENT);
   });
 
   it("clears a percentage on exactly two things, and nothing else", () => {
-    // Clear 1 is the program's own OSC 9;4;0 (the value arrives as -1), so it
-    // needs no status rule at all — it is simply carried through.
+    // Clear 1 is the server's -1 (the program cleared or never reported a
+    // percentage, e.g. OSC 9;4;0), so it needs no status rule: it is carried through.
     expect(renderedProgress("working", PROGRESS_ABSENT)).toBe(PROGRESS_ABSENT);
-    // Clear 2: the status is not one the progress channel owns. A dead process,
-    // and equally a latch or a return to idle — a percentage under any of those
-    // is a claim about a different channel than the reader is looking at.
-    // Measured: kiro-cli parks state 4 at its context-usage percentage when
-    // idle, so a finished turn painted a green done dot beside a 72% bar.
-    expect(renderedProgress("exited", 100)).toBe(PROGRESS_ABSENT);
-    expect(renderedProgress("crashed", 60)).toBe(PROGRESS_ABSENT);
-    expect(renderedProgress("done", 72)).toBe(PROGRESS_ABSENT);
-    expect(renderedProgress("input", 100)).toBe(PROGRESS_ABSENT);
-    expect(renderedProgress("idle", 100)).toBe(PROGRESS_ABSENT);
+    expect(renderedProgress("done", PROGRESS_ABSENT)).toBe(PROGRESS_ABSENT);
+    // Clear 2 is an ended process (the test above).
 
     // NOTHING else clears it. 100% is not a completion signal (state 1 at 100 is
-    // a state that persists), the progress channel carries no "done" at all, and
+    // a state that persists), a reported "done" keeps the bar (above), and
     // there is no timeout — so a program that pins a value and goes quiet keeps
     // its bar rather than having a change asserted it never made.
     expect(renderedProgress("working", 100)).toBe(100);
     expect(renderedProgress("failed", 42)).toBe(42);
     expect(renderedProgress("warning", 25)).toBe(25);
     expect(renderedProgress("working", 0)).toBe(0);
-  });
-});
-
-describe("parseCueSeen accepts the cue statuses and nothing else", () => {
-  it("stores a crashed acknowledgement and rejects a non-cue status", () => {
-    const seen = parseCueSeen(
-      JSON.stringify({ s1: "crashed", s2: "done", s3: "working", s4: "exited" }),
-    );
-    expect([...seen.entries()]).toEqual([
-      ["s1", "crashed"],
-      ["s2", "done"],
-    ]);
   });
 });
 

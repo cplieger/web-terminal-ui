@@ -10,7 +10,7 @@ The core shows terminal output in a display-only element, so native text selecti
 
 ## The engine version
 
-`@cplieger/web-terminal-engine` is a peer dependency, so your page pins the engine version itself. The supported range is 6.x. Whether an engine and this UI can talk is decided by the engine's [wire contract](https://github.com/cplieger/web-terminal-engine#wire-protocol), not by matching package versions. When the two cannot talk, the connection banner stays up and asks the user to update the server or reload the page.
+`@cplieger/web-terminal-engine` is a peer dependency, so your page pins the engine version itself. The supported range is 6.4.0 or later on both halves: unread cues need the server's seen route and the two status-stream fields that number each status, which no wire floor checks. Whether an engine and this UI can talk is decided by the engine's [wire contract](https://github.com/cplieger/web-terminal-engine#wire-protocol), not by matching package versions. When the two cannot talk, the connection banner stays up and asks the user to update the server or reload the page.
 
 ## Choose the CSS bundle
 
@@ -18,7 +18,7 @@ The CSS ships as separate files plus manifests that list them. Concatenate the f
 
 ### A full-page terminal
 
-When the terminal is the whole page, as in web-terminal-server and web-terminal-kiro, concatenate `css/MANIFEST` into the `style.css` your page links. It holds `css/page.css` and the complete component set. A full-page terminal with tabs also owns the page address fragment, so keep your own page state out of `location.hash`.
+When the terminal is the whole page, concatenate `css/MANIFEST` into the `style.css` your page links. It holds `css/page.css` and the complete component set. A full-page terminal with tabs also owns the page address fragment, so keep your own page state out of `location.hash`.
 
 `css/page.css` is the page kit. It resets `html` and `body`, styles the loading overlay and declares the `@font-face` rules for two font families, expecting the font files at `/vendor/fonts/`:
 
@@ -67,7 +67,7 @@ The package ships TypeScript source. Your build compiles it with the rest of you
     loading: document.getElementById("loading"),
   });
   // For a server that exposes the WebSocket elsewhere, or a custom font:
-  // createTerminal("#terminal", { features: presetTabbed, wsPath: "/api/shell/ws", fontReady: '14px "MyMono"' });
+  // createTerminal("#terminal", { features: presetTabbed, wsPath: "/api/term/ws", fontReady: '14px "MyMono"' });
 </script>
 ```
 
@@ -87,8 +87,8 @@ Four presets are provided. Each is a plain function that returns an array of fea
 
 - `presetSingle()` is the single-pane desktop UI, with the context menu, clipboard, scroll-to-bottom, predictive echo and the connection banner.
 - `presetTouch()` is `presetSingle()` plus the on-screen key bar.
-- `presetTabbed()` is `presetTouch()` plus tabs, the activity monitor and animations. It needs a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`. web-terminal-server serves it.
-- `presetAgentTabbed()` has the same features as `presetTabbed()`, tuned for an agent shell such as web-terminal-kiro. Each tab's activity dot shows from the moment the tab opens instead of waiting for the program's first progress report.
+- `presetTabbed()` is `presetTouch()` plus tabs, the activity monitor and animations. It needs a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`.
+- `presetAgentTabbed()` has the same features as `presetTabbed()`, tuned for an agent shell, a host whose every tab runs a program that reports its activity. Each tab's activity dot shows from the moment the tab opens instead of waiting for the program's first status or progress report.
 
 [Tabs, activity dots and notifications](tabs.md) describes what the two tabbed presets show.
 
@@ -101,6 +101,10 @@ For a composition of your own, import single features from `…/features/<name>`
 Keep the loading overlay in your served HTML so it paints before the module loads. Give it the `wt-loading` class, a `wt-loading-bar` child and `role="status"`. `LOADING_OVERLAY_CLASSES` publishes those class names, because the markup usually lives in a static HTML file no compiler reads. Recolor the overlay by setting the `--wt-loading-*` custom properties on your own element.
 
 Pass the element as the `loading` option. The terminal fades it out and removes it once the first frame renders. On a slow start it writes a status line into the overlay after 5 seconds, then rotates four messages every 20 seconds from the 60-second mark. The `loadingMessages` option rewords those messages. A screen reader hears only the changes that mean something, not every rotation.
+
+A server that is not ready answers 503 with a `Retry-After` header and an `error` message, and the overlay shows that message while the terminal waits. The tabbed presets treat a 503 on the session list, on the layout read or on session creation the same way. They wait on `Retry-After`, then read the layout and list again, for up to 20 minutes before booting on the last list they got.
+
+The layout read is the host's "set is ready" signal, so a host that restores sessions answers it with 503 until the restore is done. Answer 503 only while the server is genuinely not ready, and 404 when it keeps no layout record, or every page load waits on the overlay that long.
 
 ## What ships
 

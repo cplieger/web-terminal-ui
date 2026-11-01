@@ -107,8 +107,8 @@
   width: 300px;
   flex: 0 1 auto;
   min-width: 100px;
-  /* Positioning context for the chip's own overlay: the OSC 9;4 determinate
-     progress bar sits on its bottom edge (see .wt-progress-bar). Nothing else
+  /* Positioning context for the chip's own overlay: the determinate progress
+     bar sits on its bottom edge (see .wt-progress-bar). Nothing else
      inside a chip is absolutely positioned, and the strip's two root-level
      overlays (.wt-tab-ghost, .wt-tab-menu) are children of .wt-root, not of a
      chip, so this cannot capture them. */
@@ -188,7 +188,7 @@
 
 /* The active tab reads clearly above the inactive chips: a stronger fill plus an
    accent-coloured edge (inactive chips carry a faint white --border; the active
-   one gets the accent equivalent). Themeable via --accent (web-terminal-kiro -> purple). */
+   one gets the accent equivalent). Themeable via --accent. */
 :where(.wt-root) .wt-tab-active {
   background: var(--tab-active-bg);
   border-color: var(--tab-active-border);
@@ -474,55 +474,6 @@
   color: var(--tab-active-fg);
 }
 
-/* The split glyph (both split buttons) is filled, never stroked: a stroke is
-   centred on its outline, so its edges sit half a stroke off the shape's.
-   20px is a whole number of device px at 1, 1.25, 1.5 and 2 dppx, and at 1.25
-   and 1.5 the shapes move to that DPR's device grid, written as device px over
-   the ratio (25 and 30 across, both mirrored about the centre). */
-:where(.wt-root) .wt-btn > .wt-split-icon {
-  width: 20px;
-  height: 20px;
-  fill: currentcolor;
-  stroke: none;
-}
-
-@media (resolution: 1.25dppx) {
-  :where(.wt-root) .wt-split-icon-left {
-    x: calc(1px / 1.25);
-    width: calc(8px / 1.25);
-  }
-
-  :where(.wt-root) .wt-split-icon-divider {
-    x: calc(11px / 1.25);
-    y: calc(2px / 1.25);
-    width: calc(3px / 1.25);
-    height: calc(21px / 1.25);
-    rx: calc(1.5px / 1.25);
-  }
-
-  :where(.wt-root) .wt-split-icon-right {
-    x: calc(16px / 1.25);
-    width: calc(8px / 1.25);
-  }
-}
-
-@media (resolution: 1.5dppx) {
-  :where(.wt-root) .wt-split-icon-left {
-    x: calc(2px / 1.5);
-    width: calc(9px / 1.5);
-  }
-
-  :where(.wt-root) .wt-split-icon-divider {
-    x: calc(14px / 1.5);
-    width: calc(2px / 1.5);
-  }
-
-  :where(.wt-root) .wt-split-icon-right {
-    x: calc(19px / 1.5);
-    width: calc(9px / 1.5);
-  }
-}
-
 /* ===== Reorder drop slot (tabs feature, desktop drag) =====
    The dragged chip stays in the strip's flow for the whole gesture and renders as
    the SLOT it will land in: an empty dashed outline in the accent over a faint
@@ -708,25 +659,14 @@
   bottom: calc(var(--wt-tabbar-h, 44px) + var(--safe-bottom, 0px));
 }
 
-/* ===== Activity dots (activityMonitor via tabs) =====
-   Eight-state, distinguishable without color (shape + motion, not hue alone),
-   per section 12 / WCAG 1.4.1: three ANIMATED progress states (working /
-   warning / failed — one object, three hues, spread across lightness so they
-   survive greyscale and deuteranopia), a frozen ringed disc (input), two static
-   discs (green done, red crashed), and two hollow ones (idle, dim exited).
-   The one .wt-status-dot vocabulary is shared by the desktop strip, the mobile
-   switcher, and the overview sheet rows.
-
-   Revealed PER TAB: the dot is hidden until its own session reports activity
-   (OSC 9;4 progress, or a classified OSC 9 notification), at which point the
-   tabs feature adds .wt-reports to that dot (paintStatusDot). A program that
-   emits no OSC 9 signal (a plain bash/sh) has no activity concept, so its tabs
-   stay clean, label-only; a progress-reporting agent (kiro-cli, Claude Code)
-   lights up. An agent-shell consumer can PRESUME the report instead (tabs'
-   presumeReports option, on in presetAgentTabbed): .wt-reports is then set
-   from tab creation, so the idle dot shows immediately rather than popping in
-   after the agent's first signal. The element stays in the DOM either way (JS
-   sets data-status regardless), so revealing it is a pure CSS switch. */
+/* ===== Activity dots: one .wt-status-dot vocabulary for the strip, the
+   switcher and the overview rows. Eight built-in states told apart without
+   colour (WCAG 1.4.1, by shape and motion): three animated progress hues
+   (working, warning, failed) spread across lightness, a ringed disc (input), two
+   static discs (done, crashed) and two hollow ones (idle, exited); any other
+   status keeps the default hollow dot below. A dot shows once its session
+   reports activity (.wt-reports, set by paintStatusDot) or from creation under
+   tabs' presumeReports option; data-status is set either way. */
 :where(.wt-root) .wt-status-dot {
   display: none;
   width: 9px;
@@ -748,12 +688,10 @@
   animation: none;
 }
 
-/* ===== Determinate progress bar (OSC 9;4 percentage) =====
-   The second display mode the specs name for a progress report (iTerm2 calls it
-   a progress bar; ConEmu also puts the value on the taskbar, which is the
-   document-title prefix's job). One 2px line on the chip's bottom edge, shared
-   by all three chip sites (desktop strip chip, mobile active row, expanded list
-   row) because it ships in the one chipContent builder.
+/* ===== Determinate progress bar (the session's percentage: OSC 7501 progress, else OSC 9;4) =====
+   One 2px line on the chip's bottom edge, shared by all three chip sites
+   (desktop strip chip, mobile active row, expanded list row) because it ships
+   in the one chipContent builder.
 
    The ACCENT colour, not a per-state tint: the bar answers "how far", the dot
    answers "in what state", and tinting the bar per state would say the same
@@ -806,8 +744,8 @@
    the element), which read as a blink and coupled the layers — an element's
    opacity always multiplies onto its pseudos, so true independence requires
    animating disc COLORS, not element opacity. Server-side this is driven by the
-   OSC 9;4 progress signal, so it tracks agent activity, not the user typing at
-   the prompt.
+   program's own status reports, so it tracks agent activity, not the user
+   typing at the prompt.
 
    WORKING, WARNING AND FAILED SHARE THIS RULE, AND BOTH KEYFRAMES, VERBATIM.
    OSC 9;4 models ONE progress indicator with several states (1/3 active,
@@ -925,8 +863,8 @@
 }
 
 /* Agent done / ready: solid disc (--status-done), no motion. The default green
-   matches Kiro IDE's "Ready" (#22c55e). It sits at almost exactly working's
-   default lightness now that working is the accent blue (both ~72% OKLab L), so
+   (#22c55e) sits at almost exactly working's default lightness now that
+   working is the accent blue (both ~72% OKLab L), so
    the pair separates by hue plus the wave's motion rather than by lightness —
    and under prefers-reduced-motion by shape, since working becomes a donut. */
 :where(.wt-root) .wt-status-dot[data-status="done"] {
@@ -934,17 +872,11 @@
   border-color: var(--status-done);
 }
 
-/* User action required (permission / approval): a solid dot inside a static,
-   HARD-edged 2px ring, motionless (--status-input; the default orange is
-   shifted away from the old amber so it separates from both blue working and
-   green done). The stillness plus the hard edge is the message: the
-   agent's turn is mid-flight but blocked on you, and the surround is a fixed
-   outline rather than working's soft travelling wave. (Before the wave landed,
-   working's ripple was a 2px ring too and this state was literally that ping
-   frozen at its birth frame; the two now differ by edge quality as well as
-   motion, which reads more distinctly at 9px.) The ring derives from the same
-   token as the dot, so a theme override recolors both together. It persists
-   until you act on or switch into the tab. */
+/* User action required: a solid dot inside a static, hard-edged 2px ring
+   (--status-input). Stillness and the hard edge separate it from working's
+   soft travelling wave. The ring derives from the dot's token, so a theme
+   override recolors both. It persists until you act on or switch into the
+   tab. */
 :where(.wt-root) .wt-status-dot[data-status="input"] {
   background: var(--status-input);
   border-color: var(--status-input);

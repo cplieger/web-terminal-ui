@@ -68,16 +68,11 @@
     "calt" 0;
   font-kerning: none;
 
-  /* Note: do NOT use `contain: layout style` here. iOS Safari has
-     paint-suppression bugs in WebKit where layout-contained elements
-     receiving frequent replaceChildren() updates can drop paint
-     invalidations for inline children whose styling-only changes
-     don't trigger layout — most visibly the inverse-styled "cursor"
-     span Ink draws inside our rows, which would visually stick at
-     its old column on space/arrow key presses until a content-
-     changing keystroke forced a repaint. Without `contain`, every
-     row update participates in normal paint flow and the cursor
-     cell tracks the column on every flush. */
+  /* No `contain: layout style` here: iOS Safari (WebKit) can drop paint
+     invalidations for inline children of a layout-contained element that
+     replaceChildren() updates, so a program's inverse-styled cursor span
+     would stick at its old column on space or arrow keys until a
+     content-changing keystroke forced a repaint. */
 }
 
 :where(.wt-root) .term-row:empty::after {
@@ -213,17 +208,13 @@
   display: block;
 }
 
-/* Clickable URLs. OSC 8 hyperlinks (base .term-link) underline on HOVER where a
-   pointer can hover: an application can attach one OSC 8 link to a whole
-   padded/bordered region — e.g. a markdown link whose URL wraps inside a table
-   cell, where the terminal keeps the link open across the cell padding, the
-   borders and the empty adjacent column — so a persistent underline risks
-   bleeding across the whole cell and, on wrap, the full row. Hover-only matches
-   iTerm2 / VTE / kitty. The app's own text colour (which the engine renders)
-   keeps the link discoverable at rest.
-   Auto-detected bare URLs (.term-autolink) are tightly scoped to the URL text and
-   never bleed, so they keep a subtle persistent underline. (The engine also only
-   anchors runs with real link text, so the underline hugs the text either way.) */
+/* Clickable URLs. An OSC 8 link (.term-link) underlines on HOVER only, as in
+   iTerm2, VTE and kitty: an application can hold one link open across a table
+   cell's padding, borders and the empty column beside it, so a persistent
+   underline would bleed across the cell and, on wrap, the whole row. The app's
+   own text colour keeps it discoverable at rest. A detected bare URL
+   (.term-autolink) spans only the URL text, so it keeps a subtle persistent
+   underline. */
 :where(.wt-root) .term-link {
   color: inherit;
   text-decoration: none;
@@ -238,25 +229,13 @@
   text-decoration: underline solid;
 }
 
-/* Where nothing can hover, hover-only is no affordance at all: a touch user sees
-   an app-declared link as plain text and has to guess. Measured on kiro-cli at 41
-   columns: it emits OSC 8 for every markdown link (its hyperlink capability
-   unlocks on the TERM_PROGRAM=iTerm.app identity the engine advertises), so a
-   phone session is full of tappable, invisible links. Give them the same subtle
-   dotted underline the auto-detected ones carry.
-
-   The bleed risk above is what kept this off, and it is narrower than it reads:
-   the engine refuses to anchor a run with no real link text, so the padding, the
-   box-drawing borders and the indent cells a wrapped link leaks onto the next row
-   stay unanchored and unmarked (verified against a captured OSC 8 link that wraps
-   mid-URL: the three leaked indent cells carry the href on the wire and get no
-   anchor). What remains is an app leaving one link open across genuine text in an
-   adjacent column, which would be underlined too. On a device that cannot hover,
-   an occasional over-underline beats a link with no affordance.
-
-   `hover: none` is the pointing device's capability, not a viewport width, so a
-   narrow window on a desktop keeps hover styling and a tablet with a trackpad is
-   treated as hoverable. */
+/* Where the primary pointing device cannot hover, a hover-only underline gives
+   a touch interaction no persistent affordance: a TUI that emits OSC 8 for
+   every link it renders (a program may enable hyperlinks for the iTerm2
+   identity the engine advertises) fills a phone session with tappable,
+   invisible links. The bleed risk above stays small because the engine anchors
+   no run without real link text. `hover: none` describes the primary pointing
+   device, not viewport width, so a narrow desktop window keeps hover styling. */
 @media (hover: none) {
   :where(.wt-root) .term-link {
     text-decoration: underline dotted;

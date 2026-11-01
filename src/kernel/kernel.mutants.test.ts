@@ -1189,7 +1189,7 @@ describe("the document title, which the kernel is the only writer of", () => {
     // It doubles as the browser-tab label and the bookmark name, and a feature
     // repaints the prefix on every status sweep: an unchanged assignment churns
     // both for nothing.
-    document.title = "kiro-cli";
+    document.title = "app";
     let ctx: TerminalContext | undefined;
     const handle = await mountTerminal(rootIn(), {
       features: () => [probeFeature((c) => (ctx = c))],
@@ -1224,12 +1224,12 @@ describe("the document title, which the kernel is the only writer of", () => {
       const reporter = ctx.shell.attention({ icons: false });
       reporter.report({ count: 2, icon: null });
       expect(writes).toBe(1);
-      expect(document.title).toBe("(2) kiro-cli");
+      expect(document.title).toBe("(2) app");
 
       // The same report again, and a program re-announcing the title it already
       // has (a shell redrawing its prompt): neither composes a different title.
       reporter.report({ count: 2, icon: null });
-      fake.callbacks().onMessage?.({ type: "title", title: "kiro-cli" } as never);
+      fake.callbacks().onMessage?.({ type: "title", title: "app" } as never);
 
       expect(writes).toBe(1);
     } finally {

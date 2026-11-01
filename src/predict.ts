@@ -86,7 +86,7 @@ export function createPredictor(): Predictor {
           if (predCol > 0) {
             predCol--;
           } else if (predRow > 0) {
-            // kiro-cli's prompt wraps a Backspace at col 0 to the previous row.
+            // A line editor wraps a Backspace at col 0 to the previous row.
             predRow--;
             predCol = cols - 1;
           }
