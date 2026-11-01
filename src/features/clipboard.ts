@@ -1,5 +1,6 @@
 import { windowOf } from "../kernel/realm.js";
 import { selectionTextWithin } from "../kernel/selection.js";
+import { isShortcutLetter } from "../kernel/shortcut-letter.js";
 import type { TerminalFeature } from "../kernel/types.js";
 
 /** The value a peer reads through `ctx.use(clipboard())`. Both members are
@@ -62,11 +63,11 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
         // Consuming plain Ctrl+V without preventDefault stops the kernel mapping
         // it to \x16 while the native paste still flows into the textarea, so no
         // clipboard read and no Firefox clipboard-read popup.
-        if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey && ev.code === "KeyV") {
+        if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey && isShortcutLetter(ev, "v")) {
           return true;
         }
         if (ev.ctrlKey && ev.shiftKey && !ev.altKey && !ev.metaKey) {
-          if (ev.code === "KeyC") {
+          if (isShortcutLetter(ev, "c")) {
             const sel = selectionTextWithin(surface);
             if (sel !== "") {
               copy(sel);
@@ -74,7 +75,7 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
             ev.preventDefault();
             return true;
           }
-          if (ev.code === "KeyV") {
+          if (isShortcutLetter(ev, "v")) {
             paste();
             ev.preventDefault();
             return true;
