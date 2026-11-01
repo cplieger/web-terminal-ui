@@ -1669,7 +1669,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
       [{ key: "c", code: "KeyC", ctrlKey: true }, 0],
       [{ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }, 0],
       [{ key: "Insert", code: "Insert", ctrlKey: true }, 0],
-      // Unencoded on the legacy path; kitty encodes it from its physical key.
+      // Unencoded on the legacy path; kitty encodes it as ctrl+c.
       [{ key: "\u0441", code: "KeyC", ctrlKey: true }, 1],
       [{ key: "c", code: "KeyC", metaKey: true }, 0],
     ] as [KeyboardEventInit & { key: string }, number][]) {

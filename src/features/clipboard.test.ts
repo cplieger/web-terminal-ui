@@ -94,15 +94,19 @@ function fakeCtx(): {
   };
 }
 
+/** A keydown; `key` defaults to what a US layout types on `code`'s letter key. */
 function keyEvent(o: {
   code: string;
+  key?: string;
   ctrl?: boolean;
   shift?: boolean;
   alt?: boolean;
   meta?: boolean;
 }): KeyboardEvent {
+  const letter = /^Key([A-Z])$/.exec(o.code)?.[1] ?? "";
   return {
     code: o.code,
+    key: o.key ?? (o.shift === true ? letter : letter.toLowerCase()),
     ctrlKey: o.ctrl ?? false,
     shiftKey: o.shift ?? false,
     altKey: o.alt ?? false,
@@ -234,6 +238,73 @@ describe("clipboard: the copy shortcut requires exactly Ctrl+Shift", () => {
     const { keydown } = setup();
     expect(keydown(keyEvent({ code: "KeyX", ctrl: true, shift: true }))).toBe(false);
     expect(readText).not.toHaveBeenCalled();
+  });
+});
+
+describe("clipboard: the shortcuts follow the layout's letters", () => {
+  it("Dvorak Ctrl+K, on the V key, is left to the kernel's key mapping", () => {
+    const { keydown } = setup();
+    expect(keydown(keyEvent({ code: "KeyV", key: "k", ctrl: true }))).toBe(false);
+  });
+
+  it("Dvorak Ctrl+V, on the Period key, is consumed for the native paste", () => {
+    const { keydown } = setup();
+    const ev = keyEvent({ code: "Period", key: "v", ctrl: true });
+    expect(keydown(ev)).toBe(true);
+    expect(ev.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("Caps Lock's capital V is still the paste key", () => {
+    const { keydown } = setup();
+    expect(keydown(keyEvent({ code: "KeyV", key: "V", ctrl: true }))).toBe(true);
+  });
+
+  it("a key the browser cannot name, on the V key, is the paste key", () => {
+    const { keydown } = setup();
+    expect(keydown(keyEvent({ code: "KeyV", key: "Unidentified", ctrl: true }))).toBe(true);
+  });
+
+  it("a non-ASCII Latin letter on the V key leaves the physical V key the paste key", () => {
+    const { keydown } = setup();
+    expect(keydown(keyEvent({ code: "KeyV", key: "\u00e9", ctrl: true }))).toBe(true);
+  });
+
+  it("Dvorak Ctrl+Shift+C, on the I key, copies; Ctrl+Shift+J on the C key does not", () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { keydown, surface } = setup();
+    selectInside(surface, "hello");
+    expect(keydown(keyEvent({ code: "KeyC", key: "J", ctrl: true, shift: true }))).toBe(false);
+    expect(writeText).not.toHaveBeenCalled();
+    expect(keydown(keyEvent({ code: "KeyI", key: "C", ctrl: true, shift: true }))).toBe(true);
+    expect(writeText).toHaveBeenCalledWith("hello");
+  });
+
+  it("Dvorak Ctrl+Shift+V, on the Period key, pastes; Ctrl+Shift+K on the V key does not", async () => {
+    const readText = vi.fn().mockResolvedValue("pasted-text");
+    vi.stubGlobal("navigator", { clipboard: { readText } });
+    const { keydown, paste } = setup();
+    expect(keydown(keyEvent({ code: "KeyV", key: "K", ctrl: true, shift: true }))).toBe(false);
+    expect(readText).not.toHaveBeenCalled();
+    expect(keydown(keyEvent({ code: "Period", key: "V", ctrl: true, shift: true }))).toBe(true);
+    await vi.waitFor(() => {
+      expect(paste).toHaveBeenCalledWith("pasted-text");
+    });
+  });
+
+  it("a layout typing no Latin letter there uses the physical C and V keys (Russian С, М)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const readText = vi.fn().mockResolvedValue("pasted-text");
+    vi.stubGlobal("navigator", { clipboard: { writeText, readText } });
+    const { keydown, surface, paste } = setup();
+    selectInside(surface, "hello");
+    expect(keydown(keyEvent({ code: "KeyV", key: "\u043c", ctrl: true }))).toBe(true);
+    expect(keydown(keyEvent({ code: "KeyC", key: "\u0421", ctrl: true, shift: true }))).toBe(true);
+    expect(writeText).toHaveBeenCalledWith("hello");
+    expect(keydown(keyEvent({ code: "KeyV", key: "\u041c", ctrl: true, shift: true }))).toBe(true);
+    await vi.waitFor(() => {
+      expect(paste).toHaveBeenCalledWith("pasted-text");
+    });
   });
 });
 

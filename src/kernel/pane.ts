@@ -14,6 +14,7 @@ import { createRegions } from "./regions.js";
 import { createAnnouncer, createPaneTablist, type PaneTablist } from "./a11y.js";
 import { createConnState } from "./conn-state.js";
 import { selectionTextWithin } from "./selection.js";
+import { isShortcutLetter } from "./shortcut-letter.js";
 import { primaryPointerFine } from "./keyboard-presence.js";
 import { windowOf } from "./realm.js";
 import {
@@ -77,16 +78,12 @@ function typedChar(ev: KeyboardEvent): string | null {
   return first !== undefined && String.fromCodePoint(first) === ev.key ? ev.key : null;
 }
 
-/** Ctrl+C (Shift allowed) or Ctrl+Insert: the chords that copy a selection. A
- *  non-Latin layout's C is its physical KeyC; a Latin layout's is `key`. */
+/** Ctrl+C (Shift allowed) or Ctrl+Insert: the chords that copy a selection. */
 function isCopyChord(ev: KeyboardEvent): boolean {
   if (!ev.ctrlKey || ev.altKey || ev.metaKey) {
     return false;
   }
-  if (ev.key === "Insert" || ev.key === "c" || ev.key === "C") {
-    return true;
-  }
-  return ev.code === "KeyC" && !/^[a-z]$/i.test(ev.key);
+  return ev.key === "Insert" || isShortcutLetter(ev, "c");
 }
 
 /** iOS sends U+00A0 where a space was typed; shared by every send path so one
