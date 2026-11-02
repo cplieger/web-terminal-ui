@@ -13,7 +13,7 @@ let SETTLE_MS = 350;
 
 /** @internal Test seam: arm every settle started from now on at `ms`; returns the
  *  previous value so the caller can restore it. */
-// deadset:ignore DS1004 -- the browser tests shorten the settle delay so they need not wait out the real one
+// deadset:ignore DS1102 -- the browser tests shorten the settle delay so they need not wait out the real one
 export function setSettleMs(ms: number): number {
   const previous = SETTLE_MS;
   SETTLE_MS = ms;
