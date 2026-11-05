@@ -11,6 +11,7 @@
       "**/test-d/**",
       "src/**/*-setup.ts",
       "src/**/test-helpers/**"
-    ]
+    ],
+    "entry_files": ["scripts/verify-chip-geometry.mjs"]
   }
 }
