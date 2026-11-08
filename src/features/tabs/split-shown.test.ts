@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { LineStore } from "@cplieger/web-terminal-engine";
 import { connectionBanner } from "../connection-banner.js";
+import { ackEpoch } from "../../test-helpers/store-epoch.js";
 import type { PersistedScrollback, ScrollbackPersistence } from "../../kernel/types.js";
 import {
   chipOf,
@@ -467,10 +468,8 @@ describe("a tab's scrollback follows it between panes", () => {
     });
     term.split?.open();
     const rightEngine = engineOn(fake, root, "right");
-    // The left connection knows s1's server epoch; the right one has never seen it.
-    leftEngine.connection.serverEpochOf.mockImplementation((id: string) =>
-      id === "s1" ? 4242 : 0,
-    );
+    // s1's store learned its server epoch in the left pane.
+    ackEpoch(boundAtBoot, 4242);
     rightEngine.renderer.bind.mockClear();
 
     menuItem(openTabMenu(root, "one"), "Snap to right").click();
@@ -480,12 +479,59 @@ describe("a tab's scrollback follows it between panes", () => {
     expect(rightEngine.renderer.boundStore()).toBe(boundAtBoot);
     expect(leftEngine.renderer.boundStore()).not.toBe(boundAtBoot);
 
-    // Neither connection knows the epoch any more (the left forgot the session,
-    // the right has had no resume yet): the save is filed under the handed-over one.
-    leftEngine.connection.serverEpochOf.mockReturnValue(0);
+    // The right pane has had no resume yet: the save is filed under the store's epoch.
     window.dispatchEvent(new Event("pagehide"));
     expect(persist.entries.get("s1")?.snapshot.serverEpoch).toBe(4242);
     expect(persist.entries.get("s1")?.snapshot.highest).toBe(3);
     await until(() => shown(ctx, "right") === "s1");
+  });
+
+  it("files a session's save under the epoch its store last acked, and a move back keeps that content", async () => {
+    // Split view: s1's store learns E1 in the left pane, the server restarts, and
+    // the right pane's resume moves the same store to E2. No pane's stale E1 may
+    // decide the save, and a move back to the left must not treat E2 content as
+    // another process's.
+    const E1 = 1_777_000_000_000_000_000;
+    const E2 = 1_777_000_000_500_000_000;
+    const persist = storage();
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server, {
+      opts: { persistScrollback: persist },
+    });
+    await tick();
+    const leftEngine = engineOn(fake, root, "left");
+    const s1Store = leftEngine.renderer.bind.mock.calls[0]?.[0];
+    if (!s1Store) {
+      throw new Error("the boot bound no store");
+    }
+    ackEpoch(s1Store, E1);
+    s1Store.applyScroll({
+      type: "scroll",
+      firstIndex: 0,
+      lines: [[{ t: "before", f: -1, b: -1, a: 0, uc: -1 }]],
+    });
+    term.split?.open();
+    menuItem(openTabMenu(root, "one"), "Snap to right").click();
+    expect(shown(ctx, "right")).toBe("s1");
+
+    expect(ackEpoch(s1Store, E2)).toBe(true);
+    s1Store.applyScroll({
+      type: "scroll",
+      firstIndex: 0,
+      lines: [
+        [{ t: "after-0", f: -1, b: -1, a: 0, uc: -1 }],
+        [{ t: "after-1", f: -1, b: -1, a: 0, uc: -1 }],
+      ],
+    });
+    window.dispatchEvent(new Event("pagehide"));
+    expect(persist.entries.get("s1")?.snapshot.serverEpoch).toBe(E2);
+    expect(persist.entries.get("s1")?.snapshot.highest).toBe(1);
+
+    menuItem(openTabMenu(root, "one"), "Snap to left").click();
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(leftEngine.renderer.boundStore()).toBe(s1Store);
+    expect(ackEpoch(s1Store, E2)).toBe(false);
+    expect(s1Store.getLine(1)?.[0]?.t).toBe("after-1");
+    await until(() => shown(ctx, "left") === "s1");
   });
 });

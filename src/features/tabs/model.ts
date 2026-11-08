@@ -542,9 +542,10 @@ function readPaneLayout(body: unknown): PaneLayout | null {
     : null;
 }
 
-/** The server's own rules for a well-formed record: a closed split shows only its
- *  left side and selects it, one session is never on both sides, and an open split
- *  with one shown side selects that side. */
+/** The server's rules for a well-formed record, tested against the engine's
+ *  `layout-shapes.json`: a closed split shows only its left side and selects it,
+ *  one session is never on both sides, and an open split with one shown side
+ *  selects that side. */
 function isConsistentLayout(l: PaneLayout): boolean {
   if (!l.open) {
     return l.right === null && l.selected === "left";

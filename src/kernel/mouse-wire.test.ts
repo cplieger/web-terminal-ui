@@ -1,16 +1,7 @@
-// The mouse-reporting seam: the engine's mouse controller reports over the
-// pane's transport, and the kernel owns the pointer shape that tells the user
-// who a click belongs to.
-//
-// The engine's mouse controller and mode state are REAL here, over the fake's
-// renderer and connection spies: a mocked encoder could not show that a modes
-// frame plus a real mousedown puts real SGR bytes on the transport, which is the
-// whole defect this seam had.
-//
-// The stylesheet is loaded because the pointer shape is a CSS fact: the kernel
-// toggles one class and the cascade decides three cursors from it (the grid, a
-// link inside the grid, and the resting state). Reading the rules back as text
-// would assert the declarations exist, not that they win.
+// The mouse-reporting seam: the engine's real mouse controller and mode state
+// report over the pane's transport, so a modes frame plus a mousedown puts real
+// SGR bytes on it. The stylesheet is loaded because the kernel's one class sets
+// three cursors through the cascade, which only computed style shows.
 import {
   describe,
   it,
@@ -575,10 +566,9 @@ describe("pointer shape", () => {
     expect(getComputedStyle(outputEl).userSelect).toBe("text");
   });
 
-  it("re-derives the shape on a session switch, which carries no modes frame", async () => {
-    // connection.setSession restores the incoming session's mode mirror
-    // synchronously and delivers nothing, so a shape driven off frames alone would
-    // keep the outgoing tab's pointer.
+  it("follows the mode state, which a session switch resets with no modes frame", async () => {
+    // connection.setSession resets the mode state to power-on and delivers
+    // nothing, so a shape driven off frames would keep the outgoing tab's pointer.
     let ctx: TerminalContext | undefined;
     const owner: TerminalFeature = {
       name: "session-owner",
@@ -592,13 +582,12 @@ describe("pointer shape", () => {
     if (ctx === undefined) {
       throw new Error("the owner feature never ran");
     }
-    // What setSession does for a session that already had tracking on.
     fake.modes().applySnapshot({ ...fake.modes().snapshot(), mouseMode: 1003, mouseSGR: true });
-    expect(getComputedStyle(outputEl).cursor).toBe("text");
+    expect(getComputedStyle(outputEl).cursor).toBe("default");
 
     const session: SessionRef = { id: "session-2" };
     ctx.notifySwitch(session);
 
-    expect(getComputedStyle(outputEl).cursor).toBe("default");
+    expect(getComputedStyle(outputEl).cursor).toBe("text");
   });
 });

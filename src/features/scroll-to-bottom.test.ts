@@ -1,15 +1,15 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { createScrollController, type ScrollController } from "@cplieger/web-terminal-engine";
 import { scrollToBottom } from "./scroll-to-bottom.js";
-import type { TerminalContext, FeatureInstance } from "../kernel/types.js";
+import type { TerminalContext, FeatureInstance, ScrollHandle } from "../kernel/types.js";
 
 function stubMatchMedia(reduce: boolean): void {
   vi.stubGlobal("matchMedia", () => ({ matches: reduce }));
 }
 
-function fakeCtx(): {
+function fakeCtx(scroll?: ScrollHandle): {
   ctx: TerminalContext;
   slot: HTMLElement;
-  surface: HTMLElement;
   scrollToBottomSpy: ReturnType<typeof vi.fn>;
   offSpy: ReturnType<typeof vi.fn>;
   /** What the feature handed to `ctx.defer`, in order. */
@@ -17,36 +17,17 @@ function fakeCtx(): {
   emitScroll: (scrolledUp: boolean) => void;
 } {
   const slot = document.createElement("div");
-  const surface = document.createElement("div");
-  surface.scrollTo = vi.fn();
-  // The scroll geometry is declared, not measured: it is an INPUT to the distance
-  // arithmetic under test, and a detached div with no content has none. The default
-  // is
-  // "there is somewhere to scroll to" (700px of range, parked at the top), which
-  // is the state the button exists for; the zero-distance case gets its own test
-  // because the feature branches on it.
-  let scrollTopValue = 0;
-  Object.defineProperty(surface, "scrollHeight", { get: () => 1000, configurable: true });
-  Object.defineProperty(surface, "clientHeight", { get: () => 300, configurable: true });
-  Object.defineProperty(surface, "scrollTop", {
-    get: () => scrollTopValue,
-    set: (v: number) => {
-      scrollTopValue = v;
-    },
-    configurable: true,
-  });
   const scrollToBottomSpy = vi.fn();
   const offSpy = vi.fn();
   const deferred: (() => void)[] = [];
   let scrollHandler: ((p: { scrolledUp: boolean }) => void) | undefined;
   const ctx = {
     region: () => slot,
-    surface: () => surface,
-    shell: { root: surface },
+    shell: { root: slot },
     defer: (release: () => void) => {
       deferred.push(release);
     },
-    scroll: {
+    scroll: scroll ?? {
       scrollToBottom: scrollToBottomSpy,
       isUserScrolledUp: () => false,
       currentScrollTop: () => 0,
@@ -60,7 +41,6 @@ function fakeCtx(): {
   return {
     ctx,
     slot,
-    surface,
     scrollToBottomSpy,
     offSpy,
     deferred,
@@ -72,42 +52,20 @@ const button = (slot: HTMLElement): HTMLButtonElement | null =>
   slot.querySelector<HTMLButtonElement>("button");
 
 describe("scrollToBottom feature", () => {
-  it("under reduced motion, activating the control uses the engine's instant scrollToBottom", () => {
+  it("under reduced motion, activating the control follows the output without animating", () => {
     stubMatchMedia(true);
-    const { ctx, slot, surface, scrollToBottomSpy } = fakeCtx();
+    const { ctx, slot, scrollToBottomSpy } = fakeCtx();
     scrollToBottom().setup(ctx);
     button(slot)?.click();
-    expect(scrollToBottomSpy).toHaveBeenCalledTimes(1);
-    expect(surface.scrollTo).not.toHaveBeenCalled();
+    expect(scrollToBottomSpy.mock.calls).toEqual([[{ smooth: false }]]);
   });
 
-  it("with motion allowed, activating the control smooth-scrolls the surface instead", () => {
+  it("with motion allowed, activating the control asks the engine for an animated move", () => {
     stubMatchMedia(false);
-    const { ctx, slot, surface, scrollToBottomSpy } = fakeCtx();
+    const { ctx, slot, scrollToBottomSpy } = fakeCtx();
     scrollToBottom().setup(ctx);
     button(slot)?.click();
-    // The target is the MAXIMUM offset (1000 - 300), not scrollHeight. An
-    // over-scroll target is one clientHeight past the end and needs the container
-    // to clamp it, which is the assumption the engine's bottom writes dropped:
-    // WebKit does not keep an offset inside the range for free.
-    expect(surface.scrollTo).toHaveBeenCalledWith({ top: 700, behavior: "smooth" });
-    expect(scrollToBottomSpy).not.toHaveBeenCalled();
-  });
-
-  it("re-engages follow directly when there is no distance to animate", () => {
-    // The state that makes this necessary: a program erasing its scrollback
-    // clamps a scrolled-up reader to the bottom WITHOUT engaging follow, and the
-    // engine now keeps them there (an upward clamp may not engage follow). A
-    // smooth scroll with zero distance fires no scroll event, so nothing would
-    // re-derive the state and this button — whose whole job is resuming follow —
-    // would be inert until output happened to arrive.
-    stubMatchMedia(false);
-    const { ctx, slot, surface, scrollToBottomSpy } = fakeCtx();
-    surface.scrollTop = 700; // already at the bottom of the 1000/300 geometry
-    scrollToBottom().setup(ctx);
-    button(slot)?.click();
-    expect(scrollToBottomSpy).toHaveBeenCalledTimes(1);
-    expect(surface.scrollTo).not.toHaveBeenCalled();
+    expect(scrollToBottomSpy.mock.calls).toEqual([[{ smooth: true }]]);
   });
 
   it("toggles the scrolled-up class on the region from the scroll:state event", () => {
@@ -172,13 +130,12 @@ describe("scrollToBottom: an engine with no matchMedia at all", () => {
     // unguarded throws inside the click handler, which loses the scroll AND
     // whatever the handler would have done next.
     vi.stubGlobal("matchMedia", undefined);
-    const { ctx, slot, surface, scrollToBottomSpy } = fakeCtx();
+    const { ctx, slot, scrollToBottomSpy } = fakeCtx();
     scrollToBottom().setup(ctx);
 
     button(slot)?.click();
 
-    expect(surface.scrollTo).toHaveBeenCalledWith({ top: 700, behavior: "smooth" });
-    expect(scrollToBottomSpy).not.toHaveBeenCalled();
+    expect(scrollToBottomSpy.mock.calls).toEqual([[{ smooth: true }]]);
   });
 });
 
@@ -196,7 +153,7 @@ describe("scrollToBottom: in a second document", () => {
     }
     try {
       win.matchMedia = () => ({ matches: true }) as unknown as MediaQueryList;
-      const { ctx, slot, surface, scrollToBottomSpy } = fakeCtx();
+      const { ctx, slot, scrollToBottomSpy } = fakeCtx();
       const root = doc.createElement("div");
       doc.body.appendChild(root);
       (ctx as unknown as { shell: { root: HTMLElement } }).shell = { root };
@@ -204,10 +161,38 @@ describe("scrollToBottom: in a second document", () => {
 
       button(slot)?.click();
 
-      expect(scrollToBottomSpy).toHaveBeenCalledTimes(1);
-      expect(surface.scrollTo).not.toHaveBeenCalled();
+      expect(scrollToBottomSpy.mock.calls).toEqual([[{ smooth: false }]]);
     } finally {
       frame.remove();
     }
+  });
+});
+
+describe("scrollToBottom: with the engine's scroll controller", () => {
+  let host: HTMLElement | undefined;
+  let controller: ScrollController | undefined;
+  afterEach(() => {
+    controller?.dispose();
+    host?.remove();
+  });
+
+  it("resumes following at the press when the move is animated", () => {
+    stubMatchMedia(false);
+    host = document.createElement("div");
+    host.style.cssText = "height: 300px; overflow-y: auto";
+    const content = document.createElement("div");
+    content.style.height = "3000px";
+    host.appendChild(content);
+    document.body.appendChild(host);
+    controller = createScrollController({ scrollEl: host });
+    controller.scrollToBottom();
+    controller.scrollByPage(-1);
+    expect(controller.isUserScrolledUp()).toBe(true);
+    const { ctx, slot } = fakeCtx(controller);
+    scrollToBottom().setup(ctx);
+
+    button(slot)?.click();
+
+    expect(controller.isUserScrolledUp()).toBe(false);
   });
 });

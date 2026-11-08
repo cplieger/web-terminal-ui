@@ -30,7 +30,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-const { sendBinary, connect, setSession, reconnectNow } = fake.connection;
+const { sendBinary, connect, setSession } = fake.connection;
 const {
   resetScrollback,
   resetScreen,
@@ -40,8 +40,7 @@ const {
   boundStore,
 } = fake.renderer;
 const { dispose } = fake;
-const dec = new TextDecoder();
-const sentText = (): string => sendBinary.mock.calls.map((c) => dec.decode(c[0])).join("");
+const sentText = (): string => fake.sentInput().join("");
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
@@ -53,30 +52,6 @@ function rootIn(): HTMLElement {
   const root = document.createElement("div");
   document.body.appendChild(root);
   return root;
-}
-
-/** Declare a scroll container's geometry, INCLUDING a writable scrollTop.
- *
- *  All three readings are inputs to the paging arithmetic under test. A real
- *  browser clamps `scrollTop` to actual overflow, so a write to a container with
- *  nothing to scroll stays 0, and a helper that only called preventDefault would
- *  pass. The own accessor records what production wrote and does NOT clamp,
- *  because production's own clamping is under test (see the ceiling note: WebKit
- *  does not reliably clamp an out-of-range offset). */
-function declareScrollGeometry(
-  el: HTMLElement,
-  geom: { clientHeight: number; scrollHeight: number; scrollTop: number },
-): void {
-  Object.defineProperty(el, "clientHeight", { value: geom.clientHeight, configurable: true });
-  Object.defineProperty(el, "scrollHeight", { value: geom.scrollHeight, configurable: true });
-  let top = geom.scrollTop;
-  Object.defineProperty(el, "scrollTop", {
-    configurable: true,
-    get: () => top,
-    set: (next: number) => {
-      top = next;
-    },
-  });
 }
 
 describe("bare kernel builds a working terminal with no chrome", () => {
@@ -106,6 +81,7 @@ describe("bare kernel builds a working terminal with no chrome", () => {
   it("brackets and sanitizes a paste (paste-jacking defense)", async () => {
     const root = rootIn();
     await mountTerminal(root, { features: () => [] });
+    fake.announceModes({ bracketedPaste: true });
     const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(
       new InputEvent("input", { inputType: "insertFromPaste", data: "ls\n\x1b[201~rm -rf /" }),
@@ -423,22 +399,50 @@ describe("reattach", () => {
     cbs.onProcessExit?.(); // the definitive close; also marks the kernel loaded
     resetScrollback.mockClear();
     resetScreen.mockClear();
+    connect.mockClear();
     seen.length = 0;
     vi.useFakeTimers();
 
     term.reattach();
 
     // The old PTY's screen goes before the connect, so the resume cannot claim
-    // lines above what the replacement has committed.
+    // lines above what the replacement has committed. connect(), because the
+    // engine refuses the wake path's reconnectNow on an ended session.
     expect(resetScrollback).toHaveBeenCalledTimes(1);
     expect(resetScreen).toHaveBeenCalledTimes(1);
-    expect(reconnectNow).toHaveBeenCalledTimes(1);
+    expect(connect).toHaveBeenCalledTimes(1);
     // And the banner stops saying "Session ended" over the blanked screen. The
     // transition carries the machine's grace delay, so a connect that lands
     // promptly shows nothing at all.
     expect(seen).not.toContain("reconnecting");
     vi.advanceTimersByTime(1000);
     expect(seen).toContain("reconnecting");
+  });
+
+  it("a wake on an ended pane leaves it ended; only reattach leaves", async () => {
+    const root = rootIn();
+    const seen: string[] = [];
+    const watcher: TerminalFeature = {
+      name: "ended-wake-watcher",
+      setup(ctx) {
+        ctx.on("connection:state", (s) => {
+          seen.push(s);
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    await mountTerminal(root, { features: () => [watcher] });
+    await tick();
+    fake.callbacks().onProcessExit?.();
+    seen.length = 0;
+    vi.useFakeTimers();
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("pageshow"));
+    window.dispatchEvent(new Event("online"));
+    vi.advanceTimersByTime(1000);
+
+    expect(seen).toEqual([]);
   });
 
   it("injects no keystrokes, and starts nothing: reconnecting is all it does", async () => {
@@ -456,12 +460,12 @@ describe("reattach", () => {
     const term = await mountTerminal(rootIn(), { features: () => [] });
     await tick();
     term.destroy();
-    reconnectNow.mockClear();
+    connect.mockClear();
     resetScrollback.mockClear();
 
     term.reattach();
 
-    expect(reconnectNow).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
     expect(resetScrollback).not.toHaveBeenCalled();
   });
 });
@@ -555,7 +559,7 @@ describe("feature lifecycle", () => {
     const dropAll: TerminalFeature = {
       name: "drop",
       setup(ctx) {
-        const off = ctx.registerInputTransform(() => new Uint8Array(0));
+        const off = ctx.registerInputTransform(() => null);
         return { teardown: off };
       },
     };
@@ -565,6 +569,26 @@ describe("feature lifecycle", () => {
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "x" }));
     // The transform dropped the byte, so nothing reached the socket.
     expect(sendBinary).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing for a paste a transform empties, not even the closing bracket", async () => {
+    const root = rootIn();
+    const emptyPastes: TerminalFeature = {
+      name: "empty-pastes",
+      setup(ctx) {
+        const off = ctx.registerInputTransform((i) =>
+          i.kind === "paste" ? { kind: "paste", text: "" } : i,
+        );
+        return { teardown: off };
+      },
+    };
+    await mountTerminal(root, { features: () => [emptyPastes] });
+    await tick();
+    fake.announceModes({ bracketedPaste: true });
+    const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertFromPaste", data: "abc" }));
+
+    expect(sentText()).toBe("");
   });
 
   it("runs teardown on destroy", async () => {
@@ -1305,7 +1329,7 @@ describe("snap-to-bottom on user input (classic-terminal follow re-engage)", () 
     const dropAll: TerminalFeature = {
       name: "drop",
       setup(ctx) {
-        return { teardown: ctx.registerInputTransform(() => new Uint8Array(0)) };
+        return { teardown: ctx.registerInputTransform(() => null) };
       },
     };
     const root = rootIn();
@@ -2115,37 +2139,14 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     }
   });
 
-  it("scrolls the viewport for Shift+PageUp and Shift+PageDown", async () => {
-    // The test document loads no stylesheet, so the terminal pane has nothing to
-    // overflow and the scroll arms need declared geometry to move against;
-    // without it this test would pass against a helper that only called
-    // preventDefault.
+  it("pages the viewport through the engine for Shift+PageUp and Shift+PageDown", async () => {
     const root = await armed();
-    const term = root.querySelector(".term") as HTMLElement;
-    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 1000 });
     typeOnDocument({ key: "PageUp", shiftKey: true });
-    expect(term.scrollTop).toBe(600);
-    expect(sentText()).toBe("");
+    expect(fake.scroll.scrollByPage.mock.calls).toEqual([[-1]]);
     selectInOutput(root);
     ta(root).blur();
     typeOnDocument({ key: "PageDown", shiftKey: true });
-    expect(term.scrollTop).toBe(1000);
-    expect(sentText()).toBe("");
-  });
-
-  it("stops a page down at the maximum offset, not one screen past it", async () => {
-    // The ceiling used to be scrollHeight, which is one clientHeight past the end
-    // of the content, so a page down from near the bottom handed the container an
-    // offset it cannot legally hold and relied on it to clamp. WebKit does not
-    // reliably do that, and an out-of-range offset is what leaves the viewport
-    // over empty space.
-    const root = await armed();
-    const term = root.querySelector(".term") as HTMLElement;
-    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 3500 });
-    selectInOutput(root);
-    ta(root).blur();
-    typeOnDocument({ key: "PageDown", shiftKey: true });
-    expect(term.scrollTop).toBe(3600); // 4000 - 400, the bottom
+    expect(fake.scroll.scrollByPage.mock.calls).toEqual([[-1], [1]]);
     expect(sentText()).toBe("");
   });
 
@@ -3386,7 +3387,7 @@ describe("the input funnel's transform and observer chains", () => {
     const probe: TerminalFeature<void> = {
       name: "rewriter",
       setup(ctx) {
-        ctx.registerInputTransform(() => new TextEncoder().encode("Z"));
+        ctx.registerInputTransform(() => ({ kind: "text", text: "Z" }));
         ctx.registerInputObserver((b) => {
           seen.push(dec2.decode(b));
         });
@@ -3413,7 +3414,7 @@ describe("the input funnel's transform and observer chains", () => {
     };
     await mountTerminal(rootIn(), { features: () => [probe] });
     await tick();
-    sendBinary.mockReturnValue(false); // the outbox is full
+    sendBinary.mockReturnValue(false); // the connection is disposed
 
     const ta = document.querySelector(".term-input") as HTMLTextAreaElement;
     ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "q" }));
@@ -3429,9 +3430,11 @@ describe("the input funnel's transform and observer chains", () => {
     const probe: TerminalFeature<void> = {
       name: "two-transforms",
       setup(ctx) {
-        ctx.registerInputTransform((b) => new TextEncoder().encode(`<${dec.decode(b)}`));
-        const off = ctx.registerInputTransform((b) =>
-          new TextEncoder().encode(`${dec.decode(b)}>`),
+        ctx.registerInputTransform((i) =>
+          i.kind === "text" ? { kind: "text", text: `<${i.text}` } : i,
+        );
+        const off = ctx.registerInputTransform((i) =>
+          i.kind === "text" ? { kind: "text", text: `${i.text}>` } : i,
         );
         off();
         return { teardown: () => undefined };
@@ -3503,10 +3506,12 @@ describe("the input funnel's transform and observer chains", () => {
     const probe: TerminalFeature<void> = {
       name: "drop-the-first",
       setup(ctx) {
-        const off = ctx.registerInputTransform((b) =>
-          new TextEncoder().encode(`<${dec.decode(b)}`),
+        const off = ctx.registerInputTransform((i) =>
+          i.kind === "text" ? { kind: "text", text: `<${i.text}` } : i,
         );
-        ctx.registerInputTransform((b) => new TextEncoder().encode(`${dec.decode(b)}>`));
+        ctx.registerInputTransform((i) =>
+          i.kind === "text" ? { kind: "text", text: `${i.text}>` } : i,
+        );
         off();
         return { teardown: () => undefined };
       },
@@ -3630,10 +3635,12 @@ describe("the input funnel's transform and observer chains", () => {
     const probe: TerminalFeature<void> = {
       name: "double-off",
       setup(ctx) {
-        const off = ctx.registerInputTransform((b) =>
-          new TextEncoder().encode(`<${dec.decode(b)}`),
+        const off = ctx.registerInputTransform((i) =>
+          i.kind === "text" ? { kind: "text", text: `<${i.text}` } : i,
         );
-        ctx.registerInputTransform((b) => new TextEncoder().encode(`${dec.decode(b)}>`));
+        ctx.registerInputTransform((i) =>
+          i.kind === "text" ? { kind: "text", text: `${i.text}>` } : i,
+        );
         off();
         off();
         return { teardown: () => undefined };
@@ -4024,51 +4031,25 @@ describe("the keydown chain on the focused textarea", () => {
     expect(sentText()).toBe("\x03");
   });
 
-  it("scrolls a page up on Shift+PageUp instead of sending it to the pty", async () => {
+  it("pages up through the engine on Shift+PageUp instead of sending it to the pty", async () => {
     // Scrollback paging is a CLIENT gesture: the pty has no scrollback to page,
     // so the bytes must not go on the wire and the browser's own PageUp must not
     // also fire.
-    const root = rootIn();
-    await mountTerminal(root, { features: () => [] });
-    const term = root.querySelector<HTMLElement>(".term");
-    if (!term) {
-      throw new Error("no .term");
-    }
-    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 1000 });
+    await mountTerminal(rootIn(), { features: () => [] });
 
     const ev = key({ key: "PageUp", shiftKey: true });
 
-    expect(term.scrollTop).toBe(600);
+    expect(fake.scroll.scrollByPage.mock.calls).toEqual([[-1]]);
     expect(ev.defaultPrevented).toBe(true);
     expect(sendBinary).not.toHaveBeenCalled();
   });
 
-  it("clamps a page up at the top rather than scrolling past it", async () => {
-    const root = rootIn();
-    await mountTerminal(root, { features: () => [] });
-    const term = root.querySelector<HTMLElement>(".term");
-    if (!term) {
-      throw new Error("no .term");
-    }
-    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 120 });
-
-    key({ key: "PageUp", shiftKey: true });
-
-    expect(term.scrollTop).toBe(0);
-  });
-
-  it("scrolls a page down on Shift+PageDown", async () => {
-    const root = rootIn();
-    await mountTerminal(root, { features: () => [] });
-    const term = root.querySelector<HTMLElement>(".term");
-    if (!term) {
-      throw new Error("no .term");
-    }
-    declareScrollGeometry(term, { clientHeight: 400, scrollHeight: 4000, scrollTop: 1000 });
+  it("pages down through the engine on Shift+PageDown", async () => {
+    await mountTerminal(rootIn(), { features: () => [] });
 
     const ev = key({ key: "PageDown", shiftKey: true });
 
-    expect(term.scrollTop).toBe(1400);
+    expect(fake.scroll.scrollByPage.mock.calls).toEqual([[1]]);
     expect(ev.defaultPrevented).toBe(true);
     expect(sendBinary).not.toHaveBeenCalled();
   });

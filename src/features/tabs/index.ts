@@ -4274,6 +4274,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let gActive = false;
       let gStartMax = 0; // list max-height (px) when a vertical drag began
       let gTargetMax = 0; // fully-open list height (px) for the current drag
+      // Until the shown session's modes are known, a mouse-tracking app may own the drag.
+      const mouseAppMayCapture = (): boolean =>
+        !ctx.modes.isKnown() || ctx.modes.getMouseMode() !== 0;
       let swiped = false; // a drag was handled; the trailing click must not also toggle
       let gPointerId = -1; // the pointer that owns the drag; stray fingers are ignored
       let gDownT = 0; // pointerdown timestamp, for the flick duration test
@@ -4481,7 +4484,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           !canceled &&
           Math.abs(dx) >= SWIPE_MIN_PX &&
           Math.abs(dx) > Math.abs(dy) * 1.5 &&
-          ctx.modes.getMouseMode() === 0
+          !mouseAppMayCapture()
         ) {
           // No pointermove locked an axis (a flick with no intermediate move, or
           // a synthetic down/up): fall back to a discrete switch from the net
@@ -4527,9 +4530,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             return;
           }
           if (Math.abs(dx) > Math.abs(dy)) {
-            // Horizontal switch preview, unless a mouse-mode app is capturing
-            // drags (leave the bar swipe inert then, matching the old gate).
-            if (ctx.modes.getMouseMode() !== 0) {
+            // Horizontal switch preview, unless a mouse-mode app may be
+            // capturing drags (leave the bar swipe inert then).
+            if (mouseAppMayCapture()) {
               gActive = false;
               swiped = true;
               gestureAbort?.abort(); // gesture abandoned; drop the window listeners
