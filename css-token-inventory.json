@@ -125,6 +125,7 @@
     "--wt-mark-radius",
     "--wt-mark-size",
     "--wt-reserve-bottom",
+    "--wt-row-fill",
     "--wt-split-bottom",
     "--wt-split-gutter",
     "--wt-split-left",
