@@ -311,13 +311,17 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
       }),
       setSession: vi.fn((id: string) => {
         ended = false;
-        if (id !== currentId) {
+        const switched = id !== currentId;
+        if (switched) {
           socketOpen = false;
         }
         currentId = id;
         liveModes?.setKnown(false);
         liveModes?.applySnapshot(module().POWER_ON_MODES);
         answerModes();
+        if (switched) {
+          consumer?.onConnecting?.();
+        }
       }),
       forgetSession: vi.fn((id: string) => {
         ended = false;
@@ -335,8 +339,10 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
       }),
       connect: vi.fn(() => {
         ended = false;
+        socketOpen = false;
         liveModes?.setKnown(false);
         answerModes();
+        consumer?.onConnecting?.();
       }),
       dispose: vi.fn(),
     };

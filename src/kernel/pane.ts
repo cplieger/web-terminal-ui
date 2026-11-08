@@ -567,6 +567,9 @@ function buildPaneInto(
   let firstFrameRendered = false;
   let fontsLoaded = false;
   let wsOpen = false;
+  // The engine reports when a socket's input starts but has no reader for when
+  // it stops, so every callback that ends or replaces a socket clears this.
+  let inputLive = false;
   function markReady(): void {
     connState.setLoaded();
     services.loading.firstFrame();
@@ -678,15 +681,18 @@ function buildPaneInto(
         announce();
       },
       onInputReady(size) {
+        inputLive = true;
         bus.emit("input:ready", size);
       },
       onConnecting() {
+        inputLive = false;
         connState.reconnecting();
       },
       onPendingInput(bytes, cancelable) {
         showPasteProgress(cancelable ? bytes : 0);
       },
       onClose() {
+        inputLive = false;
         connState.closed();
       },
       onProcessExit() {
@@ -694,12 +700,14 @@ function buildPaneInto(
         // before any screen frame still lowers the overlay; then the end state
         // (no reconnect is coming); the host's turn LAST, so a throwing handler
         // cannot leave the page without its banner.
+        inputLive = false;
         services.stores.discardUnverified({ session: engine.connection.currentSessionId() });
         markReady();
         connState.ended();
         services.onSessionEnded();
       },
       onWireIncompatible() {
+        inputLive = false;
         services.stores.discardUnverified("page");
         markReady();
         connState.incompatible();
@@ -713,7 +721,19 @@ function buildPaneInto(
   acquire(() => {
     engine.dispose();
   });
-  services.registerConnection(engine.connection);
+  // The engine tears down the shown session's socket at its forget with no
+  // callback, so the shell's forget comes through here.
+  const connection: PaneKernel["connection"] = {
+    forgetSession(id) {
+      const shown =
+        activeSession?.id ?? (services.managed ? null : engine.connection.currentSessionId());
+      if (id === shown) {
+        inputLive = false;
+      }
+      engine.connection.forgetSession(id);
+    },
+  };
+  services.registerConnection(connection);
   engine.renderer.updateFontMetrics();
   acquire(engine.modes.subscribe(updateMousePointer));
   updateMousePointer();
@@ -1424,7 +1444,7 @@ function buildPaneInto(
     }
     const outgoing = activeSession.id;
     detachSession();
-    engine.connection.forgetSession(outgoing);
+    connection.forgetSession(outgoing);
     activeSession = null;
     // `connectionInitiated` must go false here or the wake handlers reconnect a
     // pane that holds no session, under a fresh id the server has never seen.
@@ -1577,6 +1597,7 @@ function buildPaneInto(
       }
     },
     fontSettled,
+    inputReady: () => inputLive && !destroyed,
     holdInput() {
       return destroyed ? () => undefined : engine.connection.holdInput();
     },
@@ -1587,7 +1608,7 @@ function buildPaneInto(
       }
       sendBytes(bytes);
     },
-    connection: engine.connection,
+    connection,
     setupFeature: (feature) =>
       host.setup(
         feature,
