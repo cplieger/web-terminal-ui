@@ -27,56 +27,10 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { mountTerminal } from "../test-helpers/mount.js";
 import type { TerminalFeature } from "./types.js";
+import { shippedBundle } from "../test-helpers/stylesheet.js";
 
-declare global {
-  interface ImportMeta {
-    glob(
-      pattern: string,
-      options: { query: string; import: string; eager: true },
-    ): Record<string, string>;
-  }
-}
-
-// Same shape as features/tabs/chip-geometry.test.ts, and deliberately repeated
-// rather than shared: a test-support module would need a matching exclude in
-// BOTH publish allowlists (package.json `files` and jsr.json
-// `publish.exclude`), and the standing rule there is to carry only patterns that
-// match something.
-const MANIFESTS = import.meta.glob("../../css/MANIFEST*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-const SHEETS = import.meta.glob("../../css/*.css", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-
-const byName = (mods: Record<string, string>): Map<string | undefined, string> =>
-  new Map(Object.entries(mods).map(([p, text]) => [p.split("/").pop(), text]));
-
-// The FULL-PAGE manifest, because wt-viewport is the full-page product's layout
-// mode. The manifest order IS the cascade, so it is read rather than restated.
-const BUNDLE = ((): string => {
-  const manifest = byName(MANIFESTS).get("MANIFEST");
-  if (manifest === undefined) {
-    throw new Error("css/MANIFEST is missing");
-  }
-  const sheets = byName(SHEETS);
-  return manifest
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .map((name) => {
-      const text = sheets.get(name);
-      if (text === undefined) {
-        throw new Error(`css/MANIFEST names ${name}, which css/ does not contain`);
-      }
-      return text;
-    })
-    .join("\n");
-})();
+// The full-page bundle, because wt-viewport is the full-page product's layout mode.
+const BUNDLE = shippedBundle("MANIFEST");
 
 let styles: HTMLStyleElement;
 const mounted: HTMLElement[] = [];

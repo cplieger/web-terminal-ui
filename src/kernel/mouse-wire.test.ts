@@ -15,6 +15,7 @@ import {
 } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
+import { shippedBundle } from "../test-helpers/stylesheet.js";
 import type {
   CreateTerminalOptions,
   SessionRef,
@@ -22,15 +23,6 @@ import type {
   TerminalFeature,
   TerminalHandle,
 } from "./types.js";
-
-declare global {
-  interface ImportMeta {
-    glob(
-      pattern: string,
-      options: { query: string; import: string; eager: true },
-    ): Record<string, string>;
-  }
-}
 
 const fake = await vi.hoisted(async () => {
   const { createEngineFake } = await import("../test-helpers/fake-engine.js");
@@ -52,41 +44,7 @@ const { scrollToBottom } = fake.scroll;
 // reports a different row for every press below.
 fake.renderer.computeSize.mockImplementation(() => ({ cols: 80, rows: 30 }));
 
-const MANIFESTS = import.meta.glob("../../css/MANIFEST*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-const SHEETS = import.meta.glob("../../css/*.css", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-
-const byName = (mods: Record<string, string>): Map<string | undefined, string> =>
-  new Map(Object.entries(mods).map(([p, text]) => [p.split("/").pop(), text]));
-
-// The full-page manifest, whose order IS the cascade, so it is read rather than
-// restated.
-const BUNDLE = ((): string => {
-  const manifest = byName(MANIFESTS).get("MANIFEST");
-  if (manifest === undefined) {
-    throw new Error("css/MANIFEST is missing");
-  }
-  const sheets = byName(SHEETS);
-  return manifest
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .map((name) => {
-      const text = sheets.get(name);
-      if (text === undefined) {
-        throw new Error(`css/MANIFEST names ${name}, which css/ does not contain`);
-      }
-      return text;
-    })
-    .join("\n");
-})();
+const BUNDLE = shippedBundle("MANIFEST");
 
 let styles: HTMLStyleElement;
 /** Undoes the `document.fonts` shadow installed in beforeEach. */

@@ -14,6 +14,7 @@ import { shortenSettle, shortSettled } from "../test-helpers/delays.js";
 import { softKeyboard, type SoftKeyboard } from "../features/tabs/test-helpers/paint.js";
 import type {
   CreateTerminalOptions,
+  PaneHandle,
   TerminalContext,
   TerminalFeature,
   TerminalHandle,
@@ -863,6 +864,140 @@ describe("what a host can wait on before it sends", () => {
 
     expect(seen).toEqual(["open", "restarted", "input:ready"]);
     expect(fake.sentInput()).toEqual(["make\r"]);
+  });
+
+  function shownPane(ctx: TerminalContext): PaneHandle {
+    const pane = ctx.shell.pane(ctx.shell.selected());
+    if (pane === null) {
+      throw new Error("no pane");
+    }
+    return pane;
+  }
+
+  it("reads inputReady from input:ready, inside its listeners too, until the socket closes", async () => {
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    const readInListener: boolean[] = [];
+    ctx.on("input:ready", () => {
+      readInListener.push(pane.inputReady());
+    });
+    expect(pane.inputReady()).toBe(false);
+
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+    expect(readInListener).toEqual([true]);
+
+    wire().onClose();
+    expect(pane.inputReady()).toBe(false);
+  });
+
+  it("reads inputReady false from a new socket's start through its modes, until its input starts", async () => {
+    // The server can send a socket its modes before its resumeAck, so the modes
+    // are no sign that input sent now survives a restart at the resume.
+    fake.holdModes();
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    fake.announceModes();
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+
+    fake.connection.reconnectNow();
+    expect(pane.inputReady()).toBe(false);
+    fake.announceModes();
+    expect(pane.inputReady()).toBe(false);
+
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+  });
+
+  it.each<[string, (pane: PaneHandle, term: TerminalHandle) => void]>([
+    ["a process exit", () => wire().onProcessExit?.()],
+    [
+      "an incompatible server",
+      () =>
+        wire().onWireIncompatible?.({
+          source: "server-close",
+          clientVersion: 9,
+          minimumServerVersion: 9,
+          reason: "too old",
+        }),
+    ],
+    ["a switch to another session", (pane) => pane.notifySwitch({ id: "other" })],
+    ["clearing the shown session", (pane) => pane.clearActiveSession()],
+    ["destroy", (_pane, term) => term.destroy()],
+    ["a disconnect, which fires no callback", () => fake.connection.disconnect()],
+  ])("reads inputReady false at once after %s", async (_name, end) => {
+    const { term, ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    pane.notifySwitch({ id: "shown" });
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+
+    end(pane, term);
+
+    expect(pane.inputReady()).toBe(false);
+  });
+
+  it("reads inputReady false once another pane's tab close forgets the session this pane shows", async () => {
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    pane.notifySwitch({ id: "shown" });
+    fake.openSocket();
+
+    ctx.dropSession("shown");
+
+    expect(pane.inputReady()).toBe(false);
+  });
+
+  it("reads inputReady false in a feature's teardown, while the engine is still up", async () => {
+    const readAtTeardown: boolean[] = [];
+    let captured: TerminalContext | undefined;
+    const shown: { pane?: PaneHandle } = {};
+    const probe: TerminalFeature<void> = {
+      name: "teardown-probe",
+      setup(ctx) {
+        captured = ctx;
+        return {
+          teardown: () => {
+            readAtTeardown.push(shown.pane?.inputReady() ?? true);
+            readAtTeardown.push(fake.connection.inputReady());
+          },
+        };
+      },
+    };
+    const term = await mountSettled({ features: () => [probe] });
+    if (captured === undefined) {
+      throw new Error("the probe feature never ran");
+    }
+    const pane = shownPane(captured);
+    shown.pane = pane;
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+
+    term.destroy();
+
+    expect(readAtTeardown).toEqual([false, true]);
+  });
+
+  it("reads inputReady false once the shell forgets an unmanaged pane's own session", async () => {
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    fake.openSocket();
+
+    ctx.dropSession("session-under-test");
+
+    expect(pane.inputReady()).toBe(false);
+  });
+
+  it("keeps inputReady through the shell's forget of a session this pane does not show", async () => {
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    pane.notifySwitch({ id: "shown" });
+    fake.openSocket();
+
+    ctx.dropSession("elsewhere");
+
+    expect(pane.inputReady()).toBe(true);
   });
 
   it("resolves fontSettled when the font wait ends, from when announceSize sends", async () => {

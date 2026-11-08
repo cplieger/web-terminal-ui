@@ -211,6 +211,7 @@ export function createViewport(opts: ViewportOptions): Viewport {
         return;
       }
       inTransition = false;
+      fitRows();
       // Read at SETTLE, not at the start of the burst: every further event
       // re-arms the timer without re-reading, and on iOS a wake emits a stream
       // of them, so a latch taken at the start would yank a reader who scrolled
@@ -238,6 +239,28 @@ export function createViewport(opts: ViewportOptions): Viewport {
     };
   }
 
+  // Following the output pins the scrollport's bottom edge to the last row, so
+  // a height that is not whole rows shows part of a history row at its top
+  // edge; the block-end padding takes that remainder (css/02-terminal.css
+  // --wt-row-fill). Measured against the band, never the fill already written,
+  // or a growing box would add a whole row of padding; and from the integer
+  // clientHeight the engine's computeSize divides, or a fractional box loses a row.
+  function fitRows(): void {
+    const cs = win.getComputedStyle(termWrap);
+    const cell = parseFloat(cs.lineHeight);
+    // A hidden pane computes `height: auto`; its reveal resizes the box.
+    if (!(cell > 0) || !Number.isFinite(parseFloat(cs.height))) {
+      return;
+    }
+    const fill = parseFloat(cs.getPropertyValue("--wt-row-fill")) || 0;
+    const rowsArea =
+      termWrap.clientHeight - parseFloat(cs.paddingTop) - (parseFloat(cs.paddingBottom) - fill);
+    const next = `${String(((rowsArea % cell) + cell) % cell)}px`;
+    if (termWrap.style.getPropertyValue("--wt-row-fill") !== next) {
+      termWrap.style.setProperty("--wt-row-fill", next);
+    }
+  }
+
   // iOS shrinks (and can offset) the visual viewport without resizing the layout
   // viewport, so a `position: fixed; inset: 0` box keeps the full-screen height
   // behind the keyboard; driving top and bottom from the keyboard geometry keeps
@@ -258,6 +281,7 @@ export function createViewport(opts: ViewportOptions): Viewport {
     const bottom = geometry.bottom + reserve;
     termWrap.style.top = geometry.top > 0 ? `${geometry.top}px` : "";
     termWrap.style.bottom = bottom > 0 ? `${bottom}px` : "";
+    fitRows();
     startTransition();
   }
 

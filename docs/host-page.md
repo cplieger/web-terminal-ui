@@ -33,6 +33,8 @@ When the terminal is a panel or a pane in your application, concatenate the mani
 
 Chrome text then falls back to your platform's monospace font. Declare the `@font-face` rules yourself if you want the panel to match the full-page look. Pass `layout: "container"` so the terminal fills your container element and positions its chrome against it instead of the viewport.
 
+Your container can be any height. The terminal leaves the part of its height that is not whole rows as padding under the last row, so while it follows the output, no part of a row is cut off at its top edge.
+
 ## Load the modules
 
 The package ships TypeScript source. Your build compiles it with the rest of your TypeScript, and an import map resolves the bare specifiers to the JavaScript your build emits:

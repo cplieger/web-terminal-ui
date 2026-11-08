@@ -1577,6 +1577,7 @@ function buildPaneInto(
       }
     },
     fontSettled,
+    inputReady: () => !destroyed && engine.connection.inputReady(),
     holdInput() {
       return destroyed ? () => undefined : engine.connection.holdInput();
     },

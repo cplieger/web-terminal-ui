@@ -1,77 +1,16 @@
-// Rendered chip geometry: the two invariants scripts/verify-chip-geometry.mjs
-// asserts, narrowed to the one engine the gate has.
-//
-// LIMIT, stated because a green run here is easy to over-read. This runs in
-// Blink only, at one viewport, against whatever monospace the machine resolves
-// for --font-ui (this package ships no font). The correction each engine needs
-// differs by up to 0.535px at the two production label sizes, which is more
-// than the 0.33px defect that produced ink-centre.ts, so cross-engine coverage
-// is NOT here: it is scripts/verify-chip-geometry.mjs, run by hand with --font,
-// and even that reaches Linux WebKit rather than the iOS CoreText path the
-// original defect came from.
-//
-// What this file does own, and nothing else in the suite does: the CSS wiring
-// (margin-block: 0 calc(2 * var(--label-ink-shift)) is never executed by any
-// other test, because no other test loads a stylesheet), all THREE label sites at
-// two different sizes at once — including the overview row (css/31-switcher.css:512),
-// the third --label-ink-shift consumer, which the script does not measure either —
-// and the dot-gap equality, which has no coverage anywhere.
+// Rendered chip geometry, Blink only, one viewport, the machine's monospace: the
+// per-engine correction differs by up to 0.535px, more than the 0.33px defect
+// behind ink-centre.ts, so cross-engine coverage is scripts/verify-chip-geometry.mjs
+// run by hand with --font (Linux WebKit, not the iOS CoreText path). This file
+// alone measures the CSS wiring (margin-block: 0 calc(2 * var(--label-ink-shift))),
+// all three label sites at two sizes at once, the overview row
+// (css/31-switcher.css) included, and the dot-gap equality.
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { centreChipLabels } from "./ink-centre.js";
+import { shippedBundle } from "../../test-helpers/stylesheet.js";
 
-declare global {
-  interface ImportMeta {
-    glob(
-      pattern: string,
-      options: { query: string; import: string; eager: true },
-    ): Record<string, string>;
-  }
-}
-
-// Both the manifest and the sheets arrive through Vite's raw glob rather than a
-// static `?raw` import, which would need an ambient `declare module "*?raw"` —
-// and this package publishes its TypeScript source, so that wildcard would ship.
-// `import.meta.glob` needs only the local ImportMeta augmentation above, which
-// tsconfig.json (source, tests excluded) never sees. A glob pattern must carry
-// magic: the extensionless `css/MANIFEST` alone throws inside vite:import-glob,
-// so the manifests are reached by prefix and the one wanted is keyed out.
-const MANIFESTS = import.meta.glob("../../../css/MANIFEST*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-const SHEETS = import.meta.glob("../../../css/*.css", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-
-const byName = (mods: Record<string, string>): Map<string | undefined, string> =>
-  new Map(Object.entries(mods).map(([path, text]) => [path.split("/").pop(), text]));
-
-// The manifest order IS the cascade, so it is read rather than restated. This is
-// the FULL-PAGE manifest, the same one the script concatenates; the three
-// per-preset manifests beside it are not this fixture's subject.
-const BUNDLE = ((): string => {
-  const manifest = byName(MANIFESTS).get("MANIFEST");
-  if (manifest === undefined) {
-    throw new Error("css/MANIFEST is missing");
-  }
-  const sheets = byName(SHEETS);
-  const order = manifest
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"));
-  return order
-    .map((name) => {
-      const text = sheets.get(name);
-      if (text === undefined) {
-        throw new Error(`css/MANIFEST names ${name}, which css/ does not contain`);
-      }
-      return text;
-    })
-    .join("\n");
-})();
+// The full-page bundle, the one the script concatenates.
+const BUNDLE = shippedBundle("MANIFEST");
 
 // Matches scripts/verify-chip-geometry.mjs:49. The script measures a worst case
 // of 0.013px in Blink with the bundled Monaspace Neon NF; this package ships no
