@@ -204,10 +204,10 @@ export interface PaneHandle {
    *  failed, or the wait timed out), when `announceSize` starts to send, or the
    *  pane was destroyed. Never rejects. */
   readonly fontSettled: Promise<void>;
-  /** True from this pane's `input:ready` (its listeners read true) until that
-   *  socket closes, is replaced, ends or forgets the shown session, read at
-   *  once at each: input sent while it is true reaches the process the socket
-   *  attached to. False on a destroyed pane. */
+  /** True from this pane's `input:ready` (its listeners read true) until its
+   *  socket closes or is replaced, its session ends, or the shown session is
+   *  forgotten; false on a destroyed pane. Input sent while it is true goes out
+   *  at once, unless the host holds input (`holdInput`). */
   inputReady(): boolean;
   /** Keep the shown session's input off the wire until the returned release
    *  runs (once). Input typed meanwhile waits in that session's queue, in

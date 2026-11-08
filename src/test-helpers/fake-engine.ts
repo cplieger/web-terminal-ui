@@ -129,6 +129,8 @@ interface PartsInternal extends EngineParts {
   restartServer(): void;
 }
 
+const UNMANAGED_ID = "session-under-test";
+
 export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
   let actual: typeof Engine | null = null;
   let holdingModes = false;
@@ -145,7 +147,13 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
     let liveModes: ModeState | null = null;
     let consumer: ConnectionCallbacks | null = null;
     let ended = false;
-    let currentId = "session-under-test";
+    // Null after the shown session is forgotten; the next read re-mints the
+    // unmanaged id, as the real currentSessionId does.
+    let currentId: string | null = UNMANAGED_ID;
+    const active = (): string => (currentId ??= UNMANAGED_ID);
+    // Connected or connecting: the states in which the real setSession keeps the
+    // socket for the same id.
+    let attached = false;
     const wireSizes: { cols: number; rows: number }[] = [];
     // Per session, the inputs waiting for that session's modes, every input a
     // restart would drop, and what each input put on the wire once encoded.
@@ -154,7 +162,7 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
     const wire = new WeakMap<QueuedInput, string>();
     const dec = new TextDecoder();
     const encodeWaiting = (): void => {
-      const queue = waiting.get(currentId);
+      const queue = waiting.get(active());
       if (liveModes?.isKnown() !== true || queue === undefined) {
         return;
       }
@@ -190,6 +198,7 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
      *  does before the socket's input starts. */
     const openResumed = (onResume: () => void): void => {
       socketOpen = true;
+      attached = true;
       socketAnnounced = false;
       const size = consumer?.initialSize?.() ?? null;
       const sized = size !== null && putSize(size);
@@ -263,19 +272,21 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
     };
     const connection: Spied<Connection> = {
       sendBinary: vi.fn((input: QueuedInput) => {
-        const queue = waiting.get(currentId) ?? [];
-        waiting.set(currentId, queue);
+        const id = active();
+        const queue = waiting.get(id) ?? [];
+        waiting.set(id, queue);
         queue.push(input);
-        const sent = unacked.get(currentId) ?? [];
-        unacked.set(currentId, sent);
+        const sent = unacked.get(id) ?? [];
+        unacked.set(id, sent);
         sent.push(input);
         encodeWaiting();
         return true;
       }),
       cancelPendingInput: vi.fn(() => {
-        const queue = waiting.get(currentId) ?? [];
+        const id = active();
+        const queue = waiting.get(id) ?? [];
         const kept = queue.filter((i) => i instanceof Uint8Array || i.paste !== true);
-        waiting.set(currentId, kept);
+        waiting.set(id, kept);
         return kept.length !== queue.length;
       }),
       pendingInputBytes: vi.fn(() => 0),
@@ -305,15 +316,17 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
           return;
         }
         socketOpen = false;
+        attached = true;
         liveModes?.setKnown(false);
         answerModes();
         consumer?.onConnecting?.();
       }),
       setSession: vi.fn((id: string) => {
         ended = false;
-        const switched = id !== currentId;
+        const switched = id !== currentId || !attached;
         if (switched) {
           socketOpen = false;
+          attached = true;
         }
         currentId = id;
         liveModes?.setKnown(false);
@@ -327,19 +340,23 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
         ended = false;
         if (id === currentId) {
           socketOpen = false;
+          attached = false;
+          currentId = null;
         }
         waiting.delete(id);
         unacked.delete(id);
       }),
       historyBudget: vi.fn(() => 0),
       requestHistory: vi.fn(() => false),
-      currentSessionId: vi.fn(() => currentId),
+      currentSessionId: vi.fn(() => active()),
       disconnect: vi.fn(() => {
         socketOpen = false;
+        attached = false;
       }),
       connect: vi.fn(() => {
         ended = false;
         socketOpen = false;
+        attached = true;
         liveModes?.setKnown(false);
         answerModes();
         consumer?.onConnecting?.();
@@ -365,7 +382,8 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
       dispose,
       resetState() {
         bound = undefined;
-        currentId = "session-under-test";
+        currentId = UNMANAGED_ID;
+        attached = false;
         liveModes = null;
         consumer = null;
         ended = false;
@@ -387,15 +405,17 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
       },
       markEnded() {
         ended = true;
+        attached = false;
       },
       announcedSizes: () => wireSizes.map((size) => ({ ...size })),
       restartServer() {
         openResumed(() => {
-          for (const input of unacked.get(currentId) ?? []) {
+          const id = active();
+          for (const input of unacked.get(id) ?? []) {
             wire.delete(input);
           }
-          unacked.delete(currentId);
-          waiting.delete(currentId);
+          unacked.delete(id);
+          waiting.delete(id);
           consumer?.onServerRestart?.();
         });
       },
