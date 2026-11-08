@@ -14,7 +14,7 @@ const scroll = { isUserScrolledUp, stickToBottom };
 let viewport: Viewport;
 let keyboard: KeyboardInsets;
 let termWrap: HTMLElement;
-let onSettled: Mock<(wasAtBottom: boolean) => void>;
+let onSettled: Mock<() => void>;
 
 /** Installs `value` as an own property of `host` and returns the restore.
  *
@@ -49,7 +49,7 @@ beforeEach(() => {
   isUserScrolledUp.mockReturnValue(false);
   termWrap = document.createElement("div");
   document.body.replaceChildren(termWrap);
-  onSettled = vi.fn<(wasAtBottom: boolean) => void>();
+  onSettled = vi.fn<() => void>();
   keyboard = createKeyboardInsets({ root: termWrap });
   viewport = createViewport({ termWrap, box: document.body, keyboard, scroll, onSettled });
   // Flush any transition started by the construction-time pin to the keyboard.
@@ -71,7 +71,6 @@ describe("viewport: settle lifecycle", () => {
     expect(onSettled).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(onSettled).toHaveBeenCalledTimes(1);
-    expect(onSettled).toHaveBeenCalledWith(true);
     // Pins, never forces: stickToBottom respects the follow state.
     expect(stickToBottom).toHaveBeenCalledTimes(1);
   });
@@ -93,7 +92,6 @@ describe("viewport: settle lifecycle", () => {
     window.dispatchEvent(new Event("resize"));
     vi.advanceTimersByTime(SETTLE_MS);
     expect(onSettled).toHaveBeenCalledTimes(1);
-    expect(onSettled).toHaveBeenCalledWith(false);
     expect(stickToBottom).not.toHaveBeenCalled();
   });
 
@@ -110,7 +108,6 @@ describe("viewport: settle lifecycle", () => {
     isUserScrolledUp.mockReturnValue(true); // ... and the user scrolls up to read
     vi.advanceTimersByTime(SETTLE_MS);
     expect(onSettled).toHaveBeenCalledTimes(1);
-    expect(onSettled).toHaveBeenCalledWith(false);
     expect(stickToBottom).not.toHaveBeenCalled();
   });
 
@@ -179,7 +176,7 @@ describe("viewport: settle lifecycle", () => {
     // reports its own settle to its own callback exactly once.
     const otherWrap = document.createElement("div");
     document.body.appendChild(otherWrap);
-    const otherSettled = vi.fn<(wasAtBottom: boolean) => void>();
+    const otherSettled = vi.fn<() => void>();
     const other = createViewport({
       termWrap: otherWrap,
       box: document.body,

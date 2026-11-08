@@ -6,6 +6,7 @@
  *  that is indistinguishable from a 500 and loses the retry hint. */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import fc from "fast-check";
+import layoutShapes from "@cplieger/web-terminal-engine/layout-shapes.json" with { type: "json" };
 import type { CueStatus, PaneLayout, TabOrderKey } from "./model.js";
 import {
   PROGRESS_ABSENT,
@@ -564,20 +565,17 @@ describe("the layout record's client half", () => {
   });
 
   it("refuses a 200 whose body is not a layout record, rather than applying it", async () => {
-    // Every branch of the shape check, one malformed body each: a proxy's error
-    // object, a side that is neither a string nor null, a handle out of range,
-    // not a number or the Infinity a `1e999` literal parses to, a selection naming
-    // no side, and an `open` that is not a flag.
+    // The type checks the JSON decode does: a proxy's error object, a side that is
+    // neither a string nor null, a handle that is not a number or is the Infinity
+    // a `1e999` literal parses to, and an `open` that is not a flag. The value
+    // rules are the server's table, below.
     const malformed: unknown[] = [
       null,
       "nope",
       { ...record, left: 7 },
       { ...record, right: {} },
-      { ...record, handle: 1.5 },
-      { ...record, handle: -0.1 },
       { ...record, handle: "0.5" },
       { ...record, handle: Number.POSITIVE_INFINITY },
-      { ...record, selected: "middle" },
       { ...record, open: "true" },
       { left: "s1", right: null, handle: 0.5, selected: "left" },
     ];
@@ -589,37 +587,25 @@ describe("the layout record's client half", () => {
     }
   });
 
-  it("refuses a well-typed record that breaks the server's own rules, so a claim the server would 400 is never applied", async () => {
-    // A closed split showing a right side or selecting it, one session on both
-    // sides, and an open split whose one shown side is not the selected one.
-    const inconsistent: unknown[] = [
-      { left: "s1", right: "s2", handle: 0.5, selected: "left", open: false },
-      { left: "s1", right: null, handle: 0.5, selected: "right", open: false },
-      { left: "s1", right: "s1", handle: 0.5, selected: "left", open: true },
-      { left: null, right: "s1", handle: 0.5, selected: "left", open: true },
-      { left: "s1", right: null, handle: 0.5, selected: "right", open: true },
-    ];
-    for (const body of inconsistent) {
-      stubFetch(response(200, body));
+  // The server's shape table (the engine's layout-shapes.json, which its
+  // invalidShape test reads too), so the two sides keep one rule.
+  it.each(layoutShapes.filter((row) => row.valid))(
+    "applies a record the server would hold: $name",
+    async ({ layout }) => {
+      stubFetch(response(200, layout));
+      await expect(createSessionAPI("/api/sessions", window).getLayout()).resolves.toEqual(layout);
+    },
+  );
+
+  it.each(layoutShapes.filter((row) => !row.valid))(
+    "refuses a record the server would refuse: $name",
+    async ({ layout }) => {
+      stubFetch(response(200, layout));
       await expect(createSessionAPI("/api/sessions", window).getLayout()).rejects.toThrow(
         /malformed body/,
       );
-    }
-  });
-
-  it("accepts every record shape the server can hold, the empty default included", async () => {
-    const consistent: PaneLayout[] = [
-      { left: null, right: null, handle: 0.5, selected: "left", open: false },
-      { left: null, right: null, handle: 0.5, selected: "left", open: true },
-      { left: "s1", right: "s2", handle: 0.3, selected: "right", open: true },
-      { left: "s1", right: null, handle: 0.5, selected: "left", open: true },
-      { left: null, right: "s2", handle: 0.5, selected: "right", open: true },
-    ];
-    for (const body of consistent) {
-      stubFetch(response(200, body));
-      await expect(createSessionAPI("/api/sessions", window).getLayout()).resolves.toEqual(body);
-    }
-  });
+    },
+  );
 
   it("refuses a record missing a side: the server writes both keys and marshals an empty pane as null, so an absent one is not a record", async () => {
     const open: PaneLayout = { left: "s2", right: null, handle: 0.3, selected: "left", open: true };

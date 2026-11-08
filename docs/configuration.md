@@ -26,18 +26,25 @@ This page lists every `createTerminal` option, the handle it returns and the the
 `createTerminal()` returns a handle with these methods:
 
 - `focus()` focuses the terminal input, which opens the soft keyboard on a touchscreen.
-- `send(bytes)` sends bytes to the active session through the same input path as typing. Use it for a "type this command" button.
+- `send(bytes)` sends bytes to the active session through the same input path as typing. Use it for a "type this command" button. You can call it at once: no input reaches the server before the terminal has told it its size, so a command sent to a fresh session runs at the terminal's real width.
 - `reset()` drops the local scrollback and screen. It types nothing, so send a redraw key such as Ctrl+L yourself if you want a fresh prompt.
 - `reattach()` connects again to whatever the server serves now, for a session that has ended. See [When a session ends](failure-handling.md#when-a-session-ends).
 - `destroy()` tears every feature down and releases the terminal.
 
 With `split: true` the handle also carries `split`, the controller described in [Split view](split-view.md). In a split, `focus()`, `send()`, `reset()` and `reattach()` act on the selected pane.
 
+A feature reaches each pane through `ctx.shell.pane(side)`, for a host that sends on its own schedule:
+
+- The `input:ready` event fires each time a pane's connection starts sending input, at every connect. The server has the pane's size by then. After a server restart it fires once `connection:state` reads `restarted`, so a command sent from it reaches the new shell.
+- `announceSize()` sends the pane's size now, once its font has settled.
+- `fontSettled` is a promise that resolves when the pane's font wait ends, or when the pane is destroyed first. `announceSize()` sends from then on.
+- `holdInput()` keeps the shown session's input from the server until you call the release it returns. Input sent meanwhile waits in order with that session and never moves to another one. A server restart drops it, as it drops all input meant for the old process.
+
 ## Waiting for the font
 
 The terminal waits for the `fontReady` font before its first resize. The server is then sized against the web font's real cell metrics rather than a fallback. Name only the family that carries those metrics. The Web Terminal Glyphs overlay copies Monaspace's metrics and has no letter for the width probe to measure. Naming it too would let WebKit finish the wait on the overlay alone while Monaspace is still loading. WebKit is Safari and every iOS browser.
 
-The wait ends after 3 seconds whatever the fonts do, which is the `font-display: block` period the bundled faces declare. A stalled request leaves the terminal sized on fallback metrics rather than never sized at all. A font that lands later costs one corrective resize.
+The wait ends after 3 seconds whatever the fonts do, which is the `font-display: block` period the bundled faces declare. A stalled request leaves the terminal sized on fallback metrics rather than never sized at all. A font that lands later costs one corrective resize. A pane's `fontSettled` promise resolves when the wait ends, so a host never needs its own copy of the deadline.
 
 ## Scrollback size
 

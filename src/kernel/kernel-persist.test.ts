@@ -1,20 +1,9 @@
-// Scrollback persistence wired through the real kernel: the parts that are about
-// PLACEMENT rather than policy (scrollback.test.ts owns the policy).
-//
-// Three things can only be verified here. That a restored store is in place
-// before the socket opens — which is the whole feature, because a resume
-// announces what the client already holds and is not restartable. That both
-// compositions are served: the kernel's implicit store for a single unmanaged
-// terminal, and a per-session store for a feature that owns sessions. And that
-// the page-lifecycle callbacks a discard actually runs are the ones that write.
-//
-// The render mock implements the real RenderHandle contract for
-// bind/boundStore/getHighestIndex rather than returning constants, because the
-// bound store is what a restore reaches the wire through: the kernel no longer
-// supplies `getHaveThrough` (the engine defaults it to its own renderer), so a
-// mock that ignored the bound store would make the central assertion of this
-// file meaningless. What goes on the wire from that store is pinned in the
-// engine's own connection suite.
+// Scrollback persistence through the real kernel, the placement half
+// (scrollback.test.ts owns the policy): a restored store is in place before the
+// socket opens, both the implicit and the per-session store compositions work,
+// and the page-lifecycle callbacks a discard runs are the ones that write. The
+// render mock implements bind/boundStore/getHighestIndex for real, since the
+// engine reads haveThrough from the bound store.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -29,6 +18,8 @@ import type {
   TerminalHandle,
 } from "./types.js";
 
+import { ackEpoch } from "../test-helpers/store-epoch.js";
+
 const fake = await vi.hoisted(async () => {
   const { createEngineFake } = await import("../test-helpers/fake-engine.js");
   return createEngineFake();
@@ -40,8 +31,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-const { connect, setSession, forgetSession, currentSessionId, serverEpochOf, adoptPersistedEpoch } =
-  fake.connection;
+const { connect, setSession, forgetSession, currentSessionId } = fake.connection;
 const { bind, resetScreen } = fake.renderer;
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
@@ -72,7 +62,8 @@ function printOnBoundStore(n: number, from: number): void {
 }
 
 function entryFor(store: LineStore, epoch: number): PersistedScrollback {
-  const snapshot = store.snapshot(epoch);
+  ackEpoch(store, epoch);
+  const snapshot = store.snapshot();
   if (snapshot === null) {
     throw new Error("test fixture: the store was empty");
   }
@@ -133,10 +124,9 @@ describe("persistScrollback: the single unmanaged terminal", () => {
     const term = await mountTerminal(rootIn(), { persistScrollback: store });
     try {
       expect(haveThrough()).toBe(1399);
-      // And the epoch was adopted, so a server that restarted while the tab was
-      // away is detected on the first resumeAck instead of silently
-      // contradicting these indices.
-      expect(adoptPersistedEpoch).toHaveBeenCalledWith("unmanaged-1", 777);
+      // The restored store carries its epoch, so a server that restarted while
+      // the tab was away is detected on the first resumeAck.
+      expect(fake.renderer.boundStore().serverEpoch()).toBe(777);
     } finally {
       term.destroy();
     }
@@ -175,7 +165,6 @@ describe("persistScrollback: the single unmanaged terminal", () => {
     try {
       expect(bind).not.toHaveBeenCalled();
       expect(currentSessionId).not.toHaveBeenCalled();
-      expect(adoptPersistedEpoch).not.toHaveBeenCalled();
     } finally {
       term.destroy();
     }
@@ -199,10 +188,10 @@ describe("persistScrollback: the single unmanaged terminal", () => {
   it("saves the implicit store it did not restore, so a first visit is not wasted", async () => {
     // The store the renderer created is tracked as well as a hydrated one, or
     // every reload would be a cold start until the second one.
-    serverEpochOf.mockReturnValue(555);
     const store = storage();
     const term = await mountTerminal(rootIn(), { persistScrollback: store });
     try {
+      ackEpoch(fake.renderer.boundStore(), 555);
       printOnBoundStore(4, 0);
       window.dispatchEvent(new Event("pagehide"));
       expect(store.entries.get("unmanaged-1")?.snapshot.highest).toBe(3);
@@ -252,7 +241,7 @@ describe("persistScrollback: a session-owning feature", () => {
     try {
       await tick();
       expect(feature.api?.store?.highestIndex()).toBe(308);
-      expect(adoptPersistedEpoch).toHaveBeenCalledWith("sess-7", 777);
+      expect(feature.api?.store?.serverEpoch()).toBe(777);
       // The switch — which opens the socket for this session — runs after every
       // feature's setup, so the restore is necessarily in place first.
       expect(setSession).toHaveBeenCalledWith("sess-7");
@@ -333,9 +322,9 @@ describe("persistScrollback: when the snapshot is written", () => {
     readonly term: TerminalHandle;
     readonly store: ReturnType<typeof storage>;
   }> {
-    serverEpochOf.mockReturnValue(555);
     const store = storage();
     const term = await mountTerminal(rootIn(), { persistScrollback: store });
+    ackEpoch(fake.renderer.boundStore(), 555);
     return { term, store };
   }
 
@@ -443,7 +432,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
     // of session and must leave the final screen on display.
     const { term, cb } = await bootRestored();
     try {
-      cb.onResumeBounds?.(400, 300);
+      ackEpoch(fake.renderer.boundStore(), 777);
       cb.onProcessExit?.();
       expect(haveThrough()).toBe(308);
     } finally {
@@ -487,7 +476,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
       // about B.
       currentSessionId.mockReturnValue("sess-a");
       const cb = engineCallbacks();
-      cb.onResumeBounds?.(400, 300);
+      ackEpoch(a, 777);
 
       // A's process exits. That condemns A's restore only — B's session is alive.
       cb.onProcessExit?.();
@@ -528,7 +517,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
       }
       currentSessionId.mockReturnValue("sess-b");
       const cb = engineCallbacks();
-      cb.onResumeBounds?.(600, 500); // B is confirmed
+      ackEpoch(b, 777); // B is confirmed
 
       cb.onWireIncompatible?.("page" as never);
       expect(b.highestIndex()).toBe(508);

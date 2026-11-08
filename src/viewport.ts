@@ -71,7 +71,7 @@ interface ViewportOptions {
   keyboard: KeyboardInsets;
   /** This pane's scroll controller, read at settle. */
   scroll: Pick<ScrollController, "isUserScrolledUp" | "stickToBottom">;
-  onSettled: (wasAtBottom: boolean) => void;
+  onSettled: () => void;
 }
 
 /** One pane's viewport tracker. */
@@ -215,11 +215,10 @@ export function createViewport(opts: ViewportOptions): Viewport {
       // re-arms the timer without re-reading, and on iOS a wake emits a stream
       // of them, so a latch taken at the start would yank a reader who scrolled
       // up mid-burst back down.
-      const stillFollowing = !scroll.isUserScrolledUp();
-      if (stillFollowing) {
+      if (!scroll.isUserScrolledUp()) {
         scroll.stickToBottom();
       }
-      opts.onSettled(stillFollowing);
+      opts.onSettled();
     }, SETTLE_MS);
   }
   function hold(): () => void {

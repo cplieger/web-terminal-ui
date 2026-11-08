@@ -32,12 +32,13 @@ export interface SessionRef {
   readonly id: string;
 }
 
-/** Read-only view of the active session for features (active id, size, resume
- *  bounds). Features never touch the raw connection/outbox/resume layer. */
+/** Read-only view of the active session for features (id, screen size, newest
+ *  line). Features never touch the raw connection/outbox/resume layer. */
 export interface SessionView {
   /** Active session id, or null in the unmanaged single-terminal case. */
   readonly id: string | null;
-  /** Current terminal size in cells. */
+  /** The session's screen size in cells, as the server last sized it; this
+   *  pane's own box is `RenderHandle.computeSize()`. */
   size(): { cols: number; rows: number };
   /** Highest absolute line index the active store holds (-1 if empty). */
   highestIndex(): number;
@@ -97,7 +98,8 @@ export interface RenderHandle {
 
 /** The scroll methods features may drive. */
 export interface ScrollHandle {
-  scrollToBottom(): void;
+  /** Follow the output again at once; `smooth` animates the move. */
+  scrollToBottom(opts?: { smooth?: boolean }): void;
   isUserScrolledUp(): boolean;
   /** The viewport's current scroll offset — the read half of per-tab scroll
    *  memory. The engine's scroll controller owns the container's scrollTop;
@@ -137,7 +139,28 @@ export interface ModeReaders {
   /** Kitty keyboard progressive-enhancement flags in effect (bit0 disambiguate,
    *  bit1 report-event-types, bit2 report-alternate-keys); 0 means legacy encoding. */
   getKeyboardFlags(): number;
+  /** Whether the readers answer for the shown session's server on the current
+   *  socket; until then they answer power-on values after a switch and the
+   *  previous socket's modes across a reconnect. */
+  isKnown(): boolean;
 }
+
+/** The mode bits a key's bytes depend on. */
+export type KeyModes = Pick<
+  ModeReaders,
+  "isApplicationCursor" | "isApplicationKeypad" | "getKeyboardFlags"
+>;
+
+/** A key's bytes under `modes`. Pure: the kernel calls it under legacy modes
+ *  when the key is accepted, to tell an Escape or a Ctrl+C, and under the
+ *  session's known modes when it is sent. */
+export type KeyEncoder = (modes: KeyModes) => Uint8Array;
+
+/** One input as the kernel accepts it, before its bytes are encoded. */
+export type AcceptedInput =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "paste"; readonly text: string }
+  | { readonly kind: "key"; readonly encode: KeyEncoder };
 
 /** One of the two display panes a terminal can show. */
 export type PaneSide = "left" | "right";
@@ -173,10 +196,21 @@ export interface PaneHandle {
   clearActiveSession(): void;
   /** Send this pane's grid size now, once its font metrics are known. The
    *  viewport's own settle is not waited for: a handle drag sends the geometry
-   *  under the pointer, and the engine drops a size equal to the last sent. */
+   *  under the pointer, and the engine drops a size equal to the last sent.
+   *  A socket's input waits for its first size and its resume; `input:ready`
+   *  says when it starts. */
   announceSize(): void;
+  /** Resolves once the pane's `fontReady` wait has ended (the font loaded,
+   *  failed, or the wait timed out), when `announceSize` starts to send, or the
+   *  pane was destroyed. Never rejects. */
+  readonly fontSettled: Promise<void>;
+  /** Keep the shown session's input off the wire until the returned release
+   *  runs (once). Input typed meanwhile waits in that session's queue, in
+   *  order; it never moves to another session, and a server restart drops it. */
+  holdInput(): () => void;
   focus(): void;
-  send(bytes: Uint8Array): void;
+  /** `TerminalContext.send` for this pane. */
+  send(input: Uint8Array | KeyEncoder): void;
 }
 
 /** The split view's state. */
@@ -374,6 +408,11 @@ export interface TerminalEvents {
   "session:switch": SessionRef;
   /** The kernel's connection state changed. */
   "connection:state": ConnState;
+  /** This pane's socket started sending input, at each connect: the server has
+   *  the pane's grid, and after a server restart `connection:state` already
+   *  reads `restarted`. Input sent from here reaches the process this socket
+   *  attached to. */
+  "input:ready": { cols: number; rows: number };
   /** A session's process exited (from the status SSE; reaches background tabs). */
   "session:exited": { session: string };
   /** An OSC title change for a session. */
@@ -436,18 +475,23 @@ export interface TerminalContext {
    *  chrome. */
   surface(): HTMLElement;
 
-  /** The single sanitizing, session-routed input path: bracket, strip control
-   *  bytes, normalize NBSP, apply the col-0 backspace brake. Features never
-   *  touch the raw socket. */
-  send(bytes: Uint8Array): void;
+  /** The session-routed input path: input transforms apply, and input waits,
+   *  in order, until the session's modes are known. A `KeyEncoder` gives bytes
+   *  that depend on the modes (a key press). An Escape or a Ctrl+C first
+   *  cancels what is left of every unsent paste. Features never touch the raw
+   *  socket. */
+  send(input: Uint8Array | KeyEncoder): void;
   /** Paste text through the sanitizing funnel (bracketed-paste + newline
-   *  normalization). */
+   *  normalization), streamed whatever its size. Until its last byte is sent
+   *  the pane shows what is left, and an Escape or a Ctrl+C cancels the rest
+   *  after the closing bracket. */
   paste(text: string): void;
-  /** Register an outbound-byte transform (e.g. mobileToolbar sticky-Ctrl). The
-   *  kernel composes transforms in registration order around send; a transform
-   *  returning an empty array drops the input (e.g. the col-0 backspace brake). */
-  registerInputTransform(fn: (bytes: Uint8Array) => Uint8Array): Unsubscribe;
-  /** Observe accepted outbound bytes (e.g. predictiveEcho advances its cursor). */
+  /** Register an input transform (e.g. mobileToolbar sticky-Ctrl), called in
+   *  registration order when each input is accepted, never when it is sent:
+   *  it returns the input, a replacement, or null to drop it. */
+  registerInputTransform(fn: (input: AcceptedInput) => AcceptedInput | null): Unsubscribe;
+  /** Observe outbound bytes as they are encoded to be sent, in wire order (e.g.
+   *  predictiveEcho advances its cursor). */
   registerInputObserver(fn: (bytes: Uint8Array) => void): Unsubscribe;
   /** Register a keydown handler that runs before the kernel's default key
    *  mapping. Return true to consume the event (the handler owns
@@ -656,8 +700,8 @@ export interface PersistedScrollback {
 /** The consumer-supplied storage seam for scrollback persistence. Storage is the
  *  CONSUMER's because a held IndexedDB connection costs bfcache eligibility,
  *  which this library depends on, and because scrollback holds secrets while
- *  browser storage has no at-rest protection. `sessionId` is a real session id,
- *  the one the persisted server epoch is adopted against. `load` is SYNCHRONOUS:
+ *  browser storage has no at-rest protection. `sessionId` is a real session id.
+ *  `load` is SYNCHRONOUS:
  *  a resume is not restartable, so hydration must complete before it goes out;
  *  asynchronous storage is read into memory before `createTerminal`. Every
  *  callback may throw: any failure means "nothing restored" and a full resume. */

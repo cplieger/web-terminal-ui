@@ -52,53 +52,13 @@ function arm(f: ReturnType<typeof fakeCtx>, row: number, col: number): void {
 
 const DEL = 0x7f;
 
-describe("predictiveEcho: col-0 backspace brake (input transform)", () => {
-  it("drops a lone DEL at the true origin (0,0) while prediction is active", () => {
+describe("predictiveEcho: it never changes what is sent", () => {
+  it("lets a DEL at the top-left cell reach the program", () => {
+    // A full-screen program with its cursor there decides what Backspace does.
     const f = fakeCtx();
     predictiveEcho().setup(f.ctx);
     arm(f, 0, 0);
-    expect(f.transform(new Uint8Array([DEL])).length).toBe(0);
-  });
-
-  it("passes a DEL through when the predicted cursor is not at column 0", () => {
-    const f = fakeCtx();
-    predictiveEcho().setup(f.ctx);
-    arm(f, 0, 5);
-    const out = f.transform(new Uint8Array([DEL]));
-    expect(Array.from(out)).toEqual([DEL]);
-  });
-
-  it("passes a DEL through when prediction is inactive (no server frame yet)", () => {
-    const f = fakeCtx();
-    predictiveEcho().setup(f.ctx);
-    const out = f.transform(new Uint8Array([DEL]));
-    expect(Array.from(out)).toEqual([DEL]);
-  });
-
-  it("passes a multi-byte input through even at (0,0)", () => {
-    const f = fakeCtx();
-    predictiveEcho().setup(f.ctx);
-    arm(f, 0, 0);
-    const out = f.transform(new Uint8Array([DEL, DEL]));
-    expect(Array.from(out)).toEqual([DEL, DEL]);
-  });
-
-  it("passes a non-DEL single byte through at (0,0)", () => {
-    const f = fakeCtx();
-    predictiveEcho().setup(f.ctx);
-    arm(f, 0, 0);
-    const out = f.transform(new Uint8Array([0x08]));
-    expect(Array.from(out)).toEqual([0x08]);
-  });
-  it("passes a DEL through at column 0 of any row but the first", () => {
-    // The brake is for the TRUE origin only: at col 0 further down the screen a
-    // backspace is a line join the shell has to see, not a keypress against an
-    // empty first line.
-    const f = fakeCtx();
-    predictiveEcho().setup(f.ctx);
-    arm(f, 2, 0);
-    const out = f.transform(new Uint8Array([DEL]));
-    expect(Array.from(out)).toEqual([DEL]);
+    expect(Array.from(f.transform(new Uint8Array([DEL])))).toEqual([DEL]);
   });
 });
 
@@ -116,15 +76,16 @@ describe("predictiveEcho: prediction wiring", () => {
     expect(f.setPredictedCursor).toHaveBeenCalledWith(0, 3, true);
   });
 
-  it("gives the predictor the session's own width, so a prediction wraps where the screen does", () => {
-    // Predicting against a default 80 columns on a 4-column screen puts the ghost
-    // cursor off the end of the row instead of at the start of the next one.
+  it("gives the predictor the session's own width, so it parks at the screen's last column", () => {
+    // Predicting against a default 80 columns on a 4-column screen would put
+    // the ghost cursor past the end of the row.
     const f = fakeCtx({ cols: 4, rows: 2 });
     predictiveEcho().setup(f.ctx);
-    arm(f, 0, 3); // the last column: the next character wraps
+    arm(f, 0, 2);
     f.observe(new Uint8Array([0x41]));
+    expect(f.setPredictedCursor).toHaveBeenLastCalledWith(0, 3, true);
     f.observe(new Uint8Array([0x42]));
-    expect(f.setPredictedCursor).toHaveBeenLastCalledWith(1, 1, true);
+    expect(f.setPredictedCursor).toHaveBeenLastCalledWith(0, 3, false);
   });
 
   it("advances the predicted cursor for observed printable input", () => {
@@ -158,9 +119,6 @@ describe("predictiveEcho: prediction wiring", () => {
     f.setPredictedCursor.mockClear();
     inst.onDetach?.();
     expect(f.setPredictedCursor).toHaveBeenLastCalledWith(0, 0, false);
-    // A DEL at what is now (0,0) with prediction inactive passes through: the
-    // brake reads the reset predictor.
-    expect(Array.from(f.transform(new Uint8Array([DEL])))).toEqual([DEL]);
   });
 
   it("resets on connection:state 'restarted' but not on a benign state", () => {

@@ -255,36 +255,6 @@ describe("the two topologies", () => {
     expect(controller(second).enabled).toBe(true);
   });
 
-  it("a dropped session shown again carries no epoch from before it was dropped", async () => {
-    const root = rootIn();
-    const { term, ctx } = await mountSplit(root);
-    const [leftEngine] = fake.engines;
-    leftEngine?.connection.serverEpochOf.mockReturnValue(77);
-    ctx.notifySwitch({ id: "a" });
-    ctx.notifySwitch({ id: "b" });
-    controller(term).open();
-
-    ctx.dropSession("a");
-    ctx.shell.pane("right")?.notifySwitch({ id: "a" });
-
-    expect(fake.engines[1]?.connection.adoptPersistedEpoch).not.toHaveBeenCalled();
-  });
-
-  it("a session every other pane is told to forget carries no epoch from before into them", async () => {
-    const root = rootIn();
-    const { term, ctx } = await mountSplit(root);
-    const [leftEngine] = fake.engines;
-    leftEngine?.connection.serverEpochOf.mockReturnValue(77);
-    ctx.notifySwitch({ id: "a" });
-    ctx.notifySwitch({ id: "b" });
-    controller(term).open();
-
-    ctx.shell.dropSessionExcept("a", "left");
-    ctx.shell.pane("right")?.notifySwitch({ id: "a" });
-
-    expect(fake.engines[1]?.connection.adoptPersistedEpoch).not.toHaveBeenCalled();
-  });
-
   it("an attention reporter asked for after destroy() writes nothing", async () => {
     const root = rootIn();
     document.title = "Page";
@@ -467,7 +437,11 @@ describe("open(): the second pane", () => {
     ctx.on("session:switch", (s) => {
       switches.push(s.id);
     });
-    ctx.registerInputTransform((bytes) => new Uint8Array([...bytes, 0x21]));
+    ctx.registerInputTransform((input) =>
+      input.kind === "key"
+        ? { kind: "key", encode: (modes) => new Uint8Array([...input.encode(modes), 0x21]) }
+        : input,
+    );
 
     controller(term).open();
     const right = ctx.shell.pane("right");
@@ -476,9 +450,7 @@ describe("open(): the second pane", () => {
 
     expect(switches).toEqual(["b"]);
     // Through the right pane's own engine, transformed; nothing reaches the left's.
-    expect(fake.engines[1]?.connection.sendBinary.mock.calls).toEqual([
-      [new Uint8Array([0x41, 0x21])],
-    ]);
+    expect(fake.engines[1]?.sentInput()).toEqual(["A!"]);
     expect(fake.engines[0]?.connection.sendBinary).not.toHaveBeenCalled();
   });
 
@@ -1451,11 +1423,11 @@ describe("selection", () => {
     // the left's after the change, and never both.
     const [leftEngine, rightEngine] = fake.engines;
     ctx.send(new Uint8Array([0x41]));
-    expect(leftEngine?.connection.sendBinary.mock.calls).toEqual([[new Uint8Array([0x41])]]);
+    expect(leftEngine?.sentInput()).toEqual(["A"]);
     expect(rightEngine?.connection.sendBinary).not.toHaveBeenCalled();
     ctx.shell.select("right");
     ctx.send(new Uint8Array([0x42]));
-    expect(rightEngine?.connection.sendBinary.mock.calls).toEqual([[new Uint8Array([0x42])]]);
+    expect(rightEngine?.sentInput()).toEqual(["B"]);
     expect(leftEngine?.connection.sendBinary).toHaveBeenCalledTimes(1);
   });
 

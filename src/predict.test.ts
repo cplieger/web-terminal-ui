@@ -1,203 +1,126 @@
-// Unit tests for predict.ts (INPUT-01).
-//
-// Covers the predictive-cursor mini-VT under each modelled byte and
-// each bail-out condition. The bail rules are the safety property:
-// wrong predictions are worse than missing predictions, so anything
-// we don't model must suspend, not guess.
+// The predicted cursor under each byte it models and each it refuses. A wrong
+// prediction is worse than a missing one, so every byte it cannot model without
+// a copy of the server's cursor rules suspends it.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createPredictor, type Predictor } from "./predict.js";
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
+const BS = 0x08;
+const DEL = 0x7f;
 
+let cols: number;
 let predict: Predictor;
 
 beforeEach(() => {
-  predict = createPredictor();
-  predict.setDimensions(80, 24);
+  cols = 80;
+  predict = createPredictor(() => cols);
   predict.onScreenFrame(0, 0);
 });
 
-describe("predict: printable advances the column", () => {
-  it("ASCII", () => {
+describe("predict: printable ASCII advances one cell", () => {
+  it("advances the column once per character", () => {
     predict.applyInput(enc("abc"));
     expect(predict.get()).toEqual({ row: 0, col: 3, active: true });
   });
-  it("multi-byte UTF-8 codepoint = one cell", () => {
-    predict.applyInput(enc("héllo")); // é is 2 bytes
-    expect(predict.get()).toEqual({ row: 0, col: 5, active: true });
-  });
-  it("4-byte UTF-8 (emoji) = one cell (approximate)", () => {
-    predict.applyInput(enc("🙂x")); // 🙂 is 4 bytes
+
+  it("advances the space and the tilde, the ends of the printable range", () => {
+    predict.applyInput(enc(" ~"));
     expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
   });
 });
 
-describe("predict: backspace and DEL", () => {
-  it("BS / DEL go back one column", () => {
+describe("predict: anything whose width the server decides suspends", () => {
+  it("an accented letter suspends after the ASCII before it", () => {
+    predict.applyInput(enc("aé"));
+    expect(predict.get()).toEqual({ row: 0, col: 1, active: false });
+  });
+
+  it("a wide character suspends", () => {
+    predict.applyInput(enc("中"));
+    expect(predict.get()).toEqual({ row: 0, col: 0, active: false });
+  });
+
+  it("an emoji suspends", () => {
+    predict.applyInput(enc("🙂"));
+    expect(predict.get()).toEqual({ row: 0, col: 0, active: false });
+  });
+});
+
+describe("predict: Backspace and DEL", () => {
+  it("move back one column", () => {
     predict.onScreenFrame(0, 5);
-    predict.applyInput(new Uint8Array([0x7f]));
+    predict.applyInput(new Uint8Array([DEL]));
     expect(predict.get()).toEqual({ row: 0, col: 4, active: true });
-    predict.applyInput(new Uint8Array([0x08]));
+    predict.applyInput(new Uint8Array([BS]));
     expect(predict.get()).toEqual({ row: 0, col: 3, active: true });
   });
 
-  it("at col 0, BS wraps to end of previous row", () => {
+  it("suspend at the first column, where a line editor may join the previous row", () => {
     predict.onScreenFrame(2, 0);
-    predict.applyInput(new Uint8Array([0x7f]));
-    expect(predict.get()).toEqual({ row: 1, col: 79, active: true });
-  });
-
-  it("at row 0 col 0, BS does nothing", () => {
-    predict.applyInput(new Uint8Array([0x7f]));
-    expect(predict.get()).toEqual({ row: 0, col: 0, active: true });
+    predict.applyInput(new Uint8Array([DEL]));
+    expect(predict.get()).toEqual({ row: 2, col: 0, active: false });
   });
 });
 
-describe("predict: CR / LF", () => {
-  it("CR resets column", () => {
+describe("predict: control bytes suspend", () => {
+  it.each([
+    ["CR", 0x0d],
+    ["LF", 0x0a],
+    ["TAB", 0x09],
+    ["ESC", 0x1b],
+    ["NUL", 0x00],
+  ])("%s suspends without moving the cursor", (_name, byte) => {
     predict.onScreenFrame(2, 30);
-    predict.applyInput(new Uint8Array([0x0d]));
-    expect(predict.get()).toEqual({ row: 2, col: 0, active: true });
-  });
-  it("LF advances row, clamped at height-1", () => {
-    predict.onScreenFrame(22, 10);
-    predict.applyInput(new Uint8Array([0x0a]));
-    expect(predict.get()).toEqual({ row: 23, col: 10, active: true });
-    predict.applyInput(new Uint8Array([0x0a])); // already at height-1
-    expect(predict.get()).toEqual({ row: 23, col: 10, active: true });
+    predict.applyInput(new Uint8Array([byte]));
+    expect(predict.get()).toEqual({ row: 2, col: 30, active: false });
   });
 });
 
-describe("predict: line wrap on printable", () => {
-  it("uses pendingWrap: at last col, first char stays, second wraps", () => {
-    predict.setDimensions(5, 10);
-    predict.onScreenFrame(0, 4);
-    predict.applyInput(enc("x"));
-    // First 'x' written at (0,4); cursor stays with pendingWrap.
-    expect(predict.get()).toEqual({ row: 0, col: 4, active: true });
-    predict.applyInput(enc("y"));
-    // Second char triggers wrap to (1,0), then advances to (1,1).
-    expect(predict.get()).toEqual({ row: 1, col: 1, active: true });
+describe("predict: the right edge is the server's", () => {
+  it("parks at the last column of a 40-column screen and suspends on the next character", () => {
+    cols = 40;
+    predict.onScreenFrame(0, 38);
+    predict.applyInput(enc("a"));
+    expect(predict.get()).toEqual({ row: 0, col: 39, active: true });
+    predict.applyInput(enc("b"));
+    expect(predict.get()).toEqual({ row: 0, col: 39, active: false });
   });
 
-  it("at last row, wrap clamps row at height-1", () => {
-    predict.setDimensions(5, 3);
-    predict.onScreenFrame(2, 4);
-    predict.applyInput(enc("xy"));
-    // Second char wraps but row stays at 2 (already at height-1),
-    // cursor lands at (2,1).
-    expect(predict.get()).toEqual({ row: 2, col: 1, active: true });
+  it("suspends on a Backspace at the last column, where a wrap may be pending", () => {
+    cols = 40;
+    predict.onScreenFrame(0, 39);
+    predict.applyInput(new Uint8Array([DEL]));
+    expect(predict.get()).toEqual({ row: 0, col: 39, active: false });
+  });
+
+  it("reads the width at each input, so a resize between frames is honoured", () => {
+    predict.onScreenFrame(0, 38);
+    cols = 39;
+    predict.applyInput(enc("a"));
+    expect(predict.get()).toEqual({ row: 0, col: 38, active: false });
+  });
+
+  it("predicts nothing while the width is unknown", () => {
+    cols = 0;
+    predict.applyInput(enc("a"));
+    expect(predict.get()).toEqual({ row: 0, col: 0, active: false });
   });
 });
 
-describe("predict: bails on unmodelled bytes", () => {
-  it("ESC suspends prediction", () => {
-    predict.onScreenFrame(0, 5);
-    predict.applyInput(enc("a")); // ok
-    predict.applyInput(new Uint8Array([0x1b])); // bail
-    expect(predict.get().active).toBe(false);
-  });
-
-  it("TAB suspends prediction", () => {
-    predict.applyInput(new Uint8Array([0x09]));
-    expect(predict.get().active).toBe(false);
-  });
-
-  it("after bail, subsequent input is ignored until next screen frame", () => {
+describe("predict: a suspension lasts until the next frame", () => {
+  it("ignores input after a suspension and re-arms at the frame's cursor", () => {
     predict.applyInput(new Uint8Array([0x1b]));
     predict.applyInput(enc("aaa"));
-    expect(predict.get().col).toBe(0); // unchanged after bail
-    // ScreenFrame re-arms.
+    expect(predict.get()).toEqual({ row: 0, col: 0, active: false });
     predict.onScreenFrame(0, 5);
     predict.applyInput(enc("a"));
     expect(predict.get()).toEqual({ row: 0, col: 6, active: true });
   });
 });
 
-describe("predict: setDimensions invalid input ignored", () => {
-  it("zero or negative cols/rows leaves previous values", () => {
-    predict.setDimensions(40, 12);
-    predict.setDimensions(0, 0);
-    predict.onScreenFrame(0, 39);
-    predict.applyInput(enc("xy"));
-    // Width still 40: first char stays at (0,39) with pendingWrap,
-    // second char wraps to (1,0) then advances to (1,1).
-    expect(predict.get()).toEqual({ row: 1, col: 1, active: true });
-  });
-});
-
-describe("predict: setDimensions clamps position", () => {
-  it("shrinking cols clamps predCol", () => {
-    predict.setDimensions(80, 24);
-    predict.onScreenFrame(0, 70);
-    predict.applyInput(enc("a")); // col = 71
-    predict.setDimensions(50, 24); // clamp to 49
-    expect(predict.get().col).toBe(49);
-  });
-
-  it("shrinking rows clamps predRow", () => {
-    predict.setDimensions(80, 24);
-    predict.onScreenFrame(20, 0);
-    predict.setDimensions(80, 10); // clamp to 9
-    expect(predict.get().row).toBe(9);
-  });
-
-  it("a resize that changes nothing leaves the cursor where it was", () => {
-    predict.setDimensions(80, 24);
-    predict.onScreenFrame(3, 40);
-    predict.setDimensions(80, 24);
-    expect(predict.get()).toEqual({ row: 3, col: 40, active: true });
-  });
-
-  it("clamps a server column that is exactly the width, which is one past the last cell", () => {
-    // onScreenFrame takes the server's cursor unclamped, so predCol can arrive
-    // AT cols; the last addressable cell is cols-1.
-    predict.setDimensions(80, 24);
-    predict.onScreenFrame(0, 80);
-    predict.setDimensions(80, 24);
-    expect(predict.get().col).toBe(79);
-  });
-
-  it("clamps a server row that is exactly the height", () => {
-    predict.setDimensions(80, 24);
-    predict.onScreenFrame(24, 0);
-    predict.setDimensions(80, 24);
-    expect(predict.get().row).toBe(23);
-  });
-});
-
-describe("predict: a resize notifies only when it moved the cursor", () => {
-  it("stays quiet when the new size clamps nothing", () => {
-    predict.setDimensions(80, 24);
-    predict.onScreenFrame(3, 40);
-    const onChange = vi.fn();
-    predict.subscribe(onChange);
-    predict.setDimensions(80, 24);
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  it("notifies when the width clamped the column", () => {
-    predict.setDimensions(80, 24);
-    predict.onScreenFrame(3, 40);
-    const onChange = vi.fn();
-    predict.subscribe(onChange);
-    predict.setDimensions(20, 24);
-    expect(onChange).toHaveBeenCalledTimes(1);
-  });
-
-  it("notifies when the height clamped the row", () => {
-    predict.setDimensions(80, 24);
-    predict.onScreenFrame(20, 3);
-    const onChange = vi.fn();
-    predict.subscribe(onChange);
-    predict.setDimensions(80, 10);
-    expect(onChange).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe("predict: reset()", () => {
-  it("clears all state back to origin", () => {
+  it("clears all state back to the inactive origin", () => {
     predict.onScreenFrame(5, 10);
     predict.applyInput(enc("abc"));
     predict.reset();
@@ -238,6 +161,13 @@ describe("predict: subscribe notifies on every state change", () => {
     expect(afterInput).toBeGreaterThan(afterFrame);
     expect(afterReset).toBeGreaterThan(afterInput);
   });
+
+  it("notifies when a byte suspends prediction, so the overlay hides", () => {
+    const onChange = vi.fn();
+    predict.subscribe(onChange);
+    predict.applyInput(new Uint8Array([0x1b]));
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("predict: dispose()", () => {
@@ -255,8 +185,7 @@ describe("predict: dispose()", () => {
   });
 
   it("two predictors do not share a cursor", () => {
-    const other = createPredictor();
-    other.setDimensions(80, 24);
+    const other = createPredictor(() => 80);
     other.onScreenFrame(4, 4);
     predict.applyInput(enc("abc"));
     expect(predict.get()).toEqual({ row: 0, col: 3, active: true });
@@ -264,105 +193,26 @@ describe("predict: dispose()", () => {
   });
 });
 
-describe("predict: a pending wrap is cleared by CR, LF, and BS", () => {
-  it("CR clears the pending wrap before resetting the column", () => {
-    predict.setDimensions(5, 10);
-    predict.onScreenFrame(0, 4);
-    predict.applyInput(enc("x"));
-    predict.applyInput(new Uint8Array([0x0d]));
-    predict.applyInput(enc("y"));
-    expect(predict.get()).toEqual({ row: 0, col: 1, active: true });
-  });
-  it("LF clears the pending wrap before advancing the row", () => {
-    predict.setDimensions(5, 10);
-    predict.onScreenFrame(0, 4);
-    predict.applyInput(enc("x"));
-    predict.applyInput(new Uint8Array([0x0a]));
-    predict.applyInput(enc("y"));
-    expect(predict.get()).toEqual({ row: 1, col: 4, active: true });
-  });
-  it("BS clears the pending wrap before backing up", () => {
-    predict.setDimensions(5, 10);
-    predict.onScreenFrame(0, 4);
-    predict.applyInput(enc("x"));
-    predict.applyInput(new Uint8Array([0x08]));
-    predict.applyInput(enc("y"));
-    expect(predict.get()).toEqual({ row: 0, col: 4, active: true });
-  });
-});
-
-describe("predict: 3-byte UTF-8 codepoint advances one cell", () => {
-  it("CJK ideograph counts as a single cell", () => {
-    predict.applyInput(enc("中x")); // the CJK char is 3 UTF-8 bytes
-    expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
-  });
-});
-
-describe("predict: the UTF-8 lead-byte boundaries decide the codepoint length", () => {
-  it("0xC0 is a 2-byte lead, not a standalone byte", () => {
-    // The lowest 2-byte lead there is. Prediction models the byte STREAM, and a
-    // lead byte counted as one cell would advance the cursor once per
-    // continuation byte — the visible symptom being a ghost cursor running ahead
-    // of the text on any non-ASCII input.
-    predict.applyInput(new Uint8Array([0xc0, 0x80, 0x78]));
-    expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
-  });
-
-  it("0xE0 is a 3-byte lead, not a 2-byte one", () => {
-    predict.applyInput(new Uint8Array([0xe0, 0xa4, 0xb9, 0x78]));
-    expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
-  });
-
-  it("0xF0 is a 4-byte lead", () => {
-    predict.applyInput(new Uint8Array([0xf0, 0x9f, 0x99, 0x82, 0x78]));
-    expect(predict.get()).toEqual({ row: 0, col: 2, active: true });
-  });
-});
-
-describe("predict: a consumed wrap does not wrap the next character too", () => {
-  it("the character after a wrap advances normally", () => {
-    predict.setDimensions(5, 10);
-    predict.onScreenFrame(0, 4);
-    predict.applyInput(enc("x")); // at the last column: pendingWrap
-    predict.applyInput(enc("y")); // consumes the wrap: (1,0) then advance
-    predict.applyInput(enc("z")); // must NOT wrap again
-    expect(predict.get()).toEqual({ row: 1, col: 2, active: true });
-  });
-});
-
 describe("predict: prediction is off until the first server frame", () => {
-  // Every test above starts from an onScreenFrame, because that is the state the
-  // renderer is in once a session is running. A fresh predictor is not armed, so
-  // nothing the user types moves the ghost cursor before the server has said
-  // where the real one is. Guessing from (0,0) would put a ghost cursor on a
-  // screen that has not been painted yet, over a session whose cursor is
-  // wherever the shell left it.
+  // Guessing from (0,0) would put a ghost cursor on a screen that has not been
+  // painted yet, over a session whose cursor is wherever the shell left it.
 
   it("reports an inactive cursor at the origin before any frame arrives", () => {
-    const p = createPredictor();
+    const p = createPredictor(() => 80);
     expect(p.get()).toEqual({ row: 0, col: 0, active: false });
   });
 
-  it("ignores typed input until a frame arms it", () => {
-    const p = createPredictor();
-    p.applyInput(enc("hello"));
-    expect(p.get()).toEqual({ row: 0, col: 0, active: false });
-  });
-
-  it("notifies no subscriber for input it ignored", () => {
-    // The renderer redraws its overlay on every notification; an unarmed
-    // predictor that still called back would make it redraw a cursor it must
-    // not show.
-    const p = createPredictor();
+  it("ignores typed input until a frame arms it, and notifies no subscriber", () => {
+    const p = createPredictor(() => 80);
     const onChange = vi.fn();
     p.subscribe(onChange);
-    p.applyInput(enc("x"));
+    p.applyInput(enc("hello"));
+    expect(p.get()).toEqual({ row: 0, col: 0, active: false });
     expect(onChange).not.toHaveBeenCalled();
   });
 
   it("starts predicting from the position the first frame reports", () => {
-    const p = createPredictor();
-    p.setDimensions(80, 24);
+    const p = createPredictor(() => 80);
     p.onScreenFrame(3, 7);
     p.applyInput(enc("ab"));
     expect(p.get()).toEqual({ row: 3, col: 9, active: true });

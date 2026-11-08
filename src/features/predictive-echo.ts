@@ -1,16 +1,15 @@
 import { createPredictor } from "../predict.js";
 import type { TerminalFeature } from "../kernel/types.js";
 
-/** Build the predictiveEcho feature: Mosh-style local echo through one predictor
- *  per pane, drawn as the renderer's predicted-cursor overlay. The predictor
- *  suspends itself on any byte it cannot model, because a wrong prediction is
- *  worse than a missing one; a server restart and a tab switch reset it so the
- *  outgoing session's ghost cursor never paints over the incoming screen. */
+/** Build the predictiveEcho feature: local echo through one predictor per pane,
+ *  drawn as the renderer's predicted-cursor overlay against the session's screen
+ *  width. It never changes what is sent. A server restart and a tab switch reset
+ *  it so the outgoing session's ghost cursor never paints over the incoming screen. */
 export function predictiveEcho(): TerminalFeature {
   return {
     name: "predictiveEcho",
     setup(ctx) {
-      const predict = createPredictor();
+      const predict = createPredictor(() => ctx.session.size().cols);
       ctx.defer(() => {
         predict.dispose();
       });
@@ -20,13 +19,6 @@ export function predictiveEcho(): TerminalFeature {
       }
       predict.subscribe(push);
 
-      ctx.registerInputTransform((bytes) => {
-        const p = predict.get();
-        if (bytes.length === 1 && bytes[0] === 0x7f && p.active && p.row === 0 && p.col === 0) {
-          return new Uint8Array(0);
-        }
-        return bytes;
-      });
       ctx.registerInputObserver((bytes) => {
         predict.applyInput(bytes);
       });
@@ -34,8 +26,6 @@ export function predictiveEcho(): TerminalFeature {
         push();
       });
       ctx.on("wire:screen", (msg) => {
-        const sz = ctx.session.size();
-        predict.setDimensions(sz.cols, sz.rows);
         predict.onScreenFrame(msg.cursor[0], msg.cursor[1], msg.cursorHidden);
       });
       ctx.on("connection:state", (s) => {

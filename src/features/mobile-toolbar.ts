@@ -43,15 +43,13 @@ const TOOLBAR_HTML = `
  *  toolbar is visible only under a coarse pointer (`css/23-toolbar.css`). Order
  *  it before `tabs` when `externalToggle` is set, since tabs reads the API
  *  through `ctx.use`. Sticky-Ctrl is a kernel INPUT TRANSFORM rather than a
- *  toolbar click path, so it rewrites a character typed on the soft keyboard as
- *  well as one from these buttons. */
+ *  toolbar click path, so it applies to a character typed on any keyboard. */
 export function mobileToolbar(opts: MobileToolbarOptions = {}): TerminalFeature<MobileToolbarApi> {
   return {
     name: "mobileToolbar",
     scope: "shell",
     setup(ctx) {
       const encoder = new TextEncoder();
-      const decoder = new TextDecoder();
       const win = windowOf(ctx.shell.root.ownerDocument);
       const toolbar = fromHTML(ctx.shell.root.ownerDocument, TOOLBAR_HTML);
       if (opts.externalToggle) {
@@ -62,10 +60,9 @@ export function mobileToolbar(opts: MobileToolbarOptions = {}): TerminalFeature<
       const armedListeners = new Set<(armed: boolean) => void>();
       const ctrl = bindMobileToolbar({
         toolbar,
-        send: (bytes) => {
-          ctx.send(encoder.encode(bytes));
+        send: (encode) => {
+          ctx.send((modes) => encoder.encode(encode(modes)));
         },
-        modes: ctx.modes,
         onCtrlChange: (armed) => {
           for (const fn of [...armedListeners]) {
             fn(armed);
@@ -76,15 +73,20 @@ export function mobileToolbar(opts: MobileToolbarOptions = {}): TerminalFeature<
         ctrl.dispose();
       });
 
-      // The toolbar's own arrow/Tab/Enter/Esc sends disarm before sending, so
-      // they pass through untouched.
-      ctx.registerInputTransform((bytes) => {
+      // Ctrl applies to the next character typed; any other input disarms it.
+      // The toolbar's own keys disarm before they send.
+      ctx.registerInputTransform((input) => {
         if (!ctrl.isCtrlArmed()) {
-          return bytes;
+          return input;
         }
-        const text = decoder.decode(bytes);
-        const mapped = ctrl.applyStickyCtrl(text);
-        return mapped === text ? bytes : encoder.encode(mapped);
+        if (input.kind !== "text") {
+          ctrl.setCtrlArmed(false);
+          return input;
+        }
+        const chord = ctrl.applyStickyCtrl(input.text);
+        return chord === null
+          ? input
+          : { kind: "key", encode: (modes) => encoder.encode(chord(modes)) };
       });
 
       // Two frames without the slide transition, so the first paint cannot flash.

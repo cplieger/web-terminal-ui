@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
+import { ackEpoch } from "../../test-helpers/store-epoch.js";
 import type { FakeEngineRecord } from "../../test-helpers/fake-engine.js";
 import type {
   PaneSide,
@@ -1093,64 +1094,53 @@ describe("the snap items", () => {
     expect(shown(ctx, "left")).toBe("s1");
   });
 
-  it("a snap hands the losing pane's server epoch to the gaining pane before it attaches", async () => {
+  it("a snap binds the tab's store, with its server epoch, in the gaining pane before it attaches", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     term.split?.open();
     const left = engineOn(root, "left");
     const right = engineOn(root, "right");
-    // Only the LEFT connection knows s1's epoch; the right has never seen it.
-    left.connection.serverEpochOf.mockImplementation((id: string) => (id === "s1" ? 4242 : 0));
+    // s1's store learned its epoch in the left pane; the right has never seen it.
+    ackEpoch(left.renderer.boundStore(), 4242);
     const calls: string[] = [];
     for (const [side, e] of [
       ["left", left],
       ["right", right],
     ] as const) {
-      e.connection.adoptPersistedEpoch.mockImplementation((id: string, epoch: number) => {
-        calls.push(`${side}:adopt:${id}:${String(epoch)}`);
-      });
       e.connection.setSession.mockImplementation((id: string) => {
-        calls.push(`${side}:set:${id}`);
+        calls.push(`${side}:set:${id}:${String(e.renderer.boundStore().serverEpoch())}`);
       });
     }
 
     menuItem(openTabMenu(root, "one"), "Snap to right").click();
     expect(shown(ctx, "right")).toBe("s1");
-    expect(calls).toEqual(["right:adopt:s1:4242", "right:set:s1"]);
+    expect(calls).toEqual(["right:set:s1:4242"]);
   });
 
-  it("a swap hands each tab's server epoch to the pane it moves into before it attaches", async () => {
+  it("a swap binds each tab's store, with its server epoch, in the pane it moves into before it attaches", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     term.split?.open();
     chipOf(root, "two").click();
     const left = engineOn(root, "left");
     const right = engineOn(root, "right");
-    // Each connection knows only the epoch of the session it shows.
-    left.connection.serverEpochOf.mockImplementation((id: string) => (id === "s1" ? 1111 : 0));
-    right.connection.serverEpochOf.mockImplementation((id: string) => (id === "s2" ? 2222 : 0));
+    // Each tab's store learned its epoch in the pane that shows it.
+    ackEpoch(left.renderer.boundStore(), 1111);
+    ackEpoch(right.renderer.boundStore(), 2222);
     const calls: string[] = [];
     for (const [side, e] of [
       ["left", left],
       ["right", right],
     ] as const) {
-      e.connection.adoptPersistedEpoch.mockImplementation((id: string, epoch: number) => {
-        calls.push(`${side}:adopt:${id}:${String(epoch)}`);
-      });
       e.connection.setSession.mockImplementation((id: string) => {
-        calls.push(`${side}:set:${id}`);
+        calls.push(`${side}:set:${id}:${String(e.renderer.boundStore().serverEpoch())}`);
       });
     }
 
     menuItem(openTabMenu(root, "two"), "Snap to left").click();
     expect(shown(ctx, "left")).toBe("s2");
     expect(shown(ctx, "right")).toBe("s1");
-    expect(calls).toEqual([
-      "left:adopt:s2:2222",
-      "left:set:s2",
-      "right:adopt:s1:1111",
-      "right:set:s1",
-    ]);
+    expect(calls).toEqual(["left:set:s2:2222", "right:set:s1:1111"]);
   });
 
   it("snapping the single view's tab to the right while closed shows its split partner on the left", async () => {
@@ -1189,7 +1179,7 @@ describe("the snap items", () => {
     expect(ctx.shell.selected()).toBe("right");
   });
 
-  it("snapping an unshown tab onto the side the single view fills hands the kept tab's epoch to the other pane before it attaches", async () => {
+  it("snapping an unshown tab onto the side the single view fills binds the kept tab's store, with its epoch, in the other pane before it attaches", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     // The right pane's kernel exists only once a split has opened; close keeps it
@@ -1200,25 +1190,22 @@ describe("the snap items", () => {
     await until(() => shown(ctx, "left") === "s2");
     const left = engineOn(root, "left");
     const right = engineOn(root, "right");
-    // Only the left connection, where s2 lives, knows its epoch.
-    left.connection.serverEpochOf.mockImplementation((id: string) => (id === "s2" ? 2222 : 0));
+    // s2's store learned its epoch in the left pane, where s2 lives; s1's never did.
+    ackEpoch(left.renderer.boundStore(), 2222);
     const calls: string[] = [];
     for (const [side, e] of [
       ["left", left],
       ["right", right],
     ] as const) {
-      e.connection.adoptPersistedEpoch.mockImplementation((id: string, epoch: number) => {
-        calls.push(`${side}:adopt:${id}:${String(epoch)}`);
-      });
       e.connection.setSession.mockImplementation((id: string) => {
-        calls.push(`${side}:set:${id}`);
+        calls.push(`${side}:set:${id}:${String(e.renderer.boundStore().serverEpoch())}`);
       });
     }
 
     menuItem(openTabMenu(root, "one"), "Snap to left").click();
     expect(shown(ctx, "left")).toBe("s1");
     expect(shown(ctx, "right")).toBe("s2");
-    expect(calls).toEqual(["left:set:s1", "right:adopt:s2:2222", "right:set:s2"]);
+    expect(calls).toEqual(["left:set:s1:0", "right:set:s2:2222"]);
   });
 });
 
@@ -2500,19 +2487,16 @@ describe("a failed second pane", () => {
     expect(ctx.shell.selected()).toBe("left");
     const left = engineOn(root, "left");
     const failing = engineOn(root, "right");
-    // Only the failing pane's connection knows s2's epoch.
-    failing.connection.serverEpochOf.mockImplementation((id: string) => (id === "s2" ? 4242 : 0));
+    // s2's store learned its epoch in the pane that is about to fail.
+    ackEpoch(failing.renderer.boundStore(), 4242);
     failing.renderer.boundStore().applyScroll({
       type: "scroll",
       firstIndex: 0,
       lines: [[{ t: "L0", f: -1, b: -1, a: 0, uc: -1 }]],
     });
     const calls: string[] = [];
-    left.connection.adoptPersistedEpoch.mockImplementation((id: string, epoch: number) => {
-      calls.push(`adopt:${id}:${String(epoch)}`);
-    });
     left.connection.setSession.mockImplementation((id: string) => {
-      calls.push(`set:${id}`);
+      calls.push(`set:${id}:${String(left.renderer.boundStore().serverEpoch())}`);
     });
 
     late.reject();
@@ -2524,7 +2508,7 @@ describe("a failed second pane", () => {
 
     chipOf(root, "two").click();
     expect(shown(ctx, "left")).toBe("s2");
-    expect(calls).toEqual(["adopt:s2:4242", "set:s2"]);
+    expect(calls).toEqual(["set:s2:4242"]);
 
     window.dispatchEvent(new Event("pagehide"));
     expect(entries.get("s2")?.snapshot.serverEpoch).toBe(4242);

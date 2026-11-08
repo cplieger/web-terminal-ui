@@ -44,8 +44,7 @@ const {
 } = fake.renderer;
 const { dispose } = fake;
 
-const dec = new TextDecoder();
-const sentText = (): string => sendBinary.mock.calls.map((c) => dec.decode(c[0])).join("");
+const sentText = (): string => fake.sentInput().join("");
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
@@ -114,18 +113,10 @@ function selectInOutput(root: HTMLElement): Selection {
   return sel;
 }
 
-/** The same live selection, but anchored OUTSIDE the terminal root and taken
- *  AFTER destroy, for the released-runtime cases.
- *
- *  Two measured facts force both halves. A real browser applies the selection
- *  fixup, so removing the selected nodes collapses the selection — and destroy()
- *  empties the root. And destroy() collapses the document selection outright
- *  (measured: not collapsed before, collapsed after, with the range anchored in a
- *  sibling of the root), so no selection taken BEFORE destroy survives it either
- *  way. Taking it after leaves a leaked listener as the only thing that could
- *  clear it, which is the claim; production clears the document selection wherever
- *  it lives (`window.getSelection()`, kernel.ts pointerup/mousedown), so this is
- *  the same probe and it can now actually fail. */
+/** The same live selection, anchored outside the terminal root and taken after
+ *  destroy, for the released-runtime cases: destroy() collapses the document
+ *  selection, so one taken before it never survives, and only a leaked listener
+ *  could clear one taken after. */
 function selectOutsideTerminal(): Selection {
   const host = document.createElement("p");
   host.textContent = "selected outside the terminal";
@@ -1310,17 +1301,10 @@ describe("a browser with no matchMedia at all", () => {
 });
 
 describe("a fontReady the document cannot resolve", () => {
-  // The font gate is one of the two things the loading overlay waits for, so a
-  // fontReady this document cannot answer for must fall through to the settled
-  // path with a named warning rather than stalling the page silently. The header
-  // named two such cases and the emulator collapsed them into one: with no
-  // `document.fonts` at all, EVERY fontReady took the synchronous catch. A real
-  // browser separates them, and they warn differently, so they are two tests.
-  //
-  // Measured on Chromium: FontFaceSet.load never throws synchronously. An
-  // unparseable descriptor comes back as a REJECTED promise ("Could not resolve
-  // '...' as a font"), and a well-formed descriptor naming a missing family
-  // RESOLVES with zero faces, which is not an error at all.
+  // A fontReady this document cannot answer must fall through to the settled
+  // path with a named warning, not stall the loading overlay. Chromium's
+  // FontFaceSet.load never throws synchronously: a bad descriptor rejects, and a
+  // missing family resolves with zero faces, so the two cases warn differently.
   it("reports a document with no Font Loading API by name, and does not wedge startup", async () => {
     const restoreFonts = shadowFonts(undefined);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

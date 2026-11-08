@@ -20,10 +20,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-const { sendBinary } = fake.connection;
-
-const dec = new TextDecoder();
-const sentText = (): string => sendBinary.mock.calls.map((c) => dec.decode(c[0])).join("");
+const sentText = (): string => fake.sentInput().join("");
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
@@ -71,6 +68,7 @@ describe("presetTouch composition", () => {
     try {
       const { root } = await mountTouch();
       await tick();
+      fake.announceModes({ bracketedPaste: true });
       const ta = root.querySelector(".term-input") as HTMLTextAreaElement;
       ta.dispatchEvent(
         new KeyboardEvent("keydown", { ctrlKey: true, shiftKey: true, code: "KeyV" }),

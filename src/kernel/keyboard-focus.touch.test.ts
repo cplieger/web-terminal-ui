@@ -21,8 +21,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
 });
 
 const { sendBinary, setClientFocus } = fake.connection;
-const dec = new TextDecoder();
-const sentText = (): string => sendBinary.mock.calls.map((c) => dec.decode(c[0])).join("");
+const sentText = (): string => fake.sentInput().join("");
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
