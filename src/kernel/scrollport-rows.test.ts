@@ -8,50 +8,9 @@ import { LineStore } from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
 import { shortenSettle, shortSettled } from "../test-helpers/delays.js";
 import type { TerminalContext, TerminalFeature } from "./types.js";
+import { shippedBundle } from "../test-helpers/stylesheet.js";
 
-declare global {
-  interface ImportMeta {
-    glob(
-      pattern: string,
-      options: { query: string; import: string; eager: true },
-    ): Record<string, string>;
-  }
-}
-
-// Same shape as row-background.test.ts, repeated for the reason it gives.
-const MANIFESTS = import.meta.glob("../../css/MANIFEST*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-const SHEETS = import.meta.glob("../../css/*.css", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-
-const byName = (mods: Record<string, string>): Map<string | undefined, string> =>
-  new Map(Object.entries(mods).map(([p, text]) => [p.split("/").pop(), text]));
-
-const BUNDLE = ((): string => {
-  const manifest = byName(MANIFESTS).get("MANIFEST");
-  if (manifest === undefined) {
-    throw new Error("css/MANIFEST is missing");
-  }
-  const sheets = byName(SHEETS);
-  return manifest
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .map((name) => {
-      const text = sheets.get(name);
-      if (text === undefined) {
-        throw new Error(`css/MANIFEST names ${name}, which css/ does not contain`);
-      }
-      return text;
-    })
-    .join("\n");
-})();
+const BUNDLE = shippedBundle("MANIFEST");
 
 /** The cell height and the band above and below the rows, as 02-terminal.css
  *  ships them. */

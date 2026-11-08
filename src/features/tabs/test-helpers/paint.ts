@@ -1,54 +1,9 @@
-declare global {
-  interface ImportMeta {
-    glob(
-      pattern: string,
-      options: { query: string; import: string; eager: true },
-    ): Record<string, string>;
-  }
-}
-
-// Vite reads import.meta.glob's arguments statically, so this module must stay
-// outside Stryker's `mutate` set: an instrumented options object makes Vite's
-// dependency pre-scan fail for the whole browser project.
-const MANIFESTS = import.meta.glob("../../../../css/MANIFEST*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-const SHEETS = import.meta.glob("../../../../css/*.css", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-
-const byName = (mods: Record<string, string>): Map<string | undefined, string> =>
-  new Map(Object.entries(mods).map(([p, text]) => [p.split("/").pop(), text]));
-
-/** The tabbed preset's stylesheet as css/MANIFEST.tabbed concatenates it. */
-const TABBED_BUNDLE = ((): string => {
-  const manifest = byName(MANIFESTS).get("MANIFEST.tabbed");
-  if (manifest === undefined) {
-    throw new Error("css/MANIFEST.tabbed is missing");
-  }
-  const sheets = byName(SHEETS);
-  return manifest
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .map((name) => {
-      const text = sheets.get(name);
-      if (text === undefined) {
-        throw new Error(`css/MANIFEST.tabbed names ${name}, which css/ does not contain`);
-      }
-      return text;
-    })
-    .join("\n");
-})();
+import { shippedBundle } from "../../../test-helpers/stylesheet.js";
 
 /** A `<style>` holding the tabbed bundle, appended to the document's head. */
 export function tabbedStylesheet(): HTMLStyleElement {
   const styles = document.createElement("style");
-  styles.textContent = TABBED_BUNDLE;
+  styles.textContent = shippedBundle("MANIFEST.tabbed");
   document.head.appendChild(styles);
   return styles;
 }

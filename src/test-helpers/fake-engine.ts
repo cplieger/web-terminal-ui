@@ -41,8 +41,9 @@ export interface FakeEngineRecord extends EngineParts {
    *  a modes or screen frame makes known) before the kernel's `onMessage`,
    *  and a resume's bounds reach `noteResumeBounds` before `onResumeBounds`. */
   readonly callbacks: ConnectionCallbacks;
-  /** Unknown from creation, `connect`, `reconnectNow` and `setSession` (which
-   *  also restores power-on values) until a frame, under `holdModes`. */
+  /** Unknown from creation, `connect`, `reconnectNow` and a reconnecting
+   *  `setSession` (which also restores power-on values) until a frame, under
+   *  `holdModes`. */
   readonly modes: ModeState;
   /** `EngineFake.sentInput` for this engine's connection. */
   sentInput(): string[];
@@ -72,7 +73,7 @@ export interface EngineFake extends EngineParts {
   modes(): ModeState;
   /** The last engine. */
   engine(): TerminalEngine;
-  /** Until `reset()`, a new engine, `connect` and `setSession` leave the modes
+  /** Until `reset()`, a new engine, `connect` and a reconnecting `setSession` leave the modes
    *  unknown until the test delivers a modes or screen frame, as a server's
    *  round trip does. Otherwise the fake answers at once with power-on modes. */
   holdModes(): void;
@@ -189,8 +190,17 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
     };
     let socketOpen = false;
     let socketAnnounced = false;
-    /** Puts `size` on the socket; true when it is the socket's first. The fake's
-     *  socket is always resumed, so its input starts there (`onInputReady`). */
+    let inputStarted = false;
+    const endSocket = (): void => {
+      socketOpen = false;
+      inputStarted = false;
+    };
+    const startInput = (size: { cols: number; rows: number }): void => {
+      inputStarted = true;
+      consumer?.onInputReady?.({ ...size });
+    };
+    /** Puts `size` on the socket; true when it is the socket's first, which
+     *  starts the socket's input once the resume is done. */
     const putSize = (size: { cols: number; rows: number }): boolean => {
       wireSizes.push({ ...size });
       const first = !socketAnnounced;
@@ -200,6 +210,7 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
     /** A new socket's open, then its resumeAck: `onResume` is what that ack
      *  does before the socket's input starts. */
     const openResumed = (onResume: () => void): void => {
+      inputStarted = false;
       socketOpen = true;
       attached = true;
       socketAnnounced = false;
@@ -208,7 +219,7 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
       consumer?.onOpen?.();
       onResume();
       if (sized) {
-        consumer?.onInputReady?.({ ...size });
+        startInput(size);
       }
     };
     const answerModes = (): void => {
@@ -307,20 +318,20 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
           return;
         }
         if (putSize(size)) {
-          consumer?.onInputReady?.({ ...size });
+          startInput(size);
         }
       }),
       lastAnnouncedSize: vi.fn(() => {
         const last = wireSizes.at(-1);
         return last === undefined ? null : { ...last };
       }),
-      // The fake's socket is always resumed, so its input starts at its first size.
-      inputReady: vi.fn(() => socketOpen && socketAnnounced),
+      // True from onInputReady until the socket ends, as the real reader.
+      inputReady: vi.fn(() => socketOpen && inputStarted),
       reconnectNow: vi.fn(() => {
         if (ended) {
           return;
         }
-        socketOpen = false;
+        endSocket();
         attached = true;
         liveModes?.setKnown(false);
         answerModes();
@@ -329,22 +340,21 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
       setSession: vi.fn((id: string) => {
         ended = false;
         const switched = id !== currentId || !attached;
-        if (switched) {
-          socketOpen = false;
-          attached = true;
-        }
         currentId = id;
+        if (!switched) {
+          return;
+        }
+        endSocket();
+        attached = true;
         liveModes?.setKnown(false);
         liveModes?.applySnapshot(module().POWER_ON_MODES);
         answerModes();
-        if (switched) {
-          consumer?.onConnecting?.();
-        }
+        consumer?.onConnecting?.();
       }),
       forgetSession: vi.fn((id: string) => {
         ended = false;
         if (id === currentId) {
-          socketOpen = false;
+          endSocket();
           attached = false;
           currentId = null;
         }
@@ -355,12 +365,12 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
       requestHistory: vi.fn(() => false),
       currentSessionId: vi.fn(() => active()),
       disconnect: vi.fn(() => {
-        socketOpen = false;
+        endSocket();
         attached = false;
       }),
       connect: vi.fn(() => {
         ended = false;
-        socketOpen = false;
+        endSocket();
         attached = true;
         liveModes?.setKnown(false);
         answerModes();
@@ -378,7 +388,7 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
     const dispose = vi.fn(() => {
       realMouse?.dispose();
       disposed = true;
-      socketOpen = false;
+      endSocket();
       attached = false;
     });
     return {
@@ -397,7 +407,7 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
         realMouse = null;
         disposed = true;
         wireSizes.length = 0;
-        socketOpen = false;
+        endSocket();
         socketAnnounced = false;
         waiting.clear();
         unacked.clear();
@@ -411,12 +421,12 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
         disposed = false;
       },
       markClosed() {
-        socketOpen = false;
+        endSocket();
         attached = false;
       },
       markEnded() {
         ended = true;
-        socketOpen = false;
+        endSocket();
         attached = false;
       },
       announcedSizes: () => wireSizes.map((size) => ({ ...size })),
