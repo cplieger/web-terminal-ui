@@ -33,7 +33,7 @@ When the terminal is a panel or a pane in your application, concatenate the mani
 
 Chrome text then falls back to your platform's monospace font. Declare the `@font-face` rules yourself if you want the panel to match the full-page look. Pass `layout: "container"` so the terminal fills your container element and positions its chrome against it instead of the viewport.
 
-Your container can be any height. The terminal leaves the part of its height that is not whole rows as padding under the last row, so the rows it shows while following the output start at its top edge with no part of a row cut off there.
+Your container can be any height. The terminal leaves the part of its height that is not whole rows as padding under the last row, so while it follows the output, no part of a row is cut off at its top edge.
 
 ## Load the modules
 

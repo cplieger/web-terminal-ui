@@ -163,6 +163,18 @@ describe("the scrollport a box of any height shows", () => {
     expect(ctx.render.computeSize().rows).toBe(Math.floor((height - 2 * BAND) / CELL));
   });
 
+  // Display scaling, zoom and %-sized panels give a box a fractional height; the
+  // engine counts rows from the integer clientHeight, so the fill must too.
+  it.each([210.25, 210.4, 210.6, 221.3, 300.33])(
+    "keeps the row count and the band at a fractional %fpx",
+    async (height) => {
+      const { ctx, term } = await showing(height, lines(120));
+
+      expect(rowEdges(term).top).toBeCloseTo(BAND, 0);
+      expect(ctx.render.computeSize().rows).toBe(Math.floor((height - 2 * BAND) / CELL));
+    },
+  );
+
   it("shows whole rows again after a scroll up and back to the bottom", async () => {
     const { ctx, term } = await showing(210, lines(120));
 

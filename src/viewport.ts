@@ -243,21 +243,18 @@ export function createViewport(opts: ViewportOptions): Viewport {
   // a height that is not whole rows shows part of a history row at its top
   // edge; the block-end padding takes that remainder (css/02-terminal.css
   // --wt-row-fill). Measured against the band, never the fill already written,
-  // or a growing box would add a whole row of padding.
+  // or a growing box would add a whole row of padding; and from the integer
+  // clientHeight the engine's computeSize divides, or a fractional box loses a row.
   function fitRows(): void {
     const cs = win.getComputedStyle(termWrap);
     const cell = parseFloat(cs.lineHeight);
-    const fill = parseFloat(cs.getPropertyValue("--wt-row-fill")) || 0;
-    const rowsArea =
-      parseFloat(cs.height) -
-      parseFloat(cs.borderTopWidth) -
-      parseFloat(cs.borderBottomWidth) -
-      parseFloat(cs.paddingTop) -
-      (parseFloat(cs.paddingBottom) - fill);
     // A hidden pane computes `height: auto`; its reveal resizes the box.
-    if (!(cell > 0) || !Number.isFinite(rowsArea)) {
+    if (!(cell > 0) || !Number.isFinite(parseFloat(cs.height))) {
       return;
     }
+    const fill = parseFloat(cs.getPropertyValue("--wt-row-fill")) || 0;
+    const rowsArea =
+      termWrap.clientHeight - parseFloat(cs.paddingTop) - (parseFloat(cs.paddingBottom) - fill);
     const next = `${String(((rowsArea % cell) + cell) % cell)}px`;
     if (termWrap.style.getPropertyValue("--wt-row-fill") !== next) {
       termWrap.style.setProperty("--wt-row-fill", next);
