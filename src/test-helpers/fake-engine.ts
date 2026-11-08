@@ -116,6 +116,9 @@ interface PartsInternal extends EngineParts {
    *  `dispose` releases, when one was built, `modes` the state its connection
    *  marks unknown, and `consumer` the callbacks a reconnect reports to. */
   adopt(realMouse: MouseController | null, modes: ModeState, consumer: ConnectionCallbacks): void;
+  /** The socket closed (onClose, onWireIncompatible), before its callback
+   *  runs, as the real connection's close handler does. */
+  markClosed(): void;
   /** The session ended (onProcessExit): `reconnectNow` refuses until
    *  `connect`, `setSession` or `forgetSession`, as the real connection does. */
   markEnded(): void;
@@ -311,6 +314,8 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
         const last = wireSizes.at(-1);
         return last === undefined ? null : { ...last };
       }),
+      // The fake's socket is always resumed, so its input starts at its first size.
+      inputReady: vi.fn(() => socketOpen && socketAnnounced),
       reconnectNow: vi.fn(() => {
         if (ended) {
           return;
@@ -373,6 +378,8 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
     const dispose = vi.fn(() => {
       realMouse?.dispose();
       disposed = true;
+      socketOpen = false;
+      attached = false;
     });
     return {
       renderer,
@@ -403,8 +410,13 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
         consumer = callbacks;
         disposed = false;
       },
+      markClosed() {
+        socketOpen = false;
+        attached = false;
+      },
       markEnded() {
         ended = true;
+        socketOpen = false;
         attached = false;
       },
       announcedSizes: () => wireSizes.map((size) => ({ ...size })),
@@ -472,6 +484,17 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
         consumer.onResumeBounds?.(committed, oldest);
       },
     };
+    callbacks.onClose = () => {
+      parts.markClosed();
+      consumer.onClose();
+    };
+    if (consumer.onWireIncompatible !== undefined) {
+      const onWireIncompatible = consumer.onWireIncompatible.bind(consumer);
+      callbacks.onWireIncompatible = (detail) => {
+        parts.markClosed();
+        onWireIncompatible(detail);
+      };
+    }
     if (consumer.onProcessExit !== undefined) {
       const onProcessExit = consumer.onProcessExit.bind(consumer);
       callbacks.onProcessExit = () => {

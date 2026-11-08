@@ -925,6 +925,7 @@ describe("what a host can wait on before it sends", () => {
     ["a switch to another session", (pane) => pane.notifySwitch({ id: "other" })],
     ["clearing the shown session", (pane) => pane.clearActiveSession()],
     ["destroy", (_pane, term) => term.destroy()],
+    ["a disconnect, which fires no callback", () => fake.connection.disconnect()],
   ])("reads inputReady false at once after %s", async (_name, end) => {
     const { term, ctx } = await paneOf();
     const pane = shownPane(ctx);
@@ -946,6 +947,36 @@ describe("what a host can wait on before it sends", () => {
     ctx.dropSession("shown");
 
     expect(pane.inputReady()).toBe(false);
+  });
+
+  it("reads inputReady false in a feature's teardown, while the engine is still up", async () => {
+    const readAtTeardown: boolean[] = [];
+    let captured: TerminalContext | undefined;
+    const shown: { pane?: PaneHandle } = {};
+    const probe: TerminalFeature<void> = {
+      name: "teardown-probe",
+      setup(ctx) {
+        captured = ctx;
+        return {
+          teardown: () => {
+            readAtTeardown.push(shown.pane?.inputReady() ?? true);
+            readAtTeardown.push(fake.connection.inputReady());
+          },
+        };
+      },
+    };
+    const term = await mountSettled({ features: () => [probe] });
+    if (captured === undefined) {
+      throw new Error("the probe feature never ran");
+    }
+    const pane = shownPane(captured);
+    shown.pane = pane;
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+
+    term.destroy();
+
+    expect(readAtTeardown).toEqual([false, true]);
   });
 
   it("reads inputReady false once the shell forgets an unmanaged pane's own session", async () => {
