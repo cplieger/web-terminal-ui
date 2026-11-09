@@ -63,6 +63,10 @@ Left unset, the engine decides. It keeps 5000 lines against a server that cannot
 - `--tab-bg`, `--tab-hover-bg`, `--tab-active-bg`, `--tab-active-fg` and `--tab-active-border`
 - the activity-dot palette `--status-working`, `--status-done`, `--status-input`, `--status-warning` and `--status-failed`
 
+- the connection banner's text colours `--banner-offline` and `--banner-restarted`
+
+The banner's defaults suit the dark default `--surface`. If your theme gives `--surface` a light colour, set both banner tokens to darker colours that reach 4.5:1 contrast against it (WCAG 1.4.3).
+
 If you recolor `--status-working`, `--status-warning` and `--status-failed`, keep their lightness apart. The three differ only in hue, so replacements of equal lightness look the same in greyscale and to a reader with deuteranopia.
 
 ### Checking your theme keys
