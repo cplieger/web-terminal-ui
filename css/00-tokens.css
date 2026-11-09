@@ -103,6 +103,11 @@
      orange (L 75.8%), which sits between working and warning. */
   --status-warning: #facc15; /* warning: yellow disc, working's wave */
   --status-failed: #dc2626; /* a reported error: red disc, working's wave; crashed reuses it solid and static */
+  /* Connection-banner text on --surface (20-connection-banner.css). Tuned for
+     the dark default surface; a light --surface needs darker values to keep
+     WCAG 1.4.3's 4.5:1. */
+  --banner-offline: #f55;
+  --banner-restarted: #fa5;
   --radius: 0.75rem;
   --radius-inner: 0.5rem;
   /* Small square icon buttons (e.g. the 24px tab-close x): at that size the
