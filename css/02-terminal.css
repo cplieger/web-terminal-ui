@@ -54,7 +54,12 @@
      the PTY from it. The row background owes it nothing: see the run padding
      below. */
   line-height: 17px;
-  padding: 4px;
+  /* The top band is a border, outside the scrollport: as padding it scrolls
+     away while following and leaves its height of a history row at the top
+     edge. viewport.ts writes --wt-row-fill, the part of the height that is not
+     whole rows, so the rows a following scrollport shows start at its edge. */
+  border-top: 4px solid transparent;
+  padding: 0 4px calc(4px + var(--wt-row-fill, 0px));
   background: var(--bg);
   color: var(--text);
 }

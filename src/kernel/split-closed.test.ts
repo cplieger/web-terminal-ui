@@ -22,8 +22,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
 });
 
 const { sendBinary } = fake.connection;
-const dec = new TextDecoder();
-const sentText = (): string => sendBinary.mock.calls.map((c) => dec.decode(c[0])).join("");
+const sentText = (): string => fake.sentInput().join("");
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
@@ -158,6 +157,7 @@ describe.each(TOPOLOGIES)("$name", ({ opts }) => {
     textarea.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "ab" }));
     expect(sentText()).toBe("ab");
     sendBinary.mockClear();
+    fake.announceModes({ bracketedPaste: true });
     textarea.dispatchEvent(
       new InputEvent("input", { inputType: "insertFromPaste", data: "ls\n\x1b[201~x" }),
     );

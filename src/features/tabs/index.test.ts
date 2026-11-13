@@ -10,6 +10,7 @@ import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import { tabs } from "./index.js";
 import type { PaneLayout } from "./model.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
+import { ackEpoch } from "../../test-helpers/store-epoch.js";
 import { shortAnnounced, shortenReannounce } from "../../test-helpers/delays.js";
 import type { ShellContext, TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
@@ -203,7 +204,6 @@ beforeEach(() => {
   // vitest resets every spy to its construction default before each test; the
   // view memory and the mouse mode are re-declared so the defaults are stated.
   captureViewMemory.mockImplementation(() => ({ abs: 7, screenTop: -3, following: false }));
-  fake.connection.serverEpochOf.mockImplementation(() => 777);
   fake.connection.currentSessionId.mockImplementation(() => "unmanaged");
   getMouseMode.mockReturnValue(0);
   listBody = [
@@ -239,16 +239,11 @@ async function until(pred: () => boolean, tries = 20): Promise<void> {
   }
 }
 
-// A localStorage that refuses every operation, which is what Safari private mode,
-// a disabled third-party context and an embedder's iframe all look like from here.
-//
-// The whole global is REPLACED rather than `Storage.prototype` spied on. A prototype
-// spy installed inside a test does NOT reach `localStorage` once other tests in this
-// file have run: measured with a probe in the test body, the read went through
-// untouched (`getItem is mock? false`, and reading did not throw) while the same case
-// run alone with `-t` did throw. A case built on the spy therefore never exercises the
-// guard it is named for — it passes because storage stayed friendly. The stubbed global
-// holds whatever ran before it and is reversed by the afterEach `unstubAllGlobals`.
+// A localStorage that refuses every operation (Safari private mode, a disabled
+// third-party context). The global is replaced, not `Storage.prototype` spied
+// on: once other tests in this file have run, a prototype spy no longer reaches
+// `localStorage`, so the guard would go unexercised. afterEach's
+// `unstubAllGlobals` reverses it.
 function stubHostileStorage(): void {
   const boom = (): never => {
     throw new Error("storage disabled");
@@ -387,7 +382,8 @@ describe("tabs feature", () => {
       firstIndex: 500,
       lines: [[{ t: "restored", f: -1, b: -1, a: 0, uc: -1 }]],
     });
-    const snapshot = seed.snapshot(777);
+    ackEpoch(seed, 777);
+    const snapshot = seed.snapshot();
     expect(snapshot).not.toBeNull();
     const entries = new Map([["s1", { savedAt: Date.now(), snapshot: snapshot! }]]);
 
@@ -545,17 +541,10 @@ describe("tabs feature", () => {
   });
 
   it("activates a tab adopted after the bootstrap failed (server down at load, then back)", async () => {
-    // The bootstrap total-fails: the list rejects, and so does the create it falls
-    // back to, so it returns having activated nothing and leaves the retry chrome
-    // up. When the server comes back and the status stream adopts a session,
-    // ensureActive must activate it, or the tab renders inert (blank, never
-    // connecting) until the user taps it.
-    //
-    // This is the path ensureActive's `started` gate must NOT close, and the
-    // reason `started` is set on every exit from the bootstrap rather than only
-    // the successful one. Three rejections (the list, the layout record read
-    // beside it, and the create), so the shared fetch mock's base implementation
-    // is left intact for the rest of the suite.
+    // The bootstrap fails outright (the list, the layout read and the create all
+    // reject), leaving the retry chrome up. When the status stream later adopts a
+    // session, ensureActive must still activate it, or the tab stays blank: its
+    // `started` gate is set on every bootstrap exit, not only success.
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
@@ -1216,17 +1205,9 @@ describe("tabs feature", () => {
     expect(root.querySelector(".wt-tab-label")?.textContent).toBe("two");
   });
 
-  // Title RESOLUTION lives entirely in the engine: the precedence between the
-  // pinned name, the program's OSC 0/2 window title, a title the host pushed
-  // through SetSessionTitle and the engine's own foreground-process/cwd inference
-  // is resolved server-side into one `title` field. Seven tests here used to cover
-  // a browser-side version of that; the server is the source of truth for a
-  // session's name, because a browser reading only its own state disagreed with
-  // every other client.
-  //
-  // What the UI still owes is rendering what the server resolved — including a
-  // name that arrives MID-SESSION, which is what a host pushing a title produces
-  // and what no earlier test covered.
+  // The engine resolves a session's title (pinned name, OSC 0/2, a host's
+  // SetSessionTitle, its own inference) into one `title` field. The UI renders
+  // it, including a name that arrives mid-session.
   it("renders the title the server resolved, including one that arrives later", async () => {
     const monitor = fakeMonitor();
     listBody = [{ id: "s1", title: "", createdAt: "1", status: "idle" }];
@@ -1369,18 +1350,10 @@ describe("tabs feature", () => {
   });
 
   it("keeps the suffix with its own session across a reorder", async () => {
-    // The number is an IDENTITY, not a rank, so it is keyed on age and never on
-    // position. It used to be assigned by encounter order while walking the list,
-    // which made it a property of the SLOT: two tabs called the same thing always
-    // read "x" then "x (2)" whichever way round they sat, so the label text stayed
-    // put while the sessions moved underneath it. A reorder of same-titled tabs was
-    // invisible on screen even though it had worked correctly all along, server
-    // included -- and dragging one tab renumbered the other, which is the clearest
-    // sign the number belonged to the wrong thing.
-    //
-    // Prioritisation applies to the ORDER (a custom arrangement outranks age,
-    // compareTabOrder) and deliberately NOT to the identity: feeding the custom
-    // order into the numbering is exactly what made the reorder invisible.
+    // The number is an identity keyed on age, never on position: numbered by
+    // list order, same-titled tabs always read "x" then "x (2)", so a reorder
+    // looked like nothing happened and dragging one tab renumbered the other. The
+    // custom arrangement (compareTabOrder) orders tabs but never numbers them.
     listBody = [
       { id: "s1", title: "agent: workspace", createdAt: "1", status: "idle" },
       { id: "s2", title: "agent: workspace", createdAt: "2", status: "idle" },
@@ -1996,14 +1969,9 @@ describe("tabs feature", () => {
   });
 
   // --- Tab arrangement and hostile storage ---
-  //
-  // The arrangement itself is the SERVER's since engine 3.10.0: a reorder is
-  // published with PUT /api/sessions/order and read back as SessionInfo.order,
-  // so every viewer of one server shares it and it outlives a reload without the
-  // client storing anything. The localStorage arrangement this section used to
-  // pin is gone with it. What remains worth pinning is that the strip still
-  // works when Storage itself is hostile, which the active-tab write still
-  // touches.
+  // The server owns the arrangement (PUT /api/sessions/order, read back as
+  // SessionInfo.order). The strip must still work when Storage is hostile,
+  // since the active-tab write still touches it.
 
   it("survives storage that throws (Safari private mode) without losing the reorder", async () => {
     stubHostileStorage();
@@ -3313,26 +3281,12 @@ describe("tabs OSC 9 notifications", () => {
   });
 });
 
-// The switch animation's lifecycle. The class
-// comes off on the animation's own end, with the 360ms timer kept as the net for
-// the cases no event covers: an interrupted animation (animationend does not
-// fire, and animationcancel is not reliably delivered in Blink), a host with no
-// animations feature or reduced motion set (no animation runs at all), and a
-// consumer stylesheet without the rules.
-//
-// Fidelity notes:
-//   - The event is dispatched from `.term-output`, which is where all three rules
-//     actually declare the animation (css/40-animations.css), and it BUBBLES to
-//     `.term` where the listener lives. Manufacturing it on `.term` tested a path
-//     the browser never takes.
-//   - The "unrelated animation" names are real ones from the bundle. `wt-tab-in`
-//     is the tab bar's (and a sibling of the surface, so in production it cannot
-//     even bubble here) and `wt-blink-anim` is the only other animation inside
-//     `.term`. An invented name proves the filter rejects invented names.
-//   - rAF handles are monotonic and cancellation is real, via a Map. The earlier
-//     stub returned an array length that restarted at 1 after every pump, so a
-//     retained handle could alias a later callback. Nothing depended on that yet,
-//     which is exactly why it was worth removing.
+// The switch animation's lifecycle. The class comes off on the animation's own
+// end, with the 360 ms timer as the net for an interrupted animation (Blink does
+// not reliably deliver animationcancel), reduced motion or no animations, and a
+// stylesheet without the rules. The event is dispatched from `.term-output`,
+// where css/40-animations.css declares it, and bubbles to `.term`. The
+// "unrelated" names are the bundle's real `wt-tab-in` and `wt-blink-anim`.
 describe("tabs switch-animation lifecycle", () => {
   const SWITCH_CLASSES = ["wt-switching", "wt-switching-next", "wt-switching-prev"];
 
@@ -3587,23 +3541,11 @@ describe("tabs switch-animation lifecycle", () => {
 });
 
 // --- Desktop reorder preview: sweep, rest, slide, cancel --------------------
-//
-// The reorder answers a moving pointer and a stopped one differently, and these pin
-// that split: sweeping across the strip rearranges NOTHING, and the slot opens when the
-// pointer comes to REST. Rest is detected by re-arming a window on movement, so it is
-// not a hold — stopping commits, and a drop never waits for it at all.
-//
-// What these CANNOT prove: no stylesheet is loaded, so the dashed slot's appearance
-// is unverifiable here and the slide only runs where a test declares the visual
-// rects. Every stage's inline-style bookkeeping IS checkable. How the motion FEELS
-// is on the manual checklist.
-//
-// The chips' LAYOUT offsets are declared at mount (mountDragLaidOut), because the
-// hit test reads them and a real engine answers with whatever the default font laid
-// out. Every case that expects a commit aims at `h.pastEnd` — an x past the last
-// midpoint — which is why the expected orders rotate the dragged tab to the end.
-// Movement is expressed by passing a different clientX, which is what `dragAt` is
-// for.
+// Sweeping across the strip rearranges nothing; the slot opens when the pointer
+// rests (a window re-armed on movement, so a drop never waits for it). No
+// stylesheet loads, so only the inline-style bookkeeping is checked. Chip offsets
+// are declared at mount (mountDragLaidOut); a commit aims at `h.pastEnd`, past
+// the last midpoint, so the dragged tab rotates to the end.
 describe("tabs reorder preview", () => {
   async function mountDrag(
     count: number,
@@ -3811,15 +3753,9 @@ describe("tabs reorder preview", () => {
   });
 
   it("lets go of a committed slot when the pointer moves to another one", async () => {
-    // The reported unreliability, and it was not flaky so much as state-dependent: once a
-    // slot had been committed, moving to a different one did not always let go of the old
-    // one, and the user had to jiggle the mouse until it took. Worst on leftward drags.
-    //
-    // Cause: the pending slot lived in a field, and the "already in that slot" branch
-    // nulled it. Right after a commit the dragged chip sits immediately beside where the
-    // pointer is heading, so that branch fires constantly — and once it had nulled the
-    // field, the stillness branch had nothing to commit and bailed. The candidate is now
-    // recomputed from the current event, so passing through "already there" cannot lose it.
+    // Once a slot was committed, moving to another did not always take. The
+    // "already in that slot" branch, which fires constantly right after a commit,
+    // must not lose the candidate the stillness branch commits.
     const h = await mountDrag(4);
     h.stubLayout();
     const dragged = h.chips()[3];
@@ -4994,6 +4930,42 @@ describe("tabs: the switcher's gesture recogniser", () => {
     h.up(100, 302);
     expect(h.active()).toBe("one");
     expect(setSession).not.toHaveBeenCalled();
+  });
+
+  it("abandons a drag while the shown session's modes are not yet known", async () => {
+    // Power-on values stand in until the modes frame, so mode 0 then does not
+    // mean the program leaves drags to the bar.
+    fake.holdModes();
+    const h = await mountBar();
+    setSession.mockClear();
+
+    h.down(200, 300);
+    h.move(100, 302);
+    h.up(100, 302);
+    expect(h.active()).toBe("one");
+    expect(setSession).not.toHaveBeenCalled();
+  });
+
+  it("resolves no flick while the shown session's modes are not yet known", async () => {
+    fake.holdModes();
+    const h = await mountBar();
+    setSession.mockClear();
+
+    h.down(200, 300);
+    h.up(100, 302);
+    expect(h.active()).toBe("one");
+    expect(setSession).not.toHaveBeenCalled();
+  });
+
+  it("resolves a flick once the modes frame says no program owns the mouse", async () => {
+    fake.holdModes();
+    const h = await mountBar();
+    fake.announceModes();
+    setSession.mockClear();
+
+    h.down(200, 300);
+    h.up(100, 302);
+    expect(setSession).toHaveBeenCalledTimes(1);
   });
 });
 

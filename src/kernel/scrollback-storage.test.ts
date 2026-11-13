@@ -9,13 +9,15 @@
 
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { LineStore } from "@cplieger/web-terminal-engine";
-import { localScrollbackStorage } from "./scrollback-storage.js";
+import { clearLocalScrollback, localScrollbackStorage } from "./scrollback-storage.js";
+import { ackEpoch } from "../test-helpers/store-epoch.js";
 import type { PersistedScrollback } from "./types.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 
 function entryFor(epoch: number, savedAt: number, lines = 3): PersistedScrollback {
   const store = new LineStore();
+  ackEpoch(store, epoch);
   store.applyScroll({
     type: "scroll",
     firstIndex: 0,
@@ -23,7 +25,7 @@ function entryFor(epoch: number, savedAt: number, lines = 3): PersistedScrollbac
       { t: `L${String(i)}`, f: -1, b: -1, a: 0, uc: -1 },
     ]),
   });
-  const snapshot = store.snapshot(epoch);
+  const snapshot = store.snapshot();
   if (snapshot === null) {
     throw new Error("test fixture: the store was empty");
   }
@@ -85,12 +87,13 @@ describe("localScrollbackStorage: round trip", () => {
     // URL must come back unchanged.
     const store = localScrollbackStorage();
     const line = new LineStore();
+    ackEpoch(line, 777);
     line.applyScroll({
       type: "scroll",
       firstIndex: 5,
       lines: [[{ t: "x", f: -1, b: 4, uc: -1, a: 5, u: "https://example.test/a" }]],
     });
-    const snapshot = line.snapshot(777);
+    const snapshot = line.snapshot();
     store.save("sess-1", { savedAt: Date.now(), snapshot: snapshot! });
 
     expect(loaded(store.load("sess-1")).snapshot.lines).toEqual(snapshot!.lines);
@@ -527,5 +530,74 @@ describe("localScrollbackStorage: storage revoked part-way through the sweep", (
 
     expect(reads).toBeGreaterThan(1);
     expect(ownKeys()).toEqual(["wt.scrollback.later"]);
+  });
+});
+
+describe("clearLocalScrollback", () => {
+  it("removes every entry saved under the default prefix, fresh ones included", () => {
+    seed("a", entryFor(777, Date.now()));
+    seed("b", entryFor(778, Date.now() - DAY));
+    seed("c", entryFor(779, Date.now()));
+    localStorage.setItem("other-app.ui-state", "{}");
+
+    clearLocalScrollback();
+
+    expect(ownKeys()).toEqual([]);
+    expect(localStorage.getItem("other-app.ui-state")).toBe("{}");
+  });
+
+  it("removes only the entries under a custom prefix", () => {
+    const custom = localScrollbackStorage({ prefix: "app.term." });
+    custom.save("x", entryFor(777, Date.now()));
+    seed("a", entryFor(777, Date.now()));
+
+    clearLocalScrollback({ prefix: "app.term." });
+
+    expect(custom.load("x")).toBeNull();
+    expect(ownKeys()).toEqual(["wt.scrollback.a"]);
+  });
+
+  it("takes an empty prefix as the default, with a warning, and leaves the host's keys", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    seed("a", entryFor(777, Date.now()));
+    localStorage.setItem("other-app.ui-state", "{}");
+
+    clearLocalScrollback({ prefix: "" });
+
+    expect(ownKeys()).toEqual([]);
+    expect(localStorage.getItem("other-app.ui-state")).toBe("{}");
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("does not let a store with an empty prefix sweep the host's keys", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    localStorage.setItem("other-app.ui-state", "{}");
+
+    const store = localScrollbackStorage({ prefix: "" });
+    store.save("x", entryFor(777, Date.now()));
+
+    expect(localStorage.getItem("other-app.ui-state")).toBe("{}");
+    expect(ownKeys()).toEqual(["wt.scrollback.x"]);
+    warn.mockRestore();
+  });
+
+  it("does nothing, and does not throw, when storage is unavailable", () => {
+    const real = Object.getOwnPropertyDescriptor(window, "localStorage");
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get: () => {
+        throw new Error("SecurityError");
+      },
+    });
+    try {
+      expect(() => {
+        clearLocalScrollback();
+      }).not.toThrow();
+    } finally {
+      if (real) {
+        Object.defineProperty(window, "localStorage", real);
+      }
+    }
   });
 });

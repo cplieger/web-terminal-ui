@@ -1,21 +1,9 @@
-// tabs feature, the wire-driven and reorder-mechanics half: the two kernel
-// events the strip subscribes to (`wire:screen` arming the catching-up cue,
-// `wire:title` relabelling the active tab from a live OSC 0/2 title), the cue's
-// own timer/poll bookkeeping across a re-arm and a teardown, the reorder
-// preview's coordinate conversion (scroll offset, scroller rect, offsetParent
-// base), and the FLIP's inline-style bookkeeping — which chip is held still,
-// which from-state is committed, and who hands the inline styles back.
-//
-// A separate file from index.test.ts rather than an extension of it, for the
-// reason index.mutants-c.test.ts gives: this module's coverage grows from several
-// directions at once, and vitest gives each file its own module graph anyway. The
-// harness (engine mock, fetch stub, drag helpers) is deliberately duplicated so
-// each file stands on its own.
-//
-// The seam that makes the wire events reachable is the callbacks object the
-// kernel hands `createTerminalEngine`: the fake engine keeps it, and `wire()`
-// lets a test deliver a frame the way the socket would — the same seam
-// kernel-wire.test.ts uses, and the only way into a feature's `ctx.on("wire:*")`.
+// tabs feature, the wire-driven and reorder-mechanics half: `wire:screen`
+// arming the catching-up cue, `wire:title` relabelling the active tab, the cue's
+// timers across a re-arm and teardown, the reorder preview's coordinate
+// conversion, and the FLIP's inline-style bookkeeping. Each tabs test file keeps
+// its own harness. The fake engine keeps the callbacks the kernel hands
+// `createTerminalEngine`, and `wire()` delivers a frame as the socket would.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -112,7 +100,6 @@ beforeEach(() => {
     screenTop: -3,
     following: false,
   }));
-  fake.connection.serverEpochOf.mockImplementation(() => 777);
   fake.connection.currentSessionId.mockImplementation(() => "unmanaged");
   pendingRowCount.mockReturnValue(0);
   getHighestIndex.mockReturnValue(-1);

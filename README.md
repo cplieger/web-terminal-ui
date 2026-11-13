@@ -56,7 +56,7 @@ The four presets:
 
 - `createTerminal(target, options)` builds the terminal and returns a handle with `focus()`, `send(bytes)`, `reset()`, `reattach()` and `destroy()`, plus `split` under `split: true`. [Options and the terminal handle](docs/configuration.md) lists every option.
 - Presets come from `@cplieger/web-terminal-ui/presets`, or one at a time from `/presets/single`, `/presets/touch`, `/presets/tabbed` and `/presets/agent-tabbed`. Single features come from `/features/<name>`.
-- `localScrollbackStorage()` is the ready-made storage for the `persistScrollback` option.
+- `localScrollbackStorage()` is the ready-made storage for the `persistScrollback` option, and `clearLocalScrollback()` removes what it saved.
 - `PUBLIC_THEME_TOKENS` and `LOADING_OVERLAY_CLASSES`, also at `/style-contract`, list the theme keys and the overlay classes. `STARTUP_FAILURE_COPY`, also at `/startup-copy`, holds the failure panel's wording.
 - Types cover the options, the handle, features and their context, startup failures and the split controller.
 
@@ -103,7 +103,7 @@ Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
 
-This project was built with AI-assisted tooling using [Claude](https://claude.com), [GPT](https://openai.com), and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
+This project was built with AI assistance. The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
 ## License
 

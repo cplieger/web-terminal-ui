@@ -32,11 +32,11 @@
 }
 
 :where(.wt-root) .wt-conn-banner[data-state="offline"] {
-  color: #f55;
+  color: var(--banner-offline);
   border-color: oklch(60% 0.2 25deg / 50%);
 }
 
 :where(.wt-root) .wt-conn-banner[data-state="restarted"] {
-  color: #fa5;
+  color: var(--banner-restarted);
   border-color: oklch(70% 0.15 60deg / 40%);
 }

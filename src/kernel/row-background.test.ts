@@ -7,55 +7,10 @@
 // row's, and the row stays 17px (the engine sizes the PTY from it). The face is
 // the machine's `monospace`, since this package ships none; hence the text box.
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { shippedBundle } from "../test-helpers/stylesheet.js";
 
-declare global {
-  interface ImportMeta {
-    glob(
-      pattern: string,
-      options: { query: string; import: string; eager: true },
-    ): Record<string, string>;
-  }
-}
-
-// Same shape as fatal-panel.test.ts, and deliberately repeated rather than
-// shared: a test-support module would need a matching exclude in BOTH publish
-// allowlists (package.json `files` and jsr.json `publish.exclude`), and the
-// standing rule there is to carry only patterns that match something.
-const MANIFESTS = import.meta.glob("../../css/MANIFEST*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-const SHEETS = import.meta.glob("../../css/*.css", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-
-const byName = (mods: Record<string, string>): Map<string | undefined, string> =>
-  new Map(Object.entries(mods).map(([p, text]) => [p.split("/").pop(), text]));
-
-// The FULL-PAGE manifest: the same bundle the full-page product serves, in the
-// order that IS the cascade.
-const BUNDLE = ((): string => {
-  const manifest = byName(MANIFESTS).get("MANIFEST");
-  if (manifest === undefined) {
-    throw new Error("css/MANIFEST is missing");
-  }
-  const sheets = byName(SHEETS);
-  return manifest
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .map((name) => {
-      const text = sheets.get(name);
-      if (text === undefined) {
-        throw new Error(`css/MANIFEST names ${name}, which css/ does not contain`);
-      }
-      return text;
-    })
-    .join("\n");
-})();
+// The bundle the full-page product serves.
+const BUNDLE = shippedBundle("MANIFEST");
 
 let styles: HTMLStyleElement;
 let host: HTMLElement | undefined;

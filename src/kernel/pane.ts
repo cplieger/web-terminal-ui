@@ -3,6 +3,7 @@ import {
   keyboard,
   LineStore,
   type Connection,
+  type DeferredInput,
   type TerminalEngine,
 } from "@cplieger/web-terminal-engine";
 import { createComposition } from "../composition.js";
@@ -24,8 +25,11 @@ import {
   type FeatureSetupOutcome,
 } from "./feature-host.js";
 import type {
+  AcceptedInput,
   CreateTerminalOptions,
   KeyboardPresence,
+  KeyEncoder,
+  KeyModes,
   PaneHandle,
   PaneSide,
   SessionRef,
@@ -37,7 +41,7 @@ import type {
   Unsubscribe,
 } from "./types.js";
 
-const { mapKeyboardEvent, bracketTextForPaste, prepareTextForTerminal } = keyboard;
+const { mapKeyboardEvent, bracketPaste, prepareTextForTerminal } = keyboard;
 
 type GridSize = ReturnType<TerminalEngine["renderer"]["computeSize"]>;
 
@@ -65,6 +69,14 @@ const CORE_TEMPLATE = `
   <textarea class="term-input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Terminal input" tabindex="-1"></textarea>
   <div class="composition-view" aria-hidden="true"></div>
 </div>`;
+
+// Which key an input is reads from its legacy encoding, whatever keyboard
+// protocol the program asked for.
+const LEGACY_KEYBOARD: KeyModes = {
+  isApplicationCursor: () => false,
+  isApplicationKeypad: () => false,
+  getKeyboardFlags: () => 0,
+};
 
 /**
  * The single character this key types, or null when it types none. `codePointAt`
@@ -128,13 +140,11 @@ export interface StoreRegistry {
    *  holds a usable entry (registered under `sessionId`), else null after
    *  tracking `current` under that id. */
   implicitStore(sessionId: string, current: LineStore): LineStore | null;
-  /** A resume answered under a known epoch verified this session's restore. */
-  verified(sessionId: string): void;
-  /** Drop restored scrollback that will never be confirmed: one session's (a 4001
-   *  says one process is gone) or every unverified one (a wire refusal). The
-   *  renderer holding the store is reconciled; a background store is reset; an
-   *  unknown id is the calling pane's implicit store. */
-  discardUnverified(scope: { session: string } | "page", caller: PaneSide): void;
+  /** Drop restored scrollback no resumeAck will confirm
+   *  (`LineStore.isUnconfirmedRestore`): one session's (a 4001 says one process
+   *  is gone) or every one (a wire refusal). The renderer holding the store is
+   *  reconciled; a background store is reset. */
+  discardUnverified(scope: { session: string } | "page"): void;
   /** Every live tracked store except `bound`. */
   backgroundStores(bound: LineStore): LineStore[];
   /** Save every tracked store whose content advanced (the page-lifecycle hooks). */
@@ -177,13 +187,8 @@ export interface PaneServices {
   onFocusIn(): void;
   /** This pane attached a session or became empty. */
   onSessionChange(): void;
-  /** The server epoch this pane's connection knew for a session it is about to
-   *  forget, so the pane that shows the session next can be seeded with it. */
-  noteEpoch(sessionId: string, epoch: number): void;
-  /** The epoch a pane recorded for `sessionId` before forgetting it; 0 when none. */
-  knownEpoch(sessionId: string): number;
-  /** This pane's connection, registered as soon as the engine exists so the
-   *  shell's store registry can seed it before the pane's first connect. */
+  /** This pane's connection, registered as soon as the engine exists so
+   *  `dropSession` reaches every pane. */
   registerConnection(connection: PaneKernel["connection"]): void;
   readonly stores: StoreRegistry;
   /** `ctx.dropSession`: forget the session on every pane and in the keeper. */
@@ -196,10 +201,7 @@ export interface PaneServices {
 /** The pane as the shell drives it: the feature-facing handle plus the members
  *  only the shell calls. */
 export interface PaneKernel extends PaneHandle {
-  readonly connection: Pick<
-    Connection,
-    "forgetSession" | "serverEpochOf" | "adoptPersistedEpoch" | "currentSessionId"
-  >;
+  readonly connection: Pick<Connection, "forgetSession">;
   setupFeature(feature: TerminalFeature<unknown>): Promise<FeatureSetupOutcome>;
   /** `PaneHandle.on` with the feature the handler belongs to, for error attribution. */
   busOn<K extends keyof TerminalEvents>(
@@ -212,7 +214,7 @@ export interface PaneKernel extends PaneHandle {
   toast(message: string, ms?: number): void;
   announce(message: string, politeness?: "polite" | "assertive"): void;
   paste(text: string): void;
-  addInputTransform(fn: (bytes: Uint8Array) => Uint8Array): Unsubscribe;
+  addInputTransform(fn: (input: AcceptedInput) => AcceptedInput | null): Unsubscribe;
   addInputObserver(fn: (bytes: Uint8Array) => void): Unsubscribe;
   updateNarrow(): void;
   /** Drop the LOCAL display: the client-side scrollback and screen. */
@@ -293,6 +295,7 @@ function buildPaneInto(
   const fontReady = opts.fontReady ?? DEFAULT_FONT_READY;
   const scrollbackLines = services.scrollbackLines;
   const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
   // The root's realm, never the importing one: a pane in another document reads
   // and listens to that document.
   const doc = root.ownerDocument;
@@ -363,17 +366,47 @@ function buildPaneInto(
   toastEl.setAttribute("role", "status");
   regions.region("banner", "toast").appendChild(toastEl);
   let toastTimer: number | null = null;
-  function toast(message: string, ms = TOAST_MS): void {
-    toastEl.textContent = message;
-    toastEl.classList.add("visible");
+  let pasteProgressShown = false;
+  function hideToast(): void {
+    toastEl.classList.remove("visible");
+    toastEl.textContent = "";
+  }
+  function showToast(message: string): void {
     if (toastTimer !== null) {
       win.clearTimeout(toastTimer);
+      toastTimer = null;
     }
+    toastEl.textContent = message;
+    toastEl.classList.add("visible");
+  }
+  function toast(message: string, ms = TOAST_MS): void {
+    pasteProgressShown = false;
+    toastEl.removeAttribute("aria-live");
+    showToast(message);
     toastTimer = win.setTimeout(() => {
       toastTimer = null;
-      toastEl.classList.remove("visible");
-      toastEl.textContent = "";
+      hideToast();
     }, ms);
+  }
+  // Stays up while the active session has paste bytes the engine has not sent.
+  // Spoken once: a count changing every 250 ms in a live region would talk over
+  // the program.
+  function showPasteProgress(bytes: number): void {
+    if (bytes === 0) {
+      if (pasteProgressShown) {
+        pasteProgressShown = false;
+        toastEl.removeAttribute("aria-live");
+        hideToast();
+      }
+      return;
+    }
+    const message = `Pasting: ${String(Math.ceil(bytes / 1024))} KB left. Ctrl+C or Escape cancels`;
+    if (!pasteProgressShown) {
+      pasteProgressShown = true;
+      toastEl.setAttribute("aria-live", "off");
+      announcer.announce(message, "polite");
+    }
+    showToast(message);
   }
   acquire(() => {
     if (toastTimer !== null) {
@@ -386,7 +419,7 @@ function buildPaneInto(
     services.reportError(feature, err);
   };
 
-  const inputTransforms: ((b: Uint8Array) => Uint8Array)[] = [];
+  const inputTransforms: ((input: AcceptedInput) => AcceptedInput | null)[] = [];
   const inputObservers: ((b: Uint8Array) => void)[] = [];
   const keydownHandlers: ((ev: KeyboardEvent) => boolean)[] = [];
   acquire(() => {
@@ -403,39 +436,123 @@ function buildPaneInto(
     };
   }
 
-  function sendBytes(bytes: Uint8Array): void {
+  // Every input enters here. What the press decides (a transform's latch, an
+  // interrupt) is fixed now; the engine connection owns the input from here and
+  // encodes it once the session's modes are known, with its view effect (see
+  // `deferred`). `scrollPress` is a key press those modes may still make a
+  // local scroll.
+  function accept(input: AcceptedInput, scrollPress?: KeyboardEvent): void {
     // A managed pane with no session (before its first attach, or emptied) sends
     // nothing: the connection would mint an unmanaged session id and park the
     // bytes in its outbox for whatever attaches next.
     if (services.managed && activeSession === null) {
       return;
     }
-    let out = bytes;
-    for (const t of inputTransforms) {
-      out = t(out);
-      if (out.length === 0) {
+    let next: AcceptedInput | null = input;
+    try {
+      for (const t of inputTransforms) {
+        next = t(next);
+        if (next === null) {
+          return;
+        }
+      }
+      if (next.kind !== "key" && next.text === "") {
         return;
       }
-    }
-    // sendBinary buffers while disconnected and returns false only when the
-    // outbox is full; observers see accepted input only, so predictive echo never
-    // paints a character that never reached the server.
-    if (!engine.connection.sendBinary(out)) {
+      // cancelPendingInput reports the new count first, which takes the progress
+      // toast down before this one goes up.
+      if (isInterrupt(next) && engine.connection.cancelPendingInput()) {
+        toast("Paste cancelled");
+      }
+    } catch (err) {
+      reportError("input", err);
       return;
     }
-    // User input re-engages follow and snaps to the bottom (GNOME/xterm), and is
-    // the ONLY thing that scrolls a held view down; mouse reports bypass this
-    // funnel or the view would snap on every motion report.
-    engine.scroll.scrollToBottom();
-    for (const obs of inputObservers) {
-      obs(out);
+    engine.connection.sendBinary(deferred(next, next === input ? scrollPress : undefined));
+  }
+  // User input re-engages follow and snaps to the bottom (GNOME/xterm), and is
+  // the ONLY thing that scrolls a held view down; mouse reports bypass `accept`
+  // or the view would snap on every motion report. A held scroll press pages
+  // instead when the modes it is encoded under make it a local scroll.
+  function viewEffect(scrollPress: KeyboardEvent | undefined): void {
+    const kind =
+      scrollPress === undefined ? "send" : mapKeyboardEvent(scrollPress, engine.modes).kind;
+    if (kind === "scroll-up" || kind === "scroll-down") {
+      engine.scroll.scrollByPage(kind === "scroll-up" ? -1 : 1);
+    } else {
+      engine.scroll.scrollToBottom();
     }
   }
+  /** Escape or Ctrl+C: it cancels the pastes accepted before it. */
+  function isInterrupt(input: AcceptedInput): boolean {
+    switch (input.kind) {
+      case "paste":
+        return false;
+      case "text":
+        return keyboard.isInterruptInput(input.text);
+      case "key":
+        return keyboard.isInterruptInput(decoder.decode(input.encode(LEGACY_KEYBOARD)));
+    }
+  }
+  function deferred(input: AcceptedInput, scrollPress: KeyboardEvent | undefined): DeferredInput {
+    return {
+      paste: input.kind === "paste",
+      size: input.kind === "key" ? 0 : encoder.encode(input.text).length,
+      encode: () => {
+        try {
+          // Here, not at accept: the queue runs encoders in typing order, so a
+          // held page scroll can never land after a later key's snap.
+          viewEffect(scrollPress);
+          const out = encodeNow(input);
+          // Observers see the bytes as sent, in wire order, so predictive echo
+          // follows the same modes the program does.
+          for (const part of out.tail === undefined ? [out.body] : [out.body, out.tail]) {
+            if (part.length > 0) {
+              notifyObservers(part);
+            }
+          }
+          return out;
+        } catch (err) {
+          reportError("input", err);
+          return null;
+        }
+      },
+    };
+  }
+  function encodeNow(input: AcceptedInput): { body: Uint8Array; tail?: Uint8Array } {
+    switch (input.kind) {
+      case "text":
+        return { body: encoder.encode(input.text) };
+      case "paste": {
+        const { body, tail } = bracketPaste(input.text, engine.modes);
+        return { body: encoder.encode(body), tail: encoder.encode(tail) };
+      }
+      case "key":
+        return { body: input.encode(engine.modes) };
+    }
+  }
+  function notifyObservers(bytes: Uint8Array): void {
+    for (const obs of inputObservers) {
+      try {
+        obs(bytes);
+      } catch (err) {
+        reportError("input", err);
+      }
+    }
+  }
+  function sendBytes(input: Uint8Array | KeyEncoder): void {
+    if (typeof input === "function") {
+      accept({ kind: "key", encode: input });
+      return;
+    }
+    const bytes = new Uint8Array(input);
+    accept({ kind: "key", encode: () => bytes });
+  }
   function sendText(text: string): void {
-    sendBytes(encoder.encode(text));
+    accept({ kind: "text", text });
   }
   function paste(text: string): void {
-    sendText(bracketTextForPaste(prepareTextForTerminal(text), engine.modes));
+    accept({ kind: "paste", text: prepareTextForTerminal(text) });
   }
 
   let activeSession: SessionRef | null = null;
@@ -482,25 +599,29 @@ function buildPaneInto(
     engine.renderer.updateFontMetrics();
     return engine.renderer.computeSize();
   }
-  let announced: GridSize | null = null;
-  let heldGrow = false;
-  function announce(size: GridSize): void {
-    announced = size;
-    heldGrow = false;
-    engine.connection.sendResize();
+  // Whether the last request held the rows under the measured box, so the two
+  // events that end a hold (the reader follows, the alternate screen) know to
+  // announce again without measuring on every frame.
+  let holdingRows = false;
+  // The size this pane asks the server for, on every socket and at every
+  // announce: the measured box, except that a taller box at the same width waits
+  // at the last announced height while the reader is up in main-screen history,
+  // because a program repaints on resize and that repaint can erase or reflow
+  // what is being read. The engine connection keeps the record of what it sent.
+  function requestedSize(measured: GridSize): GridSize {
+    const last = engine.connection.lastAnnouncedSize();
+    holdingRows =
+      last !== null &&
+      measured.cols === last.cols &&
+      measured.rows > last.rows &&
+      engine.scroll.isUserScrolledUp() &&
+      !engine.renderer.boundStore().isAlt();
+    return holdingRows && last !== null ? last : measured;
   }
-  function releaseHeldGrow(): void {
-    const size = measurableSize();
-    if (size !== null) {
-      announce(size);
+  function announce(): void {
+    if (measurableSize() !== null) {
+      engine.connection.sendResize();
     }
-  }
-  function maybeSendFirstResize(): void {
-    const size = wsOpen ? measurableSize() : null;
-    if (size === null) {
-      return;
-    }
-    announce(size);
   }
 
   const engine: TerminalEngine = createTerminalEngine({
@@ -515,20 +636,17 @@ function buildPaneInto(
     },
     onUserScrollChange: (scrolledUp) => {
       bus.emit("scroll:state", { scrolledUp });
-      if (heldGrow && !scrolledUp) {
-        releaseHeldGrow();
+      if (holdingRows && !scrolledUp) {
+        announce();
       }
     },
     callbacks: {
-      computeSize: () => engine.renderer.computeSize(),
+      computeSize: () => requestedSize(engine.renderer.computeSize()),
       getReplayMax: () => engine.renderer.replayMaxForResume(),
-      onResumeBounds() {
-        // A resume VERIFIES the restored store of the socket's OWN session: the
-        // server answered under a known epoch. One ack cannot vouch for a tab it
-        // never talked to.
-        services.stores.verified(engine.connection.currentSessionId());
+      initialSize: () => {
+        const size = measurableSize();
+        return size === null ? null : requestedSize(size);
       },
-      initialSize: measurableSize,
       onMessage(msg) {
         if (msg.type === "screen") {
           firstFrameRendered = true;
@@ -537,8 +655,8 @@ function buildPaneInto(
           }
           // The engine applies a frame to the bound store before this callback,
           // and the alternate screen has no scrollback to hold a size for.
-          if (heldGrow && engine.renderer.boundStore().isAlt()) {
-            releaseHeldGrow();
+          if (holdingRows && engine.renderer.boundStore().isAlt()) {
+            announce();
           }
           bus.emit("wire:screen", msg);
         } else if (msg.type === "title") {
@@ -549,7 +667,6 @@ function buildPaneInto(
           }
           bus.emit("wire:title", { session: activeSession?.id ?? "", title: msg.title });
         } else if (msg.type === "modes") {
-          updateMousePointer();
           bus.emit("wire:modes", msg);
         } else if (msg.type === "clipboard") {
           bus.emit("wire:clipboard", msg.text);
@@ -558,15 +675,18 @@ function buildPaneInto(
       onOpen() {
         connState.open();
         wsOpen = true;
-        maybeSendFirstResize();
+        announce();
+      },
+      onInputReady(size) {
+        bus.emit("input:ready", size);
       },
       onConnecting() {
         connState.reconnecting();
       },
-      onClose() {
-        connState.closed();
+      onPendingInput(bytes, cancelable) {
+        showPasteProgress(cancelable ? bytes : 0);
       },
-      onOutboxFull() {
+      onClose() {
         connState.closed();
       },
       onProcessExit() {
@@ -574,22 +694,18 @@ function buildPaneInto(
         // before any screen frame still lowers the overlay; then the end state
         // (no reconnect is coming); the host's turn LAST, so a throwing handler
         // cannot leave the page without its banner.
-        services.stores.discardUnverified(
-          { session: engine.connection.currentSessionId() },
-          services.side,
-        );
+        services.stores.discardUnverified({ session: engine.connection.currentSessionId() });
         markReady();
         connState.ended();
         services.onSessionEnded();
       },
       onWireIncompatible() {
-        services.stores.discardUnverified("page", services.side);
+        services.stores.discardUnverified("page");
         markReady();
         connState.incompatible();
       },
       onServerRestart() {
-        engine.renderer.resetScrollback();
-        engine.renderer.resetScreen();
+        // The engine has already discarded what the dead process left.
         connState.restarted();
       },
     },
@@ -599,8 +715,7 @@ function buildPaneInto(
   });
   services.registerConnection(engine.connection);
   engine.renderer.updateFontMetrics();
-  // Derived at build as well as from the two triggers, so a pane created over a
-  // mode state that already tracks the mouse shows the right pointer at once.
+  acquire(engine.modes.subscribe(updateMousePointer));
   updateMousePointer();
 
   // A press over the display-only output takes focus off the hidden textarea and
@@ -736,31 +851,53 @@ function buildPaneInto(
     { signal },
   );
 
-  /** Applies a `mapKeyboardEvent` result identically on BOTH keydown paths (the
+  // What a key press does; keyboard.keyActionBeforeModes owns the decision
+  // until the modes are known.
+  function keyAction(ev: KeyboardEvent): keyboard.KeyboardResult["kind"] {
+    return engine.modes.isKnown()
+      ? mapKeyboardEvent(ev, engine.modes).kind
+      : keyboard.keyActionBeforeModes(ev);
+  }
+  // The press mapped under the modes it is sent with. Its keydown cancelled the
+  // input event, so a key those modes leave to it types its character here; a
+  // scroll sends nothing (`viewEffect` runs it).
+  function pressEncoder(ev: KeyboardEvent): KeyEncoder {
+    return (modes) => {
+      const result = mapKeyboardEvent(ev, modes);
+      if (result.kind === "send") {
+        return encoder.encode(result.bytes);
+      }
+      const char = typedChar(ev);
+      if (result.kind === "ignore" && char !== null && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+        return encoder.encode(normalizeTypedText(char));
+      }
+      return new Uint8Array(0);
+    };
+  }
+  // Before the modes are known a keypad PageUp/PageDown is DECKPAM's key or the
+  // local scroll the power-on modes give it; nothing else is undecided this way.
+  function mayScrollAtEncode(ev: KeyboardEvent): boolean {
+    const kind = mapKeyboardEvent(ev, LEGACY_KEYBOARD).kind;
+    return !engine.modes.isKnown() && (kind === "scroll-up" || kind === "scroll-down");
+  }
+  /** Applies a `keyAction` identically on BOTH keydown paths (the
    *  focused textarea and the document-level type-to-focus fallback), so the two
    *  cannot drift: handling only "send" in the fallback silently dropped
    *  Shift+PageUp, which is what a reader who just selected scrollback presses. */
-  function applyMappedKey(ev: KeyboardEvent, result: keyboard.KeyboardResult): void {
-    switch (result.kind) {
+  function applyMappedKey(ev: KeyboardEvent, kind: keyboard.KeyboardResult["kind"]): void {
+    switch (kind) {
       case "send":
         ev.preventDefault();
-        sendText(result.bytes);
+        accept({ kind: "key", encode: pressEncoder(ev) }, mayScrollAtEncode(ev) ? ev : undefined);
         return;
-      case "scroll-up": {
+      case "scroll-up":
         ev.preventDefault();
-        const h = termWrap.clientHeight;
-        termWrap.scrollTop = Math.max(0, termWrap.scrollTop - h);
+        engine.scroll.scrollByPage(-1);
         return;
-      }
-      case "scroll-down": {
+      case "scroll-down":
         ev.preventDefault();
-        const h = termWrap.clientHeight;
-        // The maximum offset, not scrollHeight, which is one clientHeight past the
-        // end; WebKit does not reliably clamp an out-of-range offset.
-        const max = Math.max(0, termWrap.scrollHeight - h);
-        termWrap.scrollTop = Math.min(max, termWrap.scrollTop + h);
+        engine.scroll.scrollByPage(1);
         return;
-      }
       case "ignore":
         return;
     }
@@ -799,7 +936,7 @@ function buildPaneInto(
         return;
       }
       // An "ignore" needs nothing more: the `input` listener delivers the character.
-      applyMappedKey(ev, mapKeyboardEvent(ev, engine.modes));
+      applyMappedKey(ev, keyAction(ev));
     },
     { signal },
   );
@@ -1022,9 +1159,9 @@ function buildPaneInto(
       // Decided before taking focus, because a bare modifier press (Shift on its
       // way to Shift+click) must leave the selection alone. Modifiers alone never
       // reject a key the encoder maps, as on the focused path.
-      const result = mapKeyboardEvent(ev, engine.modes);
-      const char = result.kind === "ignore" ? typedChar(ev) : null;
-      if (result.kind === "ignore") {
+      const kind = keyAction(ev);
+      const char = kind === "ignore" ? typedChar(ev) : null;
+      if (kind === "ignore") {
         if (char === null) {
           return;
         }
@@ -1057,7 +1194,7 @@ function buildPaneInto(
         sendText(normalizeTypedText(char));
         return;
       }
-      applyMappedKey(ev, result);
+      applyMappedKey(ev, kind);
     },
     { signal },
   );
@@ -1067,25 +1204,10 @@ function buildPaneInto(
     box: root,
     keyboard: services.keyboardInsets,
     scroll: engine.scroll,
-    onSettled(wasAtBottom) {
+    onSettled() {
       // The settle is the one resize a keyboard slide or rotation should cost;
       // sendResize deduplicates.
-      const size = measurableSize();
-      if (size !== null) {
-        // A program repaints on resize, and that repaint can erase or reflow the
-        // scrollback being read, so a taller box waits until the reader follows.
-        if (
-          !wasAtBottom &&
-          announced !== null &&
-          size.cols === announced.cols &&
-          size.rows > announced.rows &&
-          !engine.renderer.boundStore().isAlt()
-        ) {
-          heldGrow = true;
-        } else {
-          announce(size);
-        }
-      }
+      announce();
       composition.positionCompositionView();
     },
   });
@@ -1098,6 +1220,10 @@ function buildPaneInto(
   // and measure a disposed renderer.
   let fontDeadline: number | null = null;
   let firstResizeFrame: number | null = null;
+  let settleFont: () => void = () => undefined;
+  const fontSettled = new Promise<void>((resolve) => {
+    settleFont = resolve;
+  });
   acquire(() => {
     if (fontDeadline !== null) {
       win.clearTimeout(fontDeadline);
@@ -1107,8 +1233,11 @@ function buildPaneInto(
       win.cancelAnimationFrame(firstResizeFrame);
       firstResizeFrame = null;
     }
+    // Clearing the deadline leaves a stalled load as the race's only arm.
+    settleFont();
   });
   const onFontSettled = (): void => {
+    settleFont();
     if (destroyed) {
       return;
     }
@@ -1118,7 +1247,9 @@ function buildPaneInto(
     }
     firstResizeFrame = win.requestAnimationFrame(() => {
       firstResizeFrame = null;
-      maybeSendFirstResize();
+      if (wsOpen) {
+        announce();
+      }
     });
   };
   try {
@@ -1148,11 +1279,9 @@ function buildPaneInto(
       // The gate opened on fallback metrics and the swap period is infinite, so
       // one corrective announce once the bytes land; sendResize deduplicates.
       void doc.fonts.ready.then(() => {
-        const size = destroyed ? null : measurableSize();
-        if (size === null) {
-          return;
+        if (!destroyed) {
+          announce();
         }
-        announce(size);
       });
     }, onFontSettled);
   } catch (err) {
@@ -1279,21 +1408,8 @@ function buildPaneInto(
       return;
     }
     detachSession();
-    if (activeSession !== null) {
-      services.noteEpoch(activeSession.id, engine.connection.serverEpochOf(activeSession.id));
-    }
     activeSession = session;
-    // A session that left another pane, emptied or replaced, arrives with the epoch
-    // that pane knew, or the first resumeAck has nothing to compare against and a
-    // server restart between the two attaches goes undetected.
-    const epoch = services.knownEpoch(session.id);
-    if (epoch !== 0) {
-      engine.connection.adoptPersistedEpoch(session.id, epoch);
-    }
     engine.connection.setSession(session.id);
-    // setSession restores the incoming session's mode mirror synchronously and
-    // delivers no modes frame.
-    updateMousePointer();
     connectionInitiated = true;
     for (const instance of host.instances()) {
       instance.onSwitch?.(session);
@@ -1308,7 +1424,6 @@ function buildPaneInto(
     }
     const outgoing = activeSession.id;
     detachSession();
-    services.noteEpoch(outgoing, engine.connection.serverEpochOf(outgoing));
     engine.connection.forgetSession(outgoing);
     activeSession = null;
     // `connectionInitiated` must go false here or the wake handlers reconnect a
@@ -1325,7 +1440,7 @@ function buildPaneInto(
     get id() {
       return activeSession?.id ?? null;
     },
-    size: () => engine.renderer.computeSize(),
+    size: () => engine.renderer.gridSize(),
     highestIndex: () => engine.renderer.getHighestIndex(),
   };
   const layout = (): { narrow: boolean; coarse: boolean } => ({
@@ -1406,11 +1521,6 @@ function buildPaneInto(
       return;
     }
     destroyed = true;
-    // A pane torn down while showing a tab hands the tab's epoch on as an emptied
-    // one does: the tab lives on, and the next pane to show it is seeded from it.
-    if (activeSession !== null) {
-      services.noteEpoch(activeSession.id, engine.connection.serverEpochOf(activeSession.id));
-    }
     activeSession = null;
     held.drain();
   }
@@ -1463,8 +1573,13 @@ function buildPaneInto(
     clearActiveSession,
     announceSize() {
       if (!destroyed && fontsLoaded) {
-        announce(engine.renderer.computeSize());
+        engine.connection.sendResize();
       }
+    },
+    fontSettled,
+    inputReady: () => !destroyed && engine.connection.inputReady(),
+    holdInput() {
+      return destroyed ? () => undefined : engine.connection.holdInput();
     },
     focus: focusTerminal,
     send(bytes) {
@@ -1510,10 +1625,12 @@ function buildPaneInto(
       // The old session's content goes first: holding it would put a
       // `haveThrough` on the resume that claims lines the replacement has never
       // reached. Off `ended`, or the banner would contradict the blanked screen.
+      // connect(), not reconnectNow(): the engine refuses the wake path once the
+      // session has ended.
       engine.renderer.resetScrollback();
       engine.renderer.resetScreen();
       connState.reconnecting();
-      engine.connection.reconnectNow();
+      engine.connection.connect();
     },
     cleanupRuntime,
     markFailed() {

@@ -13,7 +13,7 @@ let SETTLE_MS = 350;
 
 /** @internal Test seam: arm every settle started from now on at `ms`; returns the
  *  previous value so the caller can restore it. */
-// deadset:ignore DS1004 -- the browser tests shorten the settle delay so they need not wait out the real one
+// deadset:ignore DS1102 -- the browser tests shorten the settle delay so they need not wait out the real one
 export function setSettleMs(ms: number): number {
   const previous = SETTLE_MS;
   SETTLE_MS = ms;
@@ -71,7 +71,7 @@ interface ViewportOptions {
   keyboard: KeyboardInsets;
   /** This pane's scroll controller, read at settle. */
   scroll: Pick<ScrollController, "isUserScrolledUp" | "stickToBottom">;
-  onSettled: (wasAtBottom: boolean) => void;
+  onSettled: () => void;
 }
 
 /** One pane's viewport tracker. */
@@ -211,15 +211,15 @@ export function createViewport(opts: ViewportOptions): Viewport {
         return;
       }
       inTransition = false;
+      fitRows();
       // Read at SETTLE, not at the start of the burst: every further event
       // re-arms the timer without re-reading, and on iOS a wake emits a stream
       // of them, so a latch taken at the start would yank a reader who scrolled
       // up mid-burst back down.
-      const stillFollowing = !scroll.isUserScrolledUp();
-      if (stillFollowing) {
+      if (!scroll.isUserScrolledUp()) {
         scroll.stickToBottom();
       }
-      opts.onSettled(stillFollowing);
+      opts.onSettled();
     }, SETTLE_MS);
   }
   function hold(): () => void {
@@ -237,6 +237,28 @@ export function createViewport(opts: ViewportOptions): Viewport {
         startTransition();
       }
     };
+  }
+
+  // Following the output pins the scrollport's bottom edge to the last row, so
+  // a height that is not whole rows shows part of a history row at its top
+  // edge; the block-end padding takes that remainder (css/02-terminal.css
+  // --wt-row-fill). Measured against the band, never the fill already written,
+  // or a growing box would add a whole row of padding; and from the integer
+  // clientHeight the engine's computeSize divides, or a fractional box loses a row.
+  function fitRows(): void {
+    const cs = win.getComputedStyle(termWrap);
+    const cell = parseFloat(cs.lineHeight);
+    // A hidden pane computes `height: auto`; its reveal resizes the box.
+    if (!(cell > 0) || !Number.isFinite(parseFloat(cs.height))) {
+      return;
+    }
+    const fill = parseFloat(cs.getPropertyValue("--wt-row-fill")) || 0;
+    const rowsArea =
+      termWrap.clientHeight - parseFloat(cs.paddingTop) - (parseFloat(cs.paddingBottom) - fill);
+    const next = `${String(((rowsArea % cell) + cell) % cell)}px`;
+    if (termWrap.style.getPropertyValue("--wt-row-fill") !== next) {
+      termWrap.style.setProperty("--wt-row-fill", next);
+    }
   }
 
   // iOS shrinks (and can offset) the visual viewport without resizing the layout
@@ -259,6 +281,7 @@ export function createViewport(opts: ViewportOptions): Viewport {
     const bottom = geometry.bottom + reserve;
     termWrap.style.top = geometry.top > 0 ? `${geometry.top}px` : "";
     termWrap.style.bottom = bottom > 0 ? `${bottom}px` : "";
+    fitRows();
     startTransition();
   }
 

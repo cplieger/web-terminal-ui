@@ -41,7 +41,7 @@
  *  terminal renders. Anything NOT listed here is unsupported: it may be an
  *  internal token that is renamed without a release note, or it may not exist.
  *
- *  Two families, and one rule about the second:
+ *  Three families, and one rule about the second:
  *
  *  - `--accent` and the `--tab-*` family recolor the chrome. `--accent` is the
  *    widest lever — the "+" glyphs, and the active-tab border via a `color-mix`
@@ -53,6 +53,9 @@
  *    under deuteranopia. `crashed` deliberately has no token of its own — it
  *    reuses `--status-failed`, solid and static, separating from `failed` by
  *    motion rather than color.
+ *
+ *  - `--banner-offline` and `--banner-restarted` color the connection banner's
+ *    text on `--surface`; a light surface needs darker values for 4.5:1.
  *
  *  Values are arbitrary CSS, including `var()` references. A value that reaches
  *  through `var()` to an INTERNAL token couples the consumer to a name this
@@ -69,6 +72,8 @@ export const PUBLIC_THEME_TOKENS = [
   "--status-input",
   "--status-warning",
   "--status-failed",
+  "--banner-offline",
+  "--banner-restarted",
 ] as const;
 
 /** A CSS custom property `CreateTerminalOptions.theme` supports.

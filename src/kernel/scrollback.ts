@@ -1,25 +1,13 @@
 // Scrollback persistence: the shell's half of CreateTerminalOptions.
-// persistScrollback. The engine supplies the data (LineStore snapshots) and the
-// shell supplies the identity of the server process it belongs to (the
-// SessionEpochs port); this module owns WHEN a snapshot is taken, WHETHER a
-// stored one may be trusted, and the age bound. The consumer owns where the
+// persistScrollback. The engine owns a snapshot's contents and the server epoch
+// it is filed under (LineStore.snapshot and fromSnapshot); this module owns WHEN
+// a snapshot is taken, and the age bound. The consumer owns where the
 // bytes live, because a library that opened its own IndexedDB would hold a
 // connection that costs bfcache eligibility, which this kernel depends on.
 
 import { LineStore } from "@cplieger/web-terminal-engine";
 import { positiveIntOption } from "./options.js";
 import type { ScrollbackPersistence } from "./types.js";
-
-/** The connection facts the keeper needs, answered by the shell over every pane's
- *  connection: a tab's store follows the tab into whichever pane shows it. */
-export interface SessionEpochs {
-  /** Seed the epoch a stored snapshot was taken under, before the session
-   *  connects, so the first resumeAck has a value to compare against. */
-  adoptPersistedEpoch(sessionId: string, epoch: number): void;
-  /** The server epoch the session is currently known to belong to; 0 when it
-   *  has not resumed yet. */
-  serverEpochOf(sessionId: string): number;
-}
 
 /** The timers and clock the keeper runs on: the mounted window's, so the save
  *  cadence and the age check follow the terminal's own clock. */
@@ -46,9 +34,7 @@ const DEFAULT_SAVE_INTERVAL_MS = 10_000;
  *  terminal's life, including after stop(). */
 interface ScrollbackKeeper {
   /** The store for a session: hydrated from storage when a usable entry exists,
-   *  otherwise a fresh one. Either way the store is tracked for saving. Seeds
-   *  the persisted server epoch, so this MUST be called before that session
-   *  connects. */
+   *  otherwise a fresh one. Either way the store is tracked for saving. */
   storeFor(sessionId: string): LineStore;
   /** Track a store this module did not create (the kernel's implicit store when
    *  nothing was restored for it), so it is saved like any other. It reads as
@@ -72,15 +58,8 @@ interface ScrollbackKeeper {
 interface StoredEntry {
   /** `Date.now()` at the write. Finite. */
   readonly savedAt: number;
-  /** The snapshot's server epoch, or null when the entry names no server
-   *  process. A positive integer only: the value is adopted as a session's
-   *  IDENTITY (a process-start timestamp in nanoseconds), so a negative or
-   *  fractional one is a corrupt entry. Null rather than the engine's
-   *  0-for-unknown, which would put the rejection value inside the accepted
-   *  range. */
-  readonly serverEpoch: number | null;
   /** Still the engine's to parse: `LineStore.fromSnapshot` takes `unknown` and
-   *  owns what a snapshot contains. */
+   *  owns what a snapshot contains, its server epoch included. */
   readonly snapshot: unknown;
 }
 
@@ -100,22 +79,12 @@ function readStoredEntry(entry: {}): StoredEntry | null {
   if (typeof savedAt !== "number" || !Number.isFinite(savedAt)) {
     return null;
   }
-  // `?.` is safe on a primitive as well as on null, so one operator covers every
-  // shape a stored value can have.
-  const snapshot = rec["snapshot"] as Record<string, unknown> | null | undefined;
-  const epoch = snapshot?.["serverEpoch"];
-  return {
-    savedAt,
-    serverEpoch:
-      typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch > 0 ? epoch : null,
-    snapshot,
-  };
+  return { savedAt, snapshot: rec["snapshot"] };
 }
 
 export function createScrollbackKeeper(
   cfg: ScrollbackPersistence,
   storeCap: number | undefined,
-  epochs: SessionEpochs,
   clock: ScrollbackClock,
 ): ScrollbackKeeper {
   const lines = positiveIntOption(cfg.lines, DEFAULT_PERSIST_LINES, "persistScrollback.lines");
@@ -137,7 +106,6 @@ export function createScrollbackKeeper(
    *  means never saved, which always reads as needing a save. */
   const savedThrough = new Map<string, number>();
   let warnedMissingId = false;
-  let warnedNoEpoch = false;
   let warnedSaveFailed = false;
   let stopped = false;
 
@@ -157,9 +125,9 @@ export function createScrollbackKeeper(
    *  hydrated store, or null to start empty and take a full resume. No rejection
    *  throws or reports: starting empty costs one slow restore, while hydrating
    *  something unsound shows content from a session that no longer exists. This
-   *  decides whether an entry exists and whether it may be USED (age,
-   *  verifiability); the envelope is `readStoredEntry`'s and the snapshot's
-   *  contents are the engine's. */
+   *  decides whether an entry exists and whether it is fresh enough to USE; the
+   *  envelope is `readStoredEntry`'s and the snapshot's contents are the
+   *  engine's. */
   function hydrate(sessionId: string): LineStore | null {
     let raw: unknown;
     try {
@@ -188,43 +156,14 @@ export function createScrollbackKeeper(
     const store = LineStore.fromSnapshot(entry.snapshot, storeCap);
     if (store === null) {
       drop(sessionId);
-      return null;
     }
-
-    // Absolute line indices only mean anything within one server process: a
-    // restarted server begins near 0, so a store whose epoch cannot be compared
-    // would show old content as live AND refuse the new output as already
-    // evicted. Judged AFTER fromSnapshot so the warning never fires for a
-    // snapshot the engine was going to reject anyway.
-    if (entry.serverEpoch === null) {
-      if (!warnedNoEpoch) {
-        warnedNoEpoch = true;
-        console.warn(
-          "web-terminal-ui: discarding persisted scrollback with no server epoch (this server does not report one, so a restart cannot be detected)",
-        );
-      }
-      drop(sessionId);
-      return null;
-    }
-
-    // The epoch must reach the connection layer BEFORE this session's resume, or
-    // the first resumeAck records it with nothing to compare against and a
-    // restart goes undetected for exactly the content that needed checking.
-    epochs.adoptPersistedEpoch(sessionId, entry.serverEpoch);
     return store;
   }
 
   function saveOne(sessionId: string, store: LineStore): void {
-    // Save under the epoch this session is CURRENTLY known to belong to. A
-    // session that has not resumed yet reports 0, and a snapshot that cannot be
-    // verified on the way back in is not worth writing on the way out.
-    const epoch = epochs.serverEpochOf(sessionId);
-    if (epoch === 0) {
-      return;
-    }
-    const snapshot = store.snapshot(epoch, lines);
-    // An empty store writes nothing, so a just-reset store cannot erase a good
-    // snapshot; the stale entry's epoch no longer matches, which invalidates it.
+    const snapshot = store.snapshot(lines);
+    // Null for an empty store or one no server epoch has confirmed: a just-reset
+    // store must not erase a good entry, whose stale epoch invalidates it anyway.
     if (snapshot === null) {
       return;
     }

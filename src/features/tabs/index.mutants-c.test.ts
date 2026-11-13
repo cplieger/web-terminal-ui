@@ -1,14 +1,7 @@
 // tabs feature, chrome-sync half: the surfaces syncChrome refreshes and the
-// per-chip wiring that feeds them — paintActive's "reveal the newly active chip"
-// rule, the dedicated switch button's ≥2-tabs gate, the expanded switcher list
-// (row reconcile, add/remove motion, the reel rotation, the deferred row clear),
-// applyServerOrder's read half of tab-order sync, and switchTo's slide-direction
-// derivation.
-//
-// A separate file from index.test.ts rather than an extension of it, so this
-// module's coverage can grow from three directions at once. The harness (engine
-// mock, fetch stub, fakeMonitor, until) is deliberately duplicated: each file has
-// to stand on its own, and vitest gives each one its own module graph anyway.
+// per-chip wiring behind them (paintActive's reveal rule, the switch button's
+// two-tab gate, the expanded list's reconcile, motion and reel, applyServerOrder,
+// switchTo's slide direction). Each tabs test file keeps its own harness.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -160,7 +153,6 @@ beforeEach(() => {
     screenTop: -3,
     following: false,
   }));
-  fake.connection.serverEpochOf.mockImplementation(() => 777);
   fake.connection.currentSessionId.mockImplementation(() => "unmanaged");
   pendingRowCount.mockReturnValue(0);
   getHighestIndex.mockReturnValue(-1);
@@ -759,22 +751,11 @@ describe("tabs: the expanded/collapsed resting state", () => {
   });
 });
 
-// The expanded list's motion is measured in pixels, and an unstyled row has no
-// height to move by — which is not a neutral default here: animateRowIn bails on a
-// zero-height row and the reel's pitch collapses to 0, so a case built on whatever
-// the bare markup laid out as proves nothing about either. This gives the ROWS and
-// their LIST (only) a chosen box: 40px rows stacked in DOM order inside a list
-// whose own box starts at `listTop`. Everything else keeps the environment's own
-// answer, so the strip's own scroll maths is untouched.
-//
-// Rows lifted OUT of the flow (the reel's absolute ghost) occupy no slot, which is
-// what a browser does and what the reel depends on: the survivors close up over
-// the row that left.
-//
-// `onListMeasured` fires whenever the list's own box is read. The reel reads it
-// once to locate the list and once more as the forced reflow that COMMITS the
-// from-state, so a case that wants to see the from-state — which the to-state
-// overwrites inside the same function — watches from there.
+// Gives the rows (40 px, stacked in DOM order) and their list (starting at
+// `listTop`) a chosen box, since animateRowIn bails on a zero-height row and the
+// reel's pitch collapses to 0. A row lifted out of the flow (the reel's ghost)
+// takes no slot. `onListMeasured` fires on each read of the list's box; the
+// reel's second read is the reflow that commits the from-state.
 const ROW_H = 40;
 function stubRowLayout(
   opts: { listTop?: number; gap?: number; onListMeasured?: () => void } = {},

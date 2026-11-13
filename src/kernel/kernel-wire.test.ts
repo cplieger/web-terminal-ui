@@ -1,37 +1,20 @@
-// The kernel's ENGINE SEAM: every callback the kernel hands the engine's
-// connection/render/scroll modules, driven from the outside.
-//
-// kernel.test.ts owns the DOM-facing contract (what the built terminal looks
-// like, what a keystroke does). This file owns the other direction: a frame or a
-// socket event arrives from the engine, and the kernel routes it — to the
-// renderer, to the loading lifecycle, to the connection-state machine, and onto
-// the feature bus. None of that has a DOM affordance to assert on, and all of it
-// is a fan-out where a dropped arm is invisible until a feature goes dark in
-// production (which is how the paging seam shipped inert).
-//
-// The seam is the fake engine's `createTerminalEngine`: it captures the
-// callbacks object the kernel passes, so a test can deliver a frame the way the
-// socket would, and its renderer, scroll and connection members are spies. That
-// is also the seam a FEATURE test needs to reach the kernel's wire:* events — the
-// frame goes in here and comes out on the bus.
-//
-// The kernel's font-ready path is gated on `document.fonts`, which a real
-// browser always provides, so this file installs the shape it wants rather than
-// inheriting one. Every test starts from the SETTLED shape (a load that has
-// already resolved), because that is the common case and the state most suites
-// assume; the suites that care about the not-yet-loaded state install the
-// controllable pending shape instead (stubFonts below). Stating it per test
-// rather than once in this header is the point: a premise no filename and no
-// environment can carry is a premise ~40 tests inherit without declaring it.
+// The kernel's engine seam: a frame or socket event arrives from the engine and
+// the kernel routes it to the renderer, the loading lifecycle, the connection
+// state and the feature bus (kernel.test.ts owns the DOM side). The fake engine
+// captures the callbacks the kernel passes, so a test delivers a frame as the
+// socket would. Every test starts from settled fonts; a suite that needs a
+// pending load installs `stubFonts` itself.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { LineStore } from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
+import { predictiveEcho } from "../features/predictive-echo.js";
 import { shortenSettle, shortSettled } from "../test-helpers/delays.js";
 import { softKeyboard, type SoftKeyboard } from "../features/tabs/test-helpers/paint.js";
 import type {
   CreateTerminalOptions,
+  PaneHandle,
   TerminalContext,
   TerminalFeature,
   TerminalHandle,
@@ -59,12 +42,9 @@ function mount(opts: CreateTerminalOptions): Promise<TerminalHandle> {
 beforeEach(() => {
   fake.reset();
   document.body.replaceChildren();
-  // The settled shape, stated rather than inherited: a load that has already
-  // resolved, so the kernel's font gate opens on the first microtask after mount
-  // instead of depending on what the host environment happens to provide. With a
-  // settled `ready` beside it, because a real FontFaceSet has one and the gate's
-  // timed-out arm reads it — including for a mount whose deadline outlives its own
-  // test, which is every mount in this file.
+  // A load that has already resolved, so the font gate opens on the first
+  // microtask after mount; `ready` too, which the gate's timed-out arm reads for
+  // a mount whose deadline outlives its test.
   restoreFonts = shadowFonts({ load: () => Promise.resolve([]), ready: Promise.resolve() });
 });
 
@@ -81,28 +61,20 @@ const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
  *  a transition, and `measurableSize()` declines during one. That is a second
  *  reason for a null size beside the fonts gate, so a fonts assertion that skips
  *  this can pass for the viewport's reason. Later settles run at the real length. */
-async function mountSettled(opts: CreateTerminalOptions): Promise<void> {
+async function mountSettled(opts: CreateTerminalOptions): Promise<TerminalHandle> {
   const restoreSettle = await shortenSettle();
-  await mount(opts);
+  const term = await mount(opts);
   await shortSettled();
   restoreSettle();
+  return term;
 }
 
-/** Advances FAKE timers a settle window at a time until `done()` holds.
- *
- *  A single fixed advance is a race, and it is the kind that wins on a fast
- *  machine and loses on a CI runner: the ResizeObserver behind
- *  viewport.startTransition is REAL, it delivers whenever the browser schedules
- *  it, and every delivery re-arms the 350ms settle timer. An advance that lands
- *  before the last delivery leaves the viewport in transition, and the size then
- *  reads null for the viewport's reason rather than for the test's.
- *
- *  Waiting for the OBSERVABLE asserts the same contract ("it settles, and then
- *  this becomes true") without pinning when the observer happened to fire. The
- *  bound is what keeps a genuine never-settles regression a failure rather than a
- *  hang. Deliberately predicate-based rather than reading viewport.isInTransition:
- *  importing the viewport module here breaks this file's engine mock, which is
- *  hoisted above the imports. */
+/** Advances fake timers a settle window at a time until `done()` holds. One
+ *  fixed advance races the real ResizeObserver behind viewport.startTransition,
+ *  whose every delivery re-arms the 350ms settle; `windows` bounds the wait so a
+ *  never-settles regression fails instead of hanging. A predicate stands in for
+ *  viewport.isInTransition because importing the viewport module here breaks
+ *  this file's hoisted engine mock. */
 async function settleUntil(done: () => boolean, windows = 8): Promise<void> {
   for (let i = 0; i < windows; i++) {
     if (done()) {
@@ -630,32 +602,19 @@ describe("socket lifecycle callbacks the state machine depends on", () => {
   // publishes, so a dropped call is invisible until a user stares at a banner that
   // never changes.
 
-  it("reports a full outbox as a disconnection, because that is what it is to a typist", async () => {
-    // The socket may still be open, but input is no longer reaching the server, and
-    // a terminal that silently swallows keystrokes is worse than one that says it
-    // is disconnected.
-    const seen = await loadedStateWatcher();
-    vi.useFakeTimers();
-
-    wire().onOutboxFull?.();
-    await vi.advanceTimersByTimeAsync(700); // past the machine's grace delay
-
-    expect(seen).toContain("reconnecting");
-  });
-
-  it("blanks the screen on a server restart, and says so immediately", async () => {
-    // The old process's content belongs to a pty that no longer exists; leaving it
-    // up would also put a haveThrough on the next resume that claims lines the
-    // replacement server never committed. No grace delay: this one is a fact, not
-    // a suspicion.
+  it("says so immediately on a server restart, and leaves the content to the engine", async () => {
+    // The engine fires onServerRestart after its resume transition has already
+    // discarded the dead process's content; a renderer reset here would also drop
+    // the paging state and alt base that transition just set. No grace delay:
+    // this one is a fact, not a suspicion.
     const seen = await loadedStateWatcher();
     resetScrollback.mockClear();
     resetScreen.mockClear();
 
     wire().onServerRestart?.();
 
-    expect(resetScrollback).toHaveBeenCalledTimes(1);
-    expect(resetScreen).toHaveBeenCalledTimes(1);
+    expect(resetScrollback).not.toHaveBeenCalled();
+    expect(resetScreen).not.toHaveBeenCalled();
     expect(seen).toContain("restarted");
   });
 
@@ -736,13 +695,9 @@ describe("the resize announce, and the two things it waits for", () => {
   });
 
   it("does not announce a size before the socket is open, however measurable it is", async () => {
-    // The fonts settle during startup and schedule their own attempt; with no
-    // socket open it has to decline, or the engine buffers a resize for a
-    // connection that has not negotiated yet. That font-settle attempt is this
-    // test's subject, so it deliberately does NOT wait out the viewport settle:
-    // the kernel's viewport-settle arm calls connection.sendResize() without
-    // consulting wsOpen, relying on the engine's own `connState.status !==
-    // "connected"` early return, which a mocked engine cannot show.
+    // The fonts settle during startup and schedule an announce, which declines
+    // with no socket open. It does not wait out the viewport settle, whose arm
+    // calls sendResize without consulting wsOpen and leaves the engine to drop it.
     await mount({ features: () => [] });
     await tick();
     await nextFrame();
@@ -771,12 +726,10 @@ describe("the resize announce, and the two things it waits for", () => {
   });
 
   it("keeps reporting NO size after the load REJECTS, until the font set itself settles", async () => {
-    // One document.fonts.load over a comma-separated stack rejects as a UNIT, so a
-    // host missing ONE of the gate's families rejects the whole load — and settling
-    // the gate in that handler announces cols computed from the fallback's cell
-    // width for every family, including the ones that were served. The rejection
-    // arm therefore waits for document.fonts.ready, which settles the initial load
-    // including a failed face.
+    // One document.fonts.load over a comma-separated stack rejects as a unit, so
+    // one missing family would announce cols from the fallback's cell width for
+    // every family. The rejection arm waits for document.fonts.ready, which
+    // settles the initial load including a failed face.
     const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const settleFontSet = stubFontsRejecting();
     await mountSettled({ features: () => [] });
@@ -854,22 +807,301 @@ describe("the resize announce, and the two things it waits for", () => {
   });
 });
 
+describe("what a host can wait on before it sends", () => {
+  // A host sending on its own (a Run button) needs to know when the PTY has this
+  // pane's grid and when the pane can measure itself, without copying either rule.
+
+  async function paneOf(): Promise<{
+    term: TerminalHandle;
+    ctx: TerminalContext;
+    ready: { cols: number; rows: number }[];
+  }> {
+    const ready: { cols: number; rows: number }[] = [];
+    let captured: TerminalContext | undefined;
+    const probe: TerminalFeature<void> = {
+      name: "host-probe",
+      setup(ctx) {
+        captured = ctx;
+        ctx.on("input:ready", (size) => {
+          ready.push(size);
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    const term = await mountSettled({ features: () => [probe] });
+    if (captured === undefined) {
+      throw new Error("the probe feature never ran");
+    }
+    return { term, ctx: captured, ready };
+  }
+
+  it("publishes input:ready when a socket's input starts", async () => {
+    const { ready } = await paneOf();
+    expect(ready).toEqual([]);
+
+    fake.openSocket();
+
+    expect(ready).toEqual([{ cols: 80, rows: 24 }]);
+  });
+
+  it("publishes input:ready after a server restart reads restarted, so a Run sent there survives", async () => {
+    const { ctx } = await paneOf();
+    fake.announceModes();
+    wire().onMessage(screenFrame()); // loaded: the banner states pass from here
+    fake.openSocket();
+    ctx.send(new TextEncoder().encode("ls\r")); // for the shell the restart replaces
+    const seen: string[] = [];
+    ctx.on("connection:state", (state) => {
+      seen.push(state);
+    });
+    ctx.on("input:ready", () => {
+      seen.push("input:ready");
+      ctx.send(new TextEncoder().encode("make\r"));
+    });
+
+    fake.restartServer();
+    fake.announceModes();
+
+    expect(seen).toEqual(["open", "restarted", "input:ready"]);
+    expect(fake.sentInput()).toEqual(["make\r"]);
+  });
+
+  function shownPane(ctx: TerminalContext): PaneHandle {
+    const pane = ctx.shell.pane(ctx.shell.selected());
+    if (pane === null) {
+      throw new Error("no pane");
+    }
+    return pane;
+  }
+
+  it("reads inputReady from input:ready, inside its listeners too, until the socket closes", async () => {
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    const readInListener: boolean[] = [];
+    ctx.on("input:ready", () => {
+      readInListener.push(pane.inputReady());
+    });
+    expect(pane.inputReady()).toBe(false);
+
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+    expect(readInListener).toEqual([true]);
+
+    wire().onClose();
+    expect(pane.inputReady()).toBe(false);
+  });
+
+  it("reads inputReady false from a new socket's start through its modes, until its input starts", async () => {
+    // The server can send a socket its modes before its resumeAck, so the modes
+    // are no sign that input sent now survives a restart at the resume.
+    fake.holdModes();
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    fake.announceModes();
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+
+    fake.connection.reconnectNow();
+    expect(pane.inputReady()).toBe(false);
+    fake.announceModes();
+    expect(pane.inputReady()).toBe(false);
+
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+  });
+
+  it.each<[string, (pane: PaneHandle, term: TerminalHandle) => void]>([
+    ["a process exit", () => wire().onProcessExit?.()],
+    [
+      "an incompatible server",
+      () =>
+        wire().onWireIncompatible?.({
+          source: "server-close",
+          clientVersion: 9,
+          minimumServerVersion: 9,
+          reason: "too old",
+        }),
+    ],
+    ["a switch to another session", (pane) => pane.notifySwitch({ id: "other" })],
+    ["clearing the shown session", (pane) => pane.clearActiveSession()],
+    ["destroy", (_pane, term) => term.destroy()],
+    ["a disconnect, which fires no callback", () => fake.connection.disconnect()],
+  ])("reads inputReady false at once after %s", async (_name, end) => {
+    const { term, ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    pane.notifySwitch({ id: "shown" });
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+
+    end(pane, term);
+
+    expect(pane.inputReady()).toBe(false);
+  });
+
+  it("reads inputReady false once another pane's tab close forgets the session this pane shows", async () => {
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    pane.notifySwitch({ id: "shown" });
+    fake.openSocket();
+
+    ctx.dropSession("shown");
+
+    expect(pane.inputReady()).toBe(false);
+  });
+
+  it("reads inputReady false in a feature's teardown, while the engine is still up", async () => {
+    const readAtTeardown: boolean[] = [];
+    let captured: TerminalContext | undefined;
+    const shown: { pane?: PaneHandle } = {};
+    const probe: TerminalFeature<void> = {
+      name: "teardown-probe",
+      setup(ctx) {
+        captured = ctx;
+        return {
+          teardown: () => {
+            readAtTeardown.push(shown.pane?.inputReady() ?? true);
+            readAtTeardown.push(fake.connection.inputReady());
+          },
+        };
+      },
+    };
+    const term = await mountSettled({ features: () => [probe] });
+    if (captured === undefined) {
+      throw new Error("the probe feature never ran");
+    }
+    const pane = shownPane(captured);
+    shown.pane = pane;
+    fake.openSocket();
+    expect(pane.inputReady()).toBe(true);
+
+    term.destroy();
+
+    expect(readAtTeardown).toEqual([false, true]);
+  });
+
+  it("reads inputReady false once the shell forgets an unmanaged pane's own session", async () => {
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    fake.openSocket();
+
+    ctx.dropSession("session-under-test");
+
+    expect(pane.inputReady()).toBe(false);
+  });
+
+  it("keeps inputReady through the shell's forget of a session this pane does not show", async () => {
+    const { ctx } = await paneOf();
+    const pane = shownPane(ctx);
+    pane.notifySwitch({ id: "shown" });
+    fake.openSocket();
+
+    ctx.dropSession("elsewhere");
+
+    expect(pane.inputReady()).toBe(true);
+  });
+
+  it("resolves fontSettled when the font wait ends, from when announceSize sends", async () => {
+    const settle = stubFonts();
+    const { ctx } = await paneOf();
+    const pane = ctx.shell.pane(ctx.shell.selected());
+    if (pane === null) {
+      throw new Error("no pane");
+    }
+    wire().onOpen();
+    let settled = false;
+    void pane.fontSettled.then(() => {
+      settled = true;
+      sendResize.mockClear();
+      pane.announceSize();
+    });
+    await tick();
+    expect(settled).toBe(false);
+
+    settle();
+    await tick();
+
+    expect(settled).toBe(true);
+    expect(sendResize).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves fontSettled when the pane is destroyed inside a stalled font wait", async () => {
+    stubFonts(); // never settled: the load stays pending, as a held-open response leaves it
+    const { term, ctx } = await paneOf();
+    const pane = ctx.shell.pane(ctx.shell.selected());
+    if (pane === null) {
+      throw new Error("no pane");
+    }
+    let settled = false;
+    void pane.fontSettled.then(() => {
+      settled = true;
+    });
+
+    term.destroy();
+    await tick();
+
+    expect(settled).toBe(true);
+  });
+
+  it("holds the shown session's input on its connection", async () => {
+    const { ctx } = await paneOf();
+    const release = vi.fn();
+    fake.connection.holdInput.mockReturnValueOnce(release);
+
+    const got = ctx.shell.pane(ctx.shell.selected())?.holdInput();
+
+    expect(fake.connection.holdInput).toHaveBeenCalledTimes(1);
+    got?.();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("puts no size on the wire once the shown session is cleared, whose socket is gone", async () => {
+    const { ctx } = await paneOf();
+    const pane = ctx.shell.pane(ctx.shell.selected());
+    if (pane === null) {
+      throw new Error("no pane");
+    }
+    pane.notifySwitch({ id: "shown" });
+    fake.openSocket();
+    const sent = fake.announcedSizes().length;
+    fake.renderer.computeSize.mockReturnValue({ cols: 100, rows: 30 });
+    sendResize.mockClear();
+
+    pane.clearActiveSession();
+    pane.announceSize();
+
+    expect(sendResize).toHaveBeenCalledTimes(1);
+    expect(fake.announcedSizes()).toHaveLength(sent);
+  });
+
+  it("puts no size on the wire after disconnect", async () => {
+    await paneOf();
+    fake.openSocket();
+    const sent = fake.announcedSizes().length;
+    fake.renderer.computeSize.mockReturnValue({ cols: 100, rows: 30 });
+
+    fake.connection.disconnect();
+    fake.connection.sendResize();
+
+    expect(fake.announcedSizes()).toHaveLength(sent);
+  });
+});
+
 describe("the decisions the transport cannot make for itself", () => {
   // The engine's transport is store-blind and viewport-blind by design, so each of
   // these forwards a judgement only the renderer can make. Asserting that the
   // callback EXISTS is what let the paging seam ship inert; these call it.
 
   it("lets one resume ack reach the renderer once: the engine's own routing, with no second call from the pane", async () => {
-    // The engine hands the renderer the retained-history bounds before it invokes
-    // onResumeBounds, so the pane's callback is bookkeeping only; a renderer call
-    // of its own would schedule the same work twice per ack.
+    // The engine hands the renderer the retained-history bounds itself, and the
+    // pane wires no onResumeBounds, so the ack reaches the renderer once; a
+    // renderer call of the pane's own would schedule the same work twice.
     await mount({ features: () => [] });
     await tick();
 
     wire().onResumeBounds?.(900, 400);
 
     expect(noteResumeBounds).toHaveBeenCalledTimes(1);
-    expect(noteResumeBounds).toHaveBeenCalledWith(900, 400);
+    expect(noteResumeBounds).toHaveBeenCalledWith(400);
   });
 
   it("publishes the cursor move the renderer reports, so chrome can follow it", async () => {
@@ -972,10 +1204,10 @@ describe("a viewport grow while the reader is scrolled up", () => {
     await observersDelivered();
     await vi.advanceTimersByTimeAsync(0);
     await settleUntil(() => sendResize.mock.calls.length > 0);
+    fake.openSocket();
     fake.renderer.computeSize.mockReturnValue({ cols: 80, rows: 14 });
-    sendResize.mockClear();
     kb.open(300);
-    await settleUntil(() => sendResize.mock.calls.length > 0);
+    await settleUntil(() => fake.announcedSizes().at(-1)?.rows === 14);
   }
 
   function altScreenFrame(): Engine.ScreenMessage {
@@ -1003,23 +1235,27 @@ describe("a viewport grow while the reader is scrolled up", () => {
     await settleUntil(() => updateFontMetrics.mock.calls.length > 0);
   }
 
+  const KB_UP = { cols: 80, rows: 14 };
+  const KB_DOWN = { cols: 80, rows: 24 };
+  const lastOnWire = (): { cols: number; rows: number } | undefined => fake.announcedSizes().at(-1);
+
   it("holds the taller size while the reader is scrolled up, and announces it when they follow", async () => {
     await keyboardOpen();
     readerScrollsUp();
 
-    await keyboardCloses({ cols: 80, rows: 24 });
-    expect(sendResize).not.toHaveBeenCalled();
+    await keyboardCloses(KB_DOWN);
+    expect(lastOnWire()).toEqual(KB_UP);
 
     readerFollows();
-    expect(sendResize).toHaveBeenCalledTimes(1);
+    expect(lastOnWire()).toEqual(KB_DOWN);
   });
 
   it("announces the close at the settle for a reader who is following", async () => {
     await keyboardOpen();
 
-    await keyboardCloses({ cols: 80, rows: 24 });
+    await keyboardCloses(KB_DOWN);
 
-    expect(sendResize).toHaveBeenCalledTimes(1);
+    expect(lastOnWire()).toEqual(KB_DOWN);
   });
 
   it("announces a width change at once, scrolled up or not", async () => {
@@ -1028,49 +1264,43 @@ describe("a viewport grow while the reader is scrolled up", () => {
 
     await keyboardCloses({ cols: 120, rows: 24 });
 
-    expect(sendResize).toHaveBeenCalledTimes(1);
+    expect(lastOnWire()).toEqual({ cols: 120, rows: 24 });
   });
 
-  it("announces a keyboard that reopens over a held size, and releases nothing twice", async () => {
+  it("ends a hold when the keyboard reopens over it, so following sends nothing more", async () => {
     await keyboardOpen();
     readerScrollsUp();
-    await keyboardCloses({ cols: 80, rows: 24 });
-    expect(sendResize).not.toHaveBeenCalled();
+    await keyboardCloses(KB_DOWN);
+    const sent = fake.announcedSizes().length;
 
-    fake.renderer.computeSize.mockReturnValue({ cols: 80, rows: 14 });
+    fake.renderer.computeSize.mockReturnValue(KB_UP);
+    updateFontMetrics.mockClear();
     kb.open(300);
-    await settleUntil(() => sendResize.mock.calls.length > 0);
-    expect(sendResize).toHaveBeenCalledTimes(1);
-
+    await settleUntil(() => updateFontMetrics.mock.calls.length > 0);
     readerFollows();
-    expect(sendResize).toHaveBeenCalledTimes(1);
+
+    expect(fake.announcedSizes()).toHaveLength(sent);
+    expect(lastOnWire()).toEqual(KB_UP);
   });
 
   it("announces the grow at once on the alternate screen, which has no scrollback to hold", async () => {
     await keyboardOpen();
     const altStore = new LineStore();
-    altStore.applyScreen({
-      type: "screen",
-      rows: [[]],
-      base: 0,
-      cursor: [0, 0],
-      changed: [0],
-      altActive: true,
-    });
+    altStore.applyScreen(altScreenFrame());
     expect(altStore.isAlt()).toBe(true);
     fake.renderer.boundStore.mockReturnValue(altStore);
     readerScrollsUp();
 
-    await keyboardCloses({ cols: 80, rows: 24 });
+    await keyboardCloses(KB_DOWN);
 
-    expect(sendResize).toHaveBeenCalledTimes(1);
+    expect(lastOnWire()).toEqual(KB_DOWN);
   });
 
   it("announces a held size when a full-screen program takes the alternate screen", async () => {
     await keyboardOpen();
     readerScrollsUp();
-    await keyboardCloses({ cols: 80, rows: 24 });
-    expect(sendResize).not.toHaveBeenCalled();
+    await keyboardCloses(KB_DOWN);
+    expect(lastOnWire()).toEqual(KB_UP);
 
     const altFrame = altScreenFrame();
     // The engine applies a frame to the bound store before the kernel sees it.
@@ -1079,20 +1309,21 @@ describe("a viewport grow while the reader is scrolled up", () => {
     expect(altStore.isAlt()).toBe(true);
     fake.renderer.boundStore.mockReturnValue(altStore);
     wire().onMessage(altFrame);
-    expect(sendResize).toHaveBeenCalledTimes(1);
+    expect(lastOnWire()).toEqual(KB_DOWN);
+    const sent = fake.announcedSizes().length;
 
     readerFollows();
-    expect(sendResize).toHaveBeenCalledTimes(1);
+    expect(fake.announcedSizes()).toHaveLength(sent);
   });
 
   it("keeps holding through main-screen frames", async () => {
     await keyboardOpen();
     readerScrollsUp();
-    await keyboardCloses({ cols: 80, rows: 24 });
+    await keyboardCloses(KB_DOWN);
 
     wire().onMessage(screenFrame());
 
-    expect(sendResize).not.toHaveBeenCalled();
+    expect(lastOnWire()).toEqual(KB_UP);
   });
 
   it("does not re-measure on alternate-screen frames when nothing is held", async () => {
@@ -1110,30 +1341,61 @@ describe("a viewport grow while the reader is scrolled up", () => {
     expect(sendResize).not.toHaveBeenCalled();
   });
 
-  it("lets a socket open supersede a held size, so following again sends nothing more", async () => {
+  it("announces the held size on a reconnect while the grow is held, and the grow once the reader follows", async () => {
     await keyboardOpen();
     readerScrollsUp();
-    await keyboardCloses({ cols: 80, rows: 24 });
-    expect(sendResize).not.toHaveBeenCalled();
+    await keyboardCloses(KB_DOWN);
 
-    wire().onOpen();
-    expect(sendResize).toHaveBeenCalledTimes(1);
+    fake.openSocket();
+    expect(lastOnWire()).toEqual(KB_UP);
 
     readerFollows();
-    expect(sendResize).toHaveBeenCalledTimes(1);
+    expect(lastOnWire()).toEqual(KB_DOWN);
+  });
+});
+
+describe("the session's screen size", () => {
+  // Another device can own the shared size, so this pane's box is not the
+  // screen the server lays its output on.
+  const MEASURED = { cols: 120, rows: 30 };
+  const SERVER = { cols: 40, rows: 10 };
+
+  it("is the server's grid, not this pane's measured box", async () => {
+    const { ctx } = await withBusProbe();
+    fake.renderer.computeSize.mockReturnValue(MEASURED);
+    fake.renderer.gridSize.mockReturnValue(SERVER);
+
+    expect(ctx.session.size()).toEqual(SERVER);
+  });
+
+  it("is the right edge the predicted cursor parks at", async () => {
+    let ctx: TerminalContext | undefined;
+    const sender: TerminalFeature<void> = {
+      name: "sender",
+      setup(c) {
+        ctx = c;
+        return { teardown: () => undefined };
+      },
+    };
+    await mount({ features: () => [sender, predictiveEcho()] });
+    await tick();
+    fake.renderer.computeSize.mockReturnValue(MEASURED);
+    fake.renderer.gridSize.mockReturnValue(SERVER);
+    wire().onMessage({ ...screenFrame(), cursor: [0, 38] });
+
+    ctx?.send(new TextEncoder().encode("a"));
+    expect(fake.renderer.setPredictedCursor).toHaveBeenLastCalledWith(0, 39, true);
+    ctx?.send(new TextEncoder().encode("b"));
+    expect(fake.renderer.setPredictedCursor).toHaveBeenLastCalledWith(0, 39, false);
   });
 });
 
 describe("wake-reconnect handlers", async () => {
-  // Each of these opens a socket, so none may fire before the first connect has
-  // happened: under a session owner the kernel connects only once
-  // resolveInitialSession returns an id, and a bare /ws before then hits a
-  // session-gated endpoint that a SessionManager 404s. pageshow fires on the
-  // INITIAL load, which is how a slow session list turned into a 404 in Firefox.
-  //
-  // They live in this file rather than beside the DOM tests because they are
-  // document- and window-scoped: they need every earlier terminal torn down, or a
-  // leaked listener answers the same event and the count is somebody else's.
+  // Each handler opens a socket, so none may fire before the first connect: under
+  // a session owner the kernel connects only once resolveInitialSession returns an
+  // id, and an earlier /ws hits a session-gated endpoint that a SessionManager
+  // 404s. pageshow fires on the initial load. Each test needs every earlier
+  // terminal torn down, or a leaked document listener answers the same event.
   async function ownedTerminal(resolved: Promise<{ id: string } | null>): Promise<void> {
     const owner: TerminalFeature = {
       name: "session-owner",

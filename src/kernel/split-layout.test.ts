@@ -4,17 +4,9 @@ import type {} from "@vitest/browser-playwright";
 import { cdp } from "vitest/browser";
 import { mountTerminal } from "../test-helpers/mount.js";
 import { shortenSettle, shortSettled } from "../test-helpers/delays.js";
+import { shippedBundle } from "../test-helpers/stylesheet.js";
 import { animations } from "../features/animations.js";
 import type { TerminalContext, TerminalFeature, TerminalHandle } from "./types.js";
-
-declare global {
-  interface ImportMeta {
-    glob(
-      pattern: string,
-      options: { query: string; import: string; eager: true },
-    ): Record<string, string>;
-  }
-}
 
 const fake = await vi.hoisted(async () => {
   const { createEngineFake } = await import("../test-helpers/fake-engine.js");
@@ -27,44 +19,8 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
   return { ...actual, createTerminalEngine: fake.createTerminalEngine };
 });
 
-// Same shape as fatal-panel.test.ts, and deliberately repeated rather than
-// shared: a test-support module would need a matching exclude in BOTH publish
-// allowlists (package.json `files` and jsr.json `publish.exclude`), and the
-// standing rule there is to carry only patterns that match something.
-const MANIFESTS = import.meta.glob("../../css/MANIFEST*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-const SHEETS = import.meta.glob("../../css/*.css", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
-
-const byName = (mods: Record<string, string>): Map<string | undefined, string> =>
-  new Map(Object.entries(mods).map(([p, text]) => [p.split("/").pop(), text]));
-
 // The tabbed component bundle: the one every split-capable consumer serves.
-const BUNDLE = ((): string => {
-  const manifest = byName(MANIFESTS).get("MANIFEST.tabbed");
-  if (manifest === undefined) {
-    throw new Error("css/MANIFEST.tabbed is missing");
-  }
-  const sheets = byName(SHEETS);
-  return manifest
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .map((name) => {
-      const text = sheets.get(name);
-      if (text === undefined) {
-        throw new Error(`css/MANIFEST.tabbed names ${name}, which css/ does not contain`);
-      }
-      return text;
-    })
-    .join("\n");
-})();
+const BUNDLE = shippedBundle("MANIFEST.tabbed");
 
 let styles: HTMLStyleElement;
 beforeAll(() => {

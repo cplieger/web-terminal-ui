@@ -1,30 +1,11 @@
-// tabs feature — the switcher's INTERACTIVE drag and the document-level
-// dismissals (index.ts, the last section of the file). index.test.ts drives the
-// recogniser's decisions (which axis a drag locks, whether a release resolves at
-// all); what it never reaches is what the drag DOES while the finger is down and
-// what the release then commits:
-//
-//   * the vertical drag's live height and its open/closed snap, including the
-//     flick that beats the halfway rule and the four ways a flick is refused
-//     (canceled, too slow, too leisurely, too short);
-//   * the horizontal drag's live preview (the chip follows the finger, an open
-//     list peeks in the swipe direction), the spring back when the release does
-//     not commit, and the slide when it does;
-//   * the document handlers: a tap that dismisses an open overlay rather than
-//     opening the keyboard, a right-click that closes the tab menu, Escape's
-//     claim on that menu, and the active row's own close button.
-//
-// Two things make that reachable here where the sibling file leaves it dark. The
-// list's scrollHeight is supplied as what it is — an engine reading — so the
-// vertical drag's whole arithmetic (which is bounded by it) comes alive against a
-// number the test chose rather than whatever an unstyled list happened to measure.
-// And matchMedia is stubbed per query, so a case says which of the three questions
-// the feature asks it is answering.
-//
-// Pointer events carry an explicit timeStamp. The recogniser's flick test is
-// three comparisons against the clock (duration, sample velocity, staleness), so
-// a test that let the environment pick the timestamps would be asserting whatever
-// the box happened to be doing.
+// tabs feature: the switcher's interactive drag and the document-level
+// dismissals. index.test.ts drives the recogniser's decisions; this file covers
+// what the drag does while the finger is down and what the release commits: the
+// vertical drag's height and snap (flicks and their refusals), the horizontal
+// preview, spring back and slide, and the document handlers (dismiss tap,
+// right-click, Escape, the active row's close button). The list's scrollHeight
+// and matchMedia are stubbed, and pointer events carry explicit timeStamps,
+// because the flick test compares against the clock.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -117,7 +98,6 @@ beforeEach(() => {
   // vitest resets every spy to its construction default before each test; the
   // view memory and the mouse mode are re-declared so the defaults are stated.
   captureViewMemory.mockImplementation(() => ({ abs: 7, screenTop: -3, following: false }));
-  fake.connection.serverEpochOf.mockImplementation(() => 777);
   fake.connection.currentSessionId.mockImplementation(() => "unmanaged");
   getMouseMode.mockReturnValue(0);
   fetchMock.mockClear();
@@ -231,15 +211,10 @@ interface Bar {
 }
 
 /** Mount the tabs chrome over `count` sessions and hand back the switcher's
- *  parts plus a gesture driver.
- *
- *  `listHeight` is the list's scrollHeight, which is the ONLY input bounding the
- *  vertical drag; an unstyled list has nothing overflowing it, and a zero bound
- *  makes the whole drag inert (its two guards return early), so it is supplied
- *  here.
- *  `surfaceWidth` is the terminal's own width, which sets the horizontal
- *  commit distance (a quarter of it) — deliberately different from the window's
- *  width, so a test can tell which one the rule reads. */
+ *  parts plus a gesture driver. `listHeight` is the list's scrollHeight, the
+ *  only bound on the vertical drag (zero makes it inert). `surfaceWidth` is the
+ *  terminal's width, which sets the horizontal commit distance (a quarter of it),
+ *  unlike the window's, so a test can tell which one the rule reads. */
 async function mountBar(
   count = 3,
   opts: {
@@ -1447,7 +1422,7 @@ describe("tabs: dismissing the tab menu", () => {
     // The one Escape byte, delivered by the kernel's own mapping because this
     // feature did not claim the key.
     expect(sendBinary).toHaveBeenCalledTimes(1);
-    expect([...(sendBinary.mock.calls[0]?.[0] ?? [])]).toEqual([0x1b]);
+    expect(fake.sentInput()).toEqual(["\x1b"]);
   });
 
   it("leaves an ordinary key alone with the menu open", async () => {

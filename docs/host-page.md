@@ -10,7 +10,7 @@ The core shows terminal output in a display-only element, so native text selecti
 
 ## The engine version
 
-`@cplieger/web-terminal-engine` is a peer dependency, so your page pins the engine version itself. The supported range is 6.4.0 or later on both halves: unread cues need the server's seen route and the two status-stream fields that number each status, which no wire floor checks. Whether an engine and this UI can talk is decided by the engine's [wire contract](https://github.com/cplieger/web-terminal-engine#wire-protocol), not by matching package versions. When the two cannot talk, the connection banner stays up and asks the user to update the server or reload the page.
+`@cplieger/web-terminal-engine` is a peer dependency, so your page pins the engine version itself. The page needs engine 6.5.0 or later, whose client API this UI calls. The server needs engine 6.4.0 or later: unread cues need the server's seen route and the two status-stream fields that number each status, which no wire floor checks. Whether an engine and this UI can talk is decided by the engine's [wire contract](https://github.com/cplieger/web-terminal-engine#wire-protocol), not by matching package versions. When the two cannot talk, the connection banner stays up and asks the user to update the server or reload the page.
 
 ## Choose the CSS bundle
 
@@ -32,6 +32,8 @@ A host that does not serve the overlay file still works. That face fails to load
 When the terminal is a panel or a pane in your application, concatenate the manifest that matches your preset: `css/MANIFEST.single`, `css/MANIFEST.touch` or `css/MANIFEST.tabbed`. These hold only component styles scoped to the terminal root. They carry no page reset, no fonts and no document-level rules.
 
 Chrome text then falls back to your platform's monospace font. Declare the `@font-face` rules yourself if you want the panel to match the full-page look. Pass `layout: "container"` so the terminal fills your container element and positions its chrome against it instead of the viewport.
+
+Your container can be any height. The terminal leaves the part of its height that is not whole rows as padding under the last row, so while it follows the output, no part of a row is cut off at its top edge.
 
 ## Load the modules
 

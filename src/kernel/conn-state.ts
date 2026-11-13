@@ -15,7 +15,7 @@ export interface ConnStateMachine {
   open(): void;
   /** Reconnect attempt in progress. */
   reconnecting(): void;
-  /** Connection closed / outbox full. */
+  /** Connection closed. */
   closed(): void;
   /** Server restarted (epoch mismatch); recent input may be lost. */
   restarted(): void;

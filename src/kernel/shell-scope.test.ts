@@ -68,8 +68,6 @@ function rootIn(): HTMLElement {
   return root;
 }
 
-const encoder = new TextEncoder();
-
 describe("shell-scoped features run once", () => {
   it("sets the shared features up once and the pane features once per pane, builds the chrome once, and routes the toolbar to the selected pane", async () => {
     let thunkCalls = 0;
@@ -144,16 +142,22 @@ describe("shell-scoped features run once", () => {
     esc?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
     expect(funnel).toEqual(["right:27", "left:27"]);
 
-    // Sticky Ctrl rewrites a byte typed in either pane.
+    // Sticky Ctrl takes the next character typed in either pane.
     funnel.length = 0;
+    const typeIn = (side: "left" | "right", data: string): void => {
+      shell?.shell
+        .pane(side)
+        ?.root.querySelector(".term-input")
+        ?.dispatchEvent(new InputEvent("input", { inputType: "insertText", data }));
+    };
     const ctrl = root.querySelector<HTMLElement>("#kb-ctrl");
     ctrl?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
-    shell.shell.pane("left")?.send(encoder.encode("a"));
+    typeIn("left", "a");
     expect(funnel).toEqual(["left:1"]);
     ctrl?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
-    shell.shell.pane("right")?.send(encoder.encode("c"));
+    typeIn("right", "c");
     expect(funnel).toEqual(["left:1", "right:3"]);
-    shell.shell.pane("right")?.send(encoder.encode("c"));
+    typeIn("right", "c");
     expect(funnel).toEqual(["left:1", "right:3", "right:99"]);
   });
 });

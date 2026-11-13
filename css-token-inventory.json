@@ -4,6 +4,8 @@
   "bundle": "css/MANIFEST",
   "declared": [
     "--accent",
+    "--banner-offline",
+    "--banner-restarted",
     "--bg",
     "--bg-default",
     "--blur",
@@ -67,6 +69,8 @@
   ],
   "referenced": [
     "--accent",
+    "--banner-offline",
+    "--banner-restarted",
     "--bg",
     "--bg-default",
     "--blur",
@@ -125,6 +129,7 @@
     "--wt-mark-radius",
     "--wt-mark-size",
     "--wt-reserve-bottom",
+    "--wt-row-fill",
     "--wt-split-bottom",
     "--wt-split-gutter",
     "--wt-split-left",

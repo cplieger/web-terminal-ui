@@ -21,7 +21,23 @@ createTerminal("#terminal", {
 });
 ```
 
-A host that runs a command its operator chooses can also give the operator a switch to turn it off.
+A host that runs a command its operator chooses can also give the operator a switch to turn it off. When the switch is off, call `clearLocalScrollback()` at load, so the entries saved while it was on do not stay in the browser. It takes the same `prefix` option as `localScrollbackStorage()`:
+
+```ts
+import {
+  clearLocalScrollback,
+  createTerminal,
+  localScrollbackStorage,
+  presetTabbed,
+} from "@cplieger/web-terminal-ui";
+
+if (persistEnabled) {
+  createTerminal("#terminal", { features: presetTabbed, persistScrollback: localScrollbackStorage() });
+} else {
+  clearLocalScrollback();
+  createTerminal("#terminal", { features: presetTabbed });
+}
+```
 
 ## Why it is off by default
 
@@ -104,7 +120,7 @@ Storage can still be unavailable without a prompt, and the failures differ by br
 
 ## Cleanup
 
-A store that only writes fills up, so four mechanisms remove entries:
+A store that only writes fills up, so four mechanisms remove entries, beside `clearLocalScrollback()` when persistence is turned off:
 
 - The terminal calls `drop` when a session closes, so a tab the user closes takes its entry with it. So does a session the server removes while the page is open. This is the one that matters day to day.
 - An entry past `maxAgeMs` is deleted when it is next read.

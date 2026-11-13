@@ -694,8 +694,6 @@ function createShellInto(
   /** Every store handed out, held WEAKLY and keyed by session, so a closed tab's
    *  store stays collectable. */
   const knownStores = new Map<string, WeakRef<LineStore>>();
-  /** Restored scrollbacks not yet confirmed by a resume for THAT session. */
-  const unverifiedRestores = new Set<string>();
   function liveStores(): LineStore[] {
     const out: LineStore[] = [];
     for (const [key, ref] of knownStores) {
@@ -708,39 +706,13 @@ function createShellInto(
     }
     return out;
   }
-  /** The server epoch a pane knew for a session it forgot while the tab lives on
-   *  (a snap, a close of the split): the next pane to show it is seeded from here,
-   *  and a save filed after the pane is gone still finds it. */
-  const knownEpoch = new Map<string, number>();
   const keeper =
     opts.persistScrollback !== undefined
-      ? createScrollbackKeeper(
-          opts.persistScrollback,
-          scrollbackLines,
-          {
-            adoptPersistedEpoch(sessionId, epoch) {
-              for (const c of connections()) {
-                c.adoptPersistedEpoch(sessionId, epoch);
-              }
-            },
-            serverEpochOf(sessionId) {
-              for (const c of connections()) {
-                const epoch = c.serverEpochOf(sessionId);
-                if (epoch !== 0) {
-                  return epoch;
-                }
-              }
-              return knownEpoch.get(sessionId) ?? 0;
-            },
-          },
-          win,
-        )
+      ? createScrollbackKeeper(opts.persistScrollback, scrollbackLines, win)
       : null;
   held.push(() => {
     keeper?.stop();
     knownStores.clear();
-    unverifiedRestores.clear();
-    knownEpoch.clear();
   });
   const stores: StoreRegistry = {
     persisting: keeper !== null,
@@ -751,11 +723,7 @@ function createShellInto(
       };
       if (keeper !== null) {
         if (sessionId !== undefined) {
-          const store = keeper.storeFor(sessionId);
-          if (store.highestIndex() >= 0) {
-            unverifiedRestores.add(sessionId);
-          }
-          return track(store, sessionId);
+          return track(keeper.storeFor(sessionId), sessionId);
         }
         keeper.noteMissingSessionId();
       }
@@ -768,31 +736,26 @@ function createShellInto(
       const restored = keeper.storeFor(sessionId);
       if (restored.highestIndex() >= 0) {
         knownStores.set(sessionId, new WeakRef(restored));
-        unverifiedRestores.add(sessionId);
         return restored;
       }
       keeper.track(sessionId, current);
       return null;
     },
-    verified(sessionId) {
-      unverifiedRestores.delete(sessionId);
-    },
-    discardUnverified(scope, caller) {
-      const ids = scope === "page" ? [...unverifiedRestores] : [scope.session];
-      for (const id of ids) {
-        if (!unverifiedRestores.delete(id)) {
+    discardUnverified(scope) {
+      for (const [id, ref] of knownStores) {
+        const store = ref.deref();
+        if (store === undefined || (scope !== "page" && id !== scope.session)) {
           continue;
         }
-        const store = knownStores.get(id)?.deref();
-        const holder =
-          store === undefined
-            ? paneAt(caller)
-            : builtPanes().find((p) => p.render.boundStore() === store);
+        if (!store.isUnconfirmedRestore()) {
+          continue;
+        }
+        const holder = builtPanes().find((p) => p.render.boundStore() === store);
         if (holder !== undefined) {
           holder.reset();
-          continue;
+        } else {
+          store.reset();
         }
-        store?.reset();
       }
     },
     backgroundStores(bound) {
@@ -806,7 +769,6 @@ function createShellInto(
     for (const c of connections()) {
       c.forgetSession(id);
     }
-    knownEpoch.delete(id);
     keeper?.forget(id);
   }
 
@@ -897,7 +859,6 @@ function createShellInto(
           slot.connection?.forgetSession(sessionId);
         }
       }
-      knownEpoch.delete(sessionId);
       keeper?.forget(sessionId);
     },
     chromeResized() {
@@ -1008,12 +969,6 @@ function createShellInto(
         syncFocusReach(slot);
         settleLoading();
       },
-      noteEpoch(sessionId, epoch) {
-        if (epoch !== 0) {
-          knownEpoch.set(sessionId, epoch);
-        }
-      },
-      knownEpoch: (sessionId) => knownEpoch.get(sessionId) ?? 0,
       registerConnection(connection) {
         slot.connection = connection;
       },
@@ -1391,8 +1346,8 @@ function createShellInto(
     pendingRowCount: () => selectedPane().render.pendingRowCount(),
   };
   const scrollFacade: TerminalContext["scroll"] = {
-    scrollToBottom: () => {
-      selectedPane().scroll.scrollToBottom();
+    scrollToBottom: (opts) => {
+      selectedPane().scroll.scrollToBottom(opts);
     },
     isUserScrolledUp: () => selectedPane().scroll.isUserScrolledUp(),
     currentScrollTop: () => selectedPane().scroll.currentScrollTop(),
@@ -1410,6 +1365,7 @@ function createShellInto(
     isApplicationKeypad: () => selectedPane().modes.isApplicationKeypad(),
     isReverseVideo: () => selectedPane().modes.isReverseVideo(),
     getKeyboardFlags: () => selectedPane().modes.getKeyboardFlags(),
+    isKnown: () => selectedPane().modes.isKnown(),
   };
   const shellLayout = (): { narrow: boolean; coarse: boolean } => ({
     narrow: isNarrow(shellRoot.clientWidth, shellRoot.clientHeight),
@@ -1493,8 +1449,7 @@ function createShellInto(
   let rootReleased = false;
   function cleanupRuntime(): void {
     destroyed = true;
-    // The tracked stores are about to become unreachable, and the connections
-    // whose epochs the save is filed under go with the drain.
+    // The tracked stores are about to become unreachable.
     keeper?.flush();
     held.drain();
   }
