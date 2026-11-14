@@ -392,7 +392,10 @@ describe("the wire fan-out: a server frame reaches the renderer AND the bus", ()
     wire().onMessage(decoded(wireFrame(MSG_CLIPBOARD_REFUSED)));
 
     expect(seen).toEqual([
-      { event: "wire:clipboardRefused", payload: "Copy too large to send to the browser" },
+      {
+        event: "wire:clipboardRefused",
+        payload: { session: "", message: "Copy too large to send to the browser" },
+      },
     ]);
   });
 

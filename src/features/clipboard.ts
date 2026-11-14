@@ -4,7 +4,7 @@ import { isShortcutLetter } from "../kernel/shortcut-letter.js";
 import type { TerminalFeature } from "../kernel/types.js";
 
 // A program that retries a refused copy would otherwise re-toast and re-announce
-// it on every attempt; each refusal inside the window extends it.
+// it on every attempt; each refusal from its session inside the window extends it.
 const REFUSAL_QUIET_MS = 10_000;
 
 /** The value a peer reads through `ctx.use(clipboard())`. Both members are
@@ -31,7 +31,8 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
       const surface = ctx.surface();
       const doc = ctx.shell.root.ownerDocument;
       const win = windowOf(doc);
-      function copy(text: string): void {
+      /** Write `text`, toasting the outcome only while `current()` still holds. */
+      function write(text: string, current: () => boolean): void {
         // A property access on navigator.clipboard throws outside a secure context.
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- undefined outside secure contexts
         if (!win.navigator.clipboard) {
@@ -41,11 +42,19 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
         win.navigator.clipboard
           .writeText(text)
           .then(() => {
-            ctx.toast("Copied");
+            if (current()) {
+              ctx.toast("Copied");
+            }
           })
           .catch(() => {
-            ctx.toast("Copy failed");
+            if (current()) {
+              ctx.toast("Copy failed");
+            }
           });
+      }
+
+      function copy(text: string): void {
+        write(text, () => true);
       }
 
       function paste(): void {
@@ -89,17 +98,23 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
         return false;
       });
 
+      // One toast serves every pane, so a write that settles after a later OSC 52
+      // event must not replace that event's toast (a refusal with "Copied").
+      let wireGeneration = 0;
+      const refusalQuietUntil = new Map<string, number>();
+
       // An OSC 52 copy is an async push, not a user gesture, so some browsers
-      // reject it and copy() toasts "Copy failed".
-      let refusalQuietUntil = 0;
+      // reject it and write() toasts "Copy failed".
       ctx.on("wire:clipboard", (text) => {
-        refusalQuietUntil = 0;
-        copy(text);
+        refusalQuietUntil.clear();
+        const generation = ++wireGeneration;
+        write(text, () => generation === wireGeneration);
       });
-      ctx.on("wire:clipboardRefused", (message) => {
+      ctx.on("wire:clipboardRefused", ({ session, message }) => {
+        wireGeneration++;
         const now = Date.now();
-        const quiet = now < refusalQuietUntil;
-        refusalQuietUntil = now + REFUSAL_QUIET_MS;
+        const quiet = now < (refusalQuietUntil.get(session) ?? 0);
+        refusalQuietUntil.set(session, now + REFUSAL_QUIET_MS);
         if (!quiet) {
           ctx.toast(message);
         }

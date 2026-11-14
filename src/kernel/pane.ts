@@ -671,7 +671,10 @@ function buildPaneInto(
         } else if (msg.type === "clipboard") {
           bus.emit("wire:clipboard", msg.text);
         } else if (msg.type === "clipboardRefused") {
-          bus.emit("wire:clipboardRefused", msg.message);
+          bus.emit("wire:clipboardRefused", {
+            session: activeSession?.id ?? "",
+            message: msg.message,
+          });
         }
       },
       onOpen() {
