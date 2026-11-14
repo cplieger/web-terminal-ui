@@ -20,11 +20,13 @@ On a touchscreen, `presetTouch()` and the tabbed presets add a key bar with Tab,
 
 A clean tap on the terminal focuses the input and raises the soft keyboard. A tap while text is selected clears the selection instead.
 
-## The context menu and paste
+## The context menu, copy and paste
 
 The context menu offers Copy, Select All and Paste. It opens on a right-click and on a touch long-press. Paste is the reason it exists. The keyboard target is a hidden `<textarea>`, so no platform can offer its own paste over the output.
 
 On touch the platform keeps its long-press. Word selection and the system copy menu run untouched, and the terminal's menu appears on release only when the press selected nothing. Paste reads the Clipboard API, which needs a secure context, so touch paste needs HTTPS. The system paste gesture on iOS and Cmd+V from an external keyboard also paste into the focused terminal.
+
+A program can also copy through OSC 52, as tmux and Neovim do. The `clipboard` feature writes that text to the system clipboard and a toast says "Copied". Some browsers refuse a clipboard write that no click or key caused, and the toast then says "Copy failed". A server built on engine 6.6.0 or later refuses a copy of more than about 768 KiB of text, so the clipboard keeps its old contents and the toast says "Copy too large to send to the browser". A program that retries the copy gets that toast once, and again only after 10 seconds without a refusal or after a copy that went through. Each toast is read out by screen readers and leaves focus where it is.
 
 A paste of any size is delivered whole and in order, and keys typed during it reach the program after it. While part of a paste is still waiting to be sent, a toast shows how much is left. Escape or Ctrl+C, from the keyboard or the key bar, drops the rest. The program still receives the closing bracket of a bracketed paste, then the Escape or Ctrl+C itself, so it never stays in paste mode. A cancel cannot recall bytes the server already has.
 

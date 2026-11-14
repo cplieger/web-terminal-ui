@@ -7,8 +7,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import { LineStore } from "@cplieger/web-terminal-engine";
+import { LineStore, decodeWireBinary } from "@cplieger/web-terminal-engine";
 import { mountTerminal } from "../test-helpers/mount.js";
+import { clipboard } from "../features/clipboard.js";
 import { predictiveEcho } from "../features/predictive-echo.js";
 import { shortenSettle, shortSettled } from "../test-helpers/delays.js";
 import { softKeyboard, type SoftKeyboard } from "../features/tabs/test-helpers/paint.js";
@@ -235,6 +236,36 @@ function modesFrame(reverseVideo: boolean): Engine.ModesMessage {
   };
 }
 
+const MSG_CLIPBOARD = 6;
+const MSG_CLIPBOARD_REFUSED = 10;
+
+/** A binary server frame as the engine's wire spec lays it out: the type tag,
+ *  an 8-byte little-endian inputAck of zero, then `body`. */
+function wireFrame(type: number, body: Uint8Array = new Uint8Array()): ArrayBuffer {
+  const buf = new Uint8Array(9 + body.length);
+  buf[0] = type;
+  buf.set(body, 9);
+  return buf.buffer;
+}
+
+/** An OSC 52 copy frame carrying `text` behind its 2-byte little-endian length. */
+function clipboardFrame(text: string): ArrayBuffer {
+  const utf8 = new TextEncoder().encode(text);
+  const body = new Uint8Array(2 + utf8.length);
+  new DataView(body.buffer).setUint16(0, utf8.length, true);
+  body.set(utf8, 2);
+  return wireFrame(MSG_CLIPBOARD, body);
+}
+
+/** `frame` through the engine's own decoder, as the socket hands it to the kernel. */
+function decoded(frame: ArrayBuffer): Engine.ServerMessage {
+  const msg = decodeWireBinary(frame);
+  if (msg === null) {
+    throw new Error("the engine dropped the frame");
+  }
+  return msg;
+}
+
 /** The callbacks the kernel handed the engine, as the engine would invoke them. */
 function wire(): Engine.ConnectionCallbacks {
   return fake.callbacks();
@@ -262,6 +293,9 @@ async function withBusProbe(): Promise<{ seen: BusRecord[]; ctx: TerminalContext
       });
       ctx.on("wire:clipboard", (payload) => {
         seen.push({ event: "wire:clipboard", payload });
+      });
+      ctx.on("wire:clipboardRefused", (payload) => {
+        seen.push({ event: "wire:clipboardRefused", payload });
       });
       ctx.on("wire:title", (payload) => {
         seen.push({ event: "wire:title", payload });
@@ -352,6 +386,16 @@ describe("the wire fan-out: a server frame reaches the renderer AND the bus", ()
     expect(seen).toEqual([{ event: "wire:clipboard", payload: "copied from the pty" }]);
   });
 
+  it("republishes a refused OSC 52 copy as the engine's words for the reader", async () => {
+    const { seen } = await withBusProbe();
+
+    wire().onMessage(decoded(wireFrame(MSG_CLIPBOARD_REFUSED)));
+
+    expect(seen).toEqual([
+      { event: "wire:clipboardRefused", payload: "Copy too large to send to the browser" },
+    ]);
+  });
+
   it("publishes a title frame against the ACTIVE session, so a tab knows whose title it is", async () => {
     // The payload's session is what lets a tabs feature label the right tab. With
     // no session owner there is no active session, and the field is empty rather
@@ -387,6 +431,48 @@ describe("the wire fan-out: a server frame reaches the renderer AND the bus", ()
     wire().onMessage({ type: "resumeAck", received: 0 });
 
     expect(seen).toEqual([]);
+  });
+});
+
+describe("an OSC 52 copy the server refused reaches the reader as a toast", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function mountWithClipboard(): Promise<HTMLElement> {
+    const root = rootIn();
+    await mountTerminal(root, { features: () => [clipboard()] });
+    await tick();
+    const toast = root.querySelector<HTMLElement>(".wt-toast");
+    if (!toast) {
+      throw new Error("the terminal mounted no toast");
+    }
+    return toast;
+  }
+
+  it("shows the words in the polite status region and leaves focus where it was", async () => {
+    const toast = await mountWithClipboard();
+    const focused = document.activeElement;
+
+    wire().onMessage(decoded(wireFrame(MSG_CLIPBOARD_REFUSED)));
+
+    expect(toast.textContent).toBe("Copy too large to send to the browser");
+    expect(toast.classList.contains("visible")).toBe(true);
+    expect(toast.getAttribute("role")).toBe("status");
+    expect(toast.hasAttribute("aria-live")).toBe(false);
+    expect(document.activeElement).toBe(focused);
+  });
+
+  it("shows no refusal for a copy the server delivered", async () => {
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    const toast = await mountWithClipboard();
+
+    wire().onMessage(decoded(clipboardFrame("small")));
+
+    await vi.waitFor(() => {
+      expect(toast.textContent).toBe("Copied");
+    });
+    expect(writeText).toHaveBeenCalledWith("small");
   });
 });
 

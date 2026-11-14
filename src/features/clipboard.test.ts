@@ -353,6 +353,58 @@ describe("clipboard: inbound OSC 52 mirrors to the system clipboard", () => {
   });
 });
 
+describe("clipboard: an OSC 52 copy the server refused", () => {
+  const REFUSED = "Copy too large to send to the browser";
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("toasts the server's reason once", () => {
+    const { emit, toast } = setup();
+    emit("wire:clipboardRefused", REFUSED);
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(toast).toHaveBeenCalledWith(REFUSED);
+  });
+
+  it("toasts once while a program keeps retrying, and again after it has gone quiet", () => {
+    vi.useFakeTimers();
+    const { emit, toast } = setup();
+    for (let i = 0; i < 30; i++) {
+      emit("wire:clipboardRefused", REFUSED);
+      vi.advanceTimersByTime(2_000);
+    }
+    expect(toast).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(10_000);
+    emit("wire:clipboardRefused", REFUSED);
+    expect(toast).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the next refusal at once after a copy that went through", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { emit, toast } = setup();
+    emit("wire:clipboardRefused", REFUSED);
+    emit("wire:clipboard", "small");
+    await vi.waitFor(() => {
+      expect(toast).toHaveBeenCalledWith("Copied");
+    });
+    emit("wire:clipboardRefused", REFUSED);
+    expect(toast.mock.calls).toEqual([[REFUSED], ["Copied"], [REFUSED]]);
+  });
+
+  it("a copy that went through toasts no refusal", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { emit, toast } = setup();
+    emit("wire:clipboard", "small");
+    await vi.waitFor(() => {
+      expect(toast).toHaveBeenCalledWith("Copied");
+    });
+    expect(toast).not.toHaveBeenCalledWith(REFUSED);
+  });
+});
+
 describe("clipboard: feature-detection when navigator.clipboard is absent", () => {
   it("copy() toasts 'Clipboard unavailable' rather than throwing", () => {
     vi.stubGlobal("navigator", { clipboard: undefined });

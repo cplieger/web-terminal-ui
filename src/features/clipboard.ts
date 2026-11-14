@@ -3,6 +3,10 @@ import { selectionTextWithin } from "../kernel/selection.js";
 import { isShortcutLetter } from "../kernel/shortcut-letter.js";
 import type { TerminalFeature } from "../kernel/types.js";
 
+// A program that retries a refused copy would otherwise re-toast and re-announce
+// it on every attempt; each refusal inside the window extends it.
+const REFUSAL_QUIET_MS = 10_000;
+
 /** The value a peer reads through `ctx.use(clipboard())`. Both members are
  *  fire-and-forget: the outcome reaches the user as a toast, never the caller.
  *  Outside a secure context (`navigator.clipboard` absent) they toast
@@ -17,8 +21,9 @@ export interface ClipboardApi {
 /** Build the clipboard feature: Ctrl+Shift+C copies the browser selection,
  *  Ctrl+Shift+V pastes, a plain Ctrl+V is consumed WITHOUT preventDefault so the
  *  browser's own paste event reaches the hidden textarea, an application's OSC 52
- *  copy is mirrored to the system clipboard, and a native copy of a selection
- *  inside the terminal toasts "Copied". Absent, inbound OSC 52 is a no-op. */
+ *  copy is mirrored to the system clipboard, one the server refused as too large
+ *  toasts the server's reason, and a native copy of a selection inside the
+ *  terminal toasts "Copied". Absent, inbound OSC 52 is a no-op. */
 export function clipboard(): TerminalFeature<ClipboardApi> {
   return {
     name: "clipboard",
@@ -86,8 +91,18 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
 
       // An OSC 52 copy is an async push, not a user gesture, so some browsers
       // reject it and copy() toasts "Copy failed".
+      let refusalQuietUntil = 0;
       ctx.on("wire:clipboard", (text) => {
+        refusalQuietUntil = 0;
         copy(text);
+      });
+      ctx.on("wire:clipboardRefused", (message) => {
+        const now = Date.now();
+        const quiet = now < refusalQuietUntil;
+        refusalQuietUntil = now + REFUSAL_QUIET_MS;
+        if (!quiet) {
+          ctx.toast(message);
+        }
       });
 
       const onCopy = (): void => {
