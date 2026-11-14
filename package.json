@@ -44,7 +44,7 @@
     "verify": "bash scripts/verify.sh"
   },
   "peerDependencies": {
-    "@cplieger/web-terminal-engine": "^6.5.0"
+    "@cplieger/web-terminal-engine": "^6.5.0 || ^6.6.0-dev"
   },
   "overrides": {
     "qs": "^6.15.2",
