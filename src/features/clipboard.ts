@@ -98,7 +98,7 @@ export function clipboard(): TerminalFeature<ClipboardApi> {
         return false;
       });
 
-      // One toast serves every pane, so a write that settles after a later OSC 52
+      // This pane has one toast, so a write that settles after a later OSC 52
       // event must not replace that event's toast (a refusal with "Copied").
       let wireGeneration = 0;
       const refusalQuietUntil = new Map<string, number>();
