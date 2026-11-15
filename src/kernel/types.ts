@@ -424,6 +424,10 @@ export interface TerminalEvents {
   "wire:title": { session: string; title: string };
   /** Inbound OSC 52 clipboard content. */
   "wire:clipboard": string;
+  /** An OSC 52 copy over the server's limit, which left the clipboard
+   *  unwritten, against the ACTIVE session; `message` is the engine's sentence
+   *  for the reader. */
+  "wire:clipboardRefused": { session: string; message: string };
   /** A modes frame (mouse-mode gating, reverse video). */
   "wire:modes": ModesMessage;
   /** A screen frame (first-paint / activity hooks). */

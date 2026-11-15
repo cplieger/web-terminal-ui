@@ -353,6 +353,132 @@ describe("clipboard: inbound OSC 52 mirrors to the system clipboard", () => {
   });
 });
 
+describe("clipboard: an OSC 52 copy the server refused", () => {
+  const REFUSED = "Copy too large to send to the browser";
+  const refusal = (session = "s1"): { session: string; message: string } => ({
+    session,
+    message: REFUSED,
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A writeText that stays pending until the test settles it. */
+  function pendingWrite(): {
+    resolve: () => void;
+    reject: () => void;
+  } {
+    let resolve = (): void => undefined;
+    let reject = (): void => undefined;
+    const writeText = vi.fn(
+      () =>
+        new Promise<void>((res, rej) => {
+          resolve = res;
+          reject = () => {
+            rej(new Error("denied"));
+          };
+        }),
+    );
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    return {
+      resolve: () => {
+        resolve();
+      },
+      reject: () => {
+        reject();
+      },
+    };
+  }
+
+  it("toasts the server's reason once", () => {
+    const { emit, toast } = setup();
+    emit("wire:clipboardRefused", refusal());
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(toast).toHaveBeenCalledWith(REFUSED);
+  });
+
+  it("toasts once while a program keeps retrying, and again after it has gone quiet", () => {
+    vi.useFakeTimers();
+    const { emit, toast } = setup();
+    for (let i = 0; i < 30; i++) {
+      emit("wire:clipboardRefused", refusal());
+      vi.advanceTimersByTime(2_000);
+    }
+    expect(toast).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(10_000);
+    emit("wire:clipboardRefused", refusal());
+    expect(toast).toHaveBeenCalledTimes(2);
+  });
+
+  it("one session's retries do not silence another session's first refusal", () => {
+    vi.useFakeTimers();
+    const { emit, toast } = setup();
+    emit("wire:clipboardRefused", refusal("s1"));
+    vi.advanceTimersByTime(2_000);
+    emit("wire:clipboardRefused", refusal("s2"));
+    vi.advanceTimersByTime(2_000);
+    emit("wire:clipboardRefused", refusal("s1"));
+    emit("wire:clipboardRefused", refusal("s2"));
+    expect(toast.mock.calls).toEqual([[REFUSED], [REFUSED]]);
+  });
+
+  it("shows the next refusal at once after a copy that went through", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { emit, toast } = setup();
+    emit("wire:clipboardRefused", refusal());
+    emit("wire:clipboard", "small");
+    await vi.waitFor(() => {
+      expect(toast).toHaveBeenCalledWith("Copied");
+    });
+    emit("wire:clipboardRefused", refusal());
+    expect(toast.mock.calls).toEqual([[REFUSED], ["Copied"], [REFUSED]]);
+  });
+
+  it("a copy still being written when a later one is refused does not replace the refusal with 'Copied'", async () => {
+    const write = pendingWrite();
+    const { emit, toast } = setup();
+    emit("wire:clipboard", "small");
+    emit("wire:clipboardRefused", refusal());
+    write.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(toast.mock.calls).toEqual([[REFUSED]]);
+  });
+
+  it("a copy still being written when a later one is refused does not replace the refusal with 'Copy failed'", async () => {
+    const write = pendingWrite();
+    const { emit, toast } = setup();
+    emit("wire:clipboard", "small");
+    emit("wire:clipboardRefused", refusal());
+    write.reject();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(toast.mock.calls).toEqual([[REFUSED]]);
+  });
+
+  it("a gesture copy still toasts 'Copied' after a refusal", async () => {
+    const write = pendingWrite();
+    const { api, emit, toast } = setup();
+    api.copy("picked");
+    emit("wire:clipboardRefused", refusal());
+    write.resolve();
+    await vi.waitFor(() => {
+      expect(toast.mock.calls).toEqual([[REFUSED], ["Copied"]]);
+    });
+  });
+
+  it("a copy that went through toasts no refusal", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const { emit, toast } = setup();
+    emit("wire:clipboard", "small");
+    await vi.waitFor(() => {
+      expect(toast).toHaveBeenCalledWith("Copied");
+    });
+    expect(toast).not.toHaveBeenCalledWith(REFUSED);
+  });
+});
+
 describe("clipboard: feature-detection when navigator.clipboard is absent", () => {
   it("copy() toasts 'Clipboard unavailable' rather than throwing", () => {
     vi.stubGlobal("navigator", { clipboard: undefined });
@@ -445,10 +571,16 @@ describe("clipboard: the terminal releases both kernel seams after teardown", ()
     const { emit, toast, inst, drainScope } = setup();
     emit("wire:clipboard", "from the app");
     expect(writeText).toHaveBeenCalledWith("from the app");
+    await vi.waitFor(() => {
+      expect(toast).toHaveBeenCalledTimes(1);
+    });
 
     inst.teardown();
     emit("wire:clipboard", "still subscribed");
     expect(writeText).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      expect(toast).toHaveBeenCalledTimes(2);
+    });
     drainScope();
     emit("wire:clipboard", "after the drain");
     await new Promise((r) => setTimeout(r, 0));

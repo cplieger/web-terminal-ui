@@ -6,7 +6,7 @@ web-terminal-ui builds a browser terminal on [web-terminal-engine](https://githu
 
 ![The terminal UI with six tabs carrying progress, working and error indicators, the split view open with a git log on the left and a build and fuzz run on the right, and the tab menu open on Snap to left](docs/images/header.png)
 
-It replaces the tabs, key bar, paste menu, IME handling and soft-keyboard resizing you would otherwise build around the engine's renderer. It ships as TypeScript source on npm and JSR, with CSS bundles and a reference page. Its one dependency is the peer `@cplieger/web-terminal-engine` 6.x, and it is licensed under MPL-2.0.
+It replaces the tabs, key bar, paste menu, IME handling and soft-keyboard resizing you would otherwise build around the engine's renderer. It ships as TypeScript source on npm and JSR, with CSS bundles and a reference page. Its one dependency is the peer `@cplieger/web-terminal-engine` 6.6.0 or later, and it is licensed under MPL-2.0.
 
 ## Why use it
 
