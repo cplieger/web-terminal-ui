@@ -5,7 +5,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createSessionsServer,
-  until,
   type Page,
   type SessionsServer,
 } from "./test-helpers/sessions-server.js";
@@ -25,9 +24,28 @@ afterEach(() => {
 
 const counted = (p: Page): boolean => p.doc.title.startsWith("(");
 
+// A setTimeout(0) nested more than five deep waits 4 ms (HTML, the timer
+// initialization steps: https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html),
+// so a case that settles a dozen times slept through most of its 2 s budget.
+// A message is a whole task without the clamp.
+function nextTask(): Promise<void> {
+  const { port1, port2 } = new MessageChannel();
+  return new Promise((resolve) => {
+    port1.onmessage = () => {
+      port1.close();
+      resolve();
+    };
+    port2.postMessage(null);
+  });
+}
+
 async function settle(p: Page, pred: () => boolean = () => false): Promise<void> {
-  await until(pred, pred() ? 1 : 30);
-  await until(() => false, 3);
+  for (let i = 0; i < 30 && !pred(); i++) {
+    await nextTask();
+  }
+  for (let i = 0; i < 3; i++) {
+    await nextTask();
+  }
   void p;
 }
 
