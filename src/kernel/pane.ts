@@ -590,14 +590,17 @@ function buildPaneInto(
   function updateMousePointer(): void {
     termWrap.classList.toggle("wt-mouse-app", engine.modes.getMouseMode() !== 0);
   }
-  function measurableSize(): GridSize | null {
+  function gridNow(): GridSize | null {
     // A pane hidden by a closed split is `display: none`: the cell width it would
     // measure is 0, and the first render after a reveal would lay out on it.
-    if (!fontsLoaded || hidden || viewport.isInTransition()) {
+    if (!fontsLoaded || hidden) {
       return null;
     }
     engine.renderer.updateFontMetrics();
     return engine.renderer.computeSize();
+  }
+  function measurableSize(): GridSize | null {
+    return viewport.isInTransition() ? null : gridNow();
   }
   // Whether the last request held the rows under the measured box, so the two
   // events that end a hold (the reader follows, the alternate screen) know to
@@ -1582,6 +1585,9 @@ function buildPaneInto(
       }
     },
     fontSettled,
+    // Not measurableSize: the mount's first ResizeObserver delivery opens a
+    // viewport transition, and the boot create runs inside it.
+    measuredSize: () => (destroyed ? null : gridNow()),
     inputReady: () => !destroyed && engine.connection.inputReady(),
     holdInput() {
       return destroyed ? () => undefined : engine.connection.holdInput();

@@ -1131,6 +1131,38 @@ describe("what a host can wait on before it sends", () => {
     expect(settled).toBe(true);
   });
 
+  it("measuredSize is null before the font settles and the measured grid after", async () => {
+    const settle = stubFonts();
+    const { term, ctx } = await paneOf();
+    const pane = ctx.shell.pane(ctx.shell.selected());
+    if (pane === null) {
+      throw new Error("no pane");
+    }
+    fake.renderer.computeSize.mockReturnValue({ cols: 47, rows: 31 });
+    expect(pane.measuredSize()).toBeNull();
+
+    settle();
+    await pane.fontSettled;
+
+    expect(pane.measuredSize()).toEqual({ cols: 47, rows: 31 });
+    term.destroy();
+    expect(pane.measuredSize()).toBeNull();
+  });
+
+  it("measuredSize measures through a viewport transition, which a resize waits out", async () => {
+    const { ctx } = await paneOf();
+    const pane = ctx.shell.pane(ctx.shell.selected());
+    if (pane === null) {
+      throw new Error("no pane");
+    }
+    fake.renderer.computeSize.mockReturnValue({ cols: 47, rows: 31 });
+
+    window.dispatchEvent(new Event("resize"));
+
+    expect(wire().initialSize?.()).toBeNull();
+    expect(pane.measuredSize()).toEqual({ cols: 47, rows: 31 });
+  });
+
   it("holds the shown session's input on its connection", async () => {
     const { ctx } = await paneOf();
     const release = vi.fn();

@@ -474,7 +474,9 @@ interface SessionAPIRealm {
  *  bootstrap await pending forever. */
 interface SessionAPI {
   list(): Promise<SessionInfo[]>;
-  create(): Promise<SessionInfo>;
+  /** Create a session whose process starts at `size`, or at the server's
+   *  default when it is absent. */
+  create(size?: { cols: number; rows: number }): Promise<SessionInfo>;
   close(id: string): Promise<void>;
   /** Set the user's pinned name. THROWS on failure: a rename that silently did
    *  not persist looks correct until the next reload. */
@@ -661,10 +663,17 @@ export function createSessionAPI(apiBase: string, realm: SessionAPIRealm): Sessi
       }
       return data as SessionInfo[];
     },
-    async create(): Promise<SessionInfo> {
-      const r = await request(apiBase, {
-        method: "POST",
-      });
+    async create(size?: { cols: number; rows: number }): Promise<SessionInfo> {
+      const r = await request(
+        apiBase,
+        size === undefined
+          ? { method: "POST" }
+          : {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ cols: size.cols, rows: size.rows }),
+            },
+      );
       if (!r.ok) {
         throw await sessionError("create", r);
       }

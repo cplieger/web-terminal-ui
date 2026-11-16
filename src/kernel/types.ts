@@ -204,6 +204,10 @@ export interface PaneHandle {
    *  failed, or the wait timed out), when `announceSize` starts to send, or the
    *  pane was destroyed. Never rejects. */
   readonly fontSettled: Promise<void>;
+  /** The grid this pane's box measures now, or null while it cannot measure:
+   *  before its font settles, while a closed split hides it, or once destroyed.
+   *  Unlike a resize it does not wait out a viewport transition. */
+  measuredSize(): { cols: number; rows: number } | null;
   /** True from this pane's `input:ready` (its listeners read true) until its
    *  socket closes or is replaced, its session ends, or the shown session is
    *  forgotten; false on a destroyed pane. Input sent while it is true goes out
@@ -358,9 +362,9 @@ export interface ShellContext {
   onSelectionChange(cb: (side: PaneSide) => void): Unsubscribe;
   /** A pane built, hidden, shown or torn down. */
   onPanesChange(cb: () => void): Unsubscribe;
-  /** Where a click on `sessionId`'s tab would show it: the first empty pane, left
-   *  then right, else the selected pane. */
-  targetFor(sessionId: string): PaneSide;
+  /** Where a new tab, or a click on `sessionId`'s tab, would show it: the first
+   *  empty pane, left then right, else the selected pane. */
+  targetFor(sessionId?: string): PaneSide;
   /** The second half of closing a shown tab: `forgetSession(sessionId)` on every
    *  built pane's connection other than `side` (whose own `clearActiveSession()`
    *  already did it), and the scrollback keeper's forget. */

@@ -261,9 +261,18 @@ const isRefusal = (err: unknown): boolean => err instanceof SessionAPIError && e
 interface SessionAPIClient {
   list(): Promise<SessionInfo[]>;
   getLayout(): Promise<PaneLayout | null>;
-  create(): Promise<SessionInfo>;
+  create(size?: GridSize): Promise<SessionInfo>;
   close(id: string): Promise<void>;
 }
+
+interface GridSize {
+  readonly cols: number;
+  readonly rows: number;
+}
+
+/** The size a create starts its process at, measured before each attempt;
+ *  undefined leaves it to the server's default. */
+type CreateSize = () => Promise<GridSize | undefined>;
 
 /** Close a session a page created after it was torn down: nothing holds it. */
 function closeOrphan(api: Pick<SessionAPIClient, "close">, id: string): void {
@@ -283,6 +292,7 @@ async function createSessionHonouringRetry(
   api: Pick<SessionAPIClient, "create" | "close">,
   ctx: TerminalContext,
   signal: AbortSignal,
+  size: CreateSize,
 ): Promise<SessionInfo> {
   const wait: RefusalWait = {
     startedAt: windowOf(ctx.shell.root.ownerDocument).Date.now(),
@@ -290,9 +300,11 @@ async function createSessionHonouringRetry(
   };
   for (;;) {
     signal.throwIfAborted();
+    const startSize = await size();
+    signal.throwIfAborted();
     let info: SessionInfo;
     try {
-      info = await api.create();
+      info = await api.create(startSize);
     } catch (err) {
       signal.throwIfAborted();
       if (!(await waitOutRefusal(err, wait, ctx, signal))) {
@@ -342,6 +354,7 @@ async function settleSessionSet(
   ctx: TerminalContext,
   signal: AbortSignal,
   warnLayout: (what: string, err?: unknown) => void,
+  size: CreateSize,
 ): Promise<Settled> {
   const wait: RefusalWait = {
     startedAt: windowOf(ctx.shell.root.ownerDocument).Date.now(),
@@ -401,9 +414,11 @@ async function settleSessionSet(
     if (sessions.some((s) => !isEndedStatus(s.status))) {
       return settled;
     }
+    const startSize = await size();
+    signal.throwIfAborted();
     let info: SessionInfo;
     try {
-      info = await api.create();
+      info = await api.create(startSize);
     } catch (err) {
       if (isRefusal(err) && (await waited(err))) {
         continue;
@@ -2626,14 +2641,31 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return creating;
       }
 
+      // Where a new tab lands: the unselected pane when both show a tab.
+      function newTabSide(target: PaneSide): PaneSide {
+        const other = otherSide(target);
+        return shownIn(target) !== null && shownIn(other) !== null ? other : target;
+      }
       function showNewTab(id: string): void {
-        const side = ctx.shell.targetFor(id);
-        const other = otherSide(side);
         // Suppress the swipe reel for a new tab: the list should grow and fade the
         // new row in (animateRowIn) rather than rotate.
         creatingTab = true;
-        showIn(shownIn(side) !== null && shownIn(other) !== null ? other : side, id);
+        showIn(newTabSide(ctx.shell.targetFor(id)), id);
         creatingTab = false;
+      }
+      // The grid of the pane a new tab lands in, once that pane's font has
+      // settled (pane.ts bounds the wait). A tab headed for a pane the split
+      // opens after the create has no measurable pane yet.
+      async function newSessionSize(): Promise<GridSize | undefined> {
+        if (createOpening !== null && !ctx.shell.split.isOpen()) {
+          return undefined;
+        }
+        const pane = ctx.shell.pane(newTabSide(ctx.shell.targetFor()));
+        if (pane === null) {
+          return undefined;
+        }
+        await pane.fontSettled;
+        return pane.measuredSize() ?? undefined;
       }
       // This client's own new session can reach the stream before its POST
       // answers, so the placement waits until a create in flight has shown its tab.
@@ -2656,7 +2688,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       async function openNewSession(): Promise<void> {
         let info: SessionInfo;
         try {
-          info = await createSessionHonouringRetry(api, ctx, lifetime.signal);
+          info = await createSessionHonouringRetry(api, ctx, lifetime.signal, newSessionSize);
         } catch (err) {
           if (tornDown()) {
             return;
@@ -4659,7 +4691,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // and carrying on with whatever was listed.
       async function settleOrToast(): Promise<Settled> {
         try {
-          return await settleSessionSet(api, ctx, lifetime.signal, warnLayoutOnce);
+          return await settleSessionSet(api, ctx, lifetime.signal, warnLayoutOnce, newSessionSize);
         } catch (err) {
           if (tornDown()) {
             return NOTHING_SETTLED;
