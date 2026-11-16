@@ -1,9 +1,10 @@
 // The server starts a created session's program at its first client's first
 // resize, so a create sends no size. What the client owes that rule: the new
-// tab ends in a pane whose socket announces that pane's grid, whatever layout
-// change ran during the create, and every session the server created ends
-// shown, listed or closed. Driven through the real feature and kernel; each
-// engine fake measures its pane's box, and fetch is the only network fake.
+// tab ends in the pane the layout change gives it, that pane's opening size is
+// its own grid (not unmeasurable, no rows held), and every session the server
+// created ends shown, listed or closed. Driven through the real feature and
+// kernel; each engine fake measures its pane's box, and fetch is the only
+// network fake.
 
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -102,8 +103,9 @@ function sideShowing(m: ScriptedMount, id: string): PaneSide | null {
   return (["left", "right"] as const).find((side) => shown(m.ctx(), side) === id) ?? null;
 }
 
-/** The size `id`'s socket opens with, the one the server starts its program
- *  at, beside the grid of the pane showing it. */
+/** The size `id`'s pane opens its socket with (its `initialSize`), beside the
+ *  grid of that pane's box. Both read the same box, so they differ only when
+ *  the pane cannot measure or holds its rows. */
 async function startAndPane(
   m: ScriptedMount,
   root: HTMLElement,
