@@ -204,10 +204,11 @@ export interface PaneHandle {
    *  failed, or the wait timed out), when `announceSize` starts to send, or the
    *  pane was destroyed. Never rejects. */
   readonly fontSettled: Promise<void>;
-  /** The grid this pane's box measures now, or null while it cannot measure:
-   *  before its font settles, while a closed split hides it, or once destroyed.
-   *  Unlike a resize it does not wait out a viewport transition. */
-  measuredSize(): { cols: number; rows: number } | null;
+  /** The grid this pane's next resize sends, measured once its font has settled
+   *  and its box has stopped moving (a keyboard slide, a rotation, a split
+   *  slide), waiting at most a second for the box. Null when it still cannot
+   *  measure then: hidden by a closed split, still moving, or destroyed. */
+  measureSize(): Promise<{ cols: number; rows: number } | null>;
   /** True from this pane's `input:ready` (its listeners read true) until its
    *  socket closes or is replaced, its session ends, or the shown session is
    *  forgotten; false on a destroyed pane. Input sent while it is true goes out
@@ -252,6 +253,11 @@ export interface SplitController {
   close(): boolean;
   /** Close one side; the other pane fills the view. */
   closeSide(side: PaneSide): boolean;
+  /** The grid the pane on `side` would measure if `open()` ran now, measured by
+   *  the shown pane's renderer once its font and box settle; the full width on a
+   *  row too narrow for two panes. Null when the split is open or the shown pane
+   *  cannot measure. */
+  measureOpen(side: PaneSide): Promise<{ cols: number; rows: number } | null>;
   /** Set the left share; `commit` writes the record. False when refused. */
   setRatio(ratio: number, commit: boolean): boolean;
   onChange(cb: (state: SplitState) => void): Unsubscribe;

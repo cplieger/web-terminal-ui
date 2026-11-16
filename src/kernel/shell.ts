@@ -105,6 +105,7 @@ function disabledSplit(): SplitController {
     open: () => false,
     close: () => false,
     closeSide: () => false,
+    measureOpen: () => Promise.resolve(null),
     setRatio: () => false,
     onChange: () => () => undefined,
   };
@@ -826,6 +827,7 @@ function createShellInto(
         open: openSplit,
         close: closeSplit,
         closeSide,
+        measureOpen,
         setRatio,
         onChange(cb) {
           changeListeners.add(cb);
@@ -1265,6 +1267,35 @@ function createShellInto(
     rehomeShownTab(squeezed, survivor);
     finishClose(survivor, squeezed);
     return true;
+  }
+  async function measureOpen(side: PaneSide): Promise<{ cols: number; rows: number } | null> {
+    const showing = slotAt("left") ?? primary;
+    const kernel = showing.kernel;
+    if (kernel === null) {
+      return null;
+    }
+    const measured = await kernel.measureSize();
+    if (measured === null || splitOpen || destroyed || closing !== null) {
+      return null;
+    }
+    // A row too narrow for two panes opens collapsed, at the full width.
+    if (rowWidth() < MIN_SPLIT_AREA_PX) {
+      return measured;
+    }
+    // The open columns for one synchronous measure, undone before any frame or
+    // ResizeObserver sees them: the pane a new tab lands in may not be built
+    // yet, so the shown pane measures `side`'s column with the same renderer.
+    shellRoot.classList.add("wt-split-open");
+    shellRoot.style.setProperty("--wt-split-ratio", String(clampRatio(0.5, rowWidth())));
+    showing.root.classList.toggle("wt-side-left", side === "left");
+    showing.root.classList.toggle("wt-side-right", side === "right");
+    try {
+      return kernel.measureNow();
+    } finally {
+      shellRoot.classList.remove("wt-split-open");
+      paintSide(showing);
+      applyRatioVar();
+    }
   }
   function setRatio(ratio: number, commit: boolean): boolean {
     if (!isRatio(ratio) || !splitOpen || collapsed || destroyed) {

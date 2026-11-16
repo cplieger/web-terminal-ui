@@ -56,6 +56,9 @@ const DEFAULT_FONT_READY = '14px "Monaspace Neon NF"';
 // block buys; once the engine has painted the fallback, the cell on screen IS
 // the fallback cell.
 const FONT_READY_TIMEOUT_MS = 3000;
+// A box still moving after this long (a stream of wake resizes) is measured
+// later by its settle resize; a create waiting on it would hold the user's tap.
+const SETTLE_WAIT_MS = 1000;
 const TOAST_MS = 3000;
 // Paged-in history is disposable by construction (recovery is one fetch), so it
 // is evicted by INACTIVITY, never eagerly, to keep rapid scrolling instant.
@@ -217,6 +220,9 @@ export interface PaneKernel extends PaneHandle {
   addInputTransform(fn: (input: AcceptedInput) => AcceptedInput | null): Unsubscribe;
   addInputObserver(fn: (bytes: Uint8Array) => void): Unsubscribe;
   updateNarrow(): void;
+  /** `measureSize` without its waits: null before the font settles or mid
+   *  transition. */
+  measureNow(): GridSize | null;
   /** Drop the LOCAL display: the client-side scrollback and screen. */
   reset(): void;
   reattach(): void;
@@ -590,17 +596,14 @@ function buildPaneInto(
   function updateMousePointer(): void {
     termWrap.classList.toggle("wt-mouse-app", engine.modes.getMouseMode() !== 0);
   }
-  function gridNow(): GridSize | null {
+  function measurableSize(): GridSize | null {
     // A pane hidden by a closed split is `display: none`: the cell width it would
     // measure is 0, and the first render after a reveal would lay out on it.
-    if (!fontsLoaded || hidden) {
+    if (!fontsLoaded || hidden || viewport.isInTransition()) {
       return null;
     }
     engine.renderer.updateFontMetrics();
     return engine.renderer.computeSize();
-  }
-  function measurableSize(): GridSize | null {
-    return viewport.isInTransition() ? null : gridNow();
   }
   // Whether the last request held the rows under the measured box, so the two
   // events that end a hold (the reader follows, the alternate screen) know to
@@ -1217,11 +1220,35 @@ function buildPaneInto(
       // sendResize deduplicates.
       announce();
       composition.positionCompositionView();
+      releaseSettleWaits();
     },
   });
   acquire(() => {
     viewport.teardown();
   });
+  const settleWaits = new Set<() => void>();
+  function releaseSettleWaits(): void {
+    for (const done of [...settleWaits]) {
+      done();
+    }
+  }
+  acquire(releaseSettleWaits);
+  /** Resolves when the viewport is out of its transition, or after
+   *  SETTLE_WAIT_MS of one that keeps moving. */
+  function viewportSettled(): Promise<void> {
+    if (destroyed || !viewport.isInTransition()) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      const done = (): void => {
+        settleWaits.delete(done);
+        win.clearTimeout(deadline);
+        resolve();
+      };
+      const deadline = win.setTimeout(done, SETTLE_WAIT_MS);
+      settleWaits.add(done);
+    });
+  }
 
   // Both handles are owned so a pane destroyed inside the font wait fires
   // nothing afterwards: the settled callback would fade the consumer's overlay
@@ -1585,9 +1612,12 @@ function buildPaneInto(
       }
     },
     fontSettled,
-    // Not measurableSize: the mount's first ResizeObserver delivery opens a
-    // viewport transition, and the boot create runs inside it.
-    measuredSize: () => (destroyed ? null : gridNow()),
+    async measureSize() {
+      await fontSettled;
+      await viewportSettled();
+      return destroyed ? null : measurableSize();
+    },
+    measureNow: () => (destroyed ? null : measurableSize()),
     inputReady: () => !destroyed && engine.connection.inputReady(),
     holdInput() {
       return destroyed ? () => undefined : engine.connection.holdInput();

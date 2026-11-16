@@ -26,7 +26,7 @@ import {
   type TabAlias,
   type TabRoute,
 } from "./route.js";
-import type { CueStatus, PaneLayout, SessionInfo, StatusRecord, Tab } from "./model.js";
+import type { CueStatus, PaneLayout, SessionInfo, StartSize, StatusRecord, Tab } from "./model.js";
 import {
   MAX_PINNED_NAME,
   PROGRESS_ABSENT,
@@ -261,18 +261,13 @@ const isRefusal = (err: unknown): boolean => err instanceof SessionAPIError && e
 interface SessionAPIClient {
   list(): Promise<SessionInfo[]>;
   getLayout(): Promise<PaneLayout | null>;
-  create(size?: GridSize): Promise<SessionInfo>;
+  create(size?: StartSize): Promise<SessionInfo>;
   close(id: string): Promise<void>;
-}
-
-interface GridSize {
-  readonly cols: number;
-  readonly rows: number;
 }
 
 /** The size a create starts its process at, measured before each attempt;
  *  undefined leaves it to the server's default. */
-type CreateSize = () => Promise<GridSize | undefined>;
+type MeasureStart = () => Promise<StartSize | undefined>;
 
 /** Close a session a page created after it was torn down: nothing holds it. */
 function closeOrphan(api: Pick<SessionAPIClient, "close">, id: string): void {
@@ -292,7 +287,7 @@ async function createSessionHonouringRetry(
   api: Pick<SessionAPIClient, "create" | "close">,
   ctx: TerminalContext,
   signal: AbortSignal,
-  size: CreateSize,
+  size: MeasureStart,
 ): Promise<SessionInfo> {
   const wait: RefusalWait = {
     startedAt: windowOf(ctx.shell.root.ownerDocument).Date.now(),
@@ -354,7 +349,7 @@ async function settleSessionSet(
   ctx: TerminalContext,
   signal: AbortSignal,
   warnLayout: (what: string, err?: unknown) => void,
-  size: CreateSize,
+  size: MeasureStart,
 ): Promise<Settled> {
   const wait: RefusalWait = {
     startedAt: windowOf(ctx.shell.root.ownerDocument).Date.now(),
@@ -2653,19 +2648,25 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         showIn(newTabSide(ctx.shell.targetFor(id)), id);
         creatingTab = false;
       }
-      // The grid of the pane a new tab lands in, once that pane's font has
-      // settled (pane.ts bounds the wait). A tab headed for a pane the split
-      // opens after the create has no measurable pane yet.
-      async function newSessionSize(): Promise<GridSize | undefined> {
-        if (createOpening !== null && !ctx.shell.split.isOpen()) {
-          return undefined;
+      // The grid of the pane a new tab lands in. A create that opens the split
+      // measures the pane openNewSession fills once the split opens; a
+      // coalesced caller that asks for the split mid-measure measures again.
+      async function newSessionSize(): Promise<StartSize | undefined> {
+        for (;;) {
+          const opening = createOpening;
+          const size = await measureLanding(opening);
+          if (createOpening === opening) {
+            return size ?? undefined;
+          }
+        }
+      }
+      function measureLanding(opening: SplitOpening | null): Promise<StartSize | null> {
+        const split = ctx.shell.split;
+        if (opening !== null && !split.isOpen()) {
+          return split.measureOpen(opening.by === "button" ? "right" : otherSide(opening.side));
         }
         const pane = ctx.shell.pane(newTabSide(ctx.shell.targetFor()));
-        if (pane === null) {
-          return undefined;
-        }
-        await pane.fontSettled;
-        return pane.measuredSize() ?? undefined;
+        return pane === null ? Promise.resolve(null) : pane.measureSize();
       }
       // This client's own new session can reach the stream before its POST
       // answers, so the placement waits until a create in flight has shown its tab.

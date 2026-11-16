@@ -4,6 +4,7 @@ import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
 import { ackEpoch } from "../../test-helpers/store-epoch.js";
 import type { FakeEngineRecord } from "../../test-helpers/fake-engine.js";
+import { shortSettled, shortenSettle } from "../../test-helpers/delays.js";
 import type {
   PaneSide,
   PersistedScrollback,
@@ -69,7 +70,8 @@ const clearForgets = (): void => {
 
 let server: FakeSessionServer;
 
-beforeEach(() => {
+beforeEach(async () => {
+  await shortenSettle();
   fake.reset();
   server = fakeServer();
   vi.stubGlobal("fetch", server.fetch);
@@ -616,6 +618,8 @@ describe("the tab-click rule", () => {
 
     ctx.shell.select("left");
     server.list = [];
+    // The layout writes go out first, so the one-shot answer meets the POST.
+    await shortSettled();
     server.fetch.mockImplementationOnce(() =>
       Promise.resolve(
         jsonResponse({ id: "s-later", title: "", createdAt: "10", status: "idle" }, 201),
@@ -629,6 +633,7 @@ describe("the tab-click rule", () => {
     expect(activeLabels(root)).toEqual(["one", "New tab"]);
     expect(chips(root)).toHaveLength(4);
 
+    await shortSettled();
     server.fetch.mockImplementationOnce(() =>
       Promise.resolve(
         jsonResponse({ id: "s-last", title: "", createdAt: "11", status: "idle" }, 201),

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type { TerminalContext } from "../../kernel/types.js";
 import type { TabsApi } from "./index.js";
+import { shortenSettle } from "../../test-helpers/delays.js";
 import {
   activeLabels,
   chipOf,
@@ -31,7 +32,8 @@ const FINGER = 7;
 let server: FakeSessionServer;
 let ctx: TerminalContext;
 let api: TabsApi;
-beforeEach(() => {
+beforeEach(async () => {
+  await shortenSettle();
   expect(matchMedia("(pointer: coarse)").matches).toBe(true);
   fake.reset();
   server = fakeServer();

@@ -1154,6 +1154,7 @@ describe("construction is transactional", () => {
           open: () => false,
           close: () => false,
           closeSide: () => false,
+          measureOpen: () => Promise.resolve(null),
           setRatio: () => false,
           onChange() {
             subscriptions += 1;

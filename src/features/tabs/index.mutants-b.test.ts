@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
-import { shortenReannounce } from "../../test-helpers/delays.js";
+import { shortenReannounce, shortenSettle } from "../../test-helpers/delays.js";
 import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 // A plain string constant, so reading it through a separate module instance than
@@ -166,6 +166,7 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
 });
 
 beforeEach(async () => {
+  await shortenSettle();
   await shortenReannounce();
   fetchMock.mockClear();
   server = {

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type {} from "@vitest/browser-playwright";
+import { shortenSettle } from "../../test-helpers/delays.js";
 import {
   activeLabels,
   chipOf,
@@ -27,7 +28,8 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
 });
 
 let server: FakeSessionServer;
-beforeEach(() => {
+beforeEach(async () => {
+  await shortenSettle();
   expect(matchMedia("(pointer: coarse)").matches).toBe(true);
   expect(matchMedia("(any-pointer: fine)").matches).toBe(false);
   fake.reset();

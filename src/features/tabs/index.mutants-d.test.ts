@@ -11,6 +11,7 @@ import { tabs } from "./index.js";
 import type { PaneLayout } from "./model.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
 import type { TerminalHandle } from "../../kernel/types.js";
+import { shortSettled, shortenSettle } from "../../test-helpers/delays.js";
 // The reorder timings, imported rather than restated, for the reason
 // index.test.ts gives: these tests pin the SHAPE of the interaction, not the
 // numbers, so a deliberate retune moves one definition and not a dozen magic
@@ -91,7 +92,8 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   return Promise.resolve(jsonResponse(listBody, 200));
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  await shortenSettle();
   fake.reset();
   // vitest resets every spy to its construction default before each test; the
   // answers this file depends on are re-declared so they are stated here.
@@ -1183,6 +1185,7 @@ describe("tabs: the switcher reel and the list's own row motion", () => {
 
   it("teardown during a row's enter motion releases it: no frame or timer survives", async () => {
     const h = await mountReel();
+    await shortSettled();
     vi.useFakeTimers();
     try {
       // "+" on the open list: the new tab takes the bar and the tab that held it
