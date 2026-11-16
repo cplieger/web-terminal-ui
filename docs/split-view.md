@@ -89,4 +89,4 @@ Two rules apply to a `features` function under `split: true`, and both are check
 
 ## The split controller
 
-With `split: true`, the handle's `split` member is a `SplitController`. It has `enabled`, `state()`, `isOpen()`, `canOpen()`, `open()`, `close()`, `closeSide(side)`, `measureOpen(side)`, `setRatio(ratio, commit)` and `onChange(callback)`. `state()` returns `open`, `collapsed`, `ratio`, `committedRatio` and `selected`. `measureOpen(side)` resolves to the grid the pane on `side` would have if `open()` ran now, or null while the split is open or the shown pane cannot measure. Like `open()`, it first ends a close slide in flight. A terminal built without `split` has no `split` member on its handle.
+With `split: true`, the handle's `split` member is a `SplitController`. It has `enabled`, `state()`, `isOpen()`, `canOpen()`, `open()`, `close()`, `closeSide(side)`, `setRatio(ratio, commit)` and `onChange(callback)`. `state()` returns `open`, `collapsed`, `ratio`, `committedRatio` and `selected`. A terminal built without `split` has no `split` member on its handle.

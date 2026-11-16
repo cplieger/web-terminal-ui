@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import { shortenSettle } from "../../test-helpers/delays.js";
 import { MIN_PANE_PX, SPLIT_GUTTER_PX } from "../../kernel/layout-policy.js";
 import {
   announced,
@@ -35,8 +34,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
 
 let server: FakeSessionServer;
 
-beforeEach(async () => {
-  await shortenSettle();
+beforeEach(() => {
   fake.reset();
   server = fakeServer();
   vi.stubGlobal("fetch", server.fetch);

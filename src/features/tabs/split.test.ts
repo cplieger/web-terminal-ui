@@ -4,7 +4,6 @@ import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
 import { ackEpoch } from "../../test-helpers/store-epoch.js";
 import type { FakeEngineRecord } from "../../test-helpers/fake-engine.js";
-import { shortSettled, shortenSettle } from "../../test-helpers/delays.js";
 import type {
   PaneSide,
   PersistedScrollback,
@@ -70,8 +69,7 @@ const clearForgets = (): void => {
 
 let server: FakeSessionServer;
 
-beforeEach(async () => {
-  await shortenSettle();
+beforeEach(() => {
   fake.reset();
   server = fakeServer();
   vi.stubGlobal("fetch", server.fetch);
@@ -244,7 +242,7 @@ describe("the split button", () => {
     expect(server.posts()).toBe(1);
   });
 
-  it("with one tab a click while a '+' create is in flight waits for its tab, then opens the split beside it with the old tab", async () => {
+  it("with one tab a click while a '+' create is in flight shares its one POST, and the new tab opens on the right and selected", async () => {
     server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
@@ -257,10 +255,11 @@ describe("the split button", () => {
     expect(term.split?.isOpen()).toBe(false);
 
     held.resolve();
-    await until(() => term.split?.isOpen() === true);
-    expect(shown(ctx, "left")).toBe("s-new");
-    expect(shown(ctx, "right")).toBe("s1");
-    expect(ctx.shell.selected()).toBe("left");
+    await until(() => shown(ctx, "left") === "s-new" || shown(ctx, "right") === "s-new");
+    expect(term.split?.isOpen()).toBe(true);
+    expect(shown(ctx, "left")).toBe("s1");
+    expect(shown(ctx, "right")).toBe("s-new");
+    expect(ctx.shell.selected()).toBe("right");
     expect(chips(root)).toHaveLength(2);
     expect(server.posts()).toBe(1);
   });
@@ -617,8 +616,6 @@ describe("the tab-click rule", () => {
 
     ctx.shell.select("left");
     server.list = [];
-    // The layout writes go out first, so the one-shot answer meets the POST.
-    await shortSettled();
     server.fetch.mockImplementationOnce(() =>
       Promise.resolve(
         jsonResponse({ id: "s-later", title: "", createdAt: "10", status: "idle" }, 201),
@@ -632,7 +629,6 @@ describe("the tab-click rule", () => {
     expect(activeLabels(root)).toEqual(["one", "New tab"]);
     expect(chips(root)).toHaveLength(4);
 
-    await shortSettled();
     server.fetch.mockImplementationOnce(() =>
       Promise.resolve(
         jsonResponse({ id: "s-last", title: "", createdAt: "11", status: "idle" }, 201),

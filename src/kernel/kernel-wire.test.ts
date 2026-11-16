@@ -1131,64 +1131,6 @@ describe("what a host can wait on before it sends", () => {
     expect(settled).toBe(true);
   });
 
-  it("measureSize waits for the font, then reads the grid; null once destroyed", async () => {
-    const settle = stubFonts();
-    const { term, ctx } = await paneOf();
-    const pane = ctx.shell.pane(ctx.shell.selected());
-    if (pane === null) {
-      throw new Error("no pane");
-    }
-    fake.renderer.computeSize.mockReturnValue({ cols: 47, rows: 31 });
-    const measuring = pane.measureSize();
-    let answered = false;
-    void measuring.then(() => {
-      answered = true;
-    });
-    await tick();
-    expect(answered).toBe(false);
-
-    settle();
-
-    expect(await measuring).toEqual({ cols: 47, rows: 31 });
-    term.destroy();
-    expect(await pane.measureSize()).toBeNull();
-  });
-
-  it("measureSize waits out a viewport transition and reads the settled grid", async () => {
-    const { ctx } = await paneOf();
-    const pane = ctx.shell.pane(ctx.shell.selected());
-    if (pane === null) {
-      throw new Error("no pane");
-    }
-    await shortenSettle();
-    fake.renderer.computeSize.mockReturnValue({ cols: 47, rows: 31 });
-    window.dispatchEvent(new Event("resize"));
-
-    const measuring = pane.measureSize();
-    await tick();
-    fake.renderer.computeSize.mockReturnValue({ cols: 52, rows: 33 });
-
-    expect(await measuring).toEqual({ cols: 52, rows: 33 });
-  });
-
-  it("measureSize gives up on a viewport transition that never settles", async () => {
-    const { ctx } = await paneOf();
-    const pane = ctx.shell.pane(ctx.shell.selected());
-    if (pane === null) {
-      throw new Error("no pane");
-    }
-    await shortenSettle();
-    const restless = setInterval(() => {
-      window.dispatchEvent(new Event("resize"));
-    }, 5);
-    try {
-      window.dispatchEvent(new Event("resize"));
-      expect(await pane.measureSize()).toBeNull();
-    } finally {
-      clearInterval(restless);
-    }
-  });
-
   it("holds the shown session's input on its connection", async () => {
     const { ctx } = await paneOf();
     const release = vi.fn();

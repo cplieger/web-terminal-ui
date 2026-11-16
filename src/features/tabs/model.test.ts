@@ -526,35 +526,6 @@ describe("setOrder sends the arrangement to the server", () => {
   });
 });
 
-describe("create tells the server the size to start the process at", () => {
-  function recordCalls(): { url: string; init: RequestInit | undefined }[] {
-    const calls: { url: string; init: RequestInit | undefined }[] = [];
-    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
-      calls.push({ url, init });
-      return Promise.resolve(new Response(JSON.stringify({ id: "s1" }), { status: 201 }));
-    });
-    return calls;
-  }
-
-  it("POSTs the given grid as the JSON body the engine reads", async () => {
-    const calls = recordCalls();
-    await createSessionAPI("/api/sessions", window).create({ cols: 47, rows: 31 });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.url).toBe("/api/sessions");
-    expect(calls[0]?.init?.method).toBe("POST");
-    expect(calls[0]?.init?.body).toBe('{"cols":47,"rows":31}');
-    expect(calls[0]?.init?.headers).toEqual({ "Content-Type": "application/json" });
-  });
-
-  it("sends no body without a size, so the server starts at its default", async () => {
-    const calls = recordCalls();
-    await createSessionAPI("/api/sessions", window).create();
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.init?.method).toBe("POST");
-    expect(calls[0]?.init?.body).toBeUndefined();
-  });
-});
-
 describe("the layout record's client half", () => {
   const record: PaneLayout = {
     left: "s1",

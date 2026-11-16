@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
-import { shortenSettle } from "../../test-helpers/delays.js";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import {
   chipOf,
@@ -46,8 +45,7 @@ const session = (id: string, alias: string | undefined, createdAt: string): Sess
     ...(alias === undefined ? {} : { alias }),
   }) as SessionStatus;
 
-beforeEach(async () => {
-  await shortenSettle();
+beforeEach(() => {
   fake.reset();
   server = fakeServer();
   server.list = [session("s1", A, "1"), session("s2", B, "2"), session("s3", C, "3")];

@@ -26,7 +26,7 @@ import {
   type TabAlias,
   type TabRoute,
 } from "./route.js";
-import type { CueStatus, PaneLayout, SessionInfo, StartSize, StatusRecord, Tab } from "./model.js";
+import type { CueStatus, PaneLayout, SessionInfo, StatusRecord, Tab } from "./model.js";
 import {
   MAX_PINNED_NAME,
   PROGRESS_ABSENT,
@@ -124,8 +124,7 @@ export interface TabsApi {
    *  while a create is in flight share that create, so one gesture opens exactly
    *  one terminal. */
   create(): Promise<void>;
-  /** Close a session (kills its process) and drop its tab + cache. A shown tab
-   *  closed while a create is out waits until the new tab shows. */
+  /** Close a session (kills its process) and drop its tab + cache. */
   close(id: string): Promise<void>;
   /** Show a tab: in the first empty pane, else in the selected pane; a tab a
    *  pane already shows has that pane selected instead. */
@@ -136,8 +135,7 @@ export interface TabsApi {
    *  once it exists. A tab the other pane shows trades places with the one on
    *  that side; any other tab there becomes ordinary. In an open split, a tab
    *  already shown on that side changes nothing. False when refused: an unknown
-   *  id, an invalid side, or a split the pane row is too narrow to open. While a
-   *  create is out it waits until the new tab shows, and answers true. */
+   *  id, an invalid side, or a split the pane row is too narrow to open. */
   snap(id: string, side: PaneSide): boolean;
   /** The current tabs, first-to-last by creation; `active` marks a tab a pane
    *  shows. */
@@ -263,13 +261,9 @@ const isRefusal = (err: unknown): boolean => err instanceof SessionAPIError && e
 interface SessionAPIClient {
   list(): Promise<SessionInfo[]>;
   getLayout(): Promise<PaneLayout | null>;
-  create(size?: StartSize): Promise<SessionInfo>;
+  create(): Promise<SessionInfo>;
   close(id: string): Promise<void>;
 }
-
-/** The size a create starts its process at, measured before each attempt;
- *  undefined leaves it to the server's default. */
-type MeasureStart = () => Promise<StartSize | undefined>;
 
 /** Close a session a page created after it was torn down: nothing holds it. */
 function closeOrphan(api: Pick<SessionAPIClient, "close">, id: string): void {
@@ -289,7 +283,6 @@ async function createSessionHonouringRetry(
   api: Pick<SessionAPIClient, "create" | "close">,
   ctx: TerminalContext,
   signal: AbortSignal,
-  size: MeasureStart,
 ): Promise<SessionInfo> {
   const wait: RefusalWait = {
     startedAt: windowOf(ctx.shell.root.ownerDocument).Date.now(),
@@ -297,11 +290,9 @@ async function createSessionHonouringRetry(
   };
   for (;;) {
     signal.throwIfAborted();
-    const startSize = await size();
-    signal.throwIfAborted();
     let info: SessionInfo;
     try {
-      info = await api.create(startSize);
+      info = await api.create();
     } catch (err) {
       signal.throwIfAborted();
       if (!(await waitOutRefusal(err, wait, ctx, signal))) {
@@ -351,7 +342,6 @@ async function settleSessionSet(
   ctx: TerminalContext,
   signal: AbortSignal,
   warnLayout: (what: string, err?: unknown) => void,
-  size: MeasureStart,
 ): Promise<Settled> {
   const wait: RefusalWait = {
     startedAt: windowOf(ctx.shell.root.ownerDocument).Date.now(),
@@ -411,11 +401,9 @@ async function settleSessionSet(
     if (sessions.some((s) => !isEndedStatus(s.status))) {
       return settled;
     }
-    const startSize = await size();
-    signal.throwIfAborted();
     let info: SessionInfo;
     try {
-      info = await api.create(startSize);
+      info = await api.create();
     } catch (err) {
       if (isRefusal(err) && (await waited(err))) {
         continue;
@@ -992,6 +980,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // While a resync settles, the address bar is left alone so the dead tabs it
       // drops write no history entries (scheduleAddress).
       let settling = false;
+      // A resync dropping, settling and placing a session set (placeSet).
+      let placingSet: Promise<unknown> | null = null;
+      function placeSet<T>(run: () => Promise<T>): Promise<T> {
+        const p = run();
+        placingSet = p;
+        const clear = (): void => {
+          if (placingSet === p) {
+            placingSet = null;
+          }
+        };
+        p.then(clear, clear);
+        return p;
+      }
       // The coalesced layout write (scheduleLayoutWrite): one PUT per macrotask,
       // one in flight at a time, and a change during the flight sends the latest
       // state once it lands, so an older record can never become the server's.
@@ -1928,13 +1929,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!isPaneSide(side) || !tabList.some((t) => t.id === id)) {
           return false;
         }
-        if (
-          heldForCreate(() => {
-            snap(id, side);
-          })
-        ) {
-          return true;
-        }
         const split = ctx.shell.split;
         const opening = !split.isOpen();
         const from = sideOf(id);
@@ -1974,9 +1968,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       function toggleSplit(): void {
-        if (heldForCreate(toggleSplit)) {
-          return;
-        }
         const split = ctx.shell.split;
         if (split.isOpen()) {
           split.close();
@@ -2636,12 +2627,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // decides how it opens.
       let creating: Promise<void> | null = null;
       let createOpening: SplitOpening | null = null;
+      // A create pressed while a resync places its set starts once the set is
+      // shown: placed earlier, its tab takes the pane the settled session needs,
+      // and showSettled then keeps the panes and shows that session nowhere.
       function create(opening: SplitOpening | null = null): Promise<void> {
         if (creating === null) {
           createOpening = opening;
-          const sized = sizedCreate();
-          creating = openNewSession(sized).finally(() => {
-            sized.release();
+          const after = placingSet;
+          const run =
+            after === null ? openNewSession() : after.then(openNewSession, openNewSession);
+          creating = run.finally(() => {
             creating = null;
           });
         } else {
@@ -2650,129 +2645,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return creating;
       }
 
-      // The server starts a created process at the size its POST carried, so
-      // from the measure that took that size until the new tab shows, a split,
-      // snap, shown close or navigation waits for the holds. The divider
-      // (setRatio) is not held: its resize reaches the program once the tab shows.
-      const layoutHolds = new Set<object>();
-      let layoutFreed = Promise.withResolvers<undefined>();
-      function holdLayout(): () => void {
-        const token = {};
-        layoutHolds.add(token);
-        return () => {
-          if (layoutHolds.delete(token) && layoutHolds.size === 0) {
-            layoutFreed.resolve(undefined);
-            layoutFreed = Promise.withResolvers<undefined>();
-          }
-        };
-      }
-      async function layoutFree(): Promise<void> {
-        while (layoutHolds.size > 0) {
-          await layoutFreed.promise;
-        }
-      }
-      /** True when a create holds the layout: `change` then runs once it is free. */
-      function heldForCreate(change: () => void): boolean {
-        if (layoutHolds.size === 0) {
-          return false;
-        }
-        void layoutFree().then(() => {
-          if (!tornDown()) {
-            change();
-          }
-        });
-        return true;
-      }
-      // A split or pane change during a measure measures again.
-      let layoutEpoch = 0;
-      const bumpLayoutEpoch = (): void => {
-        layoutEpoch++;
-      };
-      ctx.defer(ctx.shell.split.onChange(bumpLayoutEpoch));
-      ctx.defer(ctx.shell.onPanesChange(bumpLayoutEpoch));
-
-      /** Where a create's tab lands: on `side`, after opening the split by
-       *  `opening` when that is not null. */
-      interface Landing {
-        readonly opening: SplitOpening | null;
-        readonly side: PaneSide;
-      }
-      /** One create's measure, the layout it holds, and where its tab lands. */
-      interface SizedCreate {
-        readonly measure: MeasureStart;
-        /** The session API whose failed create releases the hold. */
-        readonly api: SessionAPIClient;
-        /** The landing the last measure was taken for; null before one. */
-        landing(): Landing | null;
-        /** Free the layout once the tab is shown, or the create gave up. */
-        release(): void;
-      }
-      function sizedCreate(): SizedCreate {
-        let release: (() => void) | null = null;
-        let landing: Landing | null = null;
-        const done = (): void => {
-          release?.();
-          release = null;
-        };
-        return {
-          measure: () => {
-            done();
-            return newSessionSize((at) => {
-              landing = at;
-              release = holdLayout();
-            });
-          },
-          api: {
-            list: () => api.list(),
-            getLayout: () => api.getLayout(),
-            close: (id) => api.close(id),
-            create: (size) =>
-              api.create(size).catch((err: unknown) => {
-                done();
-                throw err;
-              }),
-          },
-          landing: () => landing,
-          release: done,
-        };
-      }
-
-      // Where a new tab lands: the unselected pane when both show a tab.
-      function newTabSide(target: PaneSide): PaneSide {
-        const other = otherSide(target);
-        return shownIn(target) !== null && shownIn(other) !== null ? other : target;
-      }
-      function showNewTab(id: string, side = newTabSide(ctx.shell.targetFor(id))): void {
+      function showNewTab(id: string): void {
+        const side = ctx.shell.targetFor(id);
+        const other = otherSide(side);
         // Suppress the swipe reel for a new tab: the list should grow and fade the
         // new row in (animateRowIn) rather than rotate.
         creatingTab = true;
-        showIn(side, id);
+        showIn(shownIn(side) !== null && shownIn(other) !== null ? other : side, id);
         creatingTab = false;
-      }
-      function landingNow(): Landing {
-        const opening = createOpening;
-        if (opening !== null && !ctx.shell.split.isOpen()) {
-          return { opening, side: opening.by === "button" ? "right" : otherSide(opening.side) };
-        }
-        return { opening: null, side: newTabSide(ctx.shell.targetFor()) };
-      }
-      // The grid of the pane a new tab lands in, a pane the split opens for it
-      // included. `held` runs in the task that settles on it, with no layout
-      // change since the measure began, so nothing moves it before the hold.
-      async function newSessionSize(held: (at: Landing) => void): Promise<StartSize | undefined> {
-        for (;;) {
-          const epoch = layoutEpoch;
-          const opening = createOpening;
-          const at = landingNow();
-          const pane = at.opening === null ? ctx.shell.pane(at.side) : null;
-          const size = await (at.opening === null
-            ? (pane?.measureSize() ?? Promise.resolve(null))
-            : ctx.shell.split.measureOpen(at.side));
-          if (createOpening === opening && layoutEpoch === epoch) {
-            held(at);
-            return size ?? undefined;
-          }
-        }
       }
       // This client's own new session can reach the stream before its POST
       // answers, so the placement waits until a create in flight has shown its tab.
@@ -2792,10 +2672,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      async function openNewSession(sized: SizedCreate): Promise<void> {
+      async function openNewSession(): Promise<void> {
         let info: SessionInfo;
         try {
-          info = await createSessionHonouringRetry(sized.api, ctx, lifetime.signal, sized.measure);
+          info = await createSessionHonouringRetry(api, ctx, lifetime.signal);
         } catch (err) {
           if (tornDown()) {
             return;
@@ -2817,8 +2697,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Opened once the tab exists, so a failed create leaves the single view
         // as it was rather than an empty pane. A snap whose tab closed meanwhile
         // has nothing left to pair, so the new tab takes the single view.
-        const landing = sized.landing();
-        const opening = landing?.opening ?? null;
+        const opening = createOpening;
         const split = ctx.shell.split;
         if (opening?.by === "button" && !split.isOpen()) {
           split.open();
@@ -2839,11 +2718,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             return;
           }
         }
-        // The pane the size was measured in, unless the split it was to open did not.
-        showNewTab(
-          tab.id,
-          landing !== null && (opening === null || split.isOpen()) ? landing.side : undefined,
-        );
+        showNewTab(tab.id);
       }
 
       // dropTab removes a tab's chrome + cache and, for a shown tab, decides what
@@ -2859,13 +2734,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const { remote, keyboardHeld = false, quiet = false } = opts;
         const idx = tabList.findIndex((t) => t.id === id);
         if (idx < 0) {
-          return;
-        }
-        // Emptying a shown pane re-places the panes (a split closes, a partner
-        // goes), which must not move a pane a create holds.
-        if (!quiet && sideOf(id) !== null && layoutHolds.size > 0) {
-          await layoutFree();
-          await dropTab(id, opts);
           return;
         }
         // Closing the only remaining tab: spawn its replacement BEFORE removing
@@ -2984,20 +2852,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // Each tab is a running agent, so closing two or more asks first. This path
       // drops tabs itself, so every per-tab state dropTab releases is released here.
       async function closeMany(ids: readonly string[]): Promise<void> {
-        let victims = tabList.filter((t) => ids.includes(t.id));
+        const victims = tabList.filter((t) => ids.includes(t.id));
         if (victims.length === 0) {
           return;
         }
         if (victims.length >= 2 && !win.confirm(`Close ${String(victims.length)} terminals?`)) {
           return;
-        }
-        // As in dropTab: closing a shown tab re-places the panes.
-        if (layoutHolds.size > 0 && victims.some((t) => sideOf(t.id) !== null)) {
-          await layoutFree();
-          victims = victims.filter((t) => tabList.includes(t));
-          if (victims.length === 0) {
-            return;
-          }
         }
         const selectedBefore = selectedId();
         const closingSelected = selectedBefore !== null && ids.includes(selectedBefore);
@@ -3666,53 +3526,55 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // settle the new set, then place it the way a boot does, by the address and
       // the record. Runs inside the reconcile slot.
       async function resync(known: readonly string[]): Promise<void> {
-        await withPlacementHold(async () => {
-          holdResynced = true;
-          const typing = keyboardInPaneInput();
-          settling = true;
-          let placed: "kept" | "shown" | "none" = "none";
-          try {
-            for (const id of known) {
-              await dropTab(id, { remote: false, quiet: true });
-            }
-            // showSettled reopens a split through restoreSplit, which refuses an
-            // open one; closed under applyingRecord so no record write goes out.
-            if (ctx.shell.split.isOpen()) {
-              applyingRecord = true;
-              try {
-                ctx.shell.split.close();
-              } finally {
-                applyingRecord = false;
+        await placeSet(() =>
+          withPlacementHold(async () => {
+            holdResynced = true;
+            const typing = keyboardInPaneInput();
+            settling = true;
+            let placed: "kept" | "shown" | "none" = "none";
+            try {
+              for (const id of known) {
+                await dropTab(id, { remote: false, quiet: true });
+              }
+              // showSettled reopens a split through restoreSplit, which refuses an
+              // open one; closed under applyingRecord so no record write goes out.
+              if (ctx.shell.split.isOpen()) {
+                applyingRecord = true;
+                try {
+                  ctx.shell.split.close();
+                } finally {
+                  applyingRecord = false;
+                }
+              }
+              const listedAt = streamEpoch;
+              const settled = await settleOrToast();
+              if (tornDown()) {
+                return;
+              }
+              for (const info of settled.sessions) {
+                adoptSession(info);
+                applyStatus(info, reportsOf(info.reportsActivity), { listedAt });
+              }
+              // Read now, so an address the user navigated to during the wait wins.
+              const route =
+                address !== null && settled.listed ? parseTabRoute(win.location.hash) : null;
+              // No stale-tab toast: the user did not open this address in this act.
+              placed = showSettled(settled, route, false);
+            } finally {
+              settling = false;
+              if (placed === "none") {
+                bootShowedNothing = true;
+              }
+              if (!tornDown()) {
+                syncChrome();
+                if (typing) {
+                  focusInput();
+                }
+                scheduleAddress("replace");
               }
             }
-            const listedAt = streamEpoch;
-            const settled = await settleOrToast();
-            if (tornDown()) {
-              return;
-            }
-            for (const info of settled.sessions) {
-              adoptSession(info);
-              applyStatus(info, reportsOf(info.reportsActivity), { listedAt });
-            }
-            // Read now, so an address the user navigated to during the wait wins.
-            const route =
-              address !== null && settled.listed ? parseTabRoute(win.location.hash) : null;
-            // No stale-tab toast: the user did not open this address in this act.
-            placed = showSettled(settled, route, false);
-          } finally {
-            settling = false;
-            if (placed === "none") {
-              bootShowedNothing = true;
-            }
-            if (!tornDown()) {
-              syncChrome();
-              if (typing) {
-                focusInput();
-              }
-              scheduleAddress("replace");
-            }
-          }
-        });
+          }),
+        );
       }
       function warnLayoutOnce(what: string, err?: unknown): void {
         if (warnedLayout) {
@@ -3766,13 +3628,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
        *  are shown: a URL never creates or closes a session, because a history
        *  entry would otherwise resurrect a tab closed on another device. */
       function applyFragment(fragment: string, origin: RouteOrigin): void {
-        if (
-          heldForCreate(() => {
-            applyFragment(fragment, origin);
-          })
-        ) {
-          return;
-        }
         const route = parseTabRoute(fragment);
         if (route === null) {
           return;
@@ -4822,13 +4677,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       };
 
       // settleSessionSet, toasting a failure the way a failed create always has
-      // and carrying on with whatever was listed. It creates only when nothing is
-      // listed, so no shown pane can move and its measure holds no layout.
+      // and carrying on with whatever was listed.
       async function settleOrToast(): Promise<Settled> {
         try {
-          return await settleSessionSet(api, ctx, lifetime.signal, warnLayoutOnce, () =>
-            newSessionSize(() => undefined),
-          );
+          return await settleSessionSet(api, ctx, lifetime.signal, warnLayoutOnce);
         } catch (err) {
           if (tornDown()) {
             return NOTHING_SETTLED;

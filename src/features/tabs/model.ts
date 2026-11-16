@@ -461,12 +461,6 @@ export function hasPinnedName(tab: Tab): boolean {
   return pinnedNameOf(tab) !== "";
 }
 
-/** The grid a created session's process starts at: the create body. */
-export interface StartSize {
-  readonly cols: number;
-  readonly rows: number;
-}
-
 /** The realm a session API runs in: the mounted window's `fetch`, its abort
  *  signals and its clock, never the importing page's. */
 interface SessionAPIRealm {
@@ -480,9 +474,7 @@ interface SessionAPIRealm {
  *  bootstrap await pending forever. */
 interface SessionAPI {
   list(): Promise<SessionInfo[]>;
-  /** Create a session whose process starts at `size`, or at the server's
-   *  default when it is absent. */
-  create(size?: StartSize): Promise<SessionInfo>;
+  create(): Promise<SessionInfo>;
   close(id: string): Promise<void>;
   /** Set the user's pinned name. THROWS on failure: a rename that silently did
    *  not persist looks correct until the next reload. */
@@ -669,17 +661,10 @@ export function createSessionAPI(apiBase: string, realm: SessionAPIRealm): Sessi
       }
       return data as SessionInfo[];
     },
-    async create(size?: StartSize): Promise<SessionInfo> {
-      const r = await request(
-        apiBase,
-        size === undefined
-          ? { method: "POST" }
-          : {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ cols: size.cols, rows: size.rows }),
-            },
-      );
+    async create(): Promise<SessionInfo> {
+      const r = await request(apiBase, {
+        method: "POST",
+      });
       if (!r.ok) {
         throw await sessionError("create", r);
       }

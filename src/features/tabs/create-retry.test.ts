@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
-import { shortAnnounced, shortenReannounce, shortenSettle } from "../../test-helpers/delays.js";
+import { shortAnnounced, shortenReannounce } from "../../test-helpers/delays.js";
 import type { TerminalHandle } from "../../kernel/types.js";
 
 let term: TerminalHandle | undefined;
@@ -118,8 +118,7 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   );
 });
 
-beforeEach(async () => {
-  await shortenSettle();
+beforeEach(() => {
   fetchMock.mockClear();
   posts = 0;
   deletes = [];
@@ -415,9 +414,8 @@ describe("session-create retry: teardown", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     script = [{ status: 503, message: "service starting", retryAfter: "5", at: 10 }];
     await mount();
-    // The create waits out the mount's viewport settle first.
     for (let i = 0; i < 20 && posts < 1; i++) {
-      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(0);
     }
     // The refusal has propagated and the five-second wait is armed.
     await vi.advanceTimersByTimeAsync(0);

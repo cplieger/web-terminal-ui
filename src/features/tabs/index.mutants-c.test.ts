@@ -13,7 +13,6 @@ import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { engineNumbering } from "./test-helpers/sessions-server.js";
-import { shortSettled, shortenSettle } from "../../test-helpers/delays.js";
 
 // A fake activityMonitor: lets a test push status events (a new title, a new
 // server `order`, a status change) into tabs without the real SSE.
@@ -145,8 +144,7 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   return Promise.resolve(jsonResponse(listBody, 200));
 });
 
-beforeEach(async () => {
-  await shortenSettle();
+beforeEach(() => {
   fake.reset();
   // vitest resets every spy to its construction default before each test; the
   // answers this file depends on are re-declared so they are stated here.
@@ -1201,7 +1199,6 @@ describe("tabs: chrome that only a runtime change moves", () => {
     for (const chip of m.chips()) {
       expect(chip.classList.contains("wt-tab-enter")).toBe(false);
     }
-    await shortSettled();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
     pick(m.root, ".wt-tab-new").click();
@@ -1218,7 +1215,6 @@ describe("tabs: chrome that only a runtime change moves", () => {
 
   it("destroyed while a chip is still entering, it stops touching that chip", async () => {
     const m = await mount();
-    await shortSettled();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     pick(m.root, ".wt-tab-new").click();
     await vi.advanceTimersByTimeAsync(0);
