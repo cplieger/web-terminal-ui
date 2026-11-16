@@ -198,4 +198,43 @@ describe("a create that opens the split carries the size of the pane it opens", 
     expect(landed?.cols).toBeLessThan(single.cols);
     expect(createBodies()).toEqual([JSON.stringify(landed)]);
   });
+
+  it("a split create in the same task as a close slide carries the right pane's grid", async () => {
+    server.list = [ok([A])];
+    server.post = [
+      created({ id: "s-new", title: "", createdAt: "9", status: "idle" }),
+      created({ id: "s-two", title: "", createdAt: "10", status: "idle" }),
+    ];
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") !== null, 120);
+    stripSplit(root).click();
+    await until(() => shown(m.ctx(), "right") === "s-new", 120);
+    m.ctx().shell.root.classList.add("wt-animate");
+
+    void m.api.close("s-new");
+    expect(m.ctx().shell.root.classList.contains("wt-split-closing")).toBe(true);
+    stripSplit(root).click();
+    await until(() => shown(m.ctx(), "right") === "s-two", 120);
+
+    expect(createBodies()[1]).toEqual(JSON.stringify(await announcing(root, "right")));
+  });
+
+  it("a split create that fails leaves the shown pane's renderer at the single view's grid", async () => {
+    server.list = [ok([A])];
+    server.post = [{ status: 500, body: { error: "boom" } }];
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") !== null, 120);
+    const left = engineOn(fake, root, "left");
+
+    stripSplit(root).click();
+    await until(() => server.count("POST", "/api/sessions") === 1, 120);
+    await tick();
+
+    expect(m.ctx().shell.split.isOpen()).toBe(false);
+    expect(vi.mocked(left.renderer.computeSize).mock.results.at(-1)?.value).toEqual(
+      boxGrid(left.options.termWrap),
+    );
+  });
 });

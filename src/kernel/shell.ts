@@ -1275,9 +1275,10 @@ function createShellInto(
       return null;
     }
     const measured = await kernel.measureSize();
-    if (measured === null || splitOpen || destroyed || closing !== null) {
+    if (measured === null || splitOpen || destroyed) {
       return null;
     }
+    closing?.settle();
     // A row too narrow for two panes opens collapsed, at the full width.
     if (rowWidth() < MIN_SPLIT_AREA_PX) {
       return measured;
@@ -1295,6 +1296,9 @@ function createShellInto(
       shellRoot.classList.remove("wt-split-open");
       paintSide(showing);
       applyRatioVar();
+      // computeSize also sets the renderer's own columns, which an older
+      // server's mouse hit test reads; measure back the single view's.
+      kernel.measureNow();
     }
   }
   function setRatio(ratio: number, commit: boolean): boolean {

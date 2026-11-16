@@ -204,10 +204,12 @@ export interface PaneHandle {
    *  failed, or the wait timed out), when `announceSize` starts to send, or the
    *  pane was destroyed. Never rejects. */
   readonly fontSettled: Promise<void>;
-  /** The grid this pane's next resize sends, measured once its font has settled
-   *  and its box has stopped moving (a keyboard slide, a rotation, a split
-   *  slide), waiting at most a second for the box. Null when it still cannot
-   *  measure then: hidden by a closed split, still moving, or destroyed. */
+  /** The grid this pane's box measures once its font has settled and its box
+   *  has stopped moving (a keyboard slide, a rotation, a split slide), waiting
+   *  at most a second for the box. A resize sends it too, except that it keeps
+   *  the last rows while the reader is scrolled up in main-screen history. Null
+   *  when it still cannot measure then: hidden by a closed split, still moving,
+   *  or destroyed. */
   measureSize(): Promise<{ cols: number; rows: number } | null>;
   /** True from this pane's `input:ready` (its listeners read true) until its
    *  socket closes or is replaced, its session ends, or the shown session is
@@ -255,8 +257,9 @@ export interface SplitController {
   closeSide(side: PaneSide): boolean;
   /** The grid the pane on `side` would measure if `open()` ran now, measured by
    *  the shown pane's renderer once its font and box settle; the full width on a
-   *  row too narrow for two panes. Null when the split is open or the shown pane
-   *  cannot measure. */
+   *  row too narrow for two panes. It ends a close slide in flight first, as
+   *  `open()` does. Null when the split is open or the shown pane cannot
+   *  measure. */
   measureOpen(side: PaneSide): Promise<{ cols: number; rows: number } | null>;
   /** Set the left share; `commit` writes the record. False when refused. */
   setRatio(ratio: number, commit: boolean): boolean;
@@ -368,8 +371,9 @@ export interface ShellContext {
   onSelectionChange(cb: (side: PaneSide) => void): Unsubscribe;
   /** A pane built, hidden, shown or torn down. */
   onPanesChange(cb: () => void): Unsubscribe;
-  /** Where a new tab, or a click on `sessionId`'s tab, would show it: the first
-   *  empty pane, left then right, else the selected pane. */
+  /** Where a new tab would show it: the first empty pane, left then right, else
+   *  the selected pane. Deprecated: `sessionId` is ignored, and is removed at
+   *  the next major. */
   targetFor(sessionId?: string): PaneSide;
   /** The second half of closing a shown tab: `forgetSession(sessionId)` on every
    *  built pane's connection other than `side` (whose own `clearActiveSession()`
