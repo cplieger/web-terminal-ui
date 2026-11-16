@@ -2627,16 +2627,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // decides how it opens.
       let creating: Promise<void> | null = null;
       let createOpening: SplitOpening | null = null;
-      // A create pressed while a resync places its set starts once the set is
-      // shown: placed earlier, its tab takes the pane the settled session needs,
-      // and showSettled then keeps the panes and shows that session nowhere.
       function create(opening: SplitOpening | null = null): Promise<void> {
         if (creating === null) {
           createOpening = opening;
-          const after = placingSet;
-          const run =
-            after === null ? openNewSession() : after.then(openNewSession, openNewSession);
-          creating = run.finally(() => {
+          creating = openNewSession().finally(() => {
             creating = null;
           });
         } else {
@@ -2685,6 +2679,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           // server's own schedule by this point, so reaching here means it never
           // became ready: say so with the server's own words when it gave any.
           toastCreateFailure(err);
+          return;
+        }
+        // A resync placing its set takes the panes first: placed earlier, this
+        // tab takes the pane the settled session needs, and showSettled then
+        // keeps the panes and shows that session nowhere.
+        while (placingSet !== null) {
+          await placingSet.catch(() => undefined);
+        }
+        if (tornDown()) {
+          closeOrphan(api, info.id);
           return;
         }
         // The status SSE may have adopted this session during the POST round-trip

@@ -305,13 +305,13 @@ describe("a layout change during a create: the new tab starts at the pane it end
   });
 });
 
-describe("a split pressed during a resync's create", () => {
+describe("a resync and a + create at once", () => {
   let monitor: FakeMonitor;
   beforeEach(() => {
     monitor = fakeMonitor();
   });
 
-  it("shows the resynced session beside the split's new tab", async () => {
+  it("a split pressed during the resync's create shows the resynced session beside its new tab", async () => {
     const X = row("X", "tab_X", "1");
     server.layout = [ok({ left: "X", right: null, selected: "left", handle: 0.5, open: false })];
     server.list = [ok([X])];
@@ -351,5 +351,83 @@ describe("a split pressed during a resync's create", () => {
       expect(start).toEqual(pane);
     }
     expect(orphans(m, ["R", "N"])).toEqual([]);
+  });
+
+  it("a resync that starts while a + create is out attaches its session to a pane", async () => {
+    const X = row("X", "tab_X", "1");
+    server.layout = [ok({ left: "X", right: null, selected: "left", handle: 0.5, open: false })];
+    server.list = [ok([X])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root, {
+      before: [monitor.feature],
+      tabsOpts: { activityMonitor: monitor.feature },
+    });
+    await until(() => shown(m.ctx(), "left") === "X", 120);
+    const lists = (): number => server.count("GET", "/api/sessions");
+    const before = lists();
+    monitor.open();
+    await until(() => lists() > before, 120);
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+    const attached = (): string[] =>
+      fake.engines.flatMap((e) => e.connection.setSession.mock.calls.map(([id]) => id));
+
+    const neu = held(created(NEW));
+    const resynced = held(created({ id: "R", title: "", createdAt: "20", status: "idle" }));
+    server.post = [neu.answer, resynced.answer];
+    const creating = m.api.create();
+    await until(() => server.count("POST", "/api/sessions") === 1, 120);
+    server.list = [ok([])];
+    monitor.open();
+    await until(() => server.count("POST", "/api/sessions") === 2, 200);
+    neu.release();
+    await tick();
+    await tick();
+    resynced.release();
+    await creating;
+    await until(() => m.api.list().some((t) => t.id === "R"), 200);
+
+    expect(attached()).toContain("R");
+    expect(sideShowing(m, "s-new")).not.toBeNull();
+    expect(orphans(m, ["R", "s-new"])).toEqual([]);
+  });
+
+  it("a teardown while a + create waits on a resync closes both new sessions", async () => {
+    const X = row("X", "tab_X", "1");
+    server.list = [ok([X])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root, {
+      before: [monitor.feature],
+      tabsOpts: { activityMonitor: monitor.feature },
+    });
+    await until(() => shown(m.ctx(), "left") === "X", 120);
+    const lists = (): number => server.count("GET", "/api/sessions");
+    const before = lists();
+    monitor.open();
+    await until(() => lists() > before, 120);
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+
+    const neu = held(created(NEW));
+    const resynced = held(created({ id: "R", title: "", createdAt: "20", status: "idle" }));
+    server.post = [neu.answer, resynced.answer];
+    const creating = m.api.create();
+    await until(() => server.count("POST", "/api/sessions") === 1, 120);
+    server.list = [ok([])];
+    monitor.open();
+    await until(() => server.count("POST", "/api/sessions") === 2, 200);
+    neu.release();
+    await tick();
+    await tick();
+    m.term.destroy();
+    resynced.release();
+    await creating;
+
+    await until(() => server.count("DELETE", "/api/sessions/R") === 1, 200);
+
+    expect(server.count("DELETE", "/api/sessions/s-new")).toBe(1);
+    expect(server.count("DELETE", "/api/sessions/R")).toBe(1);
   });
 });
