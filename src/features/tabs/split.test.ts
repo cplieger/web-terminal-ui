@@ -244,7 +244,7 @@ describe("the split button", () => {
     expect(server.posts()).toBe(1);
   });
 
-  it("with one tab a click while a '+' create is in flight shares its one POST, and the new tab opens on the right and selected", async () => {
+  it("with one tab a click while a '+' create is in flight waits for its tab, then opens the split beside it with the old tab", async () => {
     server.list = [{ id: "s1", title: "one", createdAt: "1", status: "idle" }];
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
@@ -257,11 +257,10 @@ describe("the split button", () => {
     expect(term.split?.isOpen()).toBe(false);
 
     held.resolve();
-    await until(() => shown(ctx, "left") === "s-new" || shown(ctx, "right") === "s-new");
-    expect(term.split?.isOpen()).toBe(true);
-    expect(shown(ctx, "left")).toBe("s1");
-    expect(shown(ctx, "right")).toBe("s-new");
-    expect(ctx.shell.selected()).toBe("right");
+    await until(() => term.split?.isOpen() === true);
+    expect(shown(ctx, "left")).toBe("s-new");
+    expect(shown(ctx, "right")).toBe("s1");
+    expect(ctx.shell.selected()).toBe("left");
     expect(chips(root)).toHaveLength(2);
     expect(server.posts()).toBe(1);
   });

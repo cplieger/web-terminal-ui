@@ -8,9 +8,19 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import type * as Engine from "@cplieger/web-terminal-engine";
 import { shortenSettle } from "../../test-helpers/delays.js";
 import { shippedBundle } from "../../test-helpers/stylesheet.js";
-import { engineOn, rootIn, shown, stripSplit, tick, until } from "./test-helpers/split.js";
+import {
+  engineOn,
+  menuItem,
+  openTabMenu,
+  rootIn,
+  shown,
+  stripSplit,
+  tick,
+  until,
+} from "./test-helpers/split.js";
 import {
   created,
+  held,
   mountScripted,
   ok,
   refuse,
@@ -150,7 +160,12 @@ describe("a create that opens the split carries the size of the pane it opens", 
     };
   }
 
+  // Per session, the grid of the pane it was first shown in, read as the pane
+  // switches to it.
+  const firstShown = new Map<string, { cols: number; rows: number }>();
+
   beforeEach(() => {
+    firstShown.clear();
     const styles = document.createElement("style");
     styles.textContent = shippedBundle("MANIFEST.tabbed");
     document.head.appendChild(styles);
@@ -161,6 +176,14 @@ describe("a create that opens the split carries the size of the pane it opens", 
     fake.createTerminalEngine.mockImplementation((opts) => {
       const engine = build(opts);
       vi.mocked(engine.renderer.computeSize).mockImplementation(() => boxGrid(opts.termWrap));
+      const setSession = vi.mocked(engine.connection.setSession);
+      const switchTo = setSession.getMockImplementation();
+      setSession.mockImplementation((id) => {
+        if (!firstShown.has(id)) {
+          firstShown.set(id, boxGrid(opts.termWrap));
+        }
+        switchTo?.(id);
+      });
       return engine;
     });
     onTestFinished(() => {
@@ -220,6 +243,174 @@ describe("a create that opens the split carries the size of the pane it opens", 
     expect(createBodies()[1]).toEqual(JSON.stringify(await announcing(root, "right")));
   });
 
+  /** The grid of the pane `id` was first shown in. */
+  function landed(id: string): { cols: number; rows: number } {
+    const grid = firstShown.get(id);
+    if (grid === undefined) {
+      throw new Error(`${id} was never shown`);
+    }
+    return grid;
+  }
+
+  /** Run `act` once, as the first POST /api/sessions arrives. */
+  function duringTheCreate(act: () => void): void {
+    let done = false;
+    server.onRequest = (method, path) => {
+      if (!done && method === "POST" && path === "/api/sessions") {
+        done = true;
+        act();
+      }
+    };
+  }
+
+  it("a split pressed while a + create is out shows the new tab where it was measured", async () => {
+    server.list = [ok([A])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") !== null, 120);
+    duringTheCreate(() => {
+      stripSplit(root).click();
+    });
+
+    await m.api.create();
+    await until(() => m.ctx().shell.split.isOpen(), 120);
+
+    expect(createBodies()).toEqual([JSON.stringify(landed("s-new"))]);
+    expect(m.ctx().shell.split.isOpen()).toBe(true);
+  });
+
+  it("a snap pressed while a + create is out shows the new tab where it was measured", async () => {
+    server.list = [ok([A])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") !== null, 120);
+    duringTheCreate(() => {
+      m.api.snap("A", "right");
+    });
+
+    await m.api.create();
+    await until(() => shown(m.ctx(), "right") === "A", 120);
+
+    expect(createBodies()).toEqual([JSON.stringify(landed("s-new"))]);
+    expect(shown(m.ctx(), "right")).toBe("A");
+  });
+
+  it("closing the other pane's tab while a + create is out shows the new tab where it was measured", async () => {
+    server.list = [ok([A, B])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") !== null, 120);
+    stripSplit(root).click();
+    await until(() => shown(m.ctx(), "right") === "B", 120);
+    duringTheCreate(() => {
+      void m.api.close("A");
+    });
+
+    await m.api.create();
+    await until(() => !m.api.list().some((t) => t.id === "A"), 120);
+
+    expect(createBodies()).toEqual([JSON.stringify(landed("s-new"))]);
+    expect(m.ctx().shell.split.isOpen()).toBe(false);
+  });
+
+  it("selecting the other pane while a + create is out keeps the new tab in the pane it measured", async () => {
+    server.list = [ok([A, B])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") !== null, 120);
+    stripSplit(root).click();
+    await until(() => shown(m.ctx(), "right") === "B", 120);
+    expect(m.ctx().shell.split.setRatio(0.3, true)).toBe(true);
+    duringTheCreate(() => {
+      m.ctx().shell.select("right");
+    });
+
+    await m.api.create();
+
+    expect(shown(m.ctx(), "right")).toBe("s-new");
+    expect(createBodies()).toEqual([JSON.stringify(landed("s-new"))]);
+  });
+
+  it("closing the shown tabs from a chip's menu while a + create is out shows the new tab where it was measured", async () => {
+    const C = row("C", "tab_C", "3");
+    server.list = [ok([A, B, C])];
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") !== null, 120);
+    stripSplit(root).click();
+    await until(() => shown(m.ctx(), "right") === "B", 120);
+    duringTheCreate(() => {
+      menuItem(openTabMenu(root, "C"), "Close others").click();
+    });
+
+    await m.api.create();
+    await until(() => m.api.list().length === 2, 120);
+
+    expect(createBodies()).toEqual([JSON.stringify(landed("s-new"))]);
+    expect(m.api.list().map((t) => t.id)).toEqual(["C", "s-new"]);
+  });
+
+  it("an address navigated to while a + create is out is shown once the new tab is", async () => {
+    server.list = [ok([A, B])];
+    const answer = held(created({ id: "s-new", title: "", createdAt: "9", status: "idle" }));
+    server.post = [answer.answer];
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") === "A", 120);
+    duringTheCreate(() => {
+      location.hash = "#tab_A,tab_B";
+    });
+
+    const creating = m.api.create();
+    await until(() => server.count("POST", "/api/sessions") === 1, 120);
+    await tick();
+    await tick();
+    answer.release();
+    await creating;
+    await until(() => shown(m.ctx(), "right") === "B", 120);
+
+    expect(createBodies()).toEqual([JSON.stringify(landed("s-new"))]);
+    expect(shown(m.ctx(), "left")).toBe("A");
+  });
+
+  it("a split closed while a + create measures carries the grid of the pane that remains", async () => {
+    server.list = [ok([A, B])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") !== null, 120);
+    stripSplit(root).click();
+    await until(() => shown(m.ctx(), "right") === "B", 120);
+
+    const creating = m.api.create();
+    stripSplit(root).click();
+    await creating;
+
+    expect(m.ctx().shell.split.isOpen()).toBe(false);
+    expect(shown(m.ctx(), "left")).toBe("s-new");
+    expect(createBodies()).toEqual([JSON.stringify(landed("s-new"))]);
+  });
+
+  it("a window resize while a + create is out resizes the new tab once it shows", async () => {
+    server.list = [ok([A])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root);
+    await until(() => shown(m.ctx(), "left") !== null, 120);
+    const before = boxGrid(engineOn(fake, root, "left").options.termWrap);
+    duringTheCreate(() => {
+      root.style.width = "700px";
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    await m.api.create();
+    await until(() => shown(m.ctx(), "left") === "s-new", 120);
+
+    const after = await announcing(root, "left");
+    expect(createBodies()).toEqual([JSON.stringify(before)]);
+    expect(after).toEqual(boxGrid(engineOn(fake, root, "left").options.termWrap));
+    expect(after?.cols).toBeLessThan(before.cols);
+  });
+
   it("a split create that fails leaves the shown pane's renderer at the single view's grid", async () => {
     server.list = [ok([A])];
     server.post = [{ status: 500, body: { error: "boom" } }];
@@ -228,13 +419,18 @@ describe("a create that opens the split carries the size of the pane it opens", 
     await until(() => shown(m.ctx(), "left") !== null, 120);
     const left = engineOn(fake, root, "left");
 
+    const fitted = (): unknown => vi.mocked(left.renderer.computeSize).mock.results.at(-1)?.value;
+    const atBox = (): boolean =>
+      JSON.stringify(fitted()) === JSON.stringify(boxGrid(left.options.termWrap));
+
     stripSplit(root).click();
     await until(() => server.count("POST", "/api/sessions") === 1, 120);
     await tick();
+    // The box can still move after the probe; the pane re-fits when its
+    // viewport settles, which a loaded runner reaches ticks later.
+    await until(atBox, 120);
 
     expect(m.ctx().shell.split.isOpen()).toBe(false);
-    expect(vi.mocked(left.renderer.computeSize).mock.results.at(-1)?.value).toEqual(
-      boxGrid(left.options.termWrap),
-    );
+    expect(fitted()).toEqual(boxGrid(left.options.termWrap));
   });
 });

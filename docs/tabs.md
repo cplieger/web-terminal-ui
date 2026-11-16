@@ -4,7 +4,7 @@ This page describes what `presetTabbed()` and `presetAgentTabbed()` show on each
 
 ## What the tabbed presets need
 
-Both presets need a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`. A server that mounts the engine's `SessionManager` routes (`MountSessionRoutes` or `MountAPI`) serves them. The server also keeps the tab order and, for the split view, the pane layout, so both travel between devices. A new tab's create carries the size of the pane it opens in, including a pane the split opens for it, once that pane's font has settled and its box has stopped moving, so the server starts the program at the pane's width rather than 80 columns.
+Both presets need a server that serves the engine's session API: `/api/sessions`, `/ws?session=` and the status stream `/api/sessions/events`. A server that mounts the engine's `SessionManager` routes (`MountSessionRoutes` or `MountAPI`) serves them. The server also keeps the tab order and, for the split view, the pane layout, so both travel between devices. A new tab's create carries the size of the pane it opens in, including a pane the split opens for it, once that pane's font has settled and its box has stopped moving, so the server starts the program at the pane's width rather than 80 columns. Until the new tab shows, a split, snap, close of a shown tab or address change waits, so that pane keeps the width its program started at; a window resize or a handle drag in that time resizes the program once the tab shows.
 
 ## Tabs on a phone
 
