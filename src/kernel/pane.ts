@@ -2,6 +2,7 @@ import {
   createTerminalEngine,
   keyboard,
   LineStore,
+  PROCESS_EXITED_CLOSE_CODE,
   type Connection,
   type DeferredInput,
   type TerminalEngine,
@@ -694,14 +695,21 @@ function buildPaneInto(
       onClose() {
         connState.closed();
       },
-      onProcessExit() {
+      onProcessExit({ code, reason }) {
         // The definitive 4001 close. markReady() first, so an exit that lands
         // before any screen frame still lowers the overlay; then the end state
         // (no reconnect is coming); the host's turn LAST, so a throwing handler
         // cannot leave the page without its banner.
-        services.stores.discardUnverified({ session: engine.connection.currentSessionId() });
+        const session = engine.connection.currentSessionId();
+        services.stores.discardUnverified({ session });
         markReady();
         connState.ended();
+        // The engine closes a process that ran with no reason, and one that never
+        // started with why (its docs/sessions.md).
+        if (code === PROCESS_EXITED_CLOSE_CODE && reason !== "") {
+          toast(`Could not start the terminal: ${reason}`);
+          bus.emit("session:startFailed", { session, reason });
+        }
         services.onSessionEnded();
       },
       onWireIncompatible() {

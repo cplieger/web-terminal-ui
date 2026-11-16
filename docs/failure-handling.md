@@ -46,6 +46,8 @@ Your page may also carry an inline script that reports that the JavaScript bundl
 
 A session whose process exits is over. The engine closes with its process-exited code, the connection banner reads "Session ended", and no reconnect is attempted. On a server that gives each session its own endpoint, reconnecting could only collect the same close again, an endless "Reconnecting…" over a screen that will never change.
 
+A session whose process could not start ends the same way, and the terminal also shows the server's reason in a toast, such as "Could not start the terminal: the process failed to start". The `session:startFailed` event carries the session and that reason. The tabs feature keeps such a tab's terminal on its pane when the server drops the session, and creates no replacement, because a new session would fail the same way.
+
 Some hosts work differently. Your endpoint may hand out a new session on the next connect, such as one shared shell the server replaces once it ends, or an endpoint that starts a process on attach. Then the connection the engine declines to make is exactly what would produce a working terminal, and only you know that. So the library gives you the event and the method, and leaves the policy to you:
 
 ```ts

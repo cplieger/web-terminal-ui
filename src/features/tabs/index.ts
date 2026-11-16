@@ -930,6 +930,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // /api/sessions) that predates the server reaping the session does not
       // re-adopt (flash back) a closed tab.
       const tombstones = createTombstones(() => win.Date.now());
+      // Shown sessions that ended before their process started, until their tab
+      // drops (placeAfterDrop).
+      const startFailed = new Set<string>();
+      ctx.on("session:startFailed", ({ session }) => {
+        startFailed.add(session);
+      });
       // The expanded mobile list's row elements, keyed by tab id. Rows are
       // reused across re-renders (reconcile, not rebuild) so a swipe can FLIP the
       // same elements from their old slots to their new ones (the rotation).
@@ -2807,8 +2813,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         syncChrome(); // reflect the drop immediately (count, position)
         // What the panes show next is decided here, before the server's answer:
         // selection must not sit on an emptied pane for a DELETE round trip.
+        const failedStart = startFailed.delete(id);
         if (!quiet) {
-          placeAfterDrop(idx, side, splitOpen);
+          placeAfterDrop(idx, side, splitOpen, failedStart);
           if (typing || keyboardHeld) {
             focusInput();
           }
@@ -2824,8 +2831,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // The pane transaction for a dropped tab that `side` showed (null: none).
-      function placeAfterDrop(idx: number, side: PaneSide | null, splitOpen: boolean): void {
+      // The pane transaction for a dropped tab that `side` showed (null: none);
+      // failedStart: its session ended before its process started.
+      function placeAfterDrop(
+        idx: number,
+        side: PaneSide | null,
+        splitOpen: boolean,
+        failedStart: boolean,
+      ): void {
         if (side === null) {
           return;
         }
@@ -2845,7 +2858,13 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Only the server removes a last tab here (a user's close of it took the
         // create-first branch of dropTab). Its server either restarted or saw
         // another device replace it, so settle rather than create a second tab.
-        // Not awaited: this may run inside the reconcile slot itself.
+        // Not awaited: this may run inside the reconcile slot itself. A session
+        // that could not start is dropped by its server too, and a settle onto
+        // the emptied list would create another that fails the same way, so the
+        // pane keeps the ended terminal and its reason.
+        if (failedStart) {
+          return;
+        }
         void inReconcileSlot(() => resync([]));
       }
 

@@ -1000,7 +1000,7 @@ describe("what a host can wait on before it sends", () => {
   });
 
   it.each<[string, (pane: PaneHandle, term: TerminalHandle) => void]>([
-    ["a process exit", () => wire().onProcessExit?.()],
+    ["a process exit", () => wire().onProcessExit?.({ code: 4001, reason: "" })],
     [
       "an incompatible server",
       () =>

@@ -507,9 +507,9 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
     }
     if (consumer.onProcessExit !== undefined) {
       const onProcessExit = consumer.onProcessExit.bind(consumer);
-      callbacks.onProcessExit = () => {
+      callbacks.onProcessExit = (close) => {
         parts.markEnded();
-        onProcessExit();
+        onProcessExit(close);
       };
     }
     let mouseController: MouseController = parts.mouse;

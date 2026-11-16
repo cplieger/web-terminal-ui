@@ -421,6 +421,10 @@ export interface TerminalEvents {
   "input:ready": { cols: number; rows: number };
   /** A session's process exited (from the status SSE; reaches background tabs). */
   "session:exited": { session: string };
+  /** The shown session ended before its process started (the engine's 4001
+   *  close with a reason, such as a command that cannot run); the pane shows the
+   *  ended state and toasts `reason`, the server's. */
+  "session:startFailed": { session: string; reason: string };
   /** An OSC title change for a session. */
   "wire:title": { session: string; title: string };
   /** Inbound OSC 52 clipboard content. */

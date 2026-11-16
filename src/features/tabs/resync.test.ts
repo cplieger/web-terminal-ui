@@ -290,6 +290,49 @@ describe("resync after a server restart", () => {
   });
 });
 
+describe("a server removing its last tab", () => {
+  const engineShowing = (id: string) =>
+    fake.engines.find((e) => e.engine.connection.currentSessionId() === id);
+
+  it("keeps a tab that ended before its process started on its pane, with the reason, and creates nothing", async () => {
+    server.layout = [ok(closed("X"))];
+    server.list = [ok([X])];
+    const m = await page("#a");
+    const listsBefore = lists();
+
+    engineShowing("X")!.callbacks.onProcessExit?.({
+      code: 4001,
+      reason: "the process failed to start",
+    });
+    monitor.emit({ ...status(X), status: "exited", removed: true });
+    for (let i = 0; i < 10; i++) {
+      await tick();
+    }
+
+    expect(server.count("POST", "/api/sessions")).toBe(0);
+    expect(lists()).toBe(listsBefore);
+    expect(m.api.list()).toEqual([]);
+    expect(shown(m.ctx(), "left")).toBe("X");
+    expect(m.ctx().shell.pane("left")?.root.querySelector(".wt-toast")?.textContent).toBe(
+      "Could not start the terminal: the process failed to start",
+    );
+  });
+
+  it("still settles onto a new session when the removed tab's process had run", async () => {
+    server.layout = [ok(closed("X"))];
+    server.list = [ok([X])];
+    const m = await page("#a");
+    server.list = [ok([])];
+    server.post = [created(row("N", "n", "20"))];
+
+    engineShowing("X")!.callbacks.onProcessExit?.({ code: 4001, reason: "" });
+    monitor.emit({ ...status(X), status: "exited", removed: true });
+
+    await until(() => shown(m.ctx(), "left") === "N", 200);
+    expect(server.count("POST", "/api/sessions")).toBe(1);
+  });
+});
+
 describe("explicit requests during a wait", () => {
   it("still creates the tab the user asked for with + once the server stops refusing", async () => {
     server.layout = [ok(closed("X"))];
