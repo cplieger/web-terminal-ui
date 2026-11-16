@@ -7,6 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
+import { shortenSettle } from "../../test-helpers/delays.js";
 import { fakeMonitor, rootIn, shown, tick, until, type FakeMonitor } from "./test-helpers/split.js";
 import {
   created,
@@ -42,7 +43,8 @@ let server: ScriptedServer;
 let monitor: FakeMonitor;
 let historyWrites: number;
 
-beforeEach(() => {
+beforeEach(async () => {
+  await shortenSettle();
   fake.reset();
   server = scriptedServer();
   monitor = fakeMonitor();

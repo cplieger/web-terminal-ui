@@ -13,7 +13,7 @@ import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import { tabs } from "./index.js";
 import type { PaneLayout } from "./model.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
-import { shortAnnounced, shortenReannounce } from "../../test-helpers/delays.js";
+import { shortAnnounced, shortenReannounce, shortenSettle } from "../../test-helpers/delays.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
@@ -93,7 +93,8 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
     : listGate.then(() => jsonResponse(listBody, 200));
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  await shortenSettle();
   fake.reset();
   // vitest resets every spy to its construction default before each test; the
   // view memory and the mouse mode are re-declared so the defaults are stated.
