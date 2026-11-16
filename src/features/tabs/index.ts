@@ -2651,8 +2651,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       // The server starts a created process at the size its POST carried, so
-      // from the measure that took that size until the new tab shows, no split
-      // change may move the pane it was measured in: each waits for the holds.
+      // from the measure that took that size until the new tab shows, a split,
+      // snap, shown close or navigation waits for the holds. The divider
+      // (setRatio) is not held: its resize reaches the program once the tab shows.
       const layoutHolds = new Set<object>();
       let layoutFreed = Promise.withResolvers<undefined>();
       function holdLayout(): () => void {
