@@ -33,7 +33,8 @@ const STATUS_EXITED = "exited";
 const STATUS_CRASHED = "crashed";
 
 /** A session that ended before its process started; the server keeps it listed,
- *  with its endReason, until a client closes it. Terminal, like "exited". */
+ *  with its endReason, until a client closes it or the server removes it.
+ *  Terminal, like "exited". */
 const STATUS_ENDED = "ended";
 
 /** An error the program reported: OSC 7501 state `error`, or OSC 9;4 progress
