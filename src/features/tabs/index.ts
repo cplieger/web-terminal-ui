@@ -2639,13 +2639,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return creating;
       }
 
-      function showNewTab(id: string): void {
+      function newTabSide(id: string): PaneSide {
         const side = ctx.shell.targetFor(id);
         const other = otherSide(side);
+        return shownIn(side) !== null && shownIn(other) !== null ? other : side;
+      }
+      function showNewTab(side: PaneSide, id: string): void {
         // Suppress the swipe reel for a new tab: the list should grow and fade the
         // new row in (animateRowIn) rather than rotate.
         creatingTab = true;
-        showIn(shownIn(side) !== null && shownIn(other) !== null ? other : side, id);
+        showIn(side, id);
         creatingTab = false;
       }
       // This client's own new session can reach the stream before its POST
@@ -2662,7 +2665,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         if (!tornDown() && ctx.shell.split.isOpen() && sideOf(id) === null) {
-          showNewTab(id);
+          showNewTab(newTabSide(id), id);
         }
       }
 
@@ -2722,7 +2725,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             return;
           }
         }
-        showNewTab(tab.id);
+        showNewTab(newTabSide(tab.id), tab.id);
       }
 
       // dropTab removes a tab's chrome + cache and, for a shown tab, decides what
