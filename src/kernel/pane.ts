@@ -561,9 +561,10 @@ function buildPaneInto(
   // before the first connect: a bare wsPath on a session-gated server 404s, and
   // pageshow fires on the initial load.
   let connectionInitiated = false;
-  // The shown session's end, recorded by whichever of its socket's 4001 close or
-  // endBeforeStart comes first. The wake handlers stay off while it is set: the
-  // server's removal makes forgetSession clear the engine's own refusal.
+  // The shown session's end, recorded by whichever of its socket's definitive
+  // close (4001 or 4004) or endBeforeStart comes first. The wake handlers stay
+  // off while it is set: the server's removal makes forgetSession clear the
+  // engine's own refusal.
   let ended: { readonly reason: string } | null = null;
   let failed = false;
   let hidden = false;
@@ -576,10 +577,11 @@ function buildPaneInto(
     connState.setLoaded();
     services.loading.firstFrame();
   }
-  // reason: empty for a process that ran, the server's why for one that never
-  // started (the engine's docs/sessions.md). markReady() first, so an end that
-  // lands before any screen frame still lowers the overlay; the host's turn
-  // LAST, so a throwing handler cannot leave the page without its banner.
+  // reason: empty for a process that ran or a session the server does not know,
+  // the server's why for one that never started (the engine's docs/sessions.md).
+  // markReady() first, so an end that lands before any screen frame still lowers
+  // the overlay; the host's turn LAST, so a throwing handler cannot leave the
+  // page without its banner.
   function recordEnd(reason: string): void {
     if (ended !== null) {
       return;
