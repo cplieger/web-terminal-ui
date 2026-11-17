@@ -395,6 +395,171 @@ describe("a server removing its last tab", () => {
     await until(() => shown(m.ctx(), "left") === "N", 200);
     expect(server.count("POST", "/api/sessions")).toBe(1);
   });
+
+  // The status stream's removal can be missed: the page polls with no stream, or
+  // the stream drops and its reopen lists the sessions instead.
+  interface Lister {
+    mount: () => Promise<ScriptedMount & { root: HTMLElement }>;
+    listAgain: () => Promise<void>;
+  }
+  const listers: [string, Lister][] = [
+    [
+      "the poll",
+      {
+        mount: async () => {
+          History.prototype.replaceState.call(history, null, "", "#a");
+          const root = rootIn(1000);
+          const m = await mountScripted(root, {
+            before: [connectionBanner()],
+            tabsOpts: { pollMs: 40 },
+          });
+          await until(() => shown(m.ctx(), "left") === "X", 200);
+          return { root, ...m };
+        },
+        listAgain: async () => {
+          const before = lists();
+          await until(() => lists() >= before + 3, 400);
+          expect(lists()).toBeGreaterThanOrEqual(before + 3);
+        },
+      },
+    ],
+    [
+      "a reopened status stream",
+      {
+        mount: () => page("#a", [connectionBanner()]),
+        listAgain: async () => {
+          for (let i = 0; i < 2; i++) {
+            const before = lists();
+            monitor.open();
+            await until(() => lists() > before);
+          }
+        },
+      },
+    ],
+  ];
+
+  it.each(listers)(
+    "keeps a failed start's ended pane and creates nothing when a list misses its tab (%s)",
+    async (_lister, { mount, listAgain }) => {
+      server.layout = [ok(closed("X"))];
+      server.list = [ok([X])];
+      const m = await mount();
+      const failures: string[] = [];
+      m.ctx().on("session:startFailed", ({ reason }) => failures.push(reason));
+      server.list = [ok([])];
+      server.post = [created(row("N", "n", "20"))];
+
+      engineShowing("X")!.callbacks.onProcessExit?.({ code: 4001, reason: startReason });
+      await listAgain();
+      for (let i = 0; i < 10; i++) {
+        await tick();
+      }
+
+      expect(server.count("POST", "/api/sessions")).toBe(0);
+      expect(m.api.list()).toEqual([]);
+      expect(shown(m.ctx(), "left")).toBe("X");
+      expect(failures).toEqual([startReason]);
+      expect(m.ctx().shell.pane("left")?.root.querySelector(".wt-conn-banner")?.textContent).toBe(
+        "Session ended",
+      );
+    },
+  );
+
+  it.each(listers)(
+    "still settles onto a new session when a list misses a tab whose process had run (%s)",
+    async (_lister, { mount, listAgain }) => {
+      server.layout = [ok(closed("X"))];
+      server.list = [ok([X])];
+      const m = await mount();
+      const N = row("N", "n", "20");
+      server.list = [ok([]), ok([]), ok([N])];
+      server.post = [created(N)];
+
+      engineShowing("X")!.callbacks.onProcessExit?.({ code: 4001, reason: "" });
+      await listAgain();
+      await until(() => shown(m.ctx(), "left") === "N", 200);
+
+      expect(shown(m.ctx(), "left")).toBe("N");
+      expect(server.count("POST", "/api/sessions")).toBe(1);
+    },
+  );
+
+  it("still resyncs onto the restored set when a restart also took a failed start's tab", async () => {
+    const m = await splitPage();
+    engineShowing("Y")!.callbacks.onProcessExit?.({ code: 4001, reason: startReason });
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+    server.list = [ok([X2])];
+    server.layout = [ok(closed("X2"))];
+
+    monitor.open();
+    await until(() => shown(m.ctx(), "left") === "X2", 200);
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+
+    expect(panes(m)).toEqual(["X2", null]);
+    expect(m.api.list().map((t) => t.id)).toEqual(["X2"]);
+    expect(server.count("POST", "/api/sessions")).toBe(0);
+  });
+
+  it("does not move a failed start's tab to the other pane", async () => {
+    const m = await splitPage();
+    engineShowing("Y")!.callbacks.onProcessExit?.({ code: 4001, reason: startReason });
+    await tick();
+
+    expect(m.api.snap("Y", "left")).toBe(false);
+    expect(panes(m)).toEqual(["X", "Y"]);
+    expect(m.ctx().shell.pane("right")?.endedBeforeStart()).toBe(startReason);
+  });
+
+  it.each(orders)(
+    "keeps a failed start's last tab on its pane when the split is open beside an empty pane (%s)",
+    async (_order, deliver) => {
+      server.layout = [ok(closed("X"))];
+      server.list = [ok([X])];
+      const m = await page("#a");
+      expect(m.term.split?.open()).toBe(true);
+      await tick();
+
+      deliver();
+      for (let i = 0; i < 10; i++) {
+        await tick();
+      }
+
+      expect(server.count("POST", "/api/sessions")).toBe(0);
+      expect(m.term.split?.isOpen()).toBe(false);
+      expect(shown(m.ctx(), "left")).toBe("X");
+      expect(m.ctx().shell.pane("left")?.endedBeforeStart()).toBe(startReason);
+    },
+  );
+
+  it("keeps both ended panes when the last tab fails beside an earlier failed start", async () => {
+    server.layout = [ok(closed("X"))];
+    server.list = [ok([X])];
+    const m = await page("#a");
+    engineShowing("X")!.callbacks.onProcessExit?.({ code: 4001, reason: startReason });
+    monitor.emit(failedRemoval());
+    await tick();
+    const N = row("N", "n", "20");
+    server.post = [created(N)];
+    expect(m.term.split?.open()).toBe(true);
+    await m.api.create();
+    expect(panes(m)).toEqual(["X", "N"]);
+
+    engineShowing("N")!.callbacks.onProcessExit?.({ code: 4001, reason: startReason });
+    monitor.emit({ ...status(N), status: "exited", removed: true, endReason: startReason });
+    for (let i = 0; i < 10; i++) {
+      await tick();
+    }
+
+    expect(server.count("POST", "/api/sessions")).toBe(1);
+    expect(m.term.split?.isOpen()).toBe(true);
+    expect(panes(m)).toEqual(["X", "N"]);
+    expect(m.ctx().shell.pane("left")?.endedBeforeStart()).toBe(startReason);
+    expect(m.ctx().shell.pane("right")?.endedBeforeStart()).toBe(startReason);
+  });
 });
 
 describe("explicit requests during a wait", () => {
