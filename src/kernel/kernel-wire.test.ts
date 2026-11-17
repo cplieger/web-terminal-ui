@@ -1098,10 +1098,14 @@ describe("what a host can wait on before it sends", () => {
     }
     wire().onOpen();
     let settled = false;
+    let sentOnSettle = 0;
     void pane.fontSettled.then(() => {
       settled = true;
       sendResize.mockClear();
       pane.announceSize();
+      // Counted here: the pane's own first-resize frame also sends, on a frame
+      // that may or may not land before the assertions below.
+      sentOnSettle = sendResize.mock.calls.length;
     });
     await tick();
     expect(settled).toBe(false);
@@ -1110,7 +1114,7 @@ describe("what a host can wait on before it sends", () => {
     await tick();
 
     expect(settled).toBe(true);
-    expect(sendResize).toHaveBeenCalledTimes(1);
+    expect(sentOnSettle).toBe(1);
   });
 
   it("resolves fontSettled when the pane is destroyed inside a stalled font wait", async () => {
