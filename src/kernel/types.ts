@@ -194,6 +194,15 @@ export interface PaneHandle {
    *  connection (which closes its socket), clear the screen and go `idle`, so no
    *  wake handler reconnects a pane that holds no session. Idempotent. */
   clearActiveSession(): void;
+  /** Show the shown session as ended before its process started, for a server
+   *  removal that carries `reason`: the ended state, one toast and
+   *  `session:startFailed`, as its socket's 4001 close gives, whichever comes
+   *  first. No wake reconnects the pane until it shows another session or none.
+   *  An empty reason, or a session whose end is already shown, is a no-op. */
+  endBeforeStart(reason: string): void;
+  /** The server's reason the shown session ended before its process started,
+   *  or null (live, or its process ran). */
+  endedBeforeStart(): string | null;
   /** Send this pane's grid size now, once its font metrics are known. The
    *  viewport's own settle is not waited for: a handle drag sends the geometry
    *  under the pointer, and the engine drops a size equal to the last sent.
@@ -421,9 +430,10 @@ export interface TerminalEvents {
   "input:ready": { cols: number; rows: number };
   /** A session's process exited (from the status SSE; reaches background tabs). */
   "session:exited": { session: string };
-  /** The shown session ended before its process started (the engine's 4001
-   *  close with a reason, such as a command that cannot run); the pane shows the
-   *  ended state and toasts `reason`, the server's. */
+  /** The shown session ended before its process started, such as a command
+   *  that cannot run: once per session, from its socket's 4001 close with a
+   *  reason or `PaneHandle.endBeforeStart`. The pane shows the ended state and
+   *  toasts `reason`, the server's. */
   "session:startFailed": { session: string; reason: string };
   /** An OSC title change for a session. */
   "wire:title": { session: string; title: string };

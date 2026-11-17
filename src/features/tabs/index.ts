@@ -930,12 +930,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // /api/sessions) that predates the server reaping the session does not
       // re-adopt (flash back) a closed tab.
       const tombstones = createTombstones(() => win.Date.now());
-      // Shown sessions that ended before their process started, until their tab
-      // drops (placeAfterDrop).
-      const startFailed = new Set<string>();
-      ctx.on("session:startFailed", ({ session }) => {
-        startFailed.add(session);
-      });
       // The expanded mobile list's row elements, keyed by tab id. Rows are
       // reused across re-renders (reconcile, not rebuild) so a swipe can FLIP the
       // same elements from their old slots to their new ones (the rotation).
@@ -2764,6 +2758,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // anything moves.
         const side = sideOf(id);
         const splitOpen = ctx.shell.split.isOpen();
+        const failedStart =
+          side !== null && (ctx.shell.pane(side)?.endedBeforeStart() ?? null) !== null;
         // Emptying a pane makes it inert, which drops a keyboard it held to the
         // body before the view moves; the keyboard follows the view instead.
         const typing = splitOpen && side !== null && keyboardInPaneInput();
@@ -2813,7 +2809,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         syncChrome(); // reflect the drop immediately (count, position)
         // What the panes show next is decided here, before the server's answer:
         // selection must not sit on an emptied pane for a DELETE round trip.
-        const failedStart = startFailed.delete(id);
         if (!quiet) {
           placeAfterDrop(idx, side, splitOpen, failedStart);
           if (typing || keyboardHeld) {
@@ -3810,6 +3805,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       if (monitor) {
         const offStatus = monitor.onStatus((s) => {
           if (s.removed) {
+            const reason: unknown = s.endReason;
+            const side = sideOf(s.id);
+            if (side !== null && typeof reason === "string") {
+              ctx.shell.pane(side)?.endBeforeStart(reason);
+            }
             void dropTab(s.id, { remote: false }); // already gone server-side; no DELETE
             return;
           }

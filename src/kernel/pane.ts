@@ -561,6 +561,10 @@ function buildPaneInto(
   // before the first connect: a bare wsPath on a session-gated server 404s, and
   // pageshow fires on the initial load.
   let connectionInitiated = false;
+  // The shown session's end, recorded by whichever of its socket's 4001 close or
+  // endBeforeStart comes first. The wake handlers stay off while it is set: the
+  // server's removal makes forgetSession clear the engine's own refusal.
+  let ended: { readonly reason: string } | null = null;
   let failed = false;
   let hidden = false;
   let rootReleased = false;
@@ -571,6 +575,25 @@ function buildPaneInto(
   function markReady(): void {
     connState.setLoaded();
     services.loading.firstFrame();
+  }
+  // reason: empty for a process that ran, the server's why for one that never
+  // started (the engine's docs/sessions.md). markReady() first, so an end that
+  // lands before any screen frame still lowers the overlay; the host's turn
+  // LAST, so a throwing handler cannot leave the page without its banner.
+  function recordEnd(reason: string): void {
+    if (ended !== null) {
+      return;
+    }
+    ended = { reason };
+    const session = activeSession?.id ?? engine.connection.currentSessionId();
+    services.stores.discardUnverified({ session });
+    markReady();
+    connState.ended();
+    if (reason !== "") {
+      toast(`Could not start the terminal: ${reason}`);
+      bus.emit("session:startFailed", { session, reason });
+    }
+    services.onSessionEnded();
   }
 
   const connState = createConnState({
@@ -696,21 +719,7 @@ function buildPaneInto(
         connState.closed();
       },
       onProcessExit({ code, reason }) {
-        // The definitive 4001 close. markReady() first, so an exit that lands
-        // before any screen frame still lowers the overlay; then the end state
-        // (no reconnect is coming); the host's turn LAST, so a throwing handler
-        // cannot leave the page without its banner.
-        const session = engine.connection.currentSessionId();
-        services.stores.discardUnverified({ session });
-        markReady();
-        connState.ended();
-        // The engine closes a process that ran with no reason, and one that never
-        // started with why (its docs/sessions.md).
-        if (code === PROCESS_EXITED_CLOSE_CODE && reason !== "") {
-          toast(`Could not start the terminal: ${reason}`);
-          bus.emit("session:startFailed", { session, reason });
-        }
-        services.onSessionEnded();
+        recordEnd(code === PROCESS_EXITED_CLOSE_CODE ? reason : "");
       },
       onWireIncompatible() {
         services.stores.discardUnverified("page");
@@ -1349,13 +1358,16 @@ function buildPaneInto(
     { signal },
   );
 
+  function wakeReconnect(): void {
+    if (connectionInitiated && ended === null) {
+      engine.connection.reconnectNow();
+    }
+  }
   doc.addEventListener(
     "visibilitychange",
     () => {
       if (doc.visibilityState === "visible") {
-        if (connectionInitiated) {
-          engine.connection.reconnectNow();
-        }
+        wakeReconnect();
         if (services.shell.selected() === services.side) {
           focusFromGesture();
         }
@@ -1368,9 +1380,7 @@ function buildPaneInto(
   win.addEventListener(
     "pageshow",
     () => {
-      if (connectionInitiated) {
-        engine.connection.reconnectNow();
-      }
+      wakeReconnect();
       if (services.shell.selected() === services.side) {
         focusFromGesture();
       }
@@ -1387,15 +1397,7 @@ function buildPaneInto(
     },
     { signal },
   );
-  win.addEventListener(
-    "online",
-    () => {
-      if (connectionInitiated) {
-        engine.connection.reconnectNow();
-      }
-    },
-    { signal },
-  );
+  win.addEventListener("online", wakeReconnect, { signal });
 
   const host = createFeatureHost(reportError);
   acquire(() => {
@@ -1422,6 +1424,7 @@ function buildPaneInto(
     }
     detachSession();
     activeSession = session;
+    ended = null;
     engine.connection.setSession(session.id);
     connectionInitiated = true;
     for (const instance of host.instances()) {
@@ -1439,6 +1442,7 @@ function buildPaneInto(
     detachSession();
     engine.connection.forgetSession(outgoing);
     activeSession = null;
+    ended = null;
     // `connectionInitiated` must go false here or the wake handlers reconnect a
     // pane that holds no session, under a fresh id the server has never seen.
     connectionInitiated = false;
@@ -1584,6 +1588,12 @@ function buildPaneInto(
     busOn,
     notifySwitch: performSwitch,
     clearActiveSession,
+    endBeforeStart(reason) {
+      if (!destroyed && reason !== "") {
+        recordEnd(reason);
+      }
+    },
+    endedBeforeStart: () => (ended === null || ended.reason === "" ? null : ended.reason),
     announceSize() {
       if (!destroyed && fontsLoaded) {
         engine.connection.sendResize();
@@ -1642,6 +1652,7 @@ function buildPaneInto(
       // session has ended.
       engine.renderer.resetScrollback();
       engine.renderer.resetScreen();
+      ended = null;
       connState.reconnecting();
       engine.connection.connect();
     },

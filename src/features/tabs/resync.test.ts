@@ -8,6 +8,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
+import { connectionBanner } from "../connection-banner.js";
+import type { TerminalFeature } from "../../kernel/types.js";
 import { fakeMonitor, rootIn, shown, tick, until, type FakeMonitor } from "./test-helpers/split.js";
 import {
   created,
@@ -81,12 +83,15 @@ const panes = (m: ScriptedMount): (string | null)[] => [
 const lists = (): number => server.count("GET", "/api/sessions");
 
 /** Boot at `hash` and let the first stream open's reconcile finish, so the next
- *  open is a reopen. */
-async function page(hash: string): Promise<ScriptedMount & { root: HTMLElement }> {
+ *  open is a reopen. `features` mount beside the status monitor. */
+async function page(
+  hash: string,
+  features: readonly TerminalFeature<unknown>[] = [],
+): Promise<ScriptedMount & { root: HTMLElement }> {
   History.prototype.replaceState.call(history, null, "", hash);
   const root = rootIn(1000);
   const m = await mountScripted(root, {
-    before: [monitor.feature],
+    before: [monitor.feature, ...features],
     tabsOpts: { activityMonitor: monitor.feature },
   });
   await until(
@@ -293,30 +298,89 @@ describe("resync after a server restart", () => {
 describe("a server removing its last tab", () => {
   const engineShowing = (id: string) =>
     fake.engines.find((e) => e.engine.connection.currentSessionId() === id);
+  const startReason = "the process failed to start";
+  const failedRemoval = (): SessionStatus => ({
+    ...status(X),
+    status: "exited",
+    removed: true,
+    endReason: startReason,
+  });
 
-  it("keeps a tab that ended before its process started on its pane, with the reason, and creates nothing", async () => {
+  // The engine sends a start failure both as the socket's 4001 close and on the
+  // status stream's removal, in no fixed order. Once the removal has dropped the
+  // session, the connection has forgotten it and the close never arrives.
+  const orders: [string, () => void][] = [
+    [
+      "the close before the removal",
+      () => {
+        engineShowing("X")!.callbacks.onProcessExit?.({ code: 4001, reason: startReason });
+        monitor.emit(failedRemoval());
+      },
+    ],
+    [
+      "the removal before the close",
+      () => {
+        monitor.emit(failedRemoval());
+      },
+    ],
+  ];
+
+  async function failedStartPage(deliver: () => void) {
     server.layout = [ok(closed("X"))];
     server.list = [ok([X])];
-    const m = await page("#a");
+    const m = await page("#a", [connectionBanner()]);
     const listsBefore = lists();
-
-    engineShowing("X")!.callbacks.onProcessExit?.({
-      code: 4001,
-      reason: "the process failed to start",
-    });
-    monitor.emit({ ...status(X), status: "exited", removed: true });
+    const engine = engineShowing("X")!.engine;
+    const failures: string[] = [];
+    m.ctx().on("session:startFailed", ({ reason }) => failures.push(reason));
+    deliver();
     for (let i = 0; i < 10; i++) {
       await tick();
     }
+    const banner = () => m.ctx().shell.pane("left")?.root.querySelector(".wt-conn-banner");
+    return { m, listsBefore, engine, failures, banner };
+  }
 
-    expect(server.count("POST", "/api/sessions")).toBe(0);
-    expect(lists()).toBe(listsBefore);
-    expect(m.api.list()).toEqual([]);
-    expect(shown(m.ctx(), "left")).toBe("X");
-    expect(m.ctx().shell.pane("left")?.root.querySelector(".wt-toast")?.textContent).toBe(
-      "Could not start the terminal: the process failed to start",
-    );
-  });
+  it.each(orders)(
+    "keeps a tab that ended before its process started on its pane, with the reason, and creates nothing (%s)",
+    async (_order, deliver) => {
+      const { m, listsBefore, failures, banner } = await failedStartPage(deliver);
+
+      expect(server.count("POST", "/api/sessions")).toBe(0);
+      expect(lists()).toBe(listsBefore);
+      expect(m.api.list()).toEqual([]);
+      expect(shown(m.ctx(), "left")).toBe("X");
+      expect(m.ctx().shell.pane("left")?.root.querySelector(".wt-toast")?.textContent).toBe(
+        `Could not start the terminal: ${startReason}`,
+      );
+      expect(failures).toEqual([startReason]);
+      expect(banner()?.textContent).toBe("Session ended");
+    },
+  );
+
+  it.each(orders)(
+    "keeps the ended screen through a wake and opens no socket (%s)",
+    async (_order, deliver) => {
+      const { engine, banner } = await failedStartPage(deliver);
+      const conn = engine.connection;
+      vi.mocked(conn.reconnectNow).mockClear();
+      vi.mocked(conn.connect).mockClear();
+      vi.mocked(conn.setSession).mockClear();
+
+      vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new PageTransitionEvent("pageshow"));
+      window.dispatchEvent(new Event("online"));
+      for (let i = 0; i < 5; i++) {
+        await tick();
+      }
+
+      expect(conn.reconnectNow).not.toHaveBeenCalled();
+      expect(conn.connect).not.toHaveBeenCalled();
+      expect(conn.setSession).not.toHaveBeenCalled();
+      expect(banner()?.textContent).toBe("Session ended");
+    },
+  );
 
   it("still settles onto a new session when the removed tab's process had run", async () => {
     server.layout = [ok(closed("X"))];
