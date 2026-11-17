@@ -1,5 +1,5 @@
-// Runs tabs alone (no activityMonitor), so no SSE mock is needed; fetch is
-// stubbed for the REST API.
+// No real activityMonitor runs here (the fakes below stand in for it), so no
+// SSE mock is needed; fetch is stubbed for the REST API.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
