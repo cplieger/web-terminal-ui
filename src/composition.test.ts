@@ -135,7 +135,7 @@ describe("composition: composition lifecycle", () => {
   });
 });
 
-describe("composition: cancelComposition (tab-switch detach, design 5.1)", () => {
+describe("composition: cancelComposition (tab-switch detach)", () => {
   it("aborts an in-flight composition without sending and clears the view", () => {
     textarea.dispatchEvent(new CompositionEvent("compositionstart"));
     textarea.value = "\u4F60\u597D";

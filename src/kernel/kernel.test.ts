@@ -1,9 +1,3 @@
-// Kernel contract tests (design section 22.10): a bare kernel yields a working
-// terminal (output + hidden textarea, input-model contract, the sanitizing
-// funnel) with no chrome, and the feature lifecycle (setup builds region chrome,
-// the api is surfaced on the feature value and via ctx.use, teardown runs on
-// destroy, the input funnel composes transforms) behaves as specified.
-
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { userEvent } from "vitest/browser";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -470,7 +464,7 @@ describe("reattach", () => {
   });
 });
 
-describe("switch detach (design 5.1 switch safety)", () => {
+describe("switch detach", () => {
   it("cancels IME composition, and runs onDetach before setSession and before onSwitch", async () => {
     const root = rootIn();
     const order: string[] = [];
@@ -2151,9 +2145,9 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
   });
 
   it("lets the real clipboard feature copy the selection with focus on the body", async () => {
-    // The design promised this integration, and the probe test above cannot stand
-    // in for it: the real handler keys on `ev.code`, not `ev.key`, and reads the
-    // ambient selection itself.
+    // The probe test above cannot stand in for this integration: the real
+    // handler keys on `ev.code`, not `ev.key`, and reads the ambient selection
+    // itself.
     const writeText = vi.fn(() => Promise.resolve());
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     const root = rootIn();

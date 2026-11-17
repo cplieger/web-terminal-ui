@@ -445,10 +445,9 @@ describe("loading overlay status text: the wording the library ships", () => {
   });
 
   it("ships more than one waiting line, because one line cannot rotate", () => {
-    // Step 3 of the design: a single sentence held for nineteen more minutes reads
-    // exactly as hung as no sentence at all. The rotation is the point, and a
-    // consumer that reworded nothing depends entirely on this table having
-    // something in it.
+    // A single sentence held for nineteen more minutes reads exactly as hung as
+    // no sentence at all. The rotation is the point, and a consumer that
+    // reworded nothing depends entirely on this table having something in it.
     expect(defaults.waiting.length).toBeGreaterThan(1);
     for (const line of defaults.waiting) {
       expect(line).not.toBe("");
