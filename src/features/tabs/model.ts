@@ -53,6 +53,11 @@ export function isEndedStatus(status: string): boolean {
   return status === STATUS_EXITED || status === STATUS_CRASHED || status === STATUS_ENDED;
 }
 
+/** Whether the session ended before its process started. */
+export function isStartFailureStatus(status: string): boolean {
+  return status === STATUS_ENDED;
+}
+
 /** The statuses whose dot shows even without the sticky reportsActivity flag: a
  *  plain shell that dies badly has reported no activity in its life, and its red
  *  dot is the one thing the user most needs to see. A clean exit is not news. */

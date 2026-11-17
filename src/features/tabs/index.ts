@@ -41,6 +41,7 @@ import {
   hasPinnedName,
   isCueStatus,
   isEndedStatus,
+  isStartFailureStatus,
   isUnread,
   normalizeActivity,
   normalizeActivityCount,
@@ -2644,6 +2645,20 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const other = otherSide(side);
         return shownIn(side) !== null && shownIn(other) !== null ? other : side;
       }
+      /** The pane a session made elsewhere takes: newTabSide's, else the split's
+       *  other pane, never one showing a failed start, which is the only place
+       *  its end shows. Null when every pane shows one. */
+      function arrivalSide(id: string): PaneSide | null {
+        const first = newTabSide(id);
+        const second = otherSide(first);
+        const sides = shownIn(second) === null ? [first] : [first, second];
+        return sides.find((side) => !showsStartFailure(side)) ?? null;
+      }
+      function showsStartFailure(side: PaneSide): boolean {
+        const id = shownIn(side);
+        const tab = id === null ? undefined : tabList.find((t) => t.id === id);
+        return tab !== undefined && isStartFailureStatus(statusOf(tab));
+      }
       function showNewTab(side: PaneSide, id: string): void {
         // Suppress the swipe reel for a new tab: the list should grow and fade the
         // new row in (animateRowIn) rather than rotate.
@@ -2664,8 +2679,12 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           });
           return;
         }
-        if (!tornDown() && ctx.shell.split.isOpen() && sideOf(id) === null) {
-          showNewTab(newTabSide(id), id);
+        if (tornDown() || !ctx.shell.split.isOpen() || sideOf(id) !== null) {
+          return;
+        }
+        const side = arrivalSide(id);
+        if (side !== null) {
+          showNewTab(side, id);
         }
       }
 

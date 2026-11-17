@@ -394,7 +394,7 @@ describe("a session that ended before its process started", () => {
     expect(bannerOn(m, "left")).toBe("Session ended");
   });
 
-  it("places a session made elsewhere as for any tab and keeps the ended tabs listed", async () => {
+  it("gives a session made elsewhere only its chip beside two ended panes", async () => {
     const m = await splitPage();
     server.list = [ok([ended(X), ended(Y)])];
     await failOn(m, "left", X);
@@ -405,10 +405,42 @@ describe("a session that ended before its process started", () => {
 
     expect(posts()).toBe(0);
     expect(strip(m)).toEqual(["X", "Y", "Z"]);
-    expect(panes(m)).toEqual(["X", "Z"]);
+    expect(panes(m)).toEqual(["X", "Y"]);
+    expect(bannerOn(m, "left")).toBe("Session ended");
+    expect(bannerOn(m, "right")).toBe("Session ended");
     expect(chipOf(m.root, "Y").querySelector(".wt-tab-dot")?.getAttribute("title")).toBe(
       "could not start",
     );
+  });
+
+  it("places a session made elsewhere on the live pane beside an ended one", async () => {
+    const m = await splitPage();
+    server.list = [ok([X, ended(Y)])];
+    await failOn(m, "right", Y);
+    m.ctx().shell.select("left");
+
+    monitor.emit(status(Z));
+    await ticks(10);
+
+    expect(posts()).toBe(0);
+    expect(strip(m)).toEqual(["X", "Y", "Z"]);
+    expect(panes(m)).toEqual(["Z", "Y"]);
+    expect(bannerOn(m, "right")).toBe("Session ended");
+  });
+
+  it("still shows the user's own new terminal in the unselected pane, as create documents", async () => {
+    const m = await splitPage();
+    server.list = [ok([X, ended(Y)])];
+    await failOn(m, "right", Y);
+    m.ctx().shell.select("left");
+    server.post = [created(N)];
+
+    await m.api.create();
+    await ticks(5);
+
+    expect(posts()).toBe(1);
+    expect(strip(m)).toEqual(["X", "Y", "N"]);
+    expect(panes(m)).toEqual(["X", "N"]);
   });
 
   it("sends the DELETE when its tab is closed, and replaces a last tab as any close does", async () => {
@@ -469,6 +501,21 @@ describe("a session that ended before its process started", () => {
 });
 
 describe("a session whose process ran", () => {
+  it("still gives its pane to a session made elsewhere", async () => {
+    const m = await splitPage();
+    server.list = [ok([X, { ...Y, status: "exited" }])];
+    monitor.emit(status({ ...Y, status: "exited" }));
+    engineOn(fake, m.root, "right").callbacks.onProcessExit?.({ code: 4001, reason: "" });
+    await ticks(10);
+
+    monitor.emit(status(Z));
+    await ticks(10);
+
+    expect(posts()).toBe(0);
+    expect(strip(m)).toEqual(["X", "Y", "Z"]);
+    expect(panes(m)).toEqual(["X", "Z"]);
+  });
+
   it("still settles onto a new session when the server removes the last tab", async () => {
     const m = await singlePage();
     server.list = [ok([])];
