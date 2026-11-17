@@ -3537,8 +3537,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // restarted (or replaced every tab). Decided before the adopt loop, so the
         // tabs it lists are placed by the address and the record, not by arrival.
         // A tab whose pane shows a failed start is no evidence of a restart: its
-        // server ended it, and alone it goes through the gone loop's dropTab,
-        // which keeps a last tab's ended pane.
+        // server ended it (dropTab owns what its pane keeps).
         const listable = tabList.filter((t) => t.born <= epochAtList).map((t) => t.id);
         const known = listable.filter((id) => !endedBeforeStart(id));
         if (known.length > 0 && known.every((id) => !seen.has(id))) {
