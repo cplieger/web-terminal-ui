@@ -2859,9 +2859,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // create-first branch of dropTab). Its server either restarted or saw
         // another device replace it, so settle rather than create a second tab.
         // Not awaited: this may run inside the reconcile slot itself. A session
-        // that could not start is dropped by its server too, and a settle onto
-        // the emptied list would create another that fails the same way, so the
-        // pane keeps the ended terminal and its reason.
+        // that ended before its process started was ended by its server, so the
+        // pane keeps the ended terminal and its reason rather than settling onto
+        // a new session the user did not ask for.
         if (failedStart) {
           return;
         }
