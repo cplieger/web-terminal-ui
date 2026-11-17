@@ -763,12 +763,13 @@ describe("the session API's requests", () => {
 });
 
 describe("the status vocabulary", () => {
-  it("treats both ways a process ENDS as ended", () => {
+  it("treats every way a session ENDS as ended", () => {
     // A crashed session is exactly as unable to produce output as an exited one,
     // so session selection must not read it as live (reloading onto a corpse was
-    // the stuck-loading wedge).
+    // the stuck-loading wedge). An `ended` one never had a process at all.
     expect(isEndedStatus("exited")).toBe(true);
     expect(isEndedStatus("crashed")).toBe(true);
+    expect(isEndedStatus("ended")).toBe(true);
     for (const live of ["idle", "working", "warning", "failed", "input", "done", ""]) {
       expect(isEndedStatus(live), live).toBe(false);
     }
@@ -790,6 +791,7 @@ describe("the status vocabulary", () => {
     expect(statusPhrase("done")).toBe("turn finished");
     expect(statusPhrase("exited")).toBe("session ended");
     expect(statusPhrase("crashed")).toBe("process crashed");
+    expect(statusPhrase("ended")).toBe("could not start");
     expect(statusPhrase("idle")).toBe("idle");
     expect(statusPhrase("")).toBe("idle");
     // A status outside the built-in vocabulary is surfaced raw rather than

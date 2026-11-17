@@ -23,6 +23,8 @@ export async function mountScripted(
   spec: {
     readonly tabsOpts?: TabsOptions;
     readonly before?: readonly TerminalFeature<unknown>[];
+    /** Pane features, built fresh for each pane, mounted after `before`. */
+    readonly paneFeatures?: () => readonly TerminalFeature<unknown>[];
     readonly opts?: Partial<CreateTerminalOptions>;
   } = {},
 ): Promise<ScriptedMount> {
@@ -38,7 +40,7 @@ export async function mountScripted(
   const feature = tabs(spec.tabsOpts);
   const term = await mountTerminal(root, {
     split: true,
-    features: () => [probe, ...(spec.before ?? []), feature],
+    features: () => [probe, ...(spec.before ?? []), ...(spec.paneFeatures?.() ?? []), feature],
     ...spec.opts,
   });
   for (let i = 0; i < 40 && (ctxRef === undefined || feature.api === undefined); i++) {

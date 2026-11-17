@@ -32,6 +32,10 @@ const STATUS_EXITED = "exited";
  *  restart never paints as a failure. Terminal, like "exited". */
 const STATUS_CRASHED = "crashed";
 
+/** A session that ended before its process started; the server keeps it listed,
+ *  with its endReason, until a client closes it. Terminal, like "exited". */
+const STATUS_ENDED = "ended";
+
 /** An error the program reported: OSC 7501 state `error`, or OSC 9;4 progress
  *  state 2 (iTerm2 semantics). A STATE that persists until the program reports
  *  another, or the process dies. */
@@ -42,10 +46,10 @@ const STATUS_FAILED = "failed";
  *  terminal reset (RIS): OSC 7501 outranks OSC 9;4 until a RIS forgets it. */
 const STATUS_WARNING = "warning";
 
-/** Whether the session's process is GONE, whichever way it went: reloading onto
- *  a crashed session is the same stuck-loading wedge as onto an exited one. */
+/** Whether the session's process is GONE, or never came: reloading onto a
+ *  crashed session is the same stuck-loading wedge as onto an exited one. */
 export function isEndedStatus(status: string): boolean {
-  return status === STATUS_EXITED || status === STATUS_CRASHED;
+  return status === STATUS_EXITED || status === STATUS_CRASHED || status === STATUS_ENDED;
 }
 
 /** The statuses whose dot shows even without the sticky reportsActivity flag: a
@@ -75,6 +79,8 @@ export function statusPhrase(status: string): string {
       return "session ended";
     case STATUS_CRASHED:
       return "process crashed";
+    case STATUS_ENDED:
+      return "could not start";
     case "idle":
     case "":
       return "idle";

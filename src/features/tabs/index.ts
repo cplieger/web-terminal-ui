@@ -135,8 +135,7 @@ export interface TabsApi {
    *  once it exists. A tab the other pane shows trades places with the one on
    *  that side; any other tab there becomes ordinary. In an open split, a tab
    *  already shown on that side changes nothing. False when refused: an unknown
-   *  id, an invalid side, a tab whose session ended before its process started,
-   *  or a split the pane row is too narrow to open. */
+   *  id, an invalid side, or a split the pane row is too narrow to open. */
   snap(id: string, side: PaneSide): boolean;
   /** The current tabs, first-to-last by creation; `active` marks a tab a pane
    *  shows. */
@@ -950,12 +949,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return null;
       }
       const isShown = (id: string): boolean => sideOf(id) !== null;
-      /** Whether a pane shows `id` ended before its process started; the pane
-       *  owns that record (`PaneHandle.endedBeforeStart`). */
-      function endedBeforeStart(id: string): boolean {
-        const side = sideOf(id);
-        return side !== null && (ctx.shell.pane(side)?.endedBeforeStart() ?? null) !== null;
-      }
       const anyShown = (): boolean => ctx.shell.panes().some((p) => p.state() === "shown");
       /** The tab that receives typing: the selected pane's. */
       const selectedId = (): string | null => shownIn(ctx.shell.selected());
@@ -1822,8 +1815,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
        *  ordinary tab, a pane elsewhere showing `id` is emptied first (a session is
        *  never shown twice), and the pane is selected unless `keepSelection` holds
        *  it on a pane that shows a tab. False when `side` names no pane that can
-       *  show a tab (absent, failed or hidden), `id` no tab, or a tab whose pane
-       *  holds a failed start: the move would clear that pane's ended record. */
+       *  show a tab (absent, failed or hidden) or `id` no tab. */
       function showIn(side: PaneSide, id: string, how: ShowOptions = {}): boolean {
         const pane = ctx.shell.pane(side);
         const next = tabList.find((t) => t.id === id);
@@ -1845,9 +1837,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return true;
         }
         const from = sideOf(id);
-        if (from !== null && endedBeforeStart(id)) {
-          return false;
-        }
         if (from !== null) {
           const losing = ctx.shell.pane(from);
           if (losing !== null) {
@@ -1945,10 +1934,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const from = sideOf(id);
         if (from === side && !opening) {
           return true;
-        }
-        // Refused before the split opens, which would otherwise open beside nothing.
-        if (endedBeforeStart(id)) {
-          return false;
         }
         if (opening && !split.canOpen()) {
           return false;
@@ -2773,7 +2758,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // anything moves.
         const side = sideOf(id);
         const splitOpen = ctx.shell.split.isOpen();
-        const failedStart = endedBeforeStart(id);
         // Emptying a pane makes it inert, which drops a keyboard it held to the
         // body before the view moves; the keyboard follows the view instead.
         const typing = splitOpen && side !== null && keyboardInPaneInput();
@@ -2807,10 +2791,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Each connection forgets the session exactly once: the showing pane's
         // through clearActiveSession (which closes its socket and empties the
         // pane), every other through dropSessionExcept. A quiet drop empties a
-        // single view's pane too, since no switch will replace what it shows. A
-        // failed start's last tab keeps its pane and that pane's ended record.
-        const keepEnded = failedStart && !quiet && tabList.length === 0;
-        if (side !== null && (splitOpen || quiet) && !keepEnded) {
+        // single view's pane too, since no switch will replace what it shows.
+        if (side !== null && (splitOpen || quiet)) {
           ctx.shell.pane(side)?.clearActiveSession();
           ctx.shell.dropSessionExcept(id, side);
         } else {
@@ -2826,7 +2808,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // What the panes show next is decided here, before the server's answer:
         // selection must not sit on an emptied pane for a DELETE round trip.
         if (!quiet) {
-          placeAfterDrop(idx, side, splitOpen, keepEnded);
+          placeAfterDrop(idx, side, splitOpen);
           if (typing || keyboardHeld) {
             focusInput();
           }
@@ -2842,24 +2824,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      // The pane transaction for a dropped tab that `side` showed (null: none);
-      // keepEnded: it was the last tab and its session ended before its process
-      // started, which its server decided, so its pane keeps the ended terminal
-      // and its reason rather than settling onto a session the user did not ask
-      // for. Only an empty other pane closes; an ended one stays beside it.
-      function placeAfterDrop(
-        idx: number,
-        side: PaneSide | null,
-        splitOpen: boolean,
-        keepEnded: boolean,
-      ): void {
+      // The pane transaction for a dropped tab that `side` showed (null: none).
+      function placeAfterDrop(idx: number, side: PaneSide | null, splitOpen: boolean): void {
         if (side === null) {
-          return;
-        }
-        if (keepEnded) {
-          if (splitOpen && shownIn(otherSide(side)) === null) {
-            ctx.shell.split.closeSide(otherSide(side));
-          }
           return;
         }
         if (splitOpen && shownIn(otherSide(side)) !== null) {
@@ -3536,12 +3503,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // Every tab the listing could have named is missing from it: the server
         // restarted (or replaced every tab). Decided before the adopt loop, so the
         // tabs it lists are placed by the address and the record, not by arrival.
-        // A tab whose pane shows a failed start is no evidence of a restart: its
-        // server ended it (dropTab owns what its pane keeps).
-        const listable = tabList.filter((t) => t.born <= epochAtList).map((t) => t.id);
-        const known = listable.filter((id) => !endedBeforeStart(id));
+        // Because this branch takes every such case, the gone loop below drops a
+        // strict subset of the known tabs and never reaches dropTab's last-tab arm.
+        const known = tabList.filter((t) => t.born <= epochAtList).map((t) => t.id);
         if (known.length > 0 && known.every((id) => !seen.has(id))) {
-          await resync(listable.filter((id) => !seen.has(id)));
+          await resync(known);
           return;
         }
         for (const info of list) {
@@ -3825,11 +3791,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       if (monitor) {
         const offStatus = monitor.onStatus((s) => {
           if (s.removed) {
-            const reason: unknown = s.endReason;
-            const side = sideOf(s.id);
-            if (side !== null && typeof reason === "string") {
-              ctx.shell.pane(side)?.endBeforeStart(reason);
-            }
             void dropTab(s.id, { remote: false }); // already gone server-side; no DELETE
             return;
           }
