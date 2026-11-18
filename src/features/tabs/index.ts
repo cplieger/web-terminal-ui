@@ -4073,11 +4073,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // The selected side first, so a tab moving across never empties it.
         for (const side of [next.split.selected, otherSide(next.split.selected)]) {
           const want = next.panes[side];
-          if (shownIn(side) === want) {
-            continue;
-          }
           if (want === null) {
-            ctx.shell.pane(side)?.clearActiveSession();
+            if (shownIn(side) !== null) {
+              ctx.shell.pane(side)?.clearActiveSession();
+            }
             continue;
           }
           const reel = bindPane(side, want, boot);
