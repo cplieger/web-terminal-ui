@@ -2581,7 +2581,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       // Add a tab, unplaced, for a session that exists server-side but has no
       // local tab yet (one created in another browser), so every client's tab set
-      // converges on the server. True when it added one. The caller runs syncChrome.
+      // converges on the server. The caller runs syncChrome.
       function adoptSession(info: SessionInfo): boolean {
         if (tabList.find((t) => t.id === info.id)) {
           return false;
@@ -2602,9 +2602,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return true;
       }
 
-      // Every server record, a stream event or a list, enters here. Placement
-      // comes after every status: arrivalSide reads the shown tabs' statuses, so
-      // an arrival placed before a later record's `ended` replaced that pane.
+      // Every record after boot, a stream event or a list, enters here; the boot
+      // list only adopts, and showSettled places it. Placement follows every
+      // status in the call: arrivalSide reads the shown tabs' statuses, so an
+      // arrival placed earlier would take a pane whose `ended` the call carries.
       function takeRecords(records: readonly StatusRecord[], source: RecordSource): void {
         const arrived = records.filter((rec) => adoptSession(rec));
         for (const rec of records) {
