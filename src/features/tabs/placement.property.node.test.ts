@@ -1,0 +1,960 @@
+import fc from "fast-check";
+import { describe, expect, it } from "vitest";
+
+import { isEndedStatus, type StatusRecord } from "./model.js";
+import {
+  chromeOf,
+  createBegan,
+  layoutRecord,
+  layoutStale,
+  ownCreated,
+  pageVisibility,
+  paneStartFailed,
+  removed,
+  resyncBegan,
+  resyncSettled,
+  select,
+  shellChanged,
+  show,
+  splitIntent,
+  splitRatio,
+  stepFor,
+  switcherToggled,
+  ackSettled,
+  ackFailed,
+  type SplitOpening,
+} from "./placement.js";
+import {
+  bootPage,
+  createdAt,
+  endedRec,
+  rec,
+  splitRecord,
+  type ListToken,
+  type Page,
+} from "./test-helpers/placement-world.js";
+
+const ORDERS = { numRuns: 4000 } as const;
+const SLOW = { timeout: 60_000 } as const;
+
+type Ev = { readonly rec: StatusRecord } | { readonly removed: string };
+
+/** The server the page talks to: its sessions now, and the stream's queue. */
+class Server {
+  readonly rows = new Map<string, StatusRecord>();
+  queue: Ev[] = [];
+  private n = 0;
+  constructor(
+    ids: readonly string[],
+    private readonly keep: string | null = null,
+  ) {
+    for (const id of ids) {
+      this.rows.set(id, rec(id));
+    }
+  }
+  create(prefix: string): string {
+    this.n += 1;
+    const id = `${prefix}${String(this.n)}`;
+    const r = rec(id);
+    this.rows.set(id, r);
+    this.queue.push({ rec: r });
+    return id;
+  }
+  pick(who: number, except: readonly (string | null)[] = []): string | undefined {
+    const ids = [...this.rows.keys()].filter((id) => !except.includes(id));
+    return ids.length === 0 ? undefined : ids[who % ids.length];
+  }
+  private update(id: string, f: (r: StatusRecord) => StatusRecord | null): void {
+    const r = this.rows.get(id);
+    const next = r === undefined ? null : f(r);
+    if (next !== null) {
+      this.rows.set(id, next);
+      this.queue.push({ rec: next });
+    }
+  }
+  status(id: string, status: string): void {
+    this.update(id, (r) =>
+      isEndedStatus(r.status) ? null : { ...r, status, statusSeq: (r.statusSeq ?? 0) + 1 },
+    );
+  }
+  fail(id: string): void {
+    this.update(id, (r) =>
+      (r.statusSeq ?? 0) !== 0
+        ? null
+        : { ...r, status: "ended", endReason: "spawn failed", statusSeq: 1 },
+    );
+  }
+  read(id: string): void {
+    this.update(id, (r) =>
+      (r.statusSeq ?? 0) <= (r.seenSeq ?? 0) ? null : { ...r, seenSeq: r.statusSeq ?? 0 },
+    );
+  }
+  remove(id: string): void {
+    if (id !== this.keep && this.rows.delete(id)) {
+      this.queue.push({ removed: id });
+    }
+  }
+  list(): StatusRecord[] {
+    return [...this.rows.values()];
+  }
+}
+
+function shuffled<T>(xs: readonly T[], seed: number): T[] {
+  const out = [...xs];
+  let s = seed >>> 0;
+  for (let i = out.length - 1; i > 0; i--) {
+    s = (Math.imul(s, 1103515245) + 12345) >>> 0;
+    const j = s % (i + 1);
+    const a = out[i];
+    const b = out[j];
+    if (a !== undefined && b !== undefined) {
+      out[i] = b;
+      out[j] = a;
+    }
+  }
+  return out;
+}
+
+const byAge = (ids: Iterable<string>): string[] =>
+  [...ids].sort((a, b) =>
+    createdAt(a) === createdAt(b) ? (a < b ? -1 : 1) : createdAt(a) < createdAt(b) ? -1 : 1,
+  );
+
+const who = fc.nat({ max: 9 });
+const cmdArb = fc.oneof(
+  fc.record({ k: fc.constant("create" as const) }),
+  fc.record({
+    k: fc.constant("status" as const),
+    who,
+    status: fc.constantFrom("working", "input", "done", "failed", "crashed", "exited", "idle"),
+  }),
+  fc.record({ k: fc.constant("fail" as const), who }),
+  fc.record({ k: fc.constant("pane4001" as const), who }),
+  fc.record({ k: fc.constant("read" as const), who }),
+  fc.record({ k: fc.constant("remove" as const), who }),
+  fc.record({ k: fc.constant("deliver" as const), n: fc.integer({ min: 1, max: 4 }) }),
+  fc.record({ k: fc.constant("pollReq" as const) }),
+  fc.record({ k: fc.constant("pollAns" as const) }),
+  fc.record({ k: fc.constant("reopen" as const), seed: fc.nat(), early: fc.nat({ max: 4 }) }),
+  fc.record({ k: fc.constant("openAns" as const), fail: fc.boolean() }),
+  fc.record({ k: fc.constant("ack" as const), gone: fc.boolean() }),
+  fc.record({ k: fc.constant("visible" as const) }),
+  fc.record({ k: fc.constant("resyncRun" as const) }),
+  fc.record({ k: fc.constant("show" as const), who }),
+  fc.record({
+    k: fc.constant("select" as const),
+    side: fc.constantFrom("left" as const, "right" as const),
+  }),
+  fc.record({ k: fc.constant("close" as const), who, many: fc.boolean() }),
+  fc.record({ k: fc.constant("ownBegin" as const), button: fc.boolean() }),
+  fc.record({ k: fc.constant("ownAns" as const) }),
+  fc.record({ k: fc.constant("split" as const) }),
+  fc.record({ k: fc.constant("tray" as const) }),
+  fc.record({ k: fc.constant("narrow" as const) }),
+);
+type Cmd = typeof cmdArb extends fc.Arbitrary<infer T> ? T : never;
+const SERVER_KINDS: ReadonlySet<Cmd["k"]> = new Set([
+  "create",
+  "status",
+  "fail",
+  "pane4001",
+  "read",
+  "remove",
+  "deliver",
+  "pollReq",
+  "pollAns",
+  "reopen",
+  "openAns",
+  "ack",
+  "resyncRun",
+]);
+// A user step commits at once; a kernel step and an answer read the screen or
+// what a commit sent, so every run commits before them.
+const USER: ReadonlySet<Cmd["k"]> = new Set([
+  "show",
+  "select",
+  "close",
+  "ownAns",
+  "split",
+  "tray",
+  "narrow",
+]);
+const COMMIT_BEFORE: ReadonlySet<Cmd["k"]> = new Set(["split", "narrow", "resyncRun", "ack"]);
+
+interface Step {
+  readonly cmd: Cmd;
+  readonly commit: boolean;
+}
+const stepsArb = (max: number, kinds?: ReadonlySet<Cmd["k"]>): fc.Arbitrary<Step[]> =>
+  fc.array(
+    fc.record({
+      cmd: kinds === undefined ? cmdArb : cmdArb.filter((c) => kinds.has(c.k)),
+      commit: fc.boolean(),
+    }),
+    { minLength: 1, maxLength: max },
+  );
+
+interface World {
+  readonly page: Page;
+  readonly server: Server;
+  readonly polls: { token: ListToken; rows: StatusRecord[] }[];
+  readonly opens: { token: ListToken; rows: StatusRecord[]; pending: StatusRecord[] }[];
+  own: { id: string; opening: SplitOpening | null } | null;
+  readonly answered: boolean[];
+}
+
+function world(keep: string | null = null): World {
+  return {
+    page: bootPage(["X", "Y", "W"], splitRecord("X", "Y")),
+    server: new Server(["X", "Y", "W"], keep),
+    polls: [],
+    opens: [],
+    own: null,
+    answered: [],
+  };
+}
+
+function deliver(w: World, n: number): void {
+  for (let i = 0; i < n; i++) {
+    const ev = w.server.queue.shift();
+    if (ev === undefined) {
+      return;
+    }
+    if ("removed" in ev) {
+      w.page.gone(ev.removed);
+    } else {
+      w.page.stream(ev.rec);
+    }
+  }
+}
+
+function present(w: World): string[] {
+  return byAge(w.page.m.sessions.keys());
+}
+
+function resyncRun(w: World): void {
+  const ids = w.page.resyncs.shift();
+  if (ids === undefined) {
+    return;
+  }
+  const rows = w.server.list();
+  w.page.apply((m) => resyncBegan(m, ids, false, 0));
+  w.page.apply((m) =>
+    resyncSettled(m, { sessions: rows, record: null, route: null, toastStale: false, now: 0 }),
+  );
+}
+
+/** Runs one command; returns the id a user step must show in its own commit. */
+function exec(w: World, cmd: Cmd): string | null {
+  const { page, server } = w;
+  switch (cmd.k) {
+    case "create":
+      server.create("Z");
+      return null;
+    case "status":
+    case "fail":
+    case "read":
+    case "remove": {
+      const id = server.pick(cmd.who, [w.own?.id ?? null]);
+      if (id === undefined) {
+        return null;
+      }
+      if (cmd.k === "status") {
+        server.status(id, cmd.status);
+      } else if (cmd.k === "fail") {
+        server.fail(id);
+      } else if (cmd.k === "read") {
+        server.read(id);
+      } else {
+        server.remove(id);
+      }
+      return null;
+    }
+    case "pane4001": {
+      const failed = present(w).filter((id) => server.rows.get(id)?.status === "ended");
+      const id = failed[cmd.who % Math.max(1, failed.length)];
+      if (id !== undefined) {
+        page.apply((m) => paneStartFailed(m, id, "spawn failed"));
+      }
+      return null;
+    }
+    case "deliver":
+      deliver(w, cmd.n);
+      return null;
+    case "pollReq":
+      w.polls.push({ token: page.request(), rows: server.list() });
+      return null;
+    case "pollAns": {
+      const poll = w.polls.shift();
+      if (poll !== undefined) {
+        page.answer(poll.token, poll.rows);
+      }
+      return null;
+    }
+    case "reopen": {
+      for (const o of w.opens) {
+        o.pending = [];
+      }
+      server.queue = [];
+      const token = page.open();
+      const rows = shuffled(server.list(), cmd.seed);
+      for (const r of rows.slice(0, cmd.early)) {
+        page.stream(r);
+      }
+      w.opens.push({ token, rows: server.list(), pending: rows.slice(cmd.early) });
+      return null;
+    }
+    case "openAns": {
+      const o = w.opens.shift();
+      if (o !== undefined) {
+        for (const r of o.pending) {
+          page.stream(r);
+        }
+        page.opened(o.token, cmd.fail ? null : o.rows);
+      }
+      return null;
+    }
+    case "ack": {
+      const order = page.acks
+        .map((a, i) => ({ a, i }))
+        .filter(({ i }) => w.answered[i] !== true)
+        .sort((x, y) => (x.a.id === y.a.id ? x.a.seq - y.a.seq : x.a.id < y.a.id ? -1 : 1));
+      const first = order[0];
+      if (first !== undefined) {
+        w.answered[first.i] = true;
+        page.apply((m) =>
+          cmd.gone
+            ? ackFailed(m, first.a.id, first.a.seq, true)
+            : ackSettled(m, first.a.id, first.a.seq),
+        );
+      }
+      return null;
+    }
+    case "visible":
+      page.apply((m) => pageVisibility(m, !m.page.visible));
+      return null;
+    case "resyncRun":
+      resyncRun(w);
+      return null;
+    case "show": {
+      const ids = present(w);
+      const id = ids[cmd.who % Math.max(1, ids.length)];
+      if (id === undefined) {
+        return null;
+      }
+      page.apply((m) => show(m, id));
+      return id;
+    }
+    case "select":
+      page.apply((m) => select(m, cmd.side));
+      return null;
+    case "close": {
+      const ids = present(w).filter((id) => id !== w.own?.id);
+      const at = cmd.who % Math.max(1, ids.length);
+      const victims = cmd.many ? ids.slice(at + 1) : ids.slice(at, at + 1);
+      if (victims.length === 0 || victims.length >= present(w).length) {
+        return null;
+      }
+      for (const id of victims) {
+        server.remove(id);
+      }
+      page.apply((m) => removed(m, victims, { by: "user" }, 0));
+      return null;
+    }
+    case "ownBegin":
+      if (w.own === null) {
+        w.own = { id: server.create("N"), opening: cmd.button ? { by: "button" } : null };
+        page.apply(createBegan);
+      }
+      return null;
+    case "ownAns": {
+      const o = w.own;
+      if (o === null) {
+        return null;
+      }
+      w.own = null;
+      const r = server.rows.get(o.id) ?? rec(o.id);
+      page.apply((m) => ownCreated(m, r, o.opening, false));
+      return page.m.holds.resync === 0 ? o.id : null;
+    }
+    case "split": {
+      const open = page.lay.split.open;
+      if (open || present(w).length >= 2) {
+        page.apply((m) => splitIntent(m, !open));
+      }
+      return null;
+    }
+    case "tray":
+      page.apply((m) => switcherToggled(m, !m.page.switcherOpen));
+      return null;
+    case "narrow": {
+      const l = page.lay;
+      if (l.split.open) {
+        const keptId = l.panes[l.split.selected] ?? l.panes.left ?? l.panes.right;
+        page.apply((m) => shellChanged(m, { kind: "splitClosed", keptId }));
+      }
+      return null;
+    }
+  }
+}
+
+/** The invariants every commit must hold (7.3.9 to 7.3.11). */
+function checkCommit(page: Page): void {
+  const l = page.lay;
+  expect(l.strip).toEqual(byAge(page.m.sessions.keys()));
+  const shown = [l.panes.left, l.panes.right].filter((id) => id !== null);
+  expect(new Set(shown).size).toBe(shown.length);
+  for (const id of shown) {
+    expect(page.m.sessions.has(id)).toBe(true);
+  }
+  if (!l.split.open) {
+    expect(l.panes.right).toBeNull();
+    expect(l.split.selected).toBe("left");
+  }
+  const again = stepFor(page.m, l);
+  expect([
+    again.layout.panes,
+    again.layout.split,
+    again.layout.covered,
+    again.layout.recent,
+  ]).toEqual([l.panes, l.split, l.covered, l.recent]);
+  const fx = again.effects;
+  expect([
+    fx.acks,
+    fx.retry,
+    fx.moved,
+    fx.persist,
+    fx.focus,
+    fx.toasts,
+    fx.settle,
+    fx.resync,
+  ]).toEqual([[], false, "none", false, null, [], false, null]);
+}
+
+function snapOf(page: Page): unknown {
+  const l = page.lay;
+  return {
+    panes: l.panes,
+    split: l.split,
+    strip: l.strip,
+    recent: l.recent,
+    dot: l.indicators.switchDot,
+    attention: l.indicators.attention,
+  };
+}
+
+function drain(w: World, after: () => void): void {
+  while (w.opens.length > 0) {
+    exec(w, { k: "openAns", fail: false });
+  }
+  while (w.polls.length > 0) {
+    exec(w, { k: "pollAns" });
+  }
+  if (w.own !== null) {
+    exec(w, { k: "ownAns" });
+    after();
+  }
+  deliver(w, Number.MAX_SAFE_INTEGER);
+  after();
+  w.page.list(w.server.list());
+  after();
+  for (let i = 0; i < 4 && w.page.resyncs.length > 0; i++) {
+    resyncRun(w);
+    after();
+  }
+}
+
+/** Runs `steps`, committing after every step (`every`) or only where a step
+ *  asks or must; returns what the screen showed at each user step and at the end. */
+function run(
+  steps: readonly Step[],
+  every: boolean,
+  opts: {
+    readonly keep?: string;
+    readonly observe?: (w: World) => unknown;
+    /** Reducers only: no layout is folded, so the run checks the model alone. */
+    readonly reducersOnly?: boolean;
+  } = {},
+): { readonly seen: unknown[]; readonly w: World } {
+  const w = world(opts.keep ?? null);
+  const observe = opts.observe ?? ((x: World) => snapOf(x.page));
+  const commit = (): void => {
+    if (opts.reducersOnly !== true) {
+      w.page.commit();
+      checkCommit(w.page);
+    }
+  };
+  const seen: unknown[] = [observe(w)];
+  for (const { cmd, commit: asked } of steps) {
+    if (COMMIT_BEFORE.has(cmd.k)) {
+      commit();
+    }
+    const mustShow = exec(w, cmd);
+    const user = USER.has(cmd.k);
+    if (user || asked || every) {
+      commit();
+    }
+    if (mustShow !== null && w.page.m.sessions.has(mustShow)) {
+      expect([w.page.lay.panes.left, w.page.lay.panes.right]).toContain(mustShow);
+    }
+    if (user) {
+      seen.push(observe(w));
+    }
+  }
+  drain(w, commit);
+  seen.push(observe(w));
+  return { seen, w };
+}
+
+describe("placement over generated input orders", () => {
+  it(
+    "gives the same screens whichever frames the commits ran in, and shows a user's tab at once",
+    SLOW,
+    () => {
+      fc.assert(
+        fc.property(stepsArb(24), (steps) => {
+          const ref = run(steps, true);
+          const sparse = run(steps, false);
+          expect(sparse.seen).toEqual(ref.seen);
+          expect(ref.seen[0]).toMatchObject({ panes: { left: "X", right: "Y" } });
+        }),
+      );
+    },
+  );
+
+  it(
+    "converges every session's facts on the server's state once every delivery lands",
+    SLOW,
+    () => {
+      fc.assert(
+        fc.property(stepsArb(24, SERVER_KINDS), (steps) => {
+          const { w } = run(steps, false, { keep: "X", reducersOnly: true });
+          const m = w.page.m;
+          expect(byAge(m.sessions.keys())).toEqual(byAge(w.server.rows.keys()));
+          for (const r of w.server.list()) {
+            const f = m.sessions.get(r.id);
+            expect({
+              status: f?.status,
+              statusSeq: f?.statusSeq,
+              seenSeq: f?.seenSeq,
+              startFailure: f?.failAt == null ? "" : f.startFailure,
+            }).toEqual({
+              status: r.status,
+              statusSeq: r.statusSeq ?? 0,
+              seenSeq: r.seenSeq ?? 0,
+              startFailure: r.status === "ended" ? r.endReason : "",
+            });
+          }
+          expect([m.holds, m.restartPending]).toEqual([
+            { sync: 0, create: false, resync: 0 },
+            null,
+          ]);
+        }),
+      );
+    },
+  );
+
+  it("paints the same selection chrome whichever frames the commits ran in", SLOW, () => {
+    fc.assert(
+      fc.property(stepsArb(16), (steps) => {
+        const observe = (w: World): unknown => chromeOf(w.page.m, w.page.lay);
+        const ref = run(steps, true, { observe });
+        const sparse = run(steps, false, { observe });
+        expect(sparse.seen).toEqual(ref.seen);
+        expect(ref.seen[0]).toMatchObject({ active: "X" });
+      }),
+      ORDERS,
+    );
+  });
+});
+
+/** The worse of two cues, written out per pair from the severity the tab icon documents. */
+const WORSE: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  "": { "": "", crashed: "crashed", failed: "failed", input: "input", done: "done" },
+  crashed: {
+    "": "crashed",
+    crashed: "crashed",
+    failed: "crashed",
+    input: "crashed",
+    done: "crashed",
+  },
+  failed: { "": "failed", crashed: "crashed", failed: "failed", input: "failed", done: "failed" },
+  input: { "": "input", crashed: "crashed", failed: "failed", input: "input", done: "input" },
+  done: { "": "done", crashed: "crashed", failed: "failed", input: "input", done: "done" },
+};
+
+describe("cues over generated delivery orders", () => {
+  const HIDDEN = ["W", "V", "U"] as const;
+  const ALL = ["X", "Y", ...HIDDEN] as const;
+  const histArb = fc.array(
+    fc.oneof(
+      fc.constantFrom("working", "input", "done", "failed", "crashed", "idle"),
+      fc.constant("read"),
+    ),
+    { maxLength: 5 },
+  );
+  const histories = fc.record({ X: histArb, Y: histArb, W: histArb, V: histArb, U: histArb });
+  const schedule = fc.array(fc.constantFrom(...ALL), { maxLength: 30 });
+
+  function records(
+    h: Readonly<Record<(typeof ALL)[number], readonly string[]>>,
+  ): Map<string, StatusRecord[]> {
+    const out = new Map<string, StatusRecord[]>();
+    for (const id of ALL) {
+      let r = rec(id);
+      const list: StatusRecord[] = [];
+      for (const step of h[id]) {
+        if (step === "read") {
+          r = { ...r, seenSeq: r.statusSeq ?? 0 };
+        } else if (!isEndedStatus(r.status)) {
+          r = { ...r, status: step, statusSeq: (r.statusSeq ?? 0) + 1 };
+        }
+        list.push(r);
+      }
+      out.set(id, list);
+    }
+    return out;
+  }
+
+  function deliverInOrder(
+    per: Map<string, StatusRecord[]>,
+    order: readonly string[],
+    commits: readonly boolean[],
+  ): Page {
+    const p = bootPage([...ALL], splitRecord("X", "Y"));
+    const queues = new Map([...per].map(([id, list]) => [id, [...list]]));
+    const seq = [
+      ...order,
+      ...ALL.flatMap((id) => Array<string>(queues.get(id)?.length ?? 0).fill(id)),
+    ];
+    seq.forEach((id, i) => {
+      const r = queues.get(id)?.shift();
+      if (r !== undefined) {
+        p.stream(r);
+        if (commits[i % commits.length] === true) {
+          p.commit();
+        }
+      }
+    });
+    p.commit();
+    return p;
+  }
+
+  it(
+    "shows the most urgent unread cue out of view and loses none, in any delivery order",
+    SLOW,
+    () => {
+      fc.assert(
+        fc.property(
+          histories,
+          schedule,
+          schedule,
+          fc.array(fc.boolean(), { minLength: 1 }),
+          (h, a, b, commits) => {
+            const per = records(h);
+            const one = deliverInOrder(per, a, commits);
+            const two = deliverInOrder(per, b, [true]);
+            let dot = "";
+            let count = 0;
+            for (const id of HIDDEN) {
+              const last = per.get(id)?.at(-1);
+              const status = last?.status ?? "";
+              if (
+                ["crashed", "failed", "input", "done"].includes(status) &&
+                (last?.statusSeq ?? 0) > (last?.seenSeq ?? 0)
+              ) {
+                dot = WORSE[dot]?.[status] ?? "?";
+                count += 1;
+              }
+            }
+            for (const p of [one, two]) {
+              expect(p.lay.indicators.switchDot).toBe(dot);
+              expect(p.lay.indicators.attention.count).toBe(count);
+              expect(p.acks.every((x) => x.id === "X" || x.id === "Y")).toBe(true);
+            }
+          },
+        ),
+      );
+    },
+  );
+});
+
+describe("the orders behind the design's findings", () => {
+  const panesKey = (p: Page): unknown => ({ panes: p.lay.panes, split: p.lay.split });
+
+  it(
+    "restores a failed start's pane and the selection wherever the failure falls among later arrivals",
+    SLOW,
+    () => {
+      const spec = fc.record({
+        xFailed: fc.boolean(),
+        k: fc.integer({ min: 1, max: 4 }),
+        pos: fc.nat({ max: 4 }),
+        source: fc.constantFrom("stream" as const, "4001" as const, "list" as const),
+        commits: fc.array(fc.boolean(), { minLength: 8, maxLength: 8 }),
+      });
+      type Spec = typeof spec extends fc.Arbitrary<infer T> ? T : never;
+      const runIt = (s: Spec, pos: number, commits: readonly boolean[]): Page => {
+        const p = bootPage(["X", "Y"], splitRecord("X", "Y"));
+        if (s.xFailed) {
+          p.stream(endedRec("X")).commit();
+        }
+        const arrivals = Array.from({ length: s.k }, (_, i) => `Z${String(i + 1)}`);
+        const at = Math.min(pos, s.k);
+        const steps: (() => void)[] = arrivals.map((id) => () => p.stream(rec(id)));
+        steps.splice(at, 0, () => {
+          if (s.source === "stream") {
+            p.stream(endedRec("Y"));
+          } else if (s.source === "4001") {
+            p.apply((m) => paneStartFailed(m, "Y", "spawn failed"));
+          } else {
+            p.list([
+              s.xFailed ? endedRec("X") : rec("X"),
+              endedRec("Y"),
+              ...arrivals.slice(0, at).map((id) => rec(id)),
+            ]);
+          }
+        });
+        steps.forEach((step, i) => {
+          step();
+          if (commits[i] === true) {
+            p.commit();
+          }
+        });
+        p.stream(endedRec("Y")).commit();
+        return p;
+      };
+      fc.assert(
+        fc.property(spec, (s) => {
+          const all = Array<boolean>(8).fill(true);
+          const generated = runIt(s, s.pos, s.commits);
+          const late = runIt(s, s.k, all);
+          const first = runIt(s, 0, all);
+          expect(panesKey(generated)).toEqual(panesKey(late));
+          expect(panesKey(late)).toEqual(panesKey(first));
+          expect([generated.lay.panes.left, generated.lay.panes.right]).toContain("Y");
+        }),
+        ORDERS,
+      );
+    },
+  );
+
+  it(
+    "places a restarted server's set only by its settle, with one resync, however the restart was seen",
+    SLOW,
+    () => {
+      const spec = fc.record({
+        path: fc.constantFrom("poll" as const, "reopen" as const, "conflict" as const),
+        k: fc.integer({ min: 2, max: 4 }),
+        seed: fc.nat(),
+        listAt: fc.nat({ max: 4 }),
+        before: fc.nat({ max: 2 }),
+        during: fc.nat({ max: 2 }),
+        commits: fc.array(fc.boolean(), { minLength: 12, maxLength: 12 }),
+      });
+      type Spec = typeof spec extends fc.Arbitrary<infer T> ? T : never;
+      const runIt = (s: Spec, commits: readonly boolean[]): Page => {
+        const p = bootPage(["X", "Y"], splitRecord("X", "Y"));
+        let i = 0;
+        const maybe = (): void => {
+          if (commits[i++ % commits.length] === true) {
+            p.commit();
+            expect(
+              [p.lay.panes.left, p.lay.panes.right].every(
+                (id) => id === null || id === "X" || id === "Y",
+              ),
+            ).toBe(true);
+          }
+        };
+        const fresh = Array.from({ length: s.k }, (_, j) => rec(`R${String(j + 1)}`));
+        if (s.path === "reopen") {
+          const token = p.open();
+          const order = shuffled(fresh, s.seed);
+          order.forEach((r, j) => {
+            if (j === Math.min(s.listAt, s.k)) {
+              p.opened(token, fresh);
+            }
+            p.stream(r);
+            maybe();
+          });
+          if (s.listAt >= s.k) {
+            p.opened(token, fresh);
+          }
+        } else {
+          p.list(fresh);
+          if (s.path === "conflict") {
+            p.apply(layoutStale);
+          }
+        }
+        maybe();
+        const extra = (n: number, from: number): StatusRecord[] =>
+          Array.from({ length: n }, (_, j) => rec(`R${String(from + j)}`));
+        for (const r of extra(s.before, 10)) {
+          p.stream(r);
+          maybe();
+        }
+        p.commit();
+        const ids = p.resyncs.shift() ?? [];
+        p.apply((m) => resyncBegan(m, ids, false, 0));
+        for (const r of extra(s.during, 20)) {
+          p.stream(r);
+          maybe();
+        }
+        const settled = [...fresh, ...extra(s.before, 10), ...extra(s.during, 20)];
+        p.apply((m) =>
+          resyncSettled(m, {
+            sessions: settled,
+            record: splitRecord("R1", "R2"),
+            route: null,
+            toastStale: false,
+            now: 0,
+          }),
+        );
+        p.commit();
+        return p;
+      };
+      fc.assert(
+        fc.property(spec, (s) => {
+          const generated = runIt(s, s.commits);
+          const every = runIt(s, [true]);
+          expect(generated.requested).toBe(1);
+          expect(panesKey(generated)).toEqual({
+            panes: { left: "R1", right: "R2" },
+            split: { open: true, selected: "left" },
+          });
+          expect(panesKey(generated)).toEqual(panesKey(every));
+        }),
+        ORDERS,
+      );
+    },
+  );
+
+  it(
+    "keeps a failed start on screen after the split collapsed onto the arrival that covered it",
+    SLOW,
+    () => {
+      const perms = [
+        ["arrive", "remove", "fail"],
+        ["arrive", "fail", "remove"],
+        ["remove", "arrive", "fail"],
+        ["remove", "fail", "arrive"],
+        ["fail", "arrive", "remove"],
+        ["fail", "remove", "arrive"],
+      ] as const;
+      const spec = fc.record({
+        order: fc.constantFrom(...perms),
+        second: fc.nat({ max: 3 }),
+        source: fc.constantFrom("stream" as const, "4001" as const),
+        commits: fc.array(fc.boolean(), { minLength: 4, maxLength: 4 }),
+      });
+      type Spec = typeof spec extends fc.Arbitrary<infer T> ? T : never;
+      const runIt = (s: Spec, commits: readonly boolean[]): Page => {
+        const p = bootPage(["X", "Y"], splitRecord("X", "Y"));
+        const steps: string[] = [...s.order];
+        if (s.second < 3) {
+          steps.splice(s.second + 1, 0, "second");
+        }
+        let failed = false;
+        steps.forEach((step, i) => {
+          if (step === "arrive") {
+            p.stream(rec("Z"));
+          } else if (step === "second") {
+            p.stream(rec("Z2"));
+          } else if (step === "remove") {
+            p.gone("X");
+          } else if (s.source === "stream") {
+            p.stream(endedRec("Y"));
+            failed = true;
+          } else {
+            p.apply((m) => paneStartFailed(m, "Y", "spawn failed"));
+            failed = true;
+          }
+          if (commits[i % commits.length] === true) {
+            p.commit();
+            if (failed) {
+              expect([p.lay.panes.left, p.lay.panes.right]).toContain("Y");
+            }
+          }
+        });
+        p.commit();
+        return p;
+      };
+      fc.assert(
+        fc.property(spec, (s) => {
+          const generated = runIt(s, s.commits);
+          const every = runIt(s, [true]);
+          expect([generated.lay.panes.left, generated.lay.panes.right]).toContain("Y");
+          expect(panesKey(generated)).toEqual(panesKey(every));
+        }),
+        ORDERS,
+      );
+    },
+  );
+
+  it("writes the reconciled record once after a 409, after a restart the settled set", SLOW, () => {
+    const spec = fc.record({
+      restart: fc.boolean(),
+      ratio: fc.constantFrom(0.3, 0.5, 0.7),
+      extra: fc.nat({ max: 3 }),
+      held: fc.nat({ max: 2 }),
+      commits: fc.array(fc.boolean(), { minLength: 8, maxLength: 8 }),
+    });
+    type Spec = typeof spec extends fc.Arbitrary<infer T> ? T : never;
+    const runIt = (s: Spec, commits: readonly boolean[]): { p: Page; after: number } => {
+      const p = bootPage(["X", "Y", "W"], splitRecord("X", "Y"));
+      p.apply((m) => splitRatio(m, s.ratio, false));
+      p.apply((m) => show(m, "W")).commit();
+      const after = p.writes.length;
+      let i = 0;
+      const maybe = (): void => {
+        if (commits[i++ % commits.length] === true) {
+          p.commit();
+        }
+      };
+      p.list(s.restart ? [rec("R1"), rec("R2")] : [rec("X"), rec("W")]);
+      p.apply(layoutStale);
+      maybe();
+      for (let j = 0; j < s.extra; j++) {
+        p.stream(
+          s.restart ? rec(`R${String(3 + j)}`) : rec("W", { status: "working", statusSeq: j + 1 }),
+        );
+        maybe();
+      }
+      if (s.restart) {
+        p.commit();
+        const ids = p.resyncs.shift() ?? [];
+        p.apply((m) => resyncBegan(m, ids, false, 0));
+        for (let j = 0; j < s.held; j++) {
+          p.stream(rec(`R${String(10 + j)}`));
+          maybe();
+        }
+        const rows = p.lay.strip.filter((id) => id.startsWith("R")).map((id) => rec(id));
+        p.apply((m) =>
+          resyncSettled(m, {
+            sessions: [rec("R1"), rec("R2"), ...rows],
+            record: splitRecord("R1", "R2", "left", s.ratio),
+            route: null,
+            toastStale: false,
+            now: 0,
+          }),
+        );
+      }
+      p.commit();
+      p.commit();
+      return { p, after };
+    };
+    fc.assert(
+      fc.property(spec, (s) => {
+        const generated = runIt(s, s.commits);
+        const every = runIt(s, [true]);
+        const written = generated.p.writes.slice(generated.after).map((w) => w.record);
+        expect(written).toEqual([layoutRecord(generated.p.lay, s.ratio)]);
+        expect(generated.p.lay.panes).toEqual(
+          s.restart ? { left: "R1", right: "R2" } : { left: "W", right: null },
+        );
+        expect(written).toEqual(every.p.writes.slice(every.after).map((w) => w.record));
+      }),
+      ORDERS,
+    );
+  });
+});

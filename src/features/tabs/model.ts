@@ -773,7 +773,7 @@ interface Tombstones {
   active(id: string): boolean;
 }
 
-const CLOSE_TOMBSTONE_MS = 15000;
+export const CLOSE_TOMBSTONE_MS = 15000;
 
 export function createTombstones(
   clock: () => number,
