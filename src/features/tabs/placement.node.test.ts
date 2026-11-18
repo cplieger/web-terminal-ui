@@ -168,6 +168,17 @@ describe("an arrival beside a failed start", () => {
     },
   );
 
+  it("returns the selection to the pane selected before the arrival when the user clicked into it and its covered start failed", () => {
+    const p = splitXY();
+    p.stream(endedRec("X")).commit();
+    p.stream(rec("Z")).commit();
+    expect(p.panes).toEqual(["X", "Z"]);
+    p.apply((m) => select(m, "right")).commit();
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+    expect(p.lay.split.selected).toBe("left");
+  });
+
   it("gives a failed start's pane back during a stream reopen", () => {
     const p = splitXY();
     p.stream(rec("Z")).commit();
@@ -237,6 +248,30 @@ describe("holds", () => {
     expect(p.panes).toEqual(["X", "N"]);
   });
 
+  it("shows the user's new terminal after the sessions made elsewhere while its POST was out", () => {
+    const p = splitXY();
+    p.apply(createBegan);
+    p.stream(rec("Z1")).stream(rec("Z2")).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+    own(p, "N").commit();
+    expect(p.panes).toContain("N");
+    expect(p.lay.panes[p.lay.split.selected]).toBe("N");
+  });
+
+  it.each([
+    ["oldest first", ["Z1", "Z2"]],
+    ["newest first", ["Z2", "Z1"]],
+  ])("places a burst's arrivals the same when its rows come %s", (_name, order) => {
+    const p = splitXY();
+    const open = p.open();
+    for (const id of order) {
+      p.stream(rec(id));
+    }
+    p.opened(open, [rec("X"), rec("Y"), rec("Z1"), rec("Z2")]).commit();
+    expect(p.panes).toEqual(["Z2", "Z1"]);
+    expect(p.lay.split.selected).toBe("left");
+  });
+
   it("places arrivals again after a stream open whose list fails", () => {
     const p = splitXY();
     p.opened(p.open(), null);
@@ -304,10 +339,10 @@ describe("restarts and resyncs", () => {
     p.list([rec("R1")]).commit();
     const ids = p.resyncs.shift() ?? [];
     p.apply((m) => resyncBegan(m, ids, false, 0));
-    p.stream(rec("Z"));
+    p.stream(rec("Z1"));
     p.apply((m) =>
       resyncSettled(m, {
-        sessions: [rec("R1"), rec("Z")],
+        sessions: [rec("R1"), rec("Z1")],
         record: null,
         route: null,
         toastStale: false,
@@ -315,7 +350,7 @@ describe("restarts and resyncs", () => {
       }),
     ).commit();
     expect(p.panes).toEqual(["R1", null]);
-    expect(p.lay.strip).toContain("Z");
+    expect(p.lay.strip).toContain("Z1");
   });
 
   it("shows the settled session and the new one when a + answers in the same frame as a resync's settle", () => {
@@ -429,6 +464,21 @@ describe("the switch dot and the reads", () => {
     expect(p.acks).toEqual([]);
     p.apply((m) => pageVisibility(m, true)).commit();
     expect(p.acks).toEqual([{ id: "X", seq: 1 }]);
+    expect(p.lay.indicators.attention.count).toBe(0);
+  });
+
+  it.each([
+    ["a frame between them", true],
+    ["one frame", false],
+  ])("acknowledges a cue on a shown tab whose page then hides, with %s", (_name, between) => {
+    const p = splitXY("W");
+    p.stream(rec("Y", { status: "input", statusSeq: 1 }));
+    if (between) {
+      p.commit();
+    }
+    p.apply((m) => pageVisibility(m, false)).commit();
+    expect(p.acks).toEqual([{ id: "Y", seq: 1 }]);
+    expect(p.lay.indicators.switchDot).toBe("");
     expect(p.lay.indicators.attention.count).toBe(0);
   });
 

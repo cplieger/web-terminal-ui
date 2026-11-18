@@ -7,12 +7,15 @@ import type { PaneSide } from "../../kernel/types.js";
 import {
   CLOSE_TOMBSTONE_MS,
   compareTabOrder,
+  foldedCueStatus,
   isEndedStatus,
   isStartFailureStatus,
+  isUnread,
   normalizeActivity,
   normalizeActivityCount,
   normalizeProgress,
   normalizeSeq,
+  summarizeCues,
   type CueStatus,
   type PaneLayout,
   type StatusRecord,
@@ -40,6 +43,8 @@ export interface SessionFact {
   /** The raw server status ("" for none). */
   readonly status: string;
   readonly statusSeq: number;
+  /** When the status or its occurrence last changed. */
+  readonly statusAt: number;
   /** Sticky: the session emitted a genuine activity signal. */
   readonly reports: boolean;
   /** The last reported percentage, or PROGRESS_ABSENT. */
@@ -129,6 +134,7 @@ export type TimelineEntry = { readonly at: number } & (
   | { readonly kind: "paneFailed"; readonly side: PaneSide }
   | { readonly kind: "splitFit"; readonly canOpen: boolean }
   | { readonly kind: "syncPoint"; readonly point: SyncPointKind }
+  | { readonly kind: "view"; readonly visible: boolean; readonly tray: boolean }
   | { readonly kind: "holdsChanged"; readonly active: boolean }
 );
 
@@ -195,6 +201,31 @@ export interface Indicators {
   readonly attention: { readonly count: number; readonly worst: CueStatus | "" };
 }
 
+/** The pane state a fold carries between events, less `recent`. */
+export interface PaneState {
+  readonly left: string | null;
+  readonly right: string | null;
+  readonly open: boolean;
+  readonly selected: PaneSide;
+  readonly covered: Partial<Record<PaneSide, Covered>>;
+  readonly failed: Partial<Record<PaneSide, true>>;
+  readonly repairArmed: boolean;
+  readonly fit: boolean;
+  readonly held: boolean;
+  readonly visible: boolean;
+  readonly tray: boolean;
+}
+
+/** The server-only events folded since an arrival covered a session, from the
+ *  pane state before it, so a start failure of a covered session can re-fold
+ *  them as if the failure had been known first. A user, kernel or settle event,
+ *  or a removal that moves a pane, ends it. */
+export interface Segment {
+  readonly base: PaneState;
+  readonly events: readonly FoldEvent[];
+  readonly covers: readonly string[];
+}
+
 /** The folded state, and the memo the next layoutFor call starts from. */
 export interface Layout {
   readonly strip: readonly string[];
@@ -209,6 +240,14 @@ export interface Layout {
   readonly failed: Partial<Record<PaneSide, true>>;
   /** The last settle placed nothing, so the repair rule may show a session. */
   readonly repairArmed: boolean;
+  /** The latest folded splitFit and holdsChanged values: the timeline entries
+   *  that carried them are pruned once folded. */
+  readonly fit: boolean;
+  readonly held: boolean;
+  /** The page's visibility and the open tray as of `through`. */
+  readonly visible: boolean;
+  readonly tray: boolean;
+  readonly segment: Segment | null;
   readonly inView: ReadonlySet<string>;
   readonly indicators: Indicators;
 }
@@ -246,20 +285,13 @@ export const EMPTY_LAYOUT: Layout = {
   recent: [],
   failed: {},
   repairArmed: false,
+  fit: true,
+  held: false,
+  visible: true,
+  tray: false,
+  segment: null,
   inView: new Set(),
   indicators: { switchDot: "", attention: { count: 0, worst: "" } },
-};
-
-export const NO_EFFECTS: Effects = {
-  acks: [],
-  retry: false,
-  moved: "none",
-  persist: false,
-  focus: null,
-  toasts: [],
-  settle: false,
-  resync: null,
-  address: null,
 };
 
 export function createModel(opts: { readonly presumeReports?: boolean } = {}): TabsModel {
@@ -300,7 +332,7 @@ interface Draft {
   restartPending: { readonly at: number; readonly ids: readonly string[] } | null;
   writeOwed: null | "write" | "rewrite";
   page: Mutable<PageFacts>;
-  readonly heldBefore: boolean;
+  heldBefore: boolean;
 }
 
 function draft(m: TabsModel): Draft {
@@ -326,11 +358,30 @@ function tick(d: Draft): number {
   return d.clock;
 }
 
-// Every reducer ends here. A flip of "any hold is set" is a stamped event, and
-// a release stamps each held session placeable in compareTabOrder order, so a
-// burst's arrivals are placed as one sorted run whatever order they came in.
+// A flip of "any hold is set" is a stamped event, and a release stamps each
+// held session placeable in compareTabOrder order, so a burst's arrivals are
+// placed as one sorted run whatever order they came in.
+function settleHolds(d: Draft): void {
+  const held = anyHoldDraft(d);
+  if (held === d.heldBefore) {
+    return;
+  }
+  d.heldBefore = held;
+  d.timeline.push({ kind: "holdsChanged", at: tick(d), active: held });
+  if (!held) {
+    const waiting = [...d.sessions.values()]
+      .filter((f) => f.placeableAt === null)
+      .sort(compareTabOrder);
+    for (const f of waiting) {
+      d.sessions.set(f.id, { ...f, placeableAt: tick(d) });
+    }
+  }
+}
+
+// Every reducer ends here.
 function finish(d: Draft): TabsModel {
-  const out: TabsModel = {
+  settleHolds(d);
+  return {
     clock: d.clock,
     streamEpoch: d.streamEpoch,
     presumeReports: d.presumeReports,
@@ -344,20 +395,6 @@ function finish(d: Draft): TabsModel {
     writeOwed: d.writeOwed,
     page: d.page,
   };
-  const held = anyHold(out);
-  if (held === d.heldBefore) {
-    return out;
-  }
-  d.timeline.push({ kind: "holdsChanged", at: tick(d), active: held });
-  if (!held) {
-    const waiting = [...d.sessions.values()]
-      .filter((f) => f.placeableAt === null)
-      .sort(compareTabOrder);
-    for (const f of waiting) {
-      d.sessions.set(f.id, { ...f, placeableAt: tick(d) });
-    }
-  }
-  return { ...out, clock: d.clock };
 }
 
 function tombstoned(d: Draft, id: string, now: number): boolean {
@@ -397,6 +434,7 @@ function addFact(d: Draft, rec: StatusRecord, origin: Origin, source: RecordSour
     pinnedTitle: rec.pinnedTitle,
     status,
     statusSeq: normalizeSeq(rec.statusSeq) ?? 0,
+    statusAt: born,
     reports: reportsOf(d, rec.reportsActivity),
     progress: normalizeProgress(rec.progressValue),
     activity: normalizeActivity(rec.activity),
@@ -443,6 +481,9 @@ function mergeInto(d: Draft, f: SessionFact, rec: StatusRecord, source: RecordSo
       next.statusSeq = seq;
     }
     next.status = status;
+    if (status !== f.status || next.statusSeq !== f.statusSeq) {
+      next.statusAt = tick(d);
+    }
     if (rec.progressValue !== undefined) {
       next.progress = normalizeProgress(rec.progressValue);
     }
@@ -636,7 +677,8 @@ export function createBegan(m: TabsModel): TabsModel {
 }
 
 /** This page's POST answered with `info`. Its intent is folded now, or right
- *  after the settle while a resync is held. */
+ *  after the settle while a resync is held. The sessions the create held are
+ *  released before the intent, so the user's new terminal is placed last. */
 export function ownCreated(
   m: TabsModel,
   info: StatusRecord,
@@ -651,12 +693,13 @@ export function ownCreated(
     d.sessions.set(info.id, { ...f, origin: "own" });
   }
   const intent: OwnIntent = { kind: "own", id: info.id, opening, typing };
+  d.holds.create = false;
+  settleHolds(d);
   if (d.holds.resync > 0) {
     d.pendingOwn = intent;
   } else {
     d.timeline.push({ ...intent, at: tick(d) });
   }
-  d.holds.create = false;
   return finish(d);
 }
 
@@ -860,11 +903,14 @@ export function splitFit(m: TabsModel, canOpen: boolean): TabsModel {
 
 export function pageVisibility(m: TabsModel, visible: boolean): TabsModel {
   const d = draft(m);
-  const became = visible && !d.page.visible;
+  const changed = visible !== d.page.visible;
   d.page.visible = visible;
   const at = tick(d);
-  if (became) {
-    d.timeline.push({ kind: "syncPoint", at, point: "visible" });
+  if (changed) {
+    d.timeline.push({ kind: "view", at, visible, tray: d.page.switcherOpen });
+  }
+  if (changed && visible) {
+    d.timeline.push({ kind: "syncPoint", at: tick(d), point: "visible" });
   }
   return finish(d);
 }
@@ -879,11 +925,14 @@ export function windowFocused(m: TabsModel): TabsModel {
 
 export function switcherToggled(m: TabsModel, open: boolean): TabsModel {
   const d = draft(m);
-  const opened = open && !d.page.switcherOpen;
+  const changed = open !== d.page.switcherOpen;
   d.page.switcherOpen = open;
   const at = tick(d);
-  if (opened) {
-    d.timeline.push({ kind: "syncPoint", at, point: "tray" });
+  if (changed) {
+    d.timeline.push({ kind: "view", at, visible: d.page.visible, tray: open });
+  }
+  if (changed && open) {
+    d.timeline.push({ kind: "syncPoint", at: tick(d), point: "tray" });
   }
   return finish(d);
 }
@@ -1092,6 +1141,865 @@ export function layoutFor(m: TabsModel, prev: Layout): Layout {
   return stepFor(m, prev).layout;
 }
 
-export function stepFor(_m: TabsModel, prev: Layout): { layout: Layout; effects: Effects } {
-  return { layout: prev, effects: NO_EFFECTS };
+export type FoldEvent =
+  | { readonly at: number; readonly kind: "arrival"; readonly id: string }
+  | { readonly at: number; readonly kind: "failure"; readonly id: string }
+  | TimelineEntry;
+
+type FoldState = Mutable<Omit<PaneState, "covered" | "failed">> & {
+  covered: Partial<Record<PaneSide, Covered>>;
+  failed: Partial<Record<PaneSide, true>>;
+  recent: string[];
+  segment: Segment | null;
+};
+
+// Events a covering arrival's segment carries on through: they move no pane by
+// a user's or the kernel's hand, so re-folding them is what the server order
+// would have given had a start failure been known first.
+const SEGMENT_KEEPS: ReadonlySet<FoldEvent["kind"]> = new Set([
+  "arrival",
+  "failure",
+  "holdsChanged",
+  "syncPoint",
+  "splitFit",
+  "paneFailed",
+  "view",
+]);
+
+interface Rule {
+  /** Whether a change this rule made is written to the shared record. */
+  readonly persist: boolean;
+  readonly moved: "settle" | "user" | "server" | null;
+  readonly form: FocusForm | null;
+}
+
+const NOOP: Rule = { persist: false, moved: null, form: null };
+const SIDES = ["left", "right"] as const;
+const otherSide = (side: PaneSide): PaneSide => (side === "left" ? "right" : "left");
+
+function sameShown(a: PaneLayout, b: PaneLayout | null): boolean {
+  return (
+    b !== null &&
+    a.left === b.left &&
+    a.right === b.right &&
+    a.open === b.open &&
+    a.selected === b.selected
+  );
+}
+
+// The fold of one stepFor call. Every rule reads a fact as it was at the event's
+// own stamp (presentAt, failedAt, liveAt), never its current value: that is what
+// makes folding a run in one call or across many give the same layout.
+class Folder {
+  readonly s: FoldState;
+  /** While a segment is re-folded, the stamp whose start failures count as known. */
+  private replayAt: number | null = null;
+  private lastCovered: string | null = null;
+  private readonly facts = new Map<string, SessionFact[]>();
+  readonly toasts: Toast[] = [];
+  settle = false;
+  retry = false;
+  typing = false;
+  keyboardHeld = false;
+
+  constructor(m: TabsModel, prev: Layout) {
+    this.s = {
+      left: prev.panes.left,
+      right: prev.panes.right,
+      open: prev.split.open,
+      selected: prev.split.selected,
+      covered: { ...prev.covered },
+      recent: [...prev.recent],
+      failed: { ...prev.failed },
+      repairArmed: prev.repairArmed,
+      fit: prev.fit,
+      held: prev.held,
+      visible: prev.visible,
+      tray: prev.tray,
+      segment: prev.segment,
+    };
+    for (const f of [...m.gone, ...m.sessions.values()]) {
+      const list = this.facts.get(f.id);
+      if (list === undefined) {
+        this.facts.set(f.id, [f]);
+      } else {
+        list.push(f);
+      }
+    }
+  }
+
+  factAt(id: string, t: number): SessionFact | undefined {
+    return this.facts
+      .get(id)
+      ?.find((f) => f.born <= t && (f.removedAt === null || f.removedAt > t));
+  }
+
+  presentAt(id: string | null, t: number): id is string {
+    return id !== null && this.factAt(id, t) !== undefined;
+  }
+
+  failedAt(id: string, t: number): boolean {
+    const f = this.factAt(id, t);
+    const asOf = this.replayAt ?? t;
+    return f !== undefined && f.failAt !== null && f.failAt <= asOf;
+  }
+
+  /** The sessions present at `t`, in strip order. */
+  stripAt(t: number): SessionFact[] {
+    const out: SessionFact[] = [];
+    for (const id of this.facts.keys()) {
+      const f = this.factAt(id, t);
+      if (f !== undefined) {
+        out.push(f);
+      }
+    }
+    return out.sort(compareTabOrder);
+  }
+
+  usable(side: PaneSide): boolean {
+    return (side === "left" || this.s.open) && this.s.failed[side] !== true;
+  }
+
+  sideOf(id: string): PaneSide | null {
+    return this.s.left === id ? "left" : this.s.right === id ? "right" : null;
+  }
+
+  /** The sessions in front of the user at `t`: on a pane or in the open tray, on a visible page. */
+  inViewAt(t: number): string[] {
+    if (!this.s.visible) {
+      return [];
+    }
+    const ids = this.s.tray ? [...this.facts.keys()] : [this.s.left, this.s.right];
+    return ids.filter((id) => this.presentAt(id, t));
+  }
+
+  anyShown(): boolean {
+    return this.s.left !== null || this.s.right !== null;
+  }
+
+  // The kernel's targetFor: the first built pane that is empty, else the selected one.
+  target(): PaneSide {
+    const built: PaneSide[] = this.s.open ? ["left", "right"] : ["left"];
+    return built.find((side) => this.usable(side) && this.s[side] === null) ?? this.s.selected;
+  }
+
+  newTabSide(): PaneSide {
+    const side = this.target();
+    const o = otherSide(side);
+    return this.s[side] !== null && this.s[o] !== null ? o : side;
+  }
+
+  uncover(side: PaneSide): void {
+    const out: Partial<Record<PaneSide, Covered>> = {};
+    for (const k of SIDES) {
+      const c = this.s.covered[k];
+      if (k !== side && c !== undefined) {
+        out[k] = c;
+      }
+    }
+    this.s.covered = out;
+  }
+
+  /** The session the last folded arrival took a side from, or null. */
+  private takeCovered(): string | null {
+    const id = this.lastCovered;
+    this.lastCovered = null;
+    return id;
+  }
+
+  /** Shows `id` on `side`, emptying the other side if it showed `id`. Every rule
+   *  but an arrival and the restore drops the side's covered entry. */
+  put(side: PaneSide, id: string, keepCovered = false): void {
+    const o = otherSide(side);
+    if (this.s[o] === id) {
+      this.s[o] = null;
+      this.uncover(o);
+    }
+    if (!keepCovered) {
+      this.uncover(side);
+    }
+    this.s[side] = id;
+  }
+
+  /** Closes the split onto `kept` as the single view, carrying `covered` with it. */
+  closeTo(kept: string | null, covered?: Covered): void {
+    this.s.left = kept;
+    this.s.right = null;
+    this.s.open = false;
+    this.s.selected = "left";
+    this.s.failed = {};
+    this.s.covered = covered === undefined ? {} : { left: covered };
+  }
+
+  /** The split's close keeps the selected pane's session (the kernel's close). */
+  closeKeepingSelected(): void {
+    const side = this.s[this.s.selected] !== null ? this.s.selected : otherSide(this.s.selected);
+    this.closeTo(this.s[side], this.s.covered[side]);
+  }
+
+  splitPartner(of: string | null, t: number): string | null {
+    const used = this.s.recent.find((id) => id !== of && this.presentAt(id, t));
+    if (used !== undefined) {
+      return used;
+    }
+    const strip = this.stripAt(t).map((f) => f.id);
+    const at = of === null ? -1 : strip.indexOf(of);
+    return strip[at + 1] ?? strip[at - 1] ?? null;
+  }
+
+  paneState(): PaneState {
+    const { recent: _recent, segment: _segment, ...rest } = this.s;
+    return { ...rest, covered: { ...rest.covered }, failed: { ...rest.failed } };
+  }
+
+  private load(p: PaneState): void {
+    Object.assign(this.s, p, { covered: { ...p.covered }, failed: { ...p.failed } });
+  }
+
+  /** Folds one event, keeping the covering arrivals' segment. */
+  event(ev: FoldEvent): Rule {
+    const seg = this.s.segment;
+    if (ev.kind === "failure" && seg?.covers.includes(ev.id) === true) {
+      return this.refold(seg, ev);
+    }
+    const before = this.paneState();
+    this.takeCovered();
+    const rule = this.apply(ev);
+    const covered = this.takeCovered();
+    if (ev.kind === "arrival" && covered !== null) {
+      const from = seg ?? { base: before, events: [], covers: [] };
+      this.s.segment = {
+        base: from.base,
+        events: [...from.events, ev],
+        covers: [...from.covers, covered],
+      };
+    } else if (seg !== null && (SEGMENT_KEEPS.has(ev.kind) || rule === NOOP)) {
+      this.s.segment = { ...seg, events: [...seg.events, ev] };
+    } else if (!SEGMENT_KEEPS.has(ev.kind)) {
+      this.s.segment = null;
+    }
+    return rule;
+  }
+
+  // A start failure of a session an arrival in the segment covered: the
+  // segment's events are folded again from its base with every start failure
+  // known by now counted from the start, then the failure itself, so the panes
+  // are what the failure learned first would have given.
+  private refold(seg: Segment, ev: FoldEvent & { readonly kind: "failure" }): Rule {
+    const selectedBefore = this.s[this.s.selected];
+    const recent = this.s.recent;
+    this.load(seg.base);
+    this.replayAt = ev.at;
+    const covers: string[] = [];
+    for (const e of seg.events) {
+      this.takeCovered();
+      this.apply(e);
+      const covered = this.takeCovered();
+      if (e.kind === "arrival" && covered !== null) {
+        covers.push(covered);
+      }
+    }
+    this.replayAt = null;
+    this.apply(ev);
+    this.s.recent = recent;
+    this.s.segment = { base: seg.base, events: [...seg.events, ev], covers };
+    const selected = this.s[this.s.selected];
+    const moved = selected !== selectedBefore && selected !== ev.id;
+    return { persist: true, moved: "server", form: moved ? "announce" : null };
+  }
+
+  private apply(ev: FoldEvent): Rule {
+    switch (ev.kind) {
+      case "arrival":
+        return this.arrival(ev.id, ev.at);
+      case "failure":
+        return this.restore(ev.id, ev.at);
+      case "removal":
+        return this.removal(ev);
+      case "show":
+        this.retry = true;
+        return this.show(ev.id, ev.at);
+      case "own":
+        this.retry = true;
+        this.typing ||= ev.typing;
+        return this.own(ev);
+      case "snap":
+        this.retry = true;
+        return this.snap(ev);
+      case "split":
+        this.retry = true;
+        return ev.open ? this.openSplit(ev.at) : this.closeSplit();
+      case "route":
+        this.retry = true;
+        return this.route(ev);
+      case "settle":
+        return this.settleRule(ev);
+      case "resyncBegan":
+        return this.resyncBegan(ev);
+      case "select":
+        return this.select(ev.side);
+      case "shell":
+        return this.shell(ev.change, ev.at);
+      case "paneFailed":
+        if (this.s.open) {
+          this.s.failed[ev.side] = true;
+        }
+        return NOOP;
+      case "splitFit":
+        this.s.fit = ev.canOpen;
+        return NOOP;
+      case "syncPoint":
+        this.retry = true;
+        return NOOP;
+      case "holdsChanged":
+        this.s.held = ev.active;
+        return NOOP;
+      case "view":
+        this.s.visible = ev.visible;
+        this.s.tray = ev.tray;
+        return NOOP;
+    }
+  }
+
+  private arrival(id: string, t: number): Rule {
+    if (!this.presentAt(id, t) || this.sideOf(id) !== null || !this.s.open) {
+      return NOOP;
+    }
+    const first = this.newTabSide();
+    for (const side of [first, otherSide(first)]) {
+      const cur = this.s[side];
+      if (!this.usable(side) || (cur !== null && this.failedAt(cur, t))) {
+        continue;
+      }
+      const entry: Covered | undefined =
+        this.s.covered[side] ??
+        (cur === null
+          ? undefined
+          : { id: cur, other: this.s[otherSide(side)], selected: this.s.selected });
+      this.put(side, id, true);
+      if (entry !== undefined) {
+        this.s.covered[side] = entry;
+      }
+      this.lastCovered = cur;
+      this.s.selected = side;
+      return { persist: true, moved: "server", form: "announce" };
+    }
+    return NOOP;
+  }
+
+  // A start failure gives back every side an arrival took from the failed
+  // session, and puts the arrival where it would have gone had the failure been
+  // known at its arrival: the other side when that still shows what it showed
+  // then, else only its chip, with the selection it would have left.
+  private restore(id: string, t: number): Rule {
+    let rule = NOOP;
+    for (const side of SIDES) {
+      const e = this.s.covered[side];
+      if (e?.id !== id) {
+        continue;
+      }
+      const arrival = this.s[side];
+      this.uncover(side);
+      this.put(side, id, true);
+      rule = { persist: true, moved: "server", form: rule.form };
+      const o = otherSide(side);
+      if (
+        arrival !== null &&
+        arrival !== id &&
+        this.s.open &&
+        e.other !== null &&
+        this.s[o] === e.other &&
+        !this.failedAt(e.other, t)
+      ) {
+        this.s[o] = arrival;
+        this.s.covered[o] = { id: e.other, other: id, selected: e.selected };
+        this.s.selected = o;
+        rule = { ...rule, form: "announce" };
+      } else if (this.s.selected === side) {
+        this.s.selected = this.s.open ? e.selected : "left";
+      }
+    }
+    return rule;
+  }
+
+  private removal(ev: Extract<TimelineEntry, { kind: "removal" }>): Rule {
+    const gone = new Set(ev.ids);
+    for (const side of SIDES) {
+      const c = this.s.covered[side];
+      if (c !== undefined && gone.has(c.id)) {
+        this.uncover(side);
+      }
+    }
+    this.s.recent = this.s.recent.filter((id) => !gone.has(id));
+    if (ev.by === "user") {
+      this.retry = true;
+      this.typing ||= ev.typing;
+      this.keyboardHeld ||= ev.keyboardHeld;
+    }
+    if (this.stripAt(ev.at).length === 0) {
+      this.settle = true;
+    }
+    const isGone = (id: string | null): id is string => id !== null && gone.has(id);
+    if (!isGone(this.s.left) && !isGone(this.s.right)) {
+      return NOOP;
+    }
+    const moved = ev.by === "user" ? "user" : "server";
+    if (this.s.open) {
+      const keep = SIDES.find((side) => this.s[side] !== null && !isGone(this.s[side]));
+      if (keep !== undefined) {
+        this.closeTo(this.s[keep], this.s.covered[keep]);
+        return { persist: true, moved, form: "focus" };
+      }
+    }
+    const sel = this.s[this.s.selected];
+    const x = isGone(sel) ? sel : this.s[otherSide(this.s.selected)];
+    const next = x === null ? null : (ev.neighbour.get(x) ?? null);
+    this.closeTo(this.presentAt(next, ev.at) ? next : null);
+    return { persist: true, moved, form: next === null ? null : "announce" };
+  }
+
+  private show(id: string, t: number): Rule {
+    if (!this.presentAt(id, t)) {
+      return NOOP;
+    }
+    const on = this.sideOf(id);
+    if (on !== null) {
+      this.s.selected = on;
+      return { persist: true, moved: "user", form: "focus" };
+    }
+    const side = this.target();
+    if (!this.usable(side)) {
+      return NOOP;
+    }
+    this.put(side, id);
+    this.s.selected = side;
+    return { persist: true, moved: "user", form: "announce" };
+  }
+
+  private own(ev: OwnIntent & { readonly at: number }): Rule {
+    if (!this.presentAt(ev.id, ev.at)) {
+      return NOOP;
+    }
+    const on = this.sideOf(ev.id);
+    if (on !== null) {
+      this.s.selected = on;
+      return { persist: true, moved: "user", form: "focus" };
+    }
+    const opening = ev.opening;
+    if (opening?.by === "button" && !this.s.open && this.s.fit) {
+      this.s.open = true;
+    } else if (
+      opening?.by === "snap" &&
+      !this.s.open &&
+      this.s.fit &&
+      this.presentAt(opening.id, ev.at)
+    ) {
+      this.s.open = true;
+      this.put(opening.side, opening.id);
+      this.s.selected = opening.side;
+      this.put(otherSide(opening.side), ev.id);
+      return { persist: true, moved: "user", form: "announce" };
+    }
+    const side = this.newTabSide();
+    if (!this.usable(side)) {
+      return { persist: true, moved: "user", form: null };
+    }
+    this.put(side, ev.id);
+    this.s.selected = side;
+    return { persist: true, moved: "user", form: "announce" };
+  }
+
+  private snap(ev: Extract<TimelineEntry, { kind: "snap" }>): Rule {
+    const { id, side, at } = ev;
+    if (!this.presentAt(id, at)) {
+      return NOOP;
+    }
+    const opening = !this.s.open;
+    const from = this.sideOf(id);
+    if ((from === side && !opening) || (opening && !this.s.fit)) {
+      return NOOP;
+    }
+    const partner = this.splitPartner(id, at);
+    if (opening && partner === null) {
+      return NOOP;
+    }
+    this.typing ||= ev.typing;
+    this.s.open = true;
+    const displaced = this.s[side];
+    this.put(side, id);
+    this.s.selected = side;
+    const kept = displaced === id ? null : displaced;
+    const back = kept ?? (opening ? partner : null);
+    const o = otherSide(side);
+    if ((from !== null || opening) && back !== null && this.s[o] === null) {
+      this.put(o, back);
+    }
+    return { persist: true, moved: "user", form: displaced === id ? "focus" : "announce" };
+  }
+
+  private openSplit(t: number): Rule {
+    if (this.s.open || !this.s.fit) {
+      return NOOP;
+    }
+    const partner = this.splitPartner(this.s[this.s.selected], t);
+    if (partner === null) {
+      return NOOP;
+    }
+    this.s.open = true;
+    this.put("right", partner);
+    if (this.s[this.s.selected] === null) {
+      this.s.selected = "right";
+    }
+    return { persist: true, moved: "user", form: null };
+  }
+
+  private closeSplit(): Rule {
+    if (!this.s.open) {
+      return NOOP;
+    }
+    this.closeKeepingSelected();
+    return { persist: true, moved: "user", form: null };
+  }
+
+  private route(ev: Extract<TimelineEntry, { kind: "route" }>): Rule {
+    if (ev.stale) {
+      this.toasts.push("stale");
+    }
+    const r = ev.route;
+    if (r === null) {
+      return NOOP;
+    }
+    const before = this.s[this.s.selected];
+    const first = r.kind === "single" ? r.tab : (r.left ?? r.right);
+    if (first === null || !this.presentAt(first, ev.at)) {
+      return NOOP;
+    }
+    let wantSplit = r.kind === "split";
+    if (wantSplit && !this.s.open && !this.s.fit) {
+      wantSplit = false;
+      this.toasts.push("narrow");
+    }
+    if (!wantSplit || r.kind === "single") {
+      if (this.s.open) {
+        const at = this.sideOf(first);
+        if (at !== null) {
+          this.s.selected = at;
+        }
+        this.closeKeepingSelected();
+      }
+      if (this.sideOf(first) === null && this.usable(this.s.selected)) {
+        this.put(this.s.selected, first);
+      }
+      return { persist: true, moved: "user", form: before === null ? "announce" : null };
+    }
+    this.s.open = true;
+    const want: Record<PaneSide, string | null> = { left: r.left, right: r.right };
+    const kept = this.s.selected;
+    for (const side of [kept, otherSide(kept)]) {
+      const id = want[side];
+      if (id !== null && this.s[side] !== id && this.usable(side) && this.presentAt(id, ev.at)) {
+        this.put(side, id);
+      }
+    }
+    for (const side of SIDES) {
+      if (want[side] === null && this.s[side] !== null) {
+        this.s[side] = null;
+        this.uncover(side);
+      }
+    }
+    const sel = this.s.selected;
+    if (this.s[sel] === null && this.s[otherSide(sel)] !== null) {
+      this.s.selected = otherSide(sel);
+    }
+    const announce = before === null && this.s[this.s.selected] !== null;
+    return { persist: true, moved: "user", form: announce ? "announce" : null };
+  }
+
+  private settleRule(ev: Extract<TimelineEntry, { kind: "settle" }>): Rule {
+    if (this.anyShown()) {
+      this.s.repairArmed = false;
+      return NOOP;
+    }
+    if (ev.stale) {
+      this.toasts.push("stale");
+    }
+    const t = ev.at;
+    const strip = this.stripAt(t).map((f) => f.id);
+    const oldestLive = strip.find((id) => ev.live.has(id));
+    const saved = (id: string | null): string | null =>
+      this.presentAt(id, t) && (ev.live.has(id) || oldestLive === undefined) ? id : null;
+    const record = ev.record;
+    const restore = (sides: Record<PaneSide, string | null>, selected: PaneSide): boolean => {
+      if ((sides.left === null && sides.right === null) || !this.s.fit) {
+        return false;
+      }
+      this.s.open = true;
+      this.s.covered = {};
+      this.s.left = sides.left;
+      this.s.right = sides.right;
+      this.s.selected = selected;
+      return true;
+    };
+    let shown = false;
+    const r = ev.route;
+    if (r !== null) {
+      const sides: Record<PaneSide, string | null> =
+        r.kind === "single"
+          ? { left: saved(r.tab), right: null }
+          : { left: saved(r.left), right: saved(r.right) };
+      if (r.kind === "split") {
+        const fromRecord =
+          record?.open === true && record.left === sides.left && record.right === sides.right
+            ? record.selected
+            : null;
+        const selected: PaneSide =
+          fromRecord !== null && sides[fromRecord] !== null
+            ? fromRecord
+            : sides.left !== null
+              ? "left"
+              : "right";
+        shown = restore(sides, selected);
+      }
+      const only = sides.left ?? sides.right;
+      if (!shown && only !== null) {
+        this.put(this.target(), only);
+        shown = true;
+      }
+    }
+    if (!shown && record?.open === true) {
+      const sides = { left: saved(record.left), right: saved(record.right) };
+      const selected: PaneSide =
+        sides[record.selected] !== null ? record.selected : sides.left !== null ? "left" : "right";
+      shown = restore(sides, selected);
+    }
+    if (!shown) {
+      const start =
+        saved(record === null ? null : record.selected === "right" ? record.right : record.left) ??
+        oldestLive ??
+        strip[0] ??
+        null;
+      if (start !== null) {
+        this.put(this.target(), start);
+        shown = true;
+      }
+    }
+    this.s.repairArmed = !shown;
+    if (!shown) {
+      return NOOP;
+    }
+    const now: PaneLayout = {
+      left: this.s.left,
+      right: this.s.right,
+      handle: 0,
+      selected: this.s.selected,
+      open: this.s.open,
+    };
+    return { persist: !sameShown(now, record), moved: "settle", form: null };
+  }
+
+  private resyncBegan(ev: Extract<TimelineEntry, { kind: "resyncBegan" }>): Rule {
+    const dropped = new Set(ev.ids);
+    this.typing ||= ev.typing;
+    this.s.recent = this.s.recent.filter((id) => !dropped.has(id));
+    for (const side of SIDES) {
+      const id = this.s[side];
+      if (id !== null && dropped.has(id)) {
+        this.s[side] = null;
+      }
+    }
+    const kept = this.s[this.s.selected] ?? this.s[otherSide(this.s.selected)];
+    this.closeTo(kept);
+    return { persist: false, moved: "server", form: null };
+  }
+
+  private select(side: PaneSide): Rule {
+    if (side === "right" && !this.s.open) {
+      return NOOP;
+    }
+    if (this.s[side] !== null || !this.anyShown()) {
+      this.s.selected = side;
+    }
+    return { persist: true, moved: null, form: null };
+  }
+
+  private shell(change: ShellChange, t: number): Rule {
+    switch (change.kind) {
+      case "splitClosed":
+        this.closeTo(this.presentAt(change.keptId, t) ? change.keptId : null);
+        break;
+      case "paneDropped":
+        if (this.s[change.side] === change.id) {
+          this.s[change.side] = null;
+          this.uncover(change.side);
+        }
+        break;
+      case "rehome": {
+        if (!this.presentAt(change.id, t)) {
+          return NOOP;
+        }
+        const o = otherSide(change.side);
+        this.s[change.side] = change.id;
+        this.s[o] = null;
+        this.s.covered = {};
+        this.s.selected = change.side;
+        break;
+      }
+    }
+    return { persist: true, moved: "user", form: null };
+  }
+
+  // The repair: after a settle that placed nothing, the first session present
+  // while no hold is set is shown, a live one before an ended one.
+  repair(t: number): Rule {
+    if (this.anyShown()) {
+      this.s.repairArmed = false;
+      return NOOP;
+    }
+    if (!this.s.repairArmed || this.s.held) {
+      return NOOP;
+    }
+    const byBirth = this.stripAt(t).sort((a, b) => a.born - b.born);
+    const pick =
+      byBirth.find((f) => f.endedAt === null || f.endedAt > t) ?? byBirth[0] ?? undefined;
+    if (pick === undefined) {
+      return NOOP;
+    }
+    this.closeTo(pick.id);
+    this.s.repairArmed = false;
+    return { persist: true, moved: "server", form: null };
+  }
+}
+
+function eventsAfter(m: TabsModel, through: number): FoldEvent[] {
+  const out: FoldEvent[] = [];
+  const inRange = (at: number | null): at is number => at !== null && at > through;
+  for (const f of [...m.gone, ...m.sessions.values()]) {
+    if (f.origin === "elsewhere" && inRange(f.placeableAt)) {
+      out.push({ kind: "arrival", at: f.placeableAt, id: f.id });
+    }
+    if (inRange(f.failAt)) {
+      out.push({ kind: "failure", at: f.failAt, id: f.id });
+    }
+  }
+  for (const e of m.timeline) {
+    if (e.at > through) {
+      out.push(e);
+    }
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+function stripFor(m: TabsModel, prev: Layout): string[] {
+  const sorted = [...m.sessions.values()].sort(compareTabOrder).map((f) => f.id);
+  if (!m.page.dragging) {
+    return sorted;
+  }
+  const kept = prev.strip.filter((id) => m.sessions.has(id));
+  return [...kept, ...sorted.filter((id) => !kept.includes(id))];
+}
+
+export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: Effects } {
+  const fold = new Folder(m, prev);
+  const s = fold.s;
+  const acc: { persist: boolean; moved: Effects["moved"]; form: FocusForm | null } = {
+    persist: false,
+    moved: "none",
+    form: null,
+  };
+  const track = (rule: Rule, before: Readonly<FoldState>): void => {
+    const panesMoved = before.left !== s.left || before.right !== s.right || before.open !== s.open;
+    if (rule.persist && (panesMoved || before.selected !== s.selected)) {
+      acc.persist = true;
+    }
+    if (panesMoved && rule.moved !== null) {
+      acc.moved = rule.moved;
+    }
+    if (rule.form !== null) {
+      acc.form = rule.form;
+    }
+    const sel = s[s.selected];
+    if (sel !== null && sel !== before[before.selected]) {
+      s.recent = [sel, ...s.recent.filter((id) => id !== sel)];
+    }
+  };
+  // An ack is owed for a cue whose session was in view at some stamp while that
+  // status was current, so the acks a run sends do not depend on where its
+  // commits fell. viewedUntil[id] is the first stamp after its last stretch in view.
+  const viewedUntil = new Map<string, number>();
+  const viewedBefore = (t: number): void => {
+    for (const id of fold.inViewAt(t - 1)) {
+      viewedUntil.set(id, t);
+    }
+  };
+  const step = (t: number, run: () => Rule): void => {
+    const before = { ...s };
+    track(run(), before);
+    const afterRule = { ...s };
+    const repaired = fold.repair(t);
+    if (repaired !== NOOP) {
+      s.segment = null;
+    }
+    track(repaired, afterRule);
+  };
+  step(prev.through, () => NOOP);
+  for (const ev of eventsAfter(m, prev.through)) {
+    viewedBefore(ev.at);
+    step(ev.at, () => fold.event(ev));
+  }
+  viewedBefore(m.clock + 1);
+  const inView = new Set(
+    m.page.visible
+      ? [...m.sessions.keys()].filter(
+          (id) => m.page.switcherOpen || id === s.left || id === s.right,
+        )
+      : [],
+  );
+  const acks = [...m.sessions.values()]
+    .filter(
+      (f) =>
+        isUnread(f) &&
+        (viewedUntil.get(f.id) ?? 0) > f.statusAt &&
+        (fold.retry || f.failedSeq !== f.statusSeq),
+    )
+    .map((f) => ({ id: f.id, seq: f.statusSeq }));
+  const acked = new Set(acks.map((a) => a.id));
+  const out = [...m.sessions.values()].filter((f) => !inView.has(f.id) && !acked.has(f.id));
+  const attention = summarizeCues(
+    out.map((f) => ({ ...f, status: foldedCueStatus(f.status, f.activity) })),
+  );
+  const layout: Layout = {
+    strip: stripFor(m, prev),
+    through: m.clock,
+    panes: { left: s.left, right: s.right },
+    split: { open: s.open, selected: s.selected },
+    covered: s.covered,
+    recent: s.recent,
+    failed: s.failed,
+    repairArmed: s.repairArmed,
+    fit: s.fit,
+    held: s.held,
+    visible: s.visible,
+    tray: s.tray,
+    segment: s.segment,
+    inView,
+    indicators: { switchDot: attention.worst, attention },
+  };
+  const { moved, persist, form } = acc;
+  const focus =
+    form !== null || fold.typing || fold.keyboardHeld
+      ? { form, typing: fold.typing, keyboardHeld: fold.keyboardHeld }
+      : null;
+  const effects: Effects = {
+    acks,
+    retry: fold.retry,
+    moved,
+    persist,
+    focus,
+    toasts: fold.toasts,
+    settle: fold.settle,
+    resync:
+      m.restartPending !== null && m.holds.resync === 0 ? { ids: m.restartPending.ids } : null,
+    address: moved === "none" ? null : moved === "settle" ? "replace" : "push",
+  };
+  return { layout, effects };
 }
