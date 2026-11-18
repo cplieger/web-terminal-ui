@@ -6,20 +6,14 @@ import type { PaneSide } from "../../../kernel/types.js";
 import type { PaneLayout, StatusRecord } from "../model.js";
 import {
   EMPTY_LAYOUT,
-  ackSent,
   bootSettled,
+  commitStep,
   createModel,
-  folded,
-  layoutOwed,
-  layoutWritten,
   mergeList,
   mergeRecord,
-  recordWrite,
   removed,
   resyncBegan,
-  resyncRequested,
   resyncSettled,
-  stepFor,
   syncBegan,
   syncEnded,
   type Effects,
@@ -111,29 +105,19 @@ export class Page {
   }
 
   commit(): Effects {
-    const prev = this.lay;
-    const { layout, effects } = stepFor(this.m, prev);
-    this.lay = layout;
-    let m = folded(this.m, layout.through);
-    for (const a of effects.acks) {
-      m = ackSent(m, a.id, a.seq);
-      this.acks.push(a);
-    }
-    if (effects.resync !== null || effects.settle) {
-      m = resyncRequested(m);
-      this.resyncs.push(effects.resync?.ids ?? []);
+    const step = commitStep(this.m, this.lay);
+    this.lay = step.layout;
+    this.acks.push(...step.effects.acks);
+    if (step.resync !== null) {
+      this.resyncs.push(step.resync);
       this.requested += 1;
     }
-    const write = recordWrite(m, prev, layout, effects);
-    if (write === "owe") {
-      m = layoutOwed(m);
-    } else if (write !== null) {
-      this.writes.push({ record: write, owed: m.writeOwed });
-      m = layoutWritten(m);
+    if (step.write !== null) {
+      this.writes.push({ record: step.write, owed: this.m.writeOwed });
     }
-    this.m = m;
-    this.log.push(effects);
-    return effects;
+    this.m = step.model;
+    this.log.push(step.effects);
+    return step.effects;
   }
 
   get panes(): [string | null, string | null] {

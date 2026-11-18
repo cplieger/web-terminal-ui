@@ -1099,6 +1099,43 @@ export function recordWrite(
   return layoutRecord(next, m.page.ratio);
 }
 
+/** One commit's model half: the next layout and its effects, and the model after
+ *  the commit's own dispatches (folded, ackSent, resyncRequested, the record
+ *  write's bookkeeping), so no later commit repeats an ack, a resync or a write. */
+export interface CommitStep {
+  readonly model: TabsModel;
+  readonly layout: Layout;
+  readonly effects: Effects;
+  /** The resync to queue in the reconcile slot, or null. */
+  readonly resync: readonly string[] | null;
+  /** The record to write now, or null. */
+  readonly write: PaneLayout | null;
+  /** The write discharges a 409's owed rewrite, sent without a further retry. */
+  readonly rewrite: boolean;
+}
+
+export function commitStep(m: TabsModel, prev: Layout): CommitStep {
+  const { layout, effects } = stepFor(m, prev);
+  let next = folded(m, layout.through);
+  for (const a of effects.acks) {
+    next = ackSent(next, a.id, a.seq);
+  }
+  const resync = effects.resync !== null || effects.settle ? (effects.resync?.ids ?? []) : null;
+  if (resync !== null) {
+    next = resyncRequested(next);
+  }
+  const owed = recordWrite(next, prev, layout, effects);
+  const rewrite = next.writeOwed === "rewrite";
+  let write: PaneLayout | null = null;
+  if (owed === "owe") {
+    next = layoutOwed(next);
+  } else if (owed !== null) {
+    write = owed;
+    next = layoutWritten(next);
+  }
+  return { model: next, layout, effects, resync, write, rewrite: write !== null && rewrite };
+}
+
 /** What the selection chrome paints (the active chip, the bottom bar, the
  *  switcher's multi-tab state, the page title), read from a layout and the model. */
 export interface Chrome {
