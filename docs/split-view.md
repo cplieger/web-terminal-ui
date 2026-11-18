@@ -42,7 +42,7 @@ While the drag lasts, the pane under the pointer is highlighted. Each highlight 
 
 A tab click follows one rule. An empty pane fills first, otherwise the selected pane's tab is replaced.
 
-A new tab from **+** also fills an empty pane first. With both panes showing a tab, it replaces the unselected pane's tab and that pane becomes selected, so the tab you typed in stays on screen. A session created in another browser lands the same way while the split is open. With the split closed it joins the row as an ordinary tab.
+A new tab from **+** also fills an empty pane first. With both panes showing a tab, it replaces the unselected pane's tab and that pane becomes selected, so the tab you typed in stays on screen. A session created in another browser lands the same way while the split is open. It never replaces a pane showing a session that could not start. It takes the other pane instead, even the selected one, or only joins the row when both panes show one. With the split closed it joins the row as an ordinary tab.
 
 Closing a shown tab closes the split. The other pane's tab fills the view and is selected. When the other pane was empty, the neighboring tab is shown with one pane.
 
