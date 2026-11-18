@@ -404,6 +404,80 @@ describe("this page's own ack", () => {
   });
 });
 
+describe("the switch button's dot", () => {
+  it("shows the next unread tab's cue after the most urgent is read", async () => {
+    server.add("w");
+    server.add("v");
+    const a = await server.open();
+    server.setStatus("w", "done");
+    server.setStatus("v", "crashed");
+    await settle(a, () => a.switchDot() === "crashed");
+    expect(a.switchDot()).toBe("crashed");
+
+    a.show(3);
+    await settle(a);
+
+    expect(a.switchDot()).toBe("done");
+  });
+});
+
+describe("reading while the tab list is open", () => {
+  const openTray = (p: Page): void => {
+    p.root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
+  };
+
+  it("acknowledges a cue that arrives while the tab list is open", async () => {
+    const a = await server.open();
+    openTray(a);
+    await settle(a);
+    const before = a.puts.length;
+
+    server.setStatus("y", "done");
+    await settle(a, () => a.puts.length > before);
+
+    expect(a.puts.slice(before)).toEqual([{ id: "y", seq: 1 }]);
+  });
+
+  it("posts a banner for a tab no pane shows while the tab list is open", async () => {
+    const a = await server.open();
+    openTray(a);
+    await settle(a);
+
+    server.notify("y", "Task finished", "done");
+    await settle(a, () => a.banners.length > 0);
+
+    expect(a.banners).toHaveLength(1);
+  });
+});
+
+describe("a switch while an ack is out", () => {
+  it("keeps the clicked tab shown when the seen PUT answers after the click", async () => {
+    const a = await server.open();
+    a.holdPuts();
+    server.setStatus("x", "done");
+    await settle(a, () => a.puts.length === 1);
+
+    a.show(1);
+    await settle(a);
+    await a.releasePut(204);
+    await settle(a);
+
+    expect(a.root.querySelector(".wt-tab-active .wt-tab-label")?.textContent).toBe("why");
+  });
+});
+
+describe("a cue on a hidden page", () => {
+  it("updates the title count for a cue that latches while the page is hidden", async () => {
+    const a = await server.open();
+    a.setVisible(false);
+
+    server.setStatus("x", "done");
+    await settle(a, () => counted(a));
+
+    expect(counted(a)).toBe(true);
+  });
+});
+
 describe("the boot list carries the server's numbers", () => {
   it("counts nothing for a cue already read on another device", async () => {
     server.setStatus("y", "done");

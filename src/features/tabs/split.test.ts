@@ -2148,6 +2148,54 @@ describe("bulk closes while the split is open", () => {
     { id: "s4", title: "four", createdAt: "4", status: "idle" },
   ];
 
+  const bootOn = async (layout: {
+    left: string;
+    right: string | null;
+    open: boolean;
+  }): Promise<{
+    root: HTMLElement;
+    term: Awaited<ReturnType<typeof mountTabbed>>["term"];
+    ctx: TerminalContext;
+  }> => {
+    history.replaceState(null, "", location.pathname);
+    server.layout = { ...layout, handle: 0.5, selected: "left" };
+    const root = rootIn();
+    const { term, ctx } = await mountTabbed(root, server);
+    await until(() => shown(ctx, "left") === layout.left && shown(ctx, "right") === layout.right);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    return { root, term, ctx };
+  };
+
+  it.each([
+    ["both shown tabs", { left: "s3", right: "s4", open: true }],
+    ["the single view's tab", { left: "s3", right: null, open: false }],
+  ] as const)(
+    "closing the tabs to the right of a tab shows that tab when the close takes %s",
+    async (_what, layout) => {
+      server.list = four;
+      const { root, term, ctx } = await bootOn(layout);
+
+      menuItem(openTabMenu(root, "two"), "Close to the right").click();
+      await until(() => server.deletes().length === 2);
+      await settle();
+
+      expect(term.split?.isOpen()).toBe(false);
+      expect(shown(ctx, "left")).toBe("s2");
+      expect(server.posts()).toBe(0);
+    },
+  );
+
+  it("closing the tabs to the right of the first tab shows the first tab", async () => {
+    server.list = four.slice(0, 3);
+    const { root, ctx } = await bootOn({ left: "s2", right: null, open: false });
+
+    menuItem(openTabMenu(root, "one"), "Close to the right").click();
+    await until(() => server.deletes().length === 2);
+    await settle();
+
+    expect(shown(ctx, "left")).toBe("s1");
+  });
+
   it("leaves both panes and the split as they were when no shown tab is among the closed", async () => {
     server.list = four;
     const root = rootIn();

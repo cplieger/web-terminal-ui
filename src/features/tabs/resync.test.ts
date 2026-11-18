@@ -79,6 +79,12 @@ const panes = (m: ScriptedMount): (string | null)[] => [
   shown(m.ctx(), "right"),
 ];
 const lists = (): number => server.count("GET", "/api/sessions");
+const settleFrames = async (): Promise<void> => {
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  for (let i = 0; i < 5; i++) {
+    await tick();
+  }
+};
 
 /** Boot at `hash` and let the first stream open's reconcile finish, so the next
  *  open is a reopen. */
@@ -287,6 +293,93 @@ describe("resync after a server restart", () => {
     list.release();
     await until(() => shown(m.ctx(), "left") === "Q", 200);
     expect(shown(m.ctx(), "left")).toBe("Q");
+  });
+});
+
+describe("what a restart's settle places", () => {
+  const R3 = row("R3", "r3", "15");
+  const layoutReads = (): number => server.count("GET", "/api/sessions/layout");
+  const strip = (m: ScriptedMount): string[] => m.api.list().map((t) => t.id);
+
+  it("does not place a session made elsewhere that arrives during the resync", async () => {
+    const m = await splitPage();
+    const layout = held(ok(splitRecord("X2", "Y2")));
+    server.layout = [layout.answer];
+    server.list = [ok([X2, Y2]), ok([X2, Y2, Z])];
+    const before = layoutReads();
+
+    monitor.open();
+    await until(() => layoutReads() > before, 200);
+    monitor.emit(status(Z));
+    await tick();
+    layout.release();
+    await until(() => panes(m).join() === "X2,Y2", 200);
+    await settleFrames();
+
+    expect(panes(m)).toEqual(["X2", "Y2"]);
+    expect(strip(m)).toEqual(["X2", "Y2", "Z"]);
+  });
+
+  it("places a restarted server's sessions by the address when the stream reopen's snapshot names only them", async () => {
+    const m = await splitPage();
+    const layout = held(ok(splitRecord("X2", "Y2")));
+    server.layout = [layout.answer];
+    server.list = [ok([X2, Y2]), ok([X2, Y2, R3])];
+    const before = layoutReads();
+
+    monitor.open();
+    monitor.emit(status(X2));
+    monitor.emit(status(Y2));
+    await until(() => layoutReads() > before, 200);
+    monitor.emit(status(R3));
+    await tick();
+    layout.release();
+    await until(() => panes(m).join() === "X2,Y2", 200);
+    await settleFrames();
+
+    expect(panes(m)).toEqual(["X2", "Y2"]);
+    expect(strip(m)).toEqual(["X2", "Y2", "R3"]);
+    expect(server.count("POST", "/api/sessions")).toBe(0);
+  });
+
+  it("resyncs when a poll's list misses every known tab", async () => {
+    History.prototype.replaceState.call(history, null, "", "#a,b");
+    server.layout = [ok(splitRecord("X", "Y"))];
+    server.list = [ok([X, Y])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root, { tabsOpts: { pollMs: 40 } });
+    await until(() => panes(m).join() === "X,Y", 200);
+    server.layout = [ok(splitRecord("X2", "Y2"))];
+    server.list = [ok([X2, Y2])];
+
+    await until(() => panes(m).join() === "X2,Y2", 400);
+
+    expect(panes(m)).toEqual(["X2", "Y2"]);
+    expect(strip(m)).toEqual(["X2", "Y2"]);
+    expect(server.count("POST", "/api/sessions")).toBe(0);
+  });
+
+  it("writes the settled set once after a 409 whose re-list shows a restart", async () => {
+    const m = await splitPage();
+    await settleFrames();
+    const puts = () =>
+      server.log.filter((r) => r.method === "PUT" && r.path === "/api/sessions/layout");
+    server.putLayout = [{ status: 409, body: { error: "stale" } }, { status: 204 }];
+    server.layout = [ok(splitRecord("X2", "Y2"))];
+    server.list = [ok([X2, Y2])];
+    const before = puts().length;
+
+    m.ctx().shell.select("right");
+    await until(() => panes(m).join() === "X2,Y2", 200);
+    await until(() => puts().length >= before + 2, 200);
+    await settleFrames();
+
+    expect(panes(m)).toEqual(["X2", "Y2"]);
+    expect(
+      puts()
+        .slice(before + 1)
+        .map((r) => r.body),
+    ).toEqual([expect.objectContaining({ left: "X2", right: "Y2", handle: 0.5, open: true })]);
   });
 });
 

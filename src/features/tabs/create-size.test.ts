@@ -6,6 +6,7 @@
 // kernel; each engine fake measures its pane's box, and fetch is the only
 // network fake.
 
+import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type { PaneSide } from "../../kernel/types.js";
@@ -391,6 +392,129 @@ describe("a resync and a + create at once", () => {
     expect(attached()).toContain("R");
     expect(sideShowing(m, "s-new")).not.toBeNull();
     expect(orphans(m, ["R", "s-new"])).toEqual([]);
+  });
+
+  it("shows the settled session and the new one when a split's create answers in the same task as a resync's", async () => {
+    const X = row("X", "tab_X", "1");
+    server.layout = [ok({ left: "X", right: null, selected: "left", handle: 0.5, open: false })];
+    server.list = [ok([X])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root, {
+      before: [monitor.feature],
+      tabsOpts: { activityMonitor: monitor.feature },
+    });
+    await until(() => shown(m.ctx(), "left") === "X", 120);
+    const lists = (): number => server.count("GET", "/api/sessions");
+    const before = lists();
+    monitor.open();
+    await until(() => lists() > before, 120);
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+
+    const resynced = held(created({ id: "R", title: "", createdAt: "20", status: "idle" }));
+    const neu = held(created({ id: "N", title: "", createdAt: "21", status: "idle" }));
+    server.post = [resynced.answer, neu.answer];
+    server.list = [ok([])];
+    monitor.open();
+    await until(() => server.count("POST", "/api/sessions") === 1, 200);
+    stripSplit(root).click();
+    await until(() => server.count("POST", "/api/sessions") === 2, 200);
+    resynced.release();
+    neu.release();
+    await until(() => sideShowing(m, "R") !== null && sideShowing(m, "N") !== null, 200);
+
+    expect(m.ctx().shell.split.isOpen()).toBe(true);
+    expect(sideShowing(m, "R")).not.toBeNull();
+    expect(sideShowing(m, "N")).not.toBeNull();
+    expect(orphans(m, ["R", "N"])).toEqual([]);
+  });
+
+  it("shows the new terminal when a resync's settle fails while its create was answered", async () => {
+    const X = row("X", "tab_X", "1");
+    server.list = [ok([X])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root, {
+      before: [monitor.feature],
+      tabsOpts: { activityMonitor: monitor.feature },
+    });
+    await until(() => shown(m.ctx(), "left") === "X", 120);
+    const lists = (): number => server.count("GET", "/api/sessions");
+    const before = lists();
+    monitor.open();
+    await until(() => lists() > before, 120);
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+
+    const neu = held(created(NEW));
+    server.post = [neu.answer, { status: 500, body: { error: "down" } }];
+    const creating = m.api.create();
+    await until(() => server.count("POST", "/api/sessions") === 1, 120);
+    server.list = [ok([])];
+    monitor.open();
+    await until(() => server.count("POST", "/api/sessions") === 2, 200);
+    neu.release();
+    await creating;
+    await until(() => sideShowing(m, "s-new") !== null, 200);
+
+    expect(sideShowing(m, "s-new")).not.toBeNull();
+  });
+
+  it("closes the orphan and binds nothing when a create answers after teardown", async () => {
+    const X = row("X", "tab_X", "1");
+    server.list = [ok([X])];
+    const root = rootIn(1000);
+    const m = await mountScripted(root, {
+      before: [monitor.feature],
+      tabsOpts: { activityMonitor: monitor.feature },
+    });
+    await until(() => shown(m.ctx(), "left") === "X", 120);
+    const lists = (): number => server.count("GET", "/api/sessions");
+    const before = lists();
+    monitor.open();
+    await until(() => lists() > before, 120);
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+    const requests = (method: string, suffix: string): number =>
+      server.log.filter((r) => r.method === method && r.path.endsWith(suffix)).length;
+
+    const neu = held(created(NEW));
+    const seen = held({ status: 204 });
+    const settleRead = held(
+      ok({ left: "X", right: null, selected: "left", handle: 0.5, open: false }),
+    );
+    server.post = [neu.answer, created({ id: "R", title: "", createdAt: "20", status: "idle" })];
+    server.seen = [seen.answer];
+    const creating = m.api.create();
+    await until(() => server.count("POST", "/api/sessions") === 1, 120);
+    monitor.emit({ ...X, status: "done", statusSeq: 1 } as unknown as SessionStatus);
+    await until(() => requests("PUT", "/seen") === 1, 120);
+    server.layout = [settleRead.answer];
+    server.list = [ok([])];
+    const reads = requests("GET", "/layout");
+    monitor.open();
+    await until(() => requests("GET", "/layout") > reads, 200);
+    const attached = (): string[] =>
+      fake.engines.flatMap((e) => e.connection.setSession.mock.calls.map(([id]) => id));
+    const layoutWrites = requests("PUT", "/layout");
+
+    m.term.destroy();
+    neu.release();
+    seen.release();
+    settleRead.release();
+    await creating;
+    await until(() => server.count("DELETE", "/api/sessions/s-new") === 1, 200);
+    for (let i = 0; i < 10; i++) {
+      await tick();
+    }
+
+    expect(server.count("DELETE", "/api/sessions/s-new")).toBe(1);
+    expect(server.count("POST", "/api/sessions")).toBe(1);
+    expect(requests("PUT", "/seen")).toBe(1);
+    expect(requests("PUT", "/layout")).toBe(layoutWrites);
+    expect(attached()).not.toContain("s-new");
   });
 
   it("a teardown while a + create waits on a resync closes both new sessions", async () => {
