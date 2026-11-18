@@ -654,8 +654,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const swNew = makeNewButton("wt-switcher-new wt-btn wt-switcher-new-btn");
       swBar.append(swKb, ...(swSplit === null ? [] : [swSplit]), swSwitch, swNew);
       let warnedSeen = false;
-      // The out-of-page surfaces render the same unread-cue set the switch dot
-      // shows; both are painted only by the commit, from layoutFor's indicators.
+      // Painted only by the commit, from layoutFor's indicators.
       const attention = ctx.shell.attention({ icons: opts.attentionIcons === true });
 
       // visibilityState, not document.hasFocus(), which is false for a
@@ -725,10 +724,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
       ctx.defer(cancelCommit);
 
-      // Cancelled first, so a commit pending on one timer moves to the other.
+      // Committed in this task: the attention surface re-asserts the badge one
+      // task after visibilitychange, and a commit a frame later would write it twice.
       function onVisibility(): void {
-        cancelCommit();
-        serverInput((m) => pageVisibility(m, pageVisible()));
+        update((m) => pageVisibility(m, pageVisible()));
+        commitNow();
       }
       function onWindowFocus(): void {
         serverInput(windowFocused);
@@ -4110,12 +4110,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             bannerSeq.delete(id);
           }
         }
+        // A server floor that rose is a read too, even one this page's own ack
+        // already covered.
         for (const f of model.sessions.values()) {
-          const floor = Math.max(f.seenSeq, f.ackSeq);
-          if (floor > (floors.get(f.id) ?? 0)) {
+          const was = floors.get(f.id);
+          if (f.seenSeq > (was?.seen ?? 0) || Math.max(f.seenSeq, f.ackSeq) > (was?.page ?? 0)) {
             resync = true;
           }
-          floors.set(f.id, floor);
+          floors.set(f.id, { seen: f.seenSeq, page: Math.max(f.seenSeq, f.ackSeq) });
         }
         // Every read re-asserts the badge, which may still show a write the
         // platform dropped.
@@ -4123,7 +4125,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           attention.resync();
         }
       }
-      const floors = new Map<string, number>();
+      const floors = new Map<string, { readonly seen: number; readonly page: number }>();
       let lastFragment: string | null = null;
 
       // The only code that turns a layout into DOM, kernel and server effects:
@@ -4147,8 +4149,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           paintChrome();
           reelReconcile = false;
           paintSwitchDot(next.indicators.switchDot);
-          const { count, worst } = next.indicators.attention;
-          attention.report({ count, icon: worst === "" ? null : cueIconName(worst) });
         } finally {
           applying = null;
         }
@@ -4171,6 +4171,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           sendAck(a.id, a.seq);
         }
         closeReadSurfaces(prev, next);
+        // After the read's re-assert, which a changed count's write then cancels,
+        // so one read writes the badge once.
+        const { count, worst } = next.indicators.attention;
+        attention.report({ count, icon: worst === "" ? null : cueIconName(worst) });
         if (step.write !== null) {
           scheduleLayoutWrite(step.write, !step.rewrite);
         }

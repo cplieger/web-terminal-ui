@@ -2057,11 +2057,15 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
         (fold.retry || f.failedSeq !== f.statusSeq),
     )
     .map((f) => ({ id: f.id, seq: f.statusSeq }));
+  // Leaving out the sessions this call acks gives the value those acks produce.
+  // An in-view session whose ack failed and is not retried stays unread, so it
+  // counts, though the switch dot, which points away from the screen, skips it.
   const acked = new Set(acks.map((a) => a.id));
-  const out = [...m.sessions.values()].filter((f) => !inView.has(f.id) && !acked.has(f.id));
-  const attention = summarizeCues(
-    out.map((f) => ({ ...f, status: foldedCueStatus(f.status, f.activity) })),
-  );
+  const unacked = [...m.sessions.values()]
+    .filter((f) => !acked.has(f.id))
+    .map((f) => ({ ...f, status: foldedCueStatus(f.status, f.activity) }));
+  const attention = summarizeCues(unacked);
+  const switchDot = summarizeCues(unacked.filter((f) => !inView.has(f.id))).worst;
   const layout: Layout = {
     strip: stripFor(m, prev),
     through: m.clock,
@@ -2077,7 +2081,7 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
     tray: s.tray,
     segment: s.segment,
     inView,
-    indicators: { switchDot: attention.worst, attention },
+    indicators: { switchDot, attention },
   };
   const { moved, persist, form } = acc;
   const focus =

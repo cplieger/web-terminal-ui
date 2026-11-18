@@ -59,7 +59,7 @@ class FakeNotification {
 
 function fakeMonitor(): {
   feature: TerminalFeature<ActivityMonitorApi>;
-  emit: (s: SessionStatus) => void;
+  emit: (s: SessionStatus) => Promise<void>;
   open: () => void;
 } {
   const subs = new Set<(s: SessionStatus) => void>();
@@ -90,6 +90,7 @@ function fakeMonitor(): {
       for (const cb of [...subs]) {
         cb(s);
       }
+      return nextTask();
     },
     open: () => {
       for (const cb of [...opens]) {
@@ -163,9 +164,14 @@ afterEach(() => {
   document.title = "";
 });
 
-/** A re-assert lands on the next task. */
+/** A server or page event is painted by the commit in the next animation
+ *  frame, and a re-assert lands on the task after it. */
 function nextTask(): Promise<void> {
-  return new Promise((r) => setTimeout(r, 0));
+  return new Promise((r) => {
+    requestAnimationFrame(() => {
+      setTimeout(r, 0);
+    });
+  });
 }
 
 async function until(pred: () => boolean, tries = 40): Promise<void> {
@@ -200,7 +206,13 @@ async function stuckAfterRead(): Promise<{
   monitor: ReturnType<typeof fakeMonitor>;
 }> {
   const mounted = await mount();
-  mounted.monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
+  await mounted.monitor.emit({
+    id: "s2",
+    status: "done",
+    title: "two",
+    createdAt: "2",
+    statusSeq: 1,
+  });
   expect(os.badge, "a background cue raises the badge").toBe(1);
   os.dropping = true;
   chip(mounted.root, 1).click();
@@ -213,7 +225,7 @@ async function stuckAfterRead(): Promise<{
 describe("the app badge follows the real unread state", () => {
   it("sets on a new background cue and clears on reading it", async () => {
     const { root, monitor } = await mount();
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
+    await monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
     expect(os.badge).toBe(1);
 
     chip(root, 1).click();
@@ -229,7 +241,7 @@ describe("the app badge follows the real unread state", () => {
 
   it("re-asserts when a fresh cue arrives on the session the user is watching", async () => {
     const { monitor } = await stuckAfterRead();
-    monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2", statusSeq: 2 });
+    await monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2", statusSeq: 2 });
     await nextTask();
     expect(os.badge).toBe(0);
   });
@@ -237,9 +249,7 @@ describe("the app badge follows the real unread state", () => {
   it("re-asserts when the page becomes visible", async () => {
     await stuckAfterRead();
     setVisibility("hidden");
-    document.dispatchEvent(new Event("visibilitychange"));
     setVisibility("visible");
-    document.dispatchEvent(new Event("visibilitychange"));
     await nextTask();
     expect(os.badge).toBe(0);
   });
@@ -247,12 +257,11 @@ describe("the app badge follows the real unread state", () => {
   it("writes once when coming back into view acknowledges the shown tab", async () => {
     const { monitor } = await mount();
     setVisibility("hidden");
-    monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1", statusSeq: 1 });
+    await monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1", statusSeq: 1 });
     expect(os.badge).toBe(1);
     const writes = os.writes;
 
     setVisibility("visible");
-    document.dispatchEvent(new Event("visibilitychange"));
     await nextTask();
     expect(os.badge).toBe(0);
     expect(os.writes - writes).toBe(1);
@@ -292,10 +301,10 @@ describe("the app badge follows the real unread state", () => {
     // the server's broadcast carries the raised seen floor here.
     const { monitor } = await mount();
     setVisibility("hidden");
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
+    await monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
     expect(os.badge).toBe(1);
 
-    monitor.emit({
+    await monitor.emit({
       id: "s2",
       status: "done",
       title: "two",
@@ -309,7 +318,7 @@ describe("the app badge follows the real unread state", () => {
 
   it("re-asserts when a read elsewhere leaves the count alone", async () => {
     const { monitor } = await stuckAfterRead();
-    monitor.emit({
+    await monitor.emit({
       id: "s2",
       status: "done",
       title: "two",
@@ -323,11 +332,11 @@ describe("the app badge follows the real unread state", () => {
 
   it("puts out the switch button's dot for a session read elsewhere", async () => {
     const { root, monitor } = await mount();
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
+    await monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
     expect(dot?.dataset["status"], "a background cue lights the dot").toBe("done");
 
-    monitor.emit({
+    await monitor.emit({
       id: "s2",
       status: "done",
       title: "two",
@@ -340,7 +349,7 @@ describe("the app badge follows the real unread state", () => {
 
   it("clears when the user clicks the session's notification", async () => {
     const { monitor } = await mount();
-    monitor.emit({
+    await monitor.emit({
       id: "s2",
       status: "done",
       title: "two",
@@ -360,7 +369,7 @@ describe("the app badge follows the real unread state", () => {
 describe("no seen state is kept in the browser", () => {
   it("writes nothing to localStorage when a cue is read", async () => {
     const { root, monitor } = await mount();
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
+    await monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
     chip(root, 1).click();
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
     const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i) ?? "");
@@ -370,7 +379,7 @@ describe("no seen state is kept in the browser", () => {
   it("ignores a stored acknowledgement another build left behind", async () => {
     const { monitor } = await mount();
     setVisibility("hidden");
-    monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
+    await monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2", statusSeq: 1 });
     localStorage.setItem("wt-cue-seen/s2", "done");
     window.dispatchEvent(new StorageEvent("storage", { key: "wt-cue-seen/s2" }));
     await nextTask();
@@ -382,7 +391,7 @@ describe("no seen state is kept in the browser", () => {
 describe("a delivered notification closes once its session is read", () => {
   it("closes the banner when the user switches to that tab", async () => {
     const { root, monitor } = await mount();
-    monitor.emit({
+    await monitor.emit({
       id: "s2",
       status: "done",
       title: "two",
@@ -400,7 +409,7 @@ describe("a delivered notification closes once its session is read", () => {
   it("closes the banner of the shown tab when the page comes back into view", async () => {
     const { monitor } = await mount();
     setVisibility("hidden");
-    monitor.emit({
+    await monitor.emit({
       id: "s1",
       status: "done",
       title: "one",
@@ -412,13 +421,13 @@ describe("a delivered notification closes once its session is read", () => {
     expect(banners.map((b) => [b.tag, b.closed])).toEqual([["s1", false]]);
 
     setVisibility("visible");
-    document.dispatchEvent(new Event("visibilitychange"));
+    await nextTask();
     expect(banners[0]?.closed).toBe(true);
   });
 
   it("closes the banner when another window or device reads that session", async () => {
     const { monitor } = await mount();
-    monitor.emit({
+    await monitor.emit({
       id: "s2",
       status: "done",
       title: "two",
@@ -429,7 +438,7 @@ describe("a delivered notification closes once its session is read", () => {
     });
     expect(banners.map((b) => [b.tag, b.closed])).toEqual([["s2", false]]);
 
-    monitor.emit({
+    await monitor.emit({
       id: "s1",
       status: "done",
       title: "one",
@@ -439,7 +448,7 @@ describe("a delivered notification closes once its session is read", () => {
     });
     expect(banners[0]?.closed, "a read of another session leaves it up").toBe(false);
 
-    monitor.emit({
+    await monitor.emit({
       id: "s2",
       status: "done",
       title: "two",
@@ -453,7 +462,7 @@ describe("a delivered notification closes once its session is read", () => {
   it("leaves a background tab's banner up while the user reads another tab", async () => {
     const { root, monitor } = await mount();
     chip(root, 1).click();
-    monitor.emit({
+    await monitor.emit({
       id: "s1",
       status: "done",
       title: "one",

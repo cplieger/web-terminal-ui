@@ -39,14 +39,22 @@ function nextTask(): Promise<void> {
   });
 }
 
-async function settle(p: Page, pred: () => boolean = () => false): Promise<void> {
-  for (let i = 0; i < 30 && !pred(); i++) {
+/** A server event is painted by the page's commit in its next frame, and the
+ *  requests it starts answer in the tasks after it. */
+async function round(p: Page): Promise<void> {
+  await new Promise((resolve) => p.win.requestAnimationFrame(resolve));
+  for (let i = 0; i < 5; i++) {
     await nextTask();
+  }
+}
+
+async function settle(p: Page, pred?: () => boolean): Promise<void> {
+  for (let i = 0; i < 30 && pred !== undefined && !pred(); i++) {
+    await round(p);
   }
   for (let i = 0; i < 3; i++) {
-    await nextTask();
+    await round(p);
   }
-  void p;
 }
 
 /** x is unread on both pages, both hidden; B shows y, A shows x. */
@@ -239,6 +247,7 @@ describe("this page's own ack", () => {
     await settle(a, () => a.badge() === 1);
     expect(a.badge()).toBe(1);
     a.putAnswer = 204;
+    a.setVisible(false);
     a.setVisible(true);
     await settle(a, () => a.badge() === 0);
     expect(a.puts).toEqual([
@@ -274,6 +283,7 @@ describe("this page's own ack", () => {
     const a = await server.open();
     a.holdPuts();
     server.setStatus("x", "done");
+    await settle(a, () => a.puts.length === 1);
     server.setStatus("x", "working");
     server.setStatus("x", "done");
     await settle(a, () => a.puts.length === 2);
@@ -306,6 +316,7 @@ describe("this page's own ack", () => {
       await settle(a);
     }
     expect(a.puts, "one PUT for ten records of one occurrence").toHaveLength(1);
+    a.setVisible(false);
     a.setVisible(true);
     await settle(a, () => a.puts.length === 2);
     expect(a.puts).toHaveLength(2);
