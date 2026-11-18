@@ -2579,15 +2579,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ctx.announce(`Moved ${tab.display} to position ${String(to + 1)}`);
       }
 
-      // Add a tab for a session that exists server-side but has no local tab yet
-      // (one created in another browser), so every client's tab set converges on
-      // the server. The caller runs syncChrome.
-      function adoptSession(info: SessionInfo): void {
+      // Add a tab, unplaced, for a session that exists server-side but has no
+      // local tab yet (one created in another browser), so every client's tab set
+      // converges on the server. True when it added one. The caller runs syncChrome.
+      function adoptSession(info: SessionInfo): boolean {
         if (tabList.find((t) => t.id === info.id)) {
-          return;
+          return false;
         }
         if (tombstones.active(info.id)) {
-          return;
+          return false;
         }
         const tab = addTabChrome(info);
         // Placed by the SERVER's order, not by arrival: the stream's snapshot and
@@ -2599,8 +2599,21 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (after) {
           scroller.insertBefore(tab.el, after.el);
         }
+        return true;
+      }
+
+      // Every server record, a stream event or a list, enters here. Placement
+      // comes after every status: arrivalSide reads the shown tabs' statuses, so
+      // an arrival placed before a later record's `ended` replaced that pane.
+      function takeRecords(records: readonly StatusRecord[], source: RecordSource): void {
+        const arrived = records.filter((rec) => adoptSession(rec));
+        for (const rec of records) {
+          applyStatus(rec, reportsOf(rec.reportsActivity), source);
+        }
         if (started) {
-          showCreatedElsewhere(tab.id);
+          for (const rec of arrived) {
+            showCreatedElsewhere(rec.id);
+          }
         }
       }
 
@@ -3520,7 +3533,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         const seen = new Set(list.map((s) => s.id));
         // Every tab the listing could have named is missing from it: the server
-        // restarted (or replaced every tab). Decided before the adopt loop, so the
+        // restarted (or replaced every tab). Decided before takeRecords, so the
         // tabs it lists are placed by the address and the record, not by arrival.
         // Because this branch takes every such case, the gone loop below drops a
         // strict subset of the known tabs and never reaches dropTab's last-tab arm.
@@ -3529,10 +3542,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           await resync(known);
           return;
         }
-        for (const info of list) {
-          adoptSession(info); // add sessions created elsewhere (no local tab)
-          applyStatus(info, reportsOf(info.reportsActivity), { listedAt });
-        }
+        takeRecords(list, { listedAt });
         // Already gone server-side, so no DELETE; tabs born after the snapshot
         // wait for the next reconcile.
         const gone = tabList
@@ -3574,10 +3584,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
               if (tornDown()) {
                 return;
               }
-              for (const info of settled.sessions) {
-                adoptSession(info);
-                applyStatus(info, reportsOf(info.reportsActivity), { listedAt });
-              }
+              takeRecords(settled.sessions, { listedAt });
               // Read now, so an address the user navigated to during the wait wins.
               const route =
                 address !== null && settled.listed ? parseTabRoute(win.location.hash) : null;
@@ -3814,8 +3821,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             return;
           }
           streamEpoch++;
-          adoptSession(s);
-          applyStatus(s, reportsOf(s.reportsActivity), { stream: true });
+          takeRecords([s], { stream: true });
           ensureActive();
           syncChrome();
           // A notification is an EVENT delivered once, so it is handled here and

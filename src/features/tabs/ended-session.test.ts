@@ -208,6 +208,96 @@ const listers: [string, Lister][] = [
   ],
 ];
 
+// A split page over X and Y whose next list arrives together with no stream
+// event before it: by the poll, or by the status stream's first open after boot.
+const splitListers: [string, Lister][] = [
+  [
+    "the poll",
+    {
+      mount: async () => {
+        History.prototype.replaceState.call(history, null, "", "#a,b");
+        server.layout = [ok(splitRecord("X", "Y"))];
+        server.list = [ok([X, Y])];
+        const root = rootIn(1000);
+        const m = await mountScripted(root, {
+          paneFeatures: () => [connectionBanner()],
+          tabsOpts: { pollMs: 40 },
+        });
+        await until(() => panes({ root, ...m }).join() === "X,Y", 200);
+        return { root, ...m };
+      },
+      listAgain: async () => {
+        const before = lists();
+        await until(() => lists() >= before + 3, 400);
+        expect(lists()).toBeGreaterThanOrEqual(before + 3);
+        await ticks(10);
+      },
+    },
+  ],
+  [
+    "the status stream's first open",
+    {
+      mount: async () => {
+        History.prototype.replaceState.call(history, null, "", "#a,b");
+        server.layout = [ok(splitRecord("X", "Y"))];
+        server.list = [ok([X, Y])];
+        const root = rootIn(1000);
+        const m = await mountScripted(root, {
+          before: [monitor.feature],
+          paneFeatures: () => [connectionBanner()],
+          tabsOpts: { activityMonitor: monitor.feature },
+        });
+        await until(() => panes({ root, ...m }).join() === "X,Y", 200);
+        return { root, ...m };
+      },
+      listAgain: async () => {
+        const before = lists();
+        monitor.open();
+        await until(() => lists() > before);
+        await ticks(10);
+      },
+    },
+  ],
+];
+
+describe("a list that names a session made elsewhere and an ended one", () => {
+  const oneEnded: [string, () => object[]][] = [
+    ["listed before the ended one", () => [X, Z, ended(Y)]],
+    ["listed first", () => [Z, X, ended(Y)]],
+    ["listed after the ended one", () => [X, ended(Y), Z]],
+  ];
+  describe.each(splitListers)("from %s", (_lister, { mount, listAgain }) => {
+    it.each(oneEnded)("places the arrival on the live pane when it is %s", async (_o, list) => {
+      const m = await mount();
+      m.ctx().shell.select("left");
+      closeWithReason(m, "right");
+      server.list = [ok(list())];
+
+      await listAgain();
+
+      expect(posts()).toBe(0);
+      expect(strip(m)).toEqual(["X", "Y", "Z"]);
+      expect(panes(m)).toEqual(["Z", "Y"]);
+      expect(bannerOn(m, "right")).toBe("Session ended");
+    });
+
+    it("gives the arrival only its chip when both panes are ended", async () => {
+      const m = await mount();
+      closeWithReason(m, "left");
+      closeWithReason(m, "right");
+      server.list = [ok([Z, ended(X), ended(Y)])];
+
+      await listAgain();
+
+      expect(posts()).toBe(0);
+      expect(strip(m)).toEqual(["X", "Y", "Z"]);
+      expect(panes(m)).toEqual(["X", "Y"]);
+      expect(bannerOn(m, "left")).toBe("Session ended");
+      expect(bannerOn(m, "right")).toBe("Session ended");
+    });
+  });
+});
+
 describe("a session that ended before its process started", () => {
   it.each(["status first", "close first"] as const)(
     "keeps its tab on its pane with the reason and creates nothing (%s)",
