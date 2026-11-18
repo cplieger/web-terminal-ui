@@ -2117,9 +2117,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         shiftTimer = win.setTimeout(endShift, REORDER_SETTLE_MS);
       }
 
-      // Moves the DOM and NOT tabList, which is what makes the preview a preview:
-      // only a drop writes tabList, so a cancel is a re-projection and a syncChrome
-      // arriving mid-drag renders the committed order.
+      // Moves the DOM and NOT the model, which is what makes the preview a preview:
+      // only a drop reorders the sessions, so a cancel is a re-projection, and a
+      // commit mid-drag leaves the chips' order to the preview.
       function commitSlot(before: HTMLElement | null): void {
         const dragged = draggingEl;
         if (!dragged?.isConnected) {
