@@ -1,8 +1,3 @@
-// Composition tests (design section 22.10): the presetTouch bundle assembles and
-// mounts, each feature contributes its chrome into the right region, the
-// clipboard shortcut routes through the sanitizing funnel, and destroy tears the
-// whole set down.
-
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
 import type { TerminalHandle } from "./kernel/types.js";

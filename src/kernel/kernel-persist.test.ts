@@ -403,8 +403,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
 
   it("discards it when the session is already gone (4001 before any resume)", async () => {
     // Without this the overlay lifts over the PREVIOUS run's output under a
-    // "Session ended" banner — the one path where the design's stated worst case
-    // was reachable.
+    // "Session ended" banner.
     const { term, cb } = await bootRestored();
     try {
       cb.onProcessExit?.();

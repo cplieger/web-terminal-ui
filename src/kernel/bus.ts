@@ -1,6 +1,6 @@
 // Typed event bus for the kernel/feature contract. A small pub/sub keyed by the
 // TerminalEvents map, so a subscriber gets the exact payload type for its event
-// and the kernel emits with the same guarantee (no `unknown`, section 22.4).
+// and the kernel emits with the same guarantee (no `unknown`).
 //
 // The bus itself does not attribute errors to features; the kernel wraps each
 // feature's ctx.on handler with a try/catch that routes to ctx.onError with the

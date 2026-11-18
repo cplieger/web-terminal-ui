@@ -1,8 +1,5 @@
-// tabs feature tests (design sections 5, 6, 22.10): the session list builds a
-// tab per session with the first active, a switch re-points the renderer at the
-// next tab's cached store and reconnects the WS to it, and creating a tab spawns
-// a session and switches to it. Runs tabs alone (no activityMonitor) so no SSE
-// mock is needed; fetch is stubbed for the REST API.
+// No real activityMonitor runs here (the fakes below stand in for it), so no
+// SSE mock is needed; fetch is stubbed for the REST API.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";

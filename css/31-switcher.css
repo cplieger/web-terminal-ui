@@ -1,4 +1,4 @@
-/* ===== Mobile tab chrome (tabs feature, section 12) =====
+/* ===== Mobile tab chrome (tabs feature) =====
    The bottom bar (switcher) is the mobile tab surface, the externally-driven key
    grid docks above it, and the overview sheet lists every tab. The desktop strip
    is hidden only on a narrow coarse-pointer device (a phone) and these appear
@@ -28,7 +28,7 @@
     left: 0;
     right: 0;
     /* Lift above the soft keyboard rather than hiding, so the switch surface
-       stays reachable in the terminal's primary working state (section 12). */
+       stays reachable in the terminal's primary working state. */
     bottom: calc(var(--safe-bottom, 0px) + var(--kb-inset, 0px));
     display: flex;
     flex-direction: column; /* bar on top; the tab list expands below it as the bar slides up */
