@@ -6,6 +6,7 @@ import {
   fakeMonitor,
   fakeServer,
   mountTabbed,
+  nextCommit,
   rootIn,
   shown,
   stripSplit,
@@ -224,11 +225,11 @@ describe("switching writes the address", () => {
     await mount();
     const before = history.length;
     monitor.emit(session("s3", "tab_offscreen", "3"));
-    await tick();
+    await nextCommit();
     expect(location.hash).toBe(`#${A}`);
 
     monitor.emit(session("s1", "host_alias", "1"));
-    await tick();
+    await nextCommit();
     expect(location.hash).toBe("#host_alias");
     expect(history.length).toBe(before);
   });
@@ -267,10 +268,10 @@ describe("the page title", () => {
   it("follows a rename of the active tab, and not of another", async () => {
     await mount();
     monitor.emit({ ...session("s2", B, "2"), title: "background" } as SessionStatus);
-    await tick();
+    await nextCommit();
     expect(document.title).toBe("s1 · Served page");
     monitor.emit({ ...session("s1", A, "1"), title: "renamed" } as SessionStatus);
-    await tick();
+    await nextCommit();
     expect(document.title).toBe("renamed · Served page");
   });
 
@@ -279,7 +280,7 @@ describe("the page title", () => {
     chipOf(root, "s3").click();
     await tick();
     monitor.emit({ ...session("s1", A, "1"), status: "input" } as SessionStatus);
-    await tick();
+    await nextCommit();
     expect(document.title).toBe("(1) s3 · Served page");
   });
 
@@ -289,6 +290,7 @@ describe("the page title", () => {
     cbs.onMessage({ type: "title", title: "vim" });
     cbs.onMessage({ type: "title", title: "vim" });
     cbs.onMessage({ type: "title", title: "make" });
+    await nextCommit();
     expect(document.title).toBe("make · Served page");
   });
 
@@ -297,6 +299,7 @@ describe("the page title", () => {
     await mount();
     // A program's own window title renames its tab, and must not outlive it.
     fake.callbacks().onMessage({ type: "title", title: "program title" });
+    await nextCommit();
     expect(document.title).toBe("program title · Served page");
     monitor.emit({ id: "s1", removed: true } as SessionStatus);
     await until(() => document.title === SERVED);
@@ -403,7 +406,7 @@ describe("navigating the address", () => {
     chipOf(root, "s1").click();
     await tick();
     monitor.emit({ id: "s2", removed: true } as SessionStatus);
-    await tick();
+    await nextCommit();
 
     await travel(() => {
       history.back();

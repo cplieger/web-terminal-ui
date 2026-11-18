@@ -12,7 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_PINNED_NAME, baseLabel, hasPinnedName, sanitizePinnedName } from "./model.js";
-import type { Tab } from "./model.js";
+import type { Labelled } from "./model.js";
 import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
 import { shortAnnounced, shortenReannounce } from "../../test-helpers/delays.js";
@@ -36,8 +36,8 @@ describe("sanitizePinnedName", () => {
   });
 });
 
-function fakeTab(over: Partial<Tab>): Tab {
-  return { title: "", nameSeq: 0, ...over } as Tab;
+function fakeTab(over: Partial<Labelled>): Labelled {
+  return { title: "", ...over };
 }
 
 describe("baseLabel", () => {

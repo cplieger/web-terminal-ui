@@ -789,7 +789,7 @@ describe("a session made elsewhere over a pane whose session failed to start", (
     await arrive(ended(Y));
 
     expect(panes(m)).toEqual(["N", "Y"]);
-    expect(strip(m)).toEqual(["X", "Y", "Z", "N"]);
+    expect(strip(m)).toEqual(["X", "Y", "N", "Z"]);
   });
 
   it("shows a failed start again after the split collapsed onto the arrival that covered it", async () => {

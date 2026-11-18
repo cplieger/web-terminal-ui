@@ -125,8 +125,13 @@ const fetchMock = vi.fn((url: string | URL, init?: RequestInit) => {
   return Promise.resolve(jsonResponse(list, 200));
 });
 
+// A browser fires visibilitychange whenever the state changes.
 function setVisibility(state: "visible" | "hidden"): void {
+  const changed = document.visibilityState !== state;
   Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+  if (changed) {
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
 }
 
 let term: TerminalHandle | undefined;

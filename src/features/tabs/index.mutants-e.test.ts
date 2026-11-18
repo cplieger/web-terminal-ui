@@ -169,8 +169,13 @@ function stubMedia(answers: Record<string, boolean>): void {
 // Page visibility is a FIXTURE, not ambient state: the active-tab
 // acknowledgement defers while hidden, so a test that inherited whatever the
 // previous one left would pass or fail by ordering.
+// A browser fires visibilitychange whenever the state changes.
 function setVisibility(state: "visible" | "hidden"): void {
+  const changed = document.visibilityState !== state;
   Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+  if (changed) {
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
 }
 
 let term: TerminalHandle | undefined;

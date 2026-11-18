@@ -84,6 +84,7 @@ export type ResolvedRoute =
   | { readonly kind: "split"; readonly left: string | null; readonly right: string | null };
 
 export type ShellChange =
+  | { readonly kind: "splitOpened"; readonly selected: PaneSide }
   | { readonly kind: "splitClosed"; readonly keptId: string | null }
   | { readonly kind: "paneDropped"; readonly side: PaneSide; readonly id: string }
   | { readonly kind: "rehome"; readonly side: PaneSide; readonly id: string };
@@ -152,6 +153,8 @@ export interface PageFacts {
   readonly switcherOpen: boolean;
   readonly started: boolean;
   readonly dragging: boolean;
+  /** The terminal was built with a split, so a settle may restore one. */
+  readonly splitEnabled: boolean;
   /** The split controller's committed share, the record's `handle`. */
   readonly ratio: number;
 }
@@ -307,7 +310,14 @@ export function createModel(opts: { readonly presumeReports?: boolean } = {}): T
     pendingOwn: null,
     restartPending: null,
     writeOwed: null,
-    page: { visible: true, switcherOpen: false, started: false, dragging: false, ratio: 0.5 },
+    page: {
+      visible: true,
+      switcherOpen: false,
+      started: false,
+      dragging: false,
+      splitEnabled: true,
+      ratio: 0.5,
+    },
   };
 }
 
@@ -788,6 +798,9 @@ function resolveRoute(
 }
 
 function pushSettle(d: Draft, kind: "boot" | "resync", input: SettleInput): void {
+  if (input.record !== null) {
+    d.page.ratio = input.record.handle;
+  }
   for (const rec of [...input.sessions].sort(compareTabOrder)) {
     mergeRow(d, rec, { listedAt: d.streamEpoch }, input.now, kind === "boot" ? "boot" : "settle");
   }
@@ -809,10 +822,11 @@ function pushSettle(d: Draft, kind: "boot" | "resync", input: SettleInput): void
  *  fit recorded, then placed by the address, the record or the oldest live tab. */
 export function bootSettled(
   m: TabsModel,
-  input: SettleInput & { readonly canOpen: boolean },
+  input: SettleInput & { readonly canOpen: boolean; readonly splitEnabled: boolean },
 ): TabsModel {
   const d = draft(m);
   d.page.started = true;
+  d.page.splitEnabled = input.splitEnabled;
   d.timeline.push({ kind: "splitFit", at: tick(d), canOpen: input.canOpen });
   pushSettle(d, "boot", input);
   return finish(d);
@@ -820,7 +834,8 @@ export function bootSettled(
 
 /** A resync's settle (a failed one settles what it listed, or nothing). Every
  *  session still unplaceable is relabelled a settle session, so none of the set
- *  held across it is placed as an arrival. */
+ *  held across it is placed as an arrival. A create that answered during it
+ *  waits for ownReleased. */
 export function resyncSettled(m: TabsModel, input: SettleInput): TabsModel {
   const d = draft(m);
   pushSettle(d, "resync", { ...input, toastStale: false });
@@ -829,11 +844,20 @@ export function resyncSettled(m: TabsModel, input: SettleInput): TabsModel {
       d.sessions.set(f.id, { ...f, origin: "settle" });
     }
   }
-  if (d.pendingOwn !== null) {
-    d.timeline.push({ ...d.pendingOwn, at: tick(d) });
-    d.pendingOwn = null;
-  }
   d.holds.resync = Math.max(0, d.holds.resync - 1);
+  return finish(d);
+}
+
+/** The create that answered during a resync, folded once the settle is
+ *  committed: the settled session is bound first, so its process starts at a
+ *  client's size even when the new terminal then takes its pane. */
+export function ownReleased(m: TabsModel): TabsModel {
+  if (m.pendingOwn === null || m.holds.resync > 0) {
+    return m;
+  }
+  const d = draft(m);
+  d.timeline.push({ ...m.pendingOwn, at: tick(d) });
+  d.pendingOwn = null;
   return finish(d);
 }
 
@@ -1174,6 +1198,19 @@ export function chromeOf(m: TabsModel, l: Layout): Chrome {
   return { active, strip: l.strip, shown };
 }
 
+/** The session a split opened from `of` pairs with: the selected pane's most
+ *  recent other session, else its strip neighbour. Null when there is none, which
+ *  makes a snap or the split button a create. */
+export function splitPartner(m: TabsModel, l: Layout, of: string | null): string | null {
+  const used = l.recent.find((id) => id !== of && m.sessions.has(id));
+  if (used !== undefined) {
+    return used;
+  }
+  const strip = [...m.sessions.values()].sort(compareTabOrder).map((f) => f.id);
+  const at = of === null ? -1 : strip.indexOf(of);
+  return strip[at + 1] ?? strip[at - 1] ?? null;
+}
+
 export function layoutFor(m: TabsModel, prev: Layout): Layout {
   return stepFor(m, prev).layout;
 }
@@ -1238,8 +1275,10 @@ class Folder {
   retry = false;
   typing = false;
   keyboardHeld = false;
+  private readonly splitEnabled: boolean;
 
   constructor(m: TabsModel, prev: Layout) {
+    this.splitEnabled = m.page.splitEnabled;
     this.s = {
       left: prev.panes.left,
       right: prev.panes.right,
@@ -1656,6 +1695,9 @@ class Folder {
     if ((from === side && !opening) || (opening && !this.s.fit)) {
       return NOOP;
     }
+    if (!opening && !this.usable(side)) {
+      return NOOP;
+    }
     const partner = this.splitPartner(id, at);
     if (opening && partner === null) {
       return NOOP;
@@ -1668,7 +1710,7 @@ class Folder {
     const kept = displaced === id ? null : displaced;
     const back = kept ?? (opening ? partner : null);
     const o = otherSide(side);
-    if ((from !== null || opening) && back !== null && this.s[o] === null) {
+    if ((from !== null || opening) && back !== null && this.s[o] === null && this.usable(o)) {
       this.put(o, back);
     }
     return { persist: true, moved: "user", form: displaced === id ? "focus" : "announce" };
@@ -1767,7 +1809,9 @@ class Folder {
       this.presentAt(id, t) && (ev.live.has(id) || oldestLive === undefined) ? id : null;
     const record = ev.record;
     const restore = (sides: Record<PaneSide, string | null>, selected: PaneSide): boolean => {
-      if ((sides.left === null && sides.right === null) || !this.s.fit) {
+      // The kernel restores a split onto a row too narrow for two panes as a
+      // collapsed one, so only a terminal built without a split refuses.
+      if ((sides.left === null && sides.right === null) || !this.splitEnabled) {
         return false;
       }
       this.s.open = true;
@@ -1803,6 +1847,7 @@ class Folder {
         shown = true;
       }
     }
+    const byRoute = shown;
     if (!shown && record?.open === true) {
       const sides = { left: saved(record.left), right: saved(record.right) };
       const selected: PaneSide =
@@ -1831,7 +1876,13 @@ class Folder {
       selected: this.s.selected,
       open: this.s.open,
     };
-    return { persist: !sameShown(now, record), moved: "settle", form: null };
+    // Only the address rewrites the shared record: a settle from the record, or
+    // from the oldest tab with no record, has nothing newer to say.
+    return {
+      persist: byRoute && record !== null && !sameShown(now, record),
+      moved: "settle",
+      form: null,
+    };
   }
 
   private resyncBegan(ev: Extract<TimelineEntry, { kind: "resyncBegan" }>): Rule {
@@ -1861,6 +1912,13 @@ class Folder {
 
   private shell(change: ShellChange, t: number): Rule {
     switch (change.kind) {
+      case "splitOpened":
+        if (this.s.open) {
+          return NOOP;
+        }
+        this.s.open = true;
+        this.s.selected = change.selected;
+        break;
       case "splitClosed":
         this.closeTo(this.presentAt(change.keptId, t) ? change.keptId : null);
         break;
@@ -1879,7 +1937,7 @@ class Folder {
         this.s[o] = null;
         this.s.covered = {};
         this.s.selected = change.side;
-        break;
+        return { persist: true, moved: "user", form: "announce" };
       }
     }
     return { persist: true, moved: "user", form: null };

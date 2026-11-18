@@ -15,6 +15,7 @@ import {
   openTabMenu,
   paneRoot,
   rootIn,
+  nextCommit,
   shown,
   stripSplit,
   tick,
@@ -36,8 +37,13 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
 
 let server: FakeSessionServer;
 
+// A browser fires visibilitychange whenever the state changes.
 function setVisibility(state: "visible" | "hidden"): void {
+  const changed = document.visibilityState !== state;
   Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+  if (changed) {
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
 }
 
 beforeEach(() => {
@@ -371,6 +377,7 @@ describe("attention with two shown tabs", () => {
         notification: "Task finished",
         notificationSeq: 1,
       });
+      await nextCommit();
       expect(document.title).toBe("two · Host page");
       expect(ownIcon.getAttribute("href")).toBe("/favicon.svg");
       expect(dot?.dataset["status"]).toBeUndefined();
@@ -379,6 +386,7 @@ describe("attention with two shown tabs", () => {
 
       // s2, the selected pane's tab, likewise.
       monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+      await nextCommit();
       expect(dot?.dataset["status"]).toBeUndefined();
       expect(cueSeen()["s2"]).toBe(1);
 
@@ -391,6 +399,7 @@ describe("attention with two shown tabs", () => {
         notification: "Task finished",
         notificationSeq: 1,
       });
+      await nextCommit();
       expect(document.title).toBe("(1) two · Host page");
       expect(ownIcon.getAttribute("href")).toBe("/favicon-done.svg");
       expect(dot?.dataset["status"]).toBe("done");
@@ -415,12 +424,16 @@ describe("attention with two shown tabs", () => {
 
     setVisibility("hidden");
     monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
+    await nextCommit();
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    await nextCommit();
     monitor.emit({ id: "s3", status: "input", title: "three", createdAt: "3" });
+    await nextCommit();
     expect(document.title).toBe("(3) two · Host page");
 
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
+    await nextCommit();
     expect(document.title).toBe("(1) two · Host page");
     expect(cueSeen()["s1"]).toBe(1);
     expect(cueSeen()["s2"]).toBe(1);

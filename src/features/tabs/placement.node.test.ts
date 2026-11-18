@@ -11,6 +11,7 @@ import {
   paneStartFailed,
   removed,
   resyncBegan,
+  ownReleased,
   resyncSettled,
   route,
   select,
@@ -138,6 +139,15 @@ describe("an arrival beside a failed start", () => {
     p.stream(endedRec("Y")).commit();
     expect(p.panes).toEqual(["Y", null]);
     expect(p.lay.split.open).toBe(false);
+  });
+
+  it("opens the split a host opened, with the right pane empty and the selection kept", () => {
+    const p = bootPage(["X", "Y"], singleRecord("X"));
+    p.apply((m) => shellChanged(m, { kind: "splitOpened", selected: "left" })).commit();
+    expect(p.lay.split).toEqual({ open: true, selected: "left" });
+    expect(p.panes).toEqual(["X", null]);
+    p.stream(rec("Z")).commit();
+    expect(p.panes).toEqual(["X", "Z"]);
   });
 
   it("keeps the session the narrowed window kept when a start failure is learned after", () => {
@@ -369,6 +379,8 @@ describe("restarts and resyncs", () => {
         now: 0,
       }),
     ).commit();
+    expect(p.panes).toEqual(["R1", null]);
+    p.apply(ownReleased).commit();
     expect(p.panes).toEqual(["R1", "N"]);
   });
 
@@ -381,7 +393,9 @@ describe("restarts and resyncs", () => {
     own(p, "N");
     p.apply((m) =>
       resyncSettled(m, { sessions: [], record: null, route: null, toastStale: false, now: 0 }),
-    ).commit();
+    )
+      .apply(ownReleased)
+      .commit();
     expect(p.panes).toContain("N");
   });
 

@@ -237,14 +237,13 @@ describe("resync after a server restart", () => {
     expect(panes(m)).toEqual(["X2", "Y2"]);
 
     reopenList.release();
-    // Z arrived after the settle's list: it joins the strip, and the split the
-    // address restored keeps both its panes.
+    // Z arrived after the settle, during the second reopen's wait: it is placed
+    // once that list is in, as any arrival is, on the unselected pane.
     for (let i = 0; i < 10; i++) {
       await tick();
     }
     expect(m.api.list().map((t) => t.id)).toEqual(["X2", "Y2", "Z"]);
-    expect(panes(m)).toEqual(["X2", "Y2"]);
-    expect(location.hash).toBe("#a,b");
+    expect(panes(m)).toEqual(["X2", "Z"]);
   });
 
   it("lands on the record's tab without a notice when the restored set lacks the shown tab", async () => {

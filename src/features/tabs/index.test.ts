@@ -27,6 +27,7 @@ import {
   REORDER_STILL_MS,
 } from "./strip.js";
 import { engineNumbering, seenAcks } from "./test-helpers/sessions-server.js";
+import { nextCommit } from "./test-helpers/split.js";
 
 // A fake activityMonitor feature: lets a test push status events into tabs
 // without the real SSE. tabs reads it via ctx.use, so passing the same feature
@@ -218,8 +219,13 @@ beforeEach(() => {
 // on it (the notification suppression rule, and the active-tab acknowledgement that
 // defers while hidden), and a test that inherited whatever the previous one left
 // would pass or fail by ordering.
+// A browser fires visibilitychange whenever the state changes.
 function setVisibility(state: "visible" | "hidden"): void {
+  const changed = document.visibilityState !== state;
   Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+  if (changed) {
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
 }
 
 afterEach(() => {
@@ -1457,16 +1463,19 @@ describe("tabs feature", () => {
 
     // The process sets a window title.
     monitor.emit({ id: "s1", status: "working", title: "agent: building", createdAt: "1" });
+    await nextCommit();
     expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("agent: building");
 
     // A later sweep reports a BLANK title (the process cleared its OSC 0/2
     // title, or an idle-session record has none). It must NOT revert the label
     // to "New tab": the last good title is held until a real one replaces it.
     monitor.emit({ id: "s1", status: "idle", title: "", createdAt: "1" });
+    await nextCommit();
     expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("agent: building");
 
     // A genuine new non-blank title still replaces it.
     monitor.emit({ id: "s1", status: "idle", title: "agent: tests", createdAt: "1" });
+    await nextCommit();
     expect(root.querySelectorAll(".wt-tab-label")[0]?.textContent).toBe("agent: tests");
   });
 
@@ -1530,11 +1539,13 @@ describe("tabs feature", () => {
 
     // s2 is a background tab (s1 is active) that needs input -> amber cue.
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBe("input");
 
     // The same background tab then finishes a turn -> green cue (latest wins:
     // the newer "done" overwrites the earlier "input").
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBe("done");
   });
 
@@ -1550,6 +1561,7 @@ describe("tabs feature", () => {
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
     // A background tab raises the cue.
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBe("input");
 
     // Opening the switcher acknowledges it: the dot clears (reset happens only
@@ -1576,6 +1588,7 @@ describe("tabs feature", () => {
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
     // Background s2 needs input -> the cue lights.
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBe("input");
 
     // A leftward swipe on the active row advances to s2 (the raising tab): the
@@ -1603,6 +1616,7 @@ describe("tabs feature", () => {
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
     // Background s3 raised the cue; visiting s2 does NOT resolve it.
     monitor.emit({ id: "s3", status: "done", title: "three", createdAt: "3" });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBe("done");
     feature.api?.switchTo("s2");
     expect(dot?.dataset["status"]).toBe("done");
@@ -1632,6 +1646,7 @@ describe("tabs feature", () => {
       statusSeq: 1,
       seenSeq: 1,
     });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBeUndefined();
     // The session's next occurrence is news and still notifies.
     monitor.emit({
@@ -1642,6 +1657,7 @@ describe("tabs feature", () => {
       statusSeq: 2,
       seenSeq: 1,
     });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBe("input");
   });
 
@@ -1696,6 +1712,7 @@ describe("tabs feature", () => {
 
     // s1 is the active tab.
     monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1" });
+    await nextCommit();
     expect(root.querySelector<HTMLElement>(".wt-switcher-switch-dot")?.dataset["status"]).toBe(
       undefined,
     );
@@ -1715,11 +1732,16 @@ describe("tabs feature", () => {
 
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    await nextCommit();
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
     expect(dot?.dataset["status"]).toBeUndefined();
+    // Closed again: while the list is open every tab's cue is read as it lands.
+    root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
 
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
+    await nextCommit();
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBe("done");
   });
 
@@ -1736,6 +1758,7 @@ describe("tabs feature", () => {
 
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBe("input");
 
     // Middle-click closes s2 (a background close from the desktop strip).
@@ -2421,6 +2444,7 @@ describe("tabs status chrome", async () => {
       ["idle", "idle"],
     ] as const) {
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1" });
+      await nextCommit();
       expect(tabDot(root, 0)?.dataset["status"], status).toBe(status);
       // The dots are aria-hidden decoration, so a hover tooltip is how a sighted
       // user reads an eight-state colour vocabulary they never memorised.
@@ -2434,11 +2458,13 @@ describe("tabs status chrome", async () => {
     // the status itself, or a plain shell that crashed would show nothing at all.
     for (const status of ["warning", "failed", "crashed"] as const) {
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1" });
+      await nextCommit();
       expect(tabDot(root, 0)?.classList.contains("wt-reports"), status).toBe(true);
     }
     // A clean exit stays gated (not news), as does plain idle.
     for (const status of ["exited", "idle"] as const) {
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1" });
+      await nextCommit();
       expect(tabDot(root, 0)?.classList.contains("wt-reports"), status).toBe(false);
     }
   });
@@ -2446,6 +2472,7 @@ describe("tabs status chrome", async () => {
   it("renders a percentage as a determinate bar, and never as visible text", async () => {
     const { root, monitor } = await withMonitor();
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 78 });
+    await nextCommit();
 
     // The label stays the plain name. No terminal emulator puts a number next to
     // a tab label, and a chip that shrinks toward a 100px floor cannot spare the
@@ -2466,10 +2493,12 @@ describe("tabs status chrome", async () => {
   it("renders NO bar when the percentage is absent (-1), not a zero-width one", async () => {
     const { root, monitor } = await withMonitor();
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 60 });
+    await nextCommit();
     expect(tabBar(root, 0)?.hidden).toBe(false);
 
     // OSC 9;4's own clear (9;4;0 / the abbreviated form) arrives as -1.
     monitor.emit({ id: "s1", status: "idle", title: "one", createdAt: "1", progressValue: -1 });
+    await nextCommit();
     const bar = tabBar(root, 0);
     expect(bar?.hidden).toBe(true);
     expect(bar?.style.width).toBe("");
@@ -2479,6 +2508,7 @@ describe("tabs status chrome", async () => {
   it("keeps 0% visible as a real bar (0 is not absence)", async () => {
     const { root, monitor } = await withMonitor();
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 0 });
+    await nextCommit();
     expect(tabBar(root, 0)?.hidden).toBe(false);
     expect(tabBar(root, 0)?.style.width).toBe("0%");
   });
@@ -2491,6 +2521,7 @@ describe("tabs status chrome", async () => {
     // change the program never made.
     const { root, monitor } = await withMonitor();
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 100 });
+    await nextCommit();
     expect(tabBar(root, 0)?.style.width).toBe("100%");
 
     // And NO timer clears it: five minutes of wall clock with the page left
@@ -2511,6 +2542,7 @@ describe("tabs status chrome", async () => {
     for (const status of ["done", "input", "idle"] as const) {
       const { root, monitor } = await withMonitor();
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: 72 });
+      await nextCommit();
       expect(tabDot(root, 0)?.dataset["status"], status).toBe(status);
       expect(tabBar(root, 0)?.hidden, status).toBe(false);
       expect(tabBar(root, 0)?.style.width, status).toBe("72%");
@@ -2526,6 +2558,7 @@ describe("tabs status chrome", async () => {
     for (const status of ["working", "warning", "failed"] as const) {
       const { root, monitor } = await withMonitor();
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: 40 });
+      await nextCommit();
       expect(tabBar(root, 0)?.hidden, status).toBe(false);
       expect(tabBar(root, 0)?.style.width, status).toBe("40%");
 
@@ -2541,6 +2574,7 @@ describe("tabs status chrome", async () => {
     const { root, monitor } = await withMonitor();
     const status = "hibernating";
     monitor.emit({ id: "s2", status, title: "two", createdAt: "2", progressValue: 55 });
+    await nextCommit();
 
     const dot = tabDot(root, 1);
     expect(dot?.dataset["status"]).toBe("hibernating");
@@ -2556,6 +2590,7 @@ describe("tabs status chrome", async () => {
     expect(switchDot?.dataset["status"], "no switch-button cue").toBeUndefined();
 
     monitor.emit({ id: "s2", status, title: "two", createdAt: "2", reportsActivity: true });
+    await nextCommit();
     expect(dot?.classList.contains("wt-reports"), "shown once the session reports").toBe(true);
   });
 
@@ -2571,11 +2606,13 @@ describe("tabs status chrome", async () => {
         createdAt: "1",
         progressValue: 70,
       });
+      await nextCommit();
       expect(tabBar(root, 0)?.hidden).toBe(false);
 
       // The server keeps reporting the last percentage after the exit (the
       // engine's screen still holds it); the UI drops it anyway.
       monitor.emit({ id: "s1", status: ended, title: "one", createdAt: "1", progressValue: 70 });
+      await nextCommit();
       expect(tabBar(root, 0)?.hidden, ended).toBe(true);
       expect(tabLabel(root, 0)?.textContent, ended).toBe("one");
 
@@ -2590,7 +2627,9 @@ describe("tabs status chrome", async () => {
     // Absence there means "no information", never "cleared".
     const { root, monitor } = await withMonitor();
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 45 });
+    await nextCommit();
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1" });
+    await nextCommit();
     expect(tabBar(root, 0)?.style.width).toBe("45%");
   });
 
@@ -2605,10 +2644,12 @@ describe("tabs status chrome", async () => {
 
     // The active tab's percentage renders on its own chip...
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 40 });
+    await nextCommit();
     expect(tabBar(root, 0)?.style.width).toBe("40%");
     // ...and a background tab's too, but neither reaches the page title, which
     // carries the active tab's label and the served title.
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2", progressValue: 90 });
+    await nextCommit();
     expect(document.title).toBe("one · Host page");
 
     // A destroy hands the page its own title back.
@@ -2628,6 +2669,7 @@ describe("tabs status chrome", async () => {
     // A background tab wanting the user puts the count FIRST, where a truncating
     // tab strip still shows it.
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(document.title).toBe("(1) one · Host page");
 
     // Acknowledging the cue drops the prefix and leaves the base alone. (The
@@ -2641,6 +2683,7 @@ describe("tabs status chrome", async () => {
     // And a destroy with a cue still raised must not strand the count on a page
     // the user comes back to.
     monitor.emit({ id: "s2", status: "crashed", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(document.title).toBe("(1) one · Host page");
     term?.destroy();
     term = undefined;
@@ -2658,11 +2701,13 @@ describe("tabs status chrome", async () => {
 
     // Visible + active: nothing to tell anyone, exactly as before.
     monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1" });
+    await nextCommit();
     expect(document.title).toBe("one · Host page");
 
     // Hidden + active: the user cannot see the terminal, so it raises.
     setVisibility("hidden");
     monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
+    await nextCommit();
     expect(document.title).toBe("(1) one · Host page");
 
     // Coming back acknowledges it, because now they ARE looking at it. Deferred
@@ -2670,15 +2715,18 @@ describe("tabs status chrome", async () => {
     // becomes true.
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
+    await nextCommit();
     expect(document.title).toBe("one · Host page");
 
     // ...and only for the ACTIVE tab. A background tab's cue must survive a return
     // to a DIFFERENT tab, or the viewer loses the thing it came back for.
     setVisibility("hidden");
     monitor.emit({ id: "s2", status: "crashed", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(document.title).toBe("(1) one · Host page");
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
+    await nextCommit();
     expect(document.title).toBe("(1) one · Host page");
     void root;
   });
@@ -2701,6 +2749,7 @@ describe("tabs status chrome", async () => {
     try {
       const { root, monitor } = await withMonitor({ attentionIcons: true });
       monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+      await nextCommit();
       expect(document.title).toBe("(1) one · Host page");
       expect(iconHref()).toBe("/favicon-input.svg");
 
@@ -2730,6 +2779,7 @@ describe("tabs status chrome", async () => {
     document.title = "Host page";
     const { root, monitor } = await withMonitor();
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(document.title).toBe("(1) one · Host page");
 
     document.dispatchEvent(new Event("freeze"));
@@ -2744,6 +2794,7 @@ describe("tabs status chrome", async () => {
     // s2 is a BACKGROUND tab (s1 is active), which is what the aggregate is for.
     for (const status of ["input", "done", "crashed", "failed"] as const) {
       monitor.emit({ id: "s2", status, title: "two", createdAt: "2" });
+      await nextCommit();
       expect(dot?.dataset["status"], status).toBe(status);
       // Same wording map as the per-tab dots, so the aggregate cue explains
       // itself on hover instead of being an unexplained coloured dot.
@@ -2757,6 +2808,7 @@ describe("tabs status chrome", async () => {
       );
       // Reset via the tab's own acknowledgement path (a working phase drops it).
       monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
+      await nextCommit();
     }
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click(); // clear the cue
     root.querySelector<HTMLElement>(".wt-switcher-switch")?.click(); // collapse again
@@ -2767,6 +2819,7 @@ describe("tabs status chrome", async () => {
     // to act on), and idle/exited ask nothing of anyone.
     for (const status of ["working", "warning", "idle", "exited"] as const) {
       monitor.emit({ id: "s2", status, title: "two", createdAt: "2" });
+      await nextCommit();
       expect(dot?.dataset["status"], status).toBeUndefined();
     }
   });
@@ -2775,20 +2828,24 @@ describe("tabs status chrome", async () => {
     const { root, monitor } = await withMonitor();
     const chip = root.querySelectorAll<HTMLElement>(".wt-tab")[0];
     monitor.emit({ id: "s1", status: "crashed", title: "one", createdAt: "1" });
+    await nextCommit();
     expect(chip?.getAttribute("aria-label")).toBe("one, process crashed");
 
     // The percentage rides along in the ANNOUNCED name only. It is the one place
     // it appears as text: a screen reader cannot see the 2px bar, and the visible
     // label must not spend chip width on it.
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1", progressValue: 30 });
+    await nextCommit();
     expect(chip?.getAttribute("aria-label")).toBe("one, working, 30%");
     expect(tabLabel(root, 0)?.textContent).toBe("one");
 
     // The announced name follows the bar's rule (renderedProgress): a done tab
     // still showing its bar announces the percentage, an ended one does not.
     monitor.emit({ id: "s1", status: "done", title: "one", createdAt: "1", progressValue: 30 });
+    await nextCommit();
     expect(chip?.getAttribute("aria-label")).toBe("one, turn finished, 30%");
     monitor.emit({ id: "s1", status: "exited", title: "one", createdAt: "1", progressValue: 30 });
+    await nextCommit();
     expect(chip?.getAttribute("aria-label")).toBe("one, session ended");
 
     // Both halves come from ONE wording map, so hover text and announced text
@@ -2804,6 +2861,7 @@ describe("tabs status chrome", async () => {
       "crashed",
     ] as const) {
       monitor.emit({ id: "s1", status, title: "one", createdAt: "1", progressValue: -1 });
+      await nextCommit();
       const phrase = tabDot(root, 0)?.title;
       expect(phrase, status).toBeTruthy();
       expect(chip?.getAttribute("aria-label"), status).toBe(`one, ${String(phrase)}`);
@@ -2852,6 +2910,7 @@ describe("tabs secondary activity mark", () => {
         activityCount: 2,
       }),
     );
+    await nextCommit();
 
     expect(mark(root, 0)?.dataset["activity"]).toBe("working");
     // The mark is aria-hidden decoration like the dot, so the tooltip is how a
@@ -2875,6 +2934,7 @@ describe("tabs secondary activity mark", () => {
         activityCount: 1,
       }),
     );
+    await nextCommit();
     monitor.emit(
       event({
         id: "s2",
@@ -2885,6 +2945,7 @@ describe("tabs secondary activity mark", () => {
         activityCount: 3,
       }),
     );
+    await nextCommit();
 
     const barMark = root.querySelector<HTMLElement>(".wt-switcher-current .wt-activity-mark");
     expect(barMark?.dataset["activity"]).toBe("input");
@@ -2901,9 +2962,11 @@ describe("tabs secondary activity mark", () => {
     monitor.emit(
       event({ id: "s1", status: "idle", title: "one", createdAt: "1", activity: "working" }),
     );
+    await nextCommit();
     expect(mark(root, 0)?.dataset["activity"]).toBe("working");
 
     monitor.emit(event({ id: "s1", status: "idle", title: "one", createdAt: "1", activity: "" }));
+    await nextCommit();
     // Removing the attribute is what collapses the footprint again, so the empty
     // state must leave NO attribute rather than an empty one.
     expect(mark(root, 0)?.hasAttribute("data-activity")).toBe(false);
@@ -2922,11 +2985,13 @@ describe("tabs secondary activity mark", () => {
         activityCount: 2,
       }),
     );
+    await nextCommit();
 
     // The polling fallback lists SessionInfo, and a pre-release server sends
     // neither field, so absence means "no information" and must not read as a
     // withdrawal — the same rule progressValue and order already follow.
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1" });
+    await nextCommit();
     expect(mark(root, 0)?.dataset["activity"]).toBe("working");
     expect(mark(root, 0)?.title).toBe("2 background tasks running");
   });
@@ -2963,6 +3028,7 @@ describe("tabs secondary activity mark", () => {
         activityCount: 1,
       }),
     );
+    await nextCommit();
 
     // Both channels reach a reader who cannot see either mark, in one name.
     expect(chip?.getAttribute("aria-label")).toBe(
@@ -2983,6 +3049,7 @@ describe("tabs secondary activity mark", () => {
         activityCount: 1,
       }),
     );
+    await nextCommit();
 
     // The independence proof, and the entire point of a SECOND mark: run_workflow
     // returns before the run does, so the launching turn's dot goes green while the
@@ -3088,6 +3155,7 @@ describe("tabs OSC 9 notifications", () => {
       notification: "Task finished",
       notificationSeq: 1,
     });
+    await nextCommit();
     expect(posts).toEqual([{ title: "Build box", body: "Task finished" }]);
 
     shown[0]?.onclick?.(new Event("click"));
@@ -3223,6 +3291,7 @@ describe("tabs OSC 9 notifications", () => {
 
     // A session that never reported is a plain shell, which never notifies.
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(arm).not.toHaveBeenCalled();
 
     // A session that reports activity is a program that may also notify.
@@ -3233,6 +3302,7 @@ describe("tabs OSC 9 notifications", () => {
       createdAt: "1",
       reportsActivity: true,
     });
+    await nextCommit();
     expect(arm).toHaveBeenCalledTimes(1);
 
     root
@@ -3255,6 +3325,7 @@ describe("tabs OSC 9 notifications", () => {
         notificationSeq: 1,
       });
     }).not.toThrow();
+    await nextCommit();
     expect(posts).toEqual([]);
     // Tab-only: the session's own dot and the switcher's aggregate cue still say
     // something happened.
@@ -5188,7 +5259,9 @@ describe("tabs: in a second document", () => {
     // The frame is hidden while the importing page stays visible: the cue on the
     // shown tab raises, because the terminal's own document is out of sight.
     Object.defineProperty(second.doc, "visibilityState", { value: "hidden", configurable: true });
+    second.doc.dispatchEvent(new second.win.Event("visibilitychange"));
     monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
+    await nextCommit();
     expect(second.doc.title).toBe("(1) one · Inner page");
 
     // The importing page's visibility change is not this document's.
@@ -5197,9 +5270,11 @@ describe("tabs: in a second document", () => {
       configurable: true,
     });
     document.dispatchEvent(new Event("visibilitychange"));
+    await nextCommit();
     expect(second.doc.title).toBe("(1) one · Inner page");
 
     second.doc.dispatchEvent(new second.win.Event("visibilitychange"));
+    await nextCommit();
     expect(second.doc.title).toBe("one · Inner page");
   });
 

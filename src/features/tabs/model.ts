@@ -4,7 +4,6 @@ import type { LineStore } from "@cplieger/web-terminal-engine";
 import type { SessionInfo } from "@cplieger/web-terminal-engine";
 import type { ViewMemory } from "@cplieger/web-terminal-engine";
 import type { PaneSide, TabHandle } from "../../kernel/types.js";
-import type { TabAlias } from "./route.js";
 
 export type { SessionInfo };
 
@@ -362,29 +361,12 @@ export function orderedInsertIndex(current: readonly TabOrderKey[], incoming: Ta
   return current.length;
 }
 
+/** One chip's view: its elements, its line cache and its reading position. The
+ *  session's data lives in placement.ts's SessionFact. */
 export interface Tab {
   id: string;
-  /** The session's public URL name from the server, or undefined when it sent
-   *  none (a server before engine 6.2) or one outside the alias grammar; such a
-   *  tab has no address of its own. */
-  alias: TabAlias | undefined;
-  /** The local mutation epoch at which this tab was adopted. The list reconcile
-   *  snapshots the counter BEFORE its GET and drops an unlisted tab only when
-   *  the tab predates the snapshot: a tab born while the list was in flight is
-   *  invisible to that stale listing, and dropping it cascaded into a duplicate
-   *  replacement session. */
-  born: number;
-  /** The title the SERVER resolved: the pinned name, else the program's OSC 0/2
-   *  title, else a host-pushed title, else the engine's own inference. The
-   *  displayed label adds a numbered fallback and de-duplication. */
-  title: string;
   /** The computed, de-duplicated label actually shown in the chrome. */
   display: string;
-  createdAt: string;
-  /** The server's shared position for this session, or undefined against a server
-   *  that keeps no order. Updated from every status event, so a reorder made on
-   *  another device reaches this strip (see compareTabOrder). */
-  order: number | undefined;
   store: LineStore;
   el: HTMLElement;
   label: HTMLElement;
@@ -392,63 +374,27 @@ export interface Tab {
   /** The chip's determinate progress bar (the 2px line on its bottom edge).
    *  Present on every chip, hidden until a percentage exists. */
   progressEl: HTMLElement;
-  /** The last percentage the server reported for this session, or
-   *  PROGRESS_ABSENT. Held raw: whether it is currently SHOWN is a render-time
-   *  question (renderedProgress). */
-  progress: number;
   /** The chip's secondary activity mark (the rounded-square ring beside the
    *  status dot). Present on every chip, and costing no layout until a state
    *  arrives. */
   activityEl: HTMLElement;
-  /** The host's secondary activity state for this session, normalised to the
-   *  closed set ("" for none). Independent of `status` and of `reports`: a
-   *  background task can be running while the turn that launched it is finished. */
-  activity: string;
-  /** How many sources produced that state, 0 when the server does not count. */
-  activityCount: number;
   aria: TabHandle;
   /** This tab's saved reading position as captureViewMemory() returned it when
    *  the tab was last left; null (follow the tail) for a tab never viewed or left
    *  on the alternate screen. NOT a pixel scrollTop: a rebuild has built only
    *  ~301 of up to 5000 rows when the restore lands, so the browser clamped the
-   *  offset away, and it stopped meaning the same line once the session produced
-   *  output while backgrounded. In memory only. */
+   *  offset away. In memory only. */
   view: ViewMemory | null;
-  /** Sticky: true once this session emitted a genuine activity signal (OSC 7501
-   *  status, OSC 9;4 progress or a classified OSC 9 notification). Its activity
-   *  dot is shown only while true; a session that never reports activity (a
-   *  plain shell) keeps a clean, dot-less tab. Fed from the server's
-   *  reportsActivity via applyStatus. */
-  reports: boolean;
-  /** The user's pinned name (the server's `pinnedTitle` wire field). Outranks
-   *  every automatic source in `baseLabel`, and its presence is what enables the
-   *  tab menu's "use the automatic name" action. Undefined or empty means the tab
-   *  has no user-set name. */
-  pinnedTitle?: string | undefined;
-  /** The server's number for the status this tab holds (0: none yet). */
-  statusSeq: number;
-  /** The server-confirmed seen floor. Only rises: a record carrying a lower one
-   *  is older, never a retraction. */
-  seenSeq: number;
-  /** This page's optimistic read floor: the occurrence its latest ack sent, 0
-   *  when none. A 204 clears it once seenSeq covers it, and a non-404 failure
-   *  only while it still holds the failed number; a 404 keeps it until the
-   *  vanished tab is removed. */
-  ackSeq: number;
-  /** The occurrence whose ack last failed with a non-404, 0 when none; the
-   *  automatic ack skips it so a failing server sees one PUT per occurrence. */
-  failedSeq: number;
-  /** The occurrence a banner this page posted for the session belongs to, 0
-   *  when none. */
-  bannerSeq: number;
-  /** The stream epoch at which a status-stream record last updated this tab, 0
-   *  when none: a list requested before it is older. */
-  streamAt: number;
-  /** Monotonic per-tab rename counter. A rename or clear increments it and
-   *  captures the value; the response is applied only if it is still current when
-   *  it lands, so a slow failure cannot roll back a newer rename, a later clear,
-   *  or a status-stream update from another client. */
+  /** Monotonic per-tab rename counter: a rename's failure rolls back only while
+   *  its captured value is still current, so a slow failure cannot undo a newer
+   *  rename, a later clear, or a status-stream update from another client. */
   nameSeq: number;
+}
+
+/** The two label sources a chip is named from. */
+export interface Labelled {
+  readonly title: string;
+  readonly pinnedTitle?: string | undefined;
 }
 
 /** A tab's label before de-duplication: the pinned name, else the title the
@@ -456,20 +402,20 @@ export interface Tab {
  *  source into `title` and a client re-implementing that ladder could only
  *  disagree with it. The pin is still read here so a rename paints before the
  *  round trip. fallback=true marks "New tab" so relabelAll leaves it unnumbered. */
-export function baseLabel(tab: Tab): { text: string; fallback: boolean } {
+export function baseLabel(tab: Labelled): { text: string; fallback: boolean } {
   const real = pinnedNameOf(tab) || tab.title.trim();
   return real ? { text: real, fallback: false } : { text: "New tab", fallback: true };
 }
 
 /** A tab's pin, trimmed, with a whitespace-only value reading as absent; one
  *  definition so baseLabel and the menu's enabled state cannot disagree. */
-function pinnedNameOf(tab: Tab): string {
+function pinnedNameOf(tab: Labelled): string {
   return tab.pinnedTitle?.trim() ?? "";
 }
 
 /** Whether a tab carries a user-set name, which gates the tab menu's "use the
  *  automatic name" item. */
-export function hasPinnedName(tab: Tab): boolean {
+export function hasPinnedName(tab: Labelled): boolean {
   return pinnedNameOf(tab) !== "";
 }
 

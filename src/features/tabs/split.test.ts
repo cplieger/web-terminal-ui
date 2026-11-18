@@ -27,6 +27,7 @@ import {
   lateRejecting,
   menuItem,
   mountTabbed,
+  nextCommit,
   openTabMenu,
   paneRoot,
   politeText,
@@ -651,14 +652,14 @@ describe("the tab-click rule", () => {
     term.split?.open();
 
     monitor.emit({ id: "s7", title: "seven", createdAt: "7", status: "idle" });
-    await tick();
+    await nextCommit();
     expect(shown(ctx, "left")).toBe("s1");
     expect(shown(ctx, "right")).toBe("s7");
     expect(ctx.shell.selected()).toBe("right");
 
     ctx.shell.select("left");
     monitor.emit({ id: "s8", title: "eight", createdAt: "8", status: "idle" });
-    await tick();
+    await nextCommit();
     expect(shown(ctx, "left")).toBe("s1");
     expect(shown(ctx, "right")).toBe("s8");
     expect(ctx.shell.selected()).toBe("right");
@@ -676,7 +677,7 @@ describe("the tab-click rule", () => {
     });
 
     monitor.emit({ id: "s7", title: "seven", createdAt: "7", status: "idle" });
-    await tick();
+    await nextCommit();
     expect(term.split?.isOpen()).toBe(false);
     expect(shown(ctx, "left")).toBe("s1");
     expect(activeLabels(root)).toEqual(["one"]);
@@ -714,7 +715,7 @@ describe("the tab-click rule", () => {
 
     monitor.emit({ id: "s1", title: "one", createdAt: "1", status: "idle" });
     monitor.emit({ id: "s2", title: "two", createdAt: "2", status: "idle" });
-    await tick();
+    await nextCommit();
     listed.resolve();
     await until(() => ctxRef?.shell.panes().some((p) => p.state() === "shown") === true);
     await tick();
@@ -726,7 +727,7 @@ describe("the tab-click rule", () => {
     expect(chips(root)).toHaveLength(2);
   });
 
-  it("this client's own new session, reported by the stream before its create answers, is placed once; another browser's, reported meanwhile, is placed after it", async () => {
+  it("this client's own new session, reported by the stream before its create answers, is placed once, after another browser's reported meanwhile", async () => {
     const monitor = fakeMonitor();
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server, {
@@ -743,14 +744,15 @@ describe("the tab-click rule", () => {
 
     monitor.emit({ id: "s-new", title: "", createdAt: "9", status: "idle" });
     monitor.emit({ id: "s7", title: "seven", createdAt: "7", status: "idle" });
-    await tick();
+    await nextCommit();
     expect(shown(ctx, "left")).toBe("s1");
     expect(shown(ctx, "right")).toBe("s2");
 
     held.resolve();
-    await until(() => shown(ctx, "left") === "s7");
+    await until(() => shown(ctx, "left") === "s-new");
     await tick();
-    expect(shown(ctx, "right")).toBe("s-new");
+    // The user's own terminal is placed after the arrival, so it ends selected.
+    expect(shown(ctx, "right")).toBe("s7");
     expect(ctx.shell.selected()).toBe("left");
   });
 
@@ -1445,7 +1447,7 @@ describe("drag and drop onto a half", () => {
     dragAt("dragend", dt, chip, rightX);
     await until(() => server.posts() === 1);
     monitor.emit({ id: "s1", title: "one", createdAt: "1", status: "idle", removed: true });
-    await tick();
+    await nextCommit();
 
     held.resolve();
     await until(() => shown(ctx, "left") === "s-new" || shown(ctx, "right") === "s-new");
@@ -1912,7 +1914,7 @@ describe("the closing rules while the split is open", () => {
     clearForgets();
 
     monitor.emit({ id: "s3", title: "three", createdAt: "3", status: "idle", removed: true });
-    await tick();
+    await nextCommit();
     expect(shown(ctx, "left")).toBe("s1");
     expect(shown(ctx, "right")).toBe("s2");
     expect(chips(root)).toHaveLength(2);
@@ -1922,7 +1924,7 @@ describe("the closing rules while the split is open", () => {
     const closed = engineOn(root, "left");
     const kept = engineOn(root, "right");
     monitor.emit({ id: "s1", title: "one", createdAt: "1", status: "idle", removed: true });
-    await tick();
+    await nextCommit();
     expect(term.split?.isOpen()).toBe(false);
     expect(shown(ctx, "left")).toBe("s2");
     expect(engineOn(root, "left")).toBe(kept);
@@ -1933,7 +1935,7 @@ describe("the closing rules while the split is open", () => {
     expect(server.posts()).toBe(0);
   });
 
-  it("(6) a status event never refills a view the closing rules emptied, and does show the first live tab after a bootstrap that showed nothing", async () => {
+  it("(6) closing every tab when the replacement fails keeps them all, and a status event shows the first live tab after a bootstrap that showed nothing", async () => {
     const monitor = fakeMonitor();
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server, {
@@ -1947,16 +1949,12 @@ describe("the closing rules while the split is open", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     menuItem(openTabMenu(root, "one"), "Close all").click();
     await until(() => server.posts() === 1);
-    await tick();
-    expect(term.split?.isOpen()).toBe(false);
-    expect(shown(ctx, "left")).toBeNull();
-    expect(chips(root)).toHaveLength(0);
-
-    monitor.emit({ id: "s5", title: "five", createdAt: "5", status: "idle" });
-    monitor.emit({ id: "s6", title: "six", createdAt: "6", status: "idle" });
-    await tick();
-    expect(ctx.shell.panes().some((p) => p.state() === "shown")).toBe(false);
+    await nextCommit();
+    // The replacement is created first; it failed, so every tab and pane stays.
+    expect(term.split?.isOpen()).toBe(true);
+    expect([shown(ctx, "left"), shown(ctx, "right")]).toEqual(["s1", "s2"]);
     expect(chips(root)).toHaveLength(2);
+    expect(server.deletes()).toEqual([]);
     term.destroy();
 
     // A bootstrap with nothing listed and a failing create shows nothing; the
@@ -1982,7 +1980,7 @@ describe("the closing rules while the split is open", () => {
     await tick();
     expect(ctxRef?.shell.pane("left")?.state()).toBe("empty");
     late.emit({ id: "s7", title: "seven", createdAt: "7", status: "idle" });
-    await tick();
+    await nextCommit();
     expect(ctxRef?.shell.pane("left")?.session.id).toBe("s7");
   });
 

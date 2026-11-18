@@ -11,6 +11,7 @@ import {
   createModel,
   mergeList,
   mergeRecord,
+  ownReleased,
   removed,
   resyncBegan,
   resyncSettled,
@@ -168,9 +169,10 @@ export class Page {
   ): this {
     const ids = this.resyncs.shift() ?? [];
     this.apply((m) => resyncBegan(m, ids, false, this.now));
-    return this.apply((m) =>
+    this.apply((m) =>
       resyncSettled(m, { sessions: rows, record, route, toastStale: false, now: this.now }),
     );
+    return this.apply(ownReleased);
   }
 }
 
@@ -189,6 +191,7 @@ export function bootPage(
       toastStale: false,
       now: 0,
       canOpen: opts.canOpen ?? true,
+      splitEnabled: true,
     }),
   );
   page.commit();

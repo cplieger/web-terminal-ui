@@ -12,6 +12,7 @@ import {
   paneStartFailed,
   removed,
   resyncBegan,
+  ownReleased,
   resyncSettled,
   select,
   shellChanged,
@@ -151,6 +152,7 @@ const cmdArb = fc.oneof(
   fc.record({ k: fc.constant("split" as const) }),
   fc.record({ k: fc.constant("tray" as const) }),
   fc.record({ k: fc.constant("narrow" as const) }),
+  fc.record({ k: fc.constant("hostOpen" as const) }),
 );
 type Cmd = typeof cmdArb extends fc.Arbitrary<infer T> ? T : never;
 const SERVER_KINDS: ReadonlySet<Cmd["k"]> = new Set([
@@ -178,8 +180,15 @@ const USER: ReadonlySet<Cmd["k"]> = new Set([
   "split",
   "tray",
   "narrow",
+  "hostOpen",
 ]);
-const COMMIT_BEFORE: ReadonlySet<Cmd["k"]> = new Set(["split", "narrow", "resyncRun", "ack"]);
+const COMMIT_BEFORE: ReadonlySet<Cmd["k"]> = new Set([
+  "split",
+  "narrow",
+  "hostOpen",
+  "resyncRun",
+  "ack",
+]);
 
 interface Step {
   readonly cmd: Cmd;
@@ -242,6 +251,7 @@ function resyncRun(w: World): void {
   w.page.apply((m) =>
     resyncSettled(m, { sessions: rows, record: null, route: null, toastStale: false, now: 0 }),
   );
+  w.page.apply(ownReleased);
 }
 
 /** Runs one command; returns the id a user step must show in its own commit. */
@@ -392,6 +402,13 @@ function exec(w: World, cmd: Cmd): string | null {
       if (l.split.open) {
         const keptId = l.panes[l.split.selected] ?? l.panes.left ?? l.panes.right;
         page.apply((m) => shellChanged(m, { kind: "splitClosed", keptId }));
+      }
+      return null;
+    }
+    case "hostOpen": {
+      const l = page.lay;
+      if (!l.split.open && l.fit) {
+        page.apply((m) => shellChanged(m, { kind: "splitOpened", selected: l.split.selected }));
       }
       return null;
     }
