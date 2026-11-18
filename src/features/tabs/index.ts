@@ -2645,14 +2645,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const other = otherSide(side);
         return shownIn(side) !== null && shownIn(other) !== null ? other : side;
       }
-      /** The pane a session made elsewhere takes: newTabSide's, else the split's
-       *  other pane, never one showing a failed start, which is the only place
-       *  its end shows. Null when every pane shows one. */
+      /** The pane a session made elsewhere takes: newTabSide's, else the other
+       *  one, skipping a pane that shows a failed start. Null when both do. */
       function arrivalSide(id: string): PaneSide | null {
         const first = newTabSide(id);
-        const second = otherSide(first);
-        const sides = shownIn(second) === null ? [first] : [first, second];
-        return sides.find((side) => !showsStartFailure(side)) ?? null;
+        return [first, otherSide(first)].find((side) => !showsStartFailure(side)) ?? null;
       }
       function showsStartFailure(side: PaneSide): boolean {
         const id = shownIn(side);
