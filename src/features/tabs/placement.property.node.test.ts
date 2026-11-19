@@ -233,8 +233,8 @@ const COMMIT_BEFORE: ReadonlySet<Cmd["k"]> = new Set([
   "layoutAns",
 ]);
 
-// The steps that fold an intent or a sync point, after which a failed ack is
-// sent again (design 2.1 `retry`). No other step may re-send one.
+// The steps that fold an intent or a sync point, after which the fold's `retry`
+// sends a failed ack again. No other step may re-send one.
 const RETRIES: ReadonlySet<Log["step"]> = new Set([
   "show",
   "close",
@@ -325,8 +325,9 @@ interface Sides {
   right: string | null;
 }
 
-/** What the test's own steps say the page learned and showed: the oracle of
- *  design 7.3.1, 7.3.4 and 7.3.5, never read off a field the fold derives. */
+/** What the test's own steps say the page learned and showed: the oracle for
+ *  ended panes, the cue count and the switch dot, never read off a field the
+ *  fold derives. */
 interface Log {
   /** Each session's freshest delivered occurrence, and its read floor. */
   readonly occ: Map<string, { readonly status: string; readonly seq: number }>;
@@ -413,7 +414,7 @@ function learn(w: World, rows: readonly StatusRecord[], listedAt: number | null)
 
 /** Records what a list requested while the page knew `known` tells it. A list
  *  naming none of those sessions still known is a server restart's and tells
- *  nothing until its resync settles (design 1.1); any other drops what it misses. */
+ *  nothing until its resync settles; any other drops what it misses. */
 function learnList(
   w: World,
   rows: readonly StatusRecord[],
