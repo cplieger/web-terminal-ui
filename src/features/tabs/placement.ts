@@ -185,6 +185,9 @@ export interface TabsModel {
    *  list cannot re-add them within CLOSE_TOMBSTONE_MS. */
   readonly tombstones: ReadonlyMap<string, number>;
   readonly timeline: readonly TimelineEntry[];
+  /** The clock at the end of each input since the last commit: the points a
+   *  frame can paint, so the only ones at which a session counts as seen. */
+  readonly inputEnds: readonly number[];
   readonly holds: Holds;
   /** An own create answered during a resync, folded right after its settle. */
   readonly pendingOwn: OwnIntent | null;
@@ -318,6 +321,7 @@ export function createModel(opts: { readonly presumeReports?: boolean } = {}): T
     gone: [],
     tombstones: new Map(),
     timeline: [],
+    inputEnds: [],
     holds: { sync: 0, create: false, resync: 0 },
     pendingOwn: null,
     restartPending: null,
@@ -349,12 +353,14 @@ interface Draft {
   gone: SessionFact[];
   readonly tombstones: Map<string, number>;
   readonly timeline: TimelineEntry[];
+  inputEnds: number[];
   holds: Mutable<Holds>;
   pendingOwn: OwnIntent | null;
   restartPending: { readonly at: number; readonly ids: readonly string[] } | null;
   writeOwed: null | "write" | "rewrite";
   page: Mutable<PageFacts>;
   heldBefore: boolean;
+  readonly startClock: number;
 }
 
 function draft(m: TabsModel): Draft {
@@ -366,12 +372,14 @@ function draft(m: TabsModel): Draft {
     gone: [...m.gone],
     tombstones: new Map(m.tombstones),
     timeline: [...m.timeline],
+    inputEnds: [...m.inputEnds],
     holds: { ...m.holds },
     pendingOwn: m.pendingOwn,
     restartPending: m.restartPending,
     writeOwed: m.writeOwed,
     page: { ...m.page },
     heldBefore: anyHold(m),
+    startClock: m.clock,
   };
 }
 
@@ -403,6 +411,9 @@ function settleHolds(d: Draft): void {
 // Every reducer ends here.
 function finish(d: Draft): TabsModel {
   settleHolds(d);
+  if (d.clock > d.startClock) {
+    d.inputEnds.push(d.clock);
+  }
   return {
     clock: d.clock,
     streamEpoch: d.streamEpoch,
@@ -411,6 +422,7 @@ function finish(d: Draft): TabsModel {
     gone: d.gone,
     tombstones: d.tombstones,
     timeline: d.timeline,
+    inputEnds: d.inputEnds,
     holds: d.holds,
     pendingOwn: d.pendingOwn,
     restartPending: d.restartPending,
@@ -1060,6 +1072,7 @@ function folded(m: TabsModel): TabsModel {
   const d = draft(m);
   d.gone = [];
   d.timeline.length = 0;
+  d.inputEnds = [];
   return finish(d);
 }
 
@@ -1974,13 +1987,18 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
       s.recent = [sel, ...s.recent.filter((id) => id !== sel)];
     }
   };
-  // An ack is owed for a cue whose session was in view at some stamp while that
-  // status was current, so the acks a run sends do not depend on where its
-  // commits fell. viewedUntil[id] is the first stamp after its last stretch in view.
-  const viewedUntil = new Map<string, number>();
+  // An ack is owed for a cue whose session was in view at an input's end while
+  // that status was current: the input ends are the same wherever commits fall,
+  // so the acks do not depend on them, and a session placed and covered
+  // inside one input was never painted. viewedAt[id] is its last such end.
+  const viewedAt = new Map<string, number>();
+  const inputEnds = m.inputEnds.filter((e) => e > prev.through);
+  let ends = 0;
   const viewedBefore = (t: number): void => {
-    for (const id of fold.inViewAt(t - 1)) {
-      viewedUntil.set(id, t);
+    for (let e = inputEnds[ends]; e !== undefined && e < t; e = inputEnds[++ends]) {
+      for (const id of fold.inViewAt(e)) {
+        viewedAt.set(id, e);
+      }
     }
   };
   const step = (t: number, run: () => Rule): void => {
@@ -1995,6 +2013,9 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
     step(ev.at, () => fold.event(ev));
   }
   viewedBefore(m.clock + 1);
+  for (const id of fold.inViewAt(m.clock)) {
+    viewedAt.set(id, m.clock);
+  }
   const inView = new Set(
     m.page.visible
       ? [...m.sessions.keys()].filter(
@@ -2006,7 +2027,7 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
     .filter(
       (f) =>
         isUnread(f) &&
-        (viewedUntil.get(f.id) ?? 0) > f.statusAt &&
+        (viewedAt.get(f.id) ?? -1) >= f.statusAt &&
         (fold.edge.retry || f.failedSeq !== f.statusSeq),
     )
     .map((f) => ({ id: f.id, seq: f.statusSeq }));

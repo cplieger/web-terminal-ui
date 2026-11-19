@@ -125,8 +125,9 @@ const byAge = (ids: Iterable<string>): string[] =>
   );
 
 const who = fc.nat({ max: 9 });
+const cueArb = fc.constantFrom("", "input", "done", "failed", "crashed");
 const cmdArb = fc.oneof(
-  fc.record({ k: fc.constant("create" as const) }),
+  fc.record({ k: fc.constant("create" as const), cue: cueArb }),
   fc.record({
     k: fc.constant("status" as const),
     who,
@@ -201,7 +202,7 @@ const COMMIT_BEFORE: ReadonlySet<Cmd["k"]> = new Set([
 
 // The steps that fold an intent or a sync point, after which a failed ack is
 // sent again (design 2.1 `retry`). No other step may re-send one.
-const RETRIES: ReadonlySet<Cmd["k"]> = new Set([
+const RETRIES: ReadonlySet<Log["step"]> = new Set([
   "show",
   "close",
   "route",
@@ -230,6 +231,25 @@ const REFOLD_KINDS: ReadonlySet<Cmd["k"]> = new Set([
   "show",
 ]);
 
+// The steps that land several arrivals in one input: a list, a hold's release.
+const BURST_KINDS: ReadonlySet<Cmd["k"]> = new Set([
+  "create",
+  "status",
+  "read",
+  "deliver",
+  "pollReq",
+  "pollAns",
+  "reopen",
+  "openAns",
+  "ownBegin",
+  "ownAns",
+  "ack",
+  "visible",
+  "tray",
+  "split",
+  "show",
+]);
+
 interface Step {
   readonly cmd: Cmd;
   readonly commit: boolean;
@@ -246,19 +266,67 @@ const stepsArb = (max: number, kinds?: ReadonlySet<Cmd["k"]>): fc.Arbitrary<Step
 interface World {
   readonly page: Page;
   readonly server: Server;
-  readonly polls: { token: ListToken; rows: StatusRecord[] }[];
-  readonly opens: { token: ListToken; rows: StatusRecord[]; pending: StatusRecord[] }[];
+  readonly polls: { token: ListToken; epoch: number; rows: StatusRecord[] }[];
+  readonly opens: {
+    token: ListToken;
+    epoch: number;
+    rows: StatusRecord[];
+    pending: StatusRecord[];
+  }[];
   own: { id: string; opening: SplitOpening | null } | null;
   readonly answered: boolean[];
   /** What the steps since the last commit owe the next commit's edge effects. */
   since: { stale: number; held: boolean; retry: boolean };
   /** The occurrences whose last ack failed with a non-404, as `id:seq`. */
   readonly failedAcks: Set<string>;
+  readonly log: Log;
+}
+
+interface Sides {
+  left: string | null;
+  right: string | null;
+}
+
+/** What the test's own steps say the page learned and showed: the oracle of
+ *  design 7.3.1, 7.3.4 and 7.3.5, never read off a field the fold derives. */
+interface Log {
+  /** Each session's freshest delivered occurrence, and its read floor. */
+  readonly occ: Map<string, { readonly status: string; readonly seq: number }>;
+  readonly floor: Map<string, number>;
+  /** The occurrence the session's last sent ack names; 0 once that ack failed. */
+  readonly acked: Map<string, number>;
+  /** The freshest occurrence delivered while a commit showed the session on screen. */
+  readonly viewed: Map<string, number>;
+  readonly failed: Set<string>;
+  /** Stream records delivered so far, and the count when each session's last one came. */
+  epoch: number;
+  readonly streamAt: Map<string, number>;
+  visible: boolean;
+  tray: boolean;
+  /** Per side, the session the last user, kernel, settle or removal step gave it. */
+  base: Sides;
+  screen: Sides & { readonly open: boolean; readonly strip: readonly string[] };
+  step: Cmd["k"] | "list";
 }
 
 function world(keep: string | null = null): World {
+  const page = bootPage(["X", "Y", "W"], splitRecord("X", "Y"));
+  const log: Log = {
+    occ: new Map(),
+    floor: new Map(),
+    acked: new Map(),
+    viewed: new Map(),
+    failed: new Set(),
+    epoch: 0,
+    streamAt: new Map(),
+    visible: page.m.page.visible,
+    tray: false,
+    base: { left: "X", right: "Y" },
+    screen: { left: "X", right: "Y", open: true, strip: ["X", "Y", "W"] },
+    step: "list",
+  };
   return {
-    page: bootPage(["X", "Y", "W"], splitRecord("X", "Y")),
+    page,
     server: new Server(["X", "Y", "W"], keep),
     polls: [],
     opens: [],
@@ -266,7 +334,32 @@ function world(keep: string | null = null): World {
     answered: [],
     since: { stale: 0, held: false, retry: false },
     failedAcks: new Set(),
+    log,
   };
+}
+
+/** Records what a stream record (`listedAt` null) or the rows of a list
+ *  requested after `listedAt` stream records tell the page. A list row is older
+ *  than a stream record of its session delivered after the list was requested. */
+function learn(w: World, rows: readonly StatusRecord[], listedAt: number | null): void {
+  const { log } = w;
+  for (const r of rows) {
+    if (listedAt === null) {
+      log.epoch += 1;
+      log.streamAt.set(r.id, log.epoch);
+    }
+    log.floor.set(r.id, Math.max(log.floor.get(r.id) ?? 0, r.seenSeq ?? 0));
+    const seq = r.statusSeq ?? 0;
+    if (listedAt !== null && (log.streamAt.get(r.id) ?? 0) > listedAt) {
+      continue;
+    }
+    if (seq >= (log.occ.get(r.id)?.seq ?? 0)) {
+      log.occ.set(r.id, { status: r.status, seq });
+    }
+    if (r.status === "ended" && (r.endReason ?? "") !== "") {
+      log.failed.add(r.id);
+    }
+  }
 }
 
 function deliver(w: World, n: number): void {
@@ -278,6 +371,7 @@ function deliver(w: World, n: number): void {
     if ("removed" in ev) {
       w.page.gone(ev.removed);
     } else {
+      learn(w, [ev.rec], null);
       w.page.stream(ev.rec);
     }
   }
@@ -293,6 +387,7 @@ function resyncRun(w: World): void {
     return;
   }
   const rows = w.server.list();
+  learn(w, rows, w.log.epoch);
   w.page.apply((m) => resyncBegan(m, ids, false, 0));
   w.page.apply((m) =>
     resyncSettled(m, { sessions: rows, record: null, route: null, toastStale: false, now: 0 }),
@@ -305,9 +400,13 @@ function exec(w: World, cmd: Cmd): string | null {
   const { page, server } = w;
   w.since.retry ||= RETRIES.has(cmd.k);
   switch (cmd.k) {
-    case "create":
-      server.create("Z");
+    case "create": {
+      const id = server.create("Z");
+      if (cmd.cue !== "") {
+        server.status(id, cmd.cue);
+      }
       return null;
+    }
     case "status":
     case "fail":
     case "read":
@@ -331,6 +430,7 @@ function exec(w: World, cmd: Cmd): string | null {
       const failed = present(w).filter((id) => server.rows.get(id)?.status === "ended");
       const id = failed[cmd.who % Math.max(1, failed.length)];
       if (id !== undefined) {
+        w.log.failed.add(id);
         page.apply((m) => paneStartFailed(m, id, "spawn failed"));
       }
       return null;
@@ -339,11 +439,12 @@ function exec(w: World, cmd: Cmd): string | null {
       deliver(w, cmd.n);
       return null;
     case "pollReq":
-      w.polls.push({ token: page.request(), rows: server.list() });
+      w.polls.push({ token: page.request(), epoch: w.log.epoch, rows: server.list() });
       return null;
     case "pollAns": {
       const poll = w.polls.shift();
       if (poll !== undefined) {
+        learn(w, poll.rows, poll.epoch);
         page.answer(poll.token, poll.rows);
       }
       return null;
@@ -354,18 +455,24 @@ function exec(w: World, cmd: Cmd): string | null {
       }
       server.queue = [];
       const token = page.open();
+      const epoch = w.log.epoch;
       const rows = shuffled(server.list(), cmd.seed);
       for (const r of rows.slice(0, cmd.early)) {
+        learn(w, [r], null);
         page.stream(r);
       }
-      w.opens.push({ token, rows: server.list(), pending: rows.slice(cmd.early) });
+      w.opens.push({ token, epoch, rows: server.list(), pending: rows.slice(cmd.early) });
       return null;
     }
     case "openAns": {
       const o = w.opens.shift();
       if (o !== undefined) {
         for (const r of o.pending) {
+          learn(w, [r], null);
           page.stream(r);
+        }
+        if (!cmd.fail) {
+          learn(w, o.rows, o.epoch);
         }
         page.opened(o.token, cmd.fail ? null : o.rows);
       }
@@ -382,8 +489,14 @@ function exec(w: World, cmd: Cmd): string | null {
         const key = `${first.a.id}:${String(first.a.seq)}`;
         if (cmd.answer === "fail") {
           w.failedAcks.add(key);
+          if (w.log.acked.get(first.a.id) === first.a.seq) {
+            w.log.acked.set(first.a.id, 0);
+          }
         } else {
           w.failedAcks.delete(key);
+        }
+        if (cmd.answer === "ok") {
+          w.log.floor.set(first.a.id, Math.max(w.log.floor.get(first.a.id) ?? 0, first.a.seq));
         }
         page.apply((m) =>
           cmd.answer === "ok"
@@ -394,7 +507,8 @@ function exec(w: World, cmd: Cmd): string | null {
       return null;
     }
     case "visible":
-      page.apply((m) => pageVisibility(m, !m.page.visible));
+      w.log.visible = !w.log.visible;
+      page.apply((m) => pageVisibility(m, w.log.visible));
       return null;
     case "resyncRun":
       resyncRun(w);
@@ -421,16 +535,16 @@ function exec(w: World, cmd: Cmd): string | null {
       for (const id of victims) {
         server.remove(id);
       }
-      page.apply((m) => removed(m, victims, { by: "user", keyboardHeld: cmd.held }, 0));
       w.since.held ||= cmd.held;
+      page.apply((m) => removed(m, victims, { by: "user", keyboardHeld: cmd.held }, 0));
       return null;
     }
     case "route": {
       const ids = present(w);
       const id = ids[cmd.who % Math.max(1, ids.length)];
       if (cmd.shape === "stale" || id === undefined) {
-        page.apply((m) => route(m, { kind: "single", tab: "Q9" as TabAlias }, true));
         w.since.stale += 1;
+        page.apply((m) => route(m, { kind: "single", tab: "Q9" as TabAlias }, true));
         return null;
       }
       if (cmd.shape === "single") {
@@ -455,6 +569,7 @@ function exec(w: World, cmd: Cmd): string | null {
       }
       w.own = null;
       const r = server.rows.get(o.id) ?? rec(o.id);
+      learn(w, [r], w.log.epoch);
       page.apply((m) => ownCreated(m, r, o.opening, false));
       return page.m.holds.resync === 0 ? o.id : null;
     }
@@ -466,7 +581,8 @@ function exec(w: World, cmd: Cmd): string | null {
       return null;
     }
     case "tray":
-      page.apply((m) => switcherToggled(m, !m.page.switcherOpen));
+      w.log.tray = !w.log.tray;
+      page.apply((m) => switcherToggled(m, w.log.tray));
       return null;
     case "narrow": {
       const l = page.lay;
@@ -482,6 +598,100 @@ function exec(w: World, cmd: Cmd): string | null {
         page.apply((m) => shellChanged(m, { kind: "splitOpened", selected: l.split.selected }));
       }
       return null;
+    }
+  }
+}
+
+/** The worse of two cues, written out per pair from the severity the tab icon documents. */
+const WORSE: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  "": { "": "", crashed: "crashed", failed: "failed", input: "input", done: "done" },
+  crashed: {
+    "": "crashed",
+    crashed: "crashed",
+    failed: "crashed",
+    input: "crashed",
+    done: "crashed",
+  },
+  failed: { "": "failed", crashed: "crashed", failed: "failed", input: "failed", done: "failed" },
+  input: { "": "input", crashed: "crashed", failed: "failed", input: "input", done: "input" },
+  done: { "": "done", crashed: "crashed", failed: "failed", input: "input", done: "done" },
+};
+
+const CUES: ReadonlySet<string> = new Set(["crashed", "failed", "input", "done"]);
+const PLACING: ReadonlySet<Log["step"]> = new Set([
+  "show",
+  "route",
+  "ownAns",
+  "split",
+  "narrow",
+  "hostOpen",
+]);
+
+/** No cue is lost and the switch dot is the worst unread cue off screen: the
+ *  count covers every unread occurrence the log shows unacknowledged, the dot
+ *  those the screen does not show, and an ack names only a session the log
+ *  showed on screen since that occurrence was delivered. */
+function checkCues(w: World, fx: Effects, acksSeen: boolean): void {
+  const { log } = w;
+  const l = w.page.lay;
+  for (const a of fx.acks) {
+    log.acked.set(a.id, a.seq);
+  }
+  const onScreen = (id: string): boolean =>
+    log.visible && (log.tray || id === l.panes.left || id === l.panes.right);
+  const unread = l.strip.filter((id) => {
+    const o = log.occ.get(id);
+    return (
+      o !== undefined &&
+      CUES.has(o.status) &&
+      o.seq > Math.max(log.floor.get(id) ?? 0, log.acked.get(id) ?? 0)
+    );
+  });
+  let dot = "";
+  for (const id of unread.filter((x) => !onScreen(x))) {
+    dot = WORSE[dot]?.[log.occ.get(id)?.status ?? ""] ?? "?";
+  }
+  expect(l.indicators.attention.count, "unread cues").toBe(unread.length);
+  expect(l.indicators.switchDot, "switch dot").toBe(dot);
+  for (const id of l.strip.filter(onScreen)) {
+    log.viewed.set(id, log.occ.get(id)?.seq ?? 0);
+  }
+  if (acksSeen) {
+    for (const a of fx.acks) {
+      expect(log.viewed.get(a.id) ?? 0, `ack ${a.id}:${String(a.seq)}`).toBeGreaterThanOrEqual(
+        a.seq,
+      );
+    }
+  }
+}
+
+/** A failed start keeps its pane: a side's base, given by the last user,
+ *  kernel, settle or removal step that changed it, shows the base once it has
+ *  failed. A removal collapsing the split carries the survivor's side's base. */
+function checkEnded(w: World): void {
+  const { log } = w;
+  const l = w.page.lay;
+  const was = log.screen;
+  const gone = was.strip.some((id) => !l.strip.includes(id));
+  if (log.step === "resyncRun") {
+    log.base = { ...l.panes };
+  } else if (gone && was.open && !l.split.open) {
+    const left = l.panes.left;
+    log.base = {
+      left: left === was.left ? log.base.left : left === was.right ? log.base.right : left,
+      right: null,
+    };
+  } else if (gone || PLACING.has(log.step)) {
+    for (const side of ["left", "right"] as const) {
+      if (l.panes[side] !== was[side]) {
+        log.base[side] = l.panes[side];
+      }
+    }
+  }
+  for (const side of l.split.open ? (["left", "right"] as const) : (["left"] as const)) {
+    const id = log.base[side];
+    if (id !== null && l.strip.includes(id) && log.failed.has(id)) {
+      expect(l.panes[side], `${side} keeps the failed start ${id}`).toBe(id);
     }
   }
 }
@@ -545,20 +755,28 @@ function snapOf(page: Page): unknown {
 }
 
 function drain(w: World, after: () => void): void {
+  w.log.step = "openAns";
   while (w.opens.length > 0) {
     exec(w, { k: "openAns", fail: false });
   }
+  w.log.step = "pollAns";
   while (w.polls.length > 0) {
     exec(w, { k: "pollAns" });
   }
   if (w.own !== null) {
+    w.log.step = "ownAns";
     exec(w, { k: "ownAns" });
     after();
   }
+  w.log.step = "deliver";
   deliver(w, Number.MAX_SAFE_INTEGER);
   after();
-  w.page.list(w.server.list());
+  w.log.step = "list";
+  const rows = w.server.list();
+  learn(w, rows, w.log.epoch);
+  w.page.list(rows);
   after();
+  w.log.step = "resyncRun";
   for (let i = 0; i < 4 && w.page.resyncs.length > 0; i++) {
     resyncRun(w);
     after();
@@ -587,15 +805,28 @@ function run(
       if (opts.unchecked !== true) {
         checkCommit(w.page);
         checkEdges(w, fx);
+        checkCues(w, fx, every);
+        if (every) {
+          checkEnded(w);
+        }
+        const l = w.page.lay;
+        w.log.screen = { ...l.panes, open: l.split.open, strip: l.strip };
       }
       w.since = { stale: 0, held: false, retry: false };
     }
   };
+  if (every) {
+    w.page.afterApply = (): void => {
+      w.since.retry ||= RETRIES.has(w.log.step);
+      commit();
+    };
+  }
   const seen: unknown[] = [observe(w)];
   for (const { cmd, commit: asked } of steps) {
     if (COMMIT_BEFORE.has(cmd.k)) {
       commit();
     }
+    w.log.step = cmd.k;
     const mustShow = exec(w, cmd);
     const user = USER.has(cmd.k);
     if (user || asked || every) {
@@ -631,7 +862,7 @@ describe("placement over generated input orders", () => {
 
   it("raises each edge effect once while start failures re-fold a covering arrival", SLOW, () => {
     const covering: Step[] = [
-      { cmd: { k: "create" }, commit: false },
+      { cmd: { k: "create", cue: "" }, commit: false },
       { cmd: { k: "deliver", n: 1 }, commit: true },
     ];
     fc.assert(
@@ -639,6 +870,22 @@ describe("placement over generated input orders", () => {
         const { w } = run([...covering, ...steps], false);
         expect(w.page.log.length).toBeGreaterThan(covering.length);
       }),
+    );
+  });
+
+  it("acknowledges only cues the screen showed while bursts of arrivals land", SLOW, () => {
+    fc.assert(
+      fc.property(
+        fc.array(cueArb, { minLength: 3, maxLength: 3 }),
+        stepsArb(16, BURST_KINDS),
+        (cues, steps) => {
+          const creates = cues.map((cue) => ({
+            cmd: { k: "create" as const, cue },
+            commit: false,
+          }));
+          run([...creates, ...steps], true);
+        },
+      ),
     );
   });
 
@@ -687,21 +934,6 @@ describe("placement over generated input orders", () => {
     );
   });
 });
-
-/** The worse of two cues, written out per pair from the severity the tab icon documents. */
-const WORSE: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-  "": { "": "", crashed: "crashed", failed: "failed", input: "input", done: "done" },
-  crashed: {
-    "": "crashed",
-    crashed: "crashed",
-    failed: "crashed",
-    input: "crashed",
-    done: "crashed",
-  },
-  failed: { "": "failed", crashed: "crashed", failed: "failed", input: "failed", done: "failed" },
-  input: { "": "input", crashed: "crashed", failed: "failed", input: "input", done: "input" },
-  done: { "": "done", crashed: "crashed", failed: "failed", input: "input", done: "done" },
-};
 
 describe("cues over generated delivery orders", () => {
   const HIDDEN = ["W", "V", "U"] as const;

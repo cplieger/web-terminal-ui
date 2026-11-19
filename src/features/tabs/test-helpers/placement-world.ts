@@ -95,6 +95,8 @@ export class Page {
   /** How many resyncs the commits requested in all. */
   requested = 0;
   readonly log: Effects[] = [];
+  /** Runs after every reducer `apply` folds in, as a commit after each input would. */
+  afterApply: (() => void) | null = null;
 
   constructor(opts: { readonly presumeReports?: boolean } = {}) {
     this.m = createModel(opts);
@@ -102,6 +104,7 @@ export class Page {
 
   apply(f: (m: TabsModel) => TabsModel): this {
     this.m = f(this.m);
+    this.afterApply?.();
     return this;
   }
 

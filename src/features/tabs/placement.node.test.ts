@@ -570,6 +570,44 @@ describe("the switch dot and the reads", () => {
       { id: "X", seq: 1 },
     ]);
   });
+
+  it("raises the switch dot for an arrival with an unread cue that is only a chip", () => {
+    const p = bootPage(["X", "Y"], singleRecord("X"));
+    p.stream(rec("Z", { status: "done", statusSeq: 1 })).commit();
+    expect(p.panes).toEqual(["X", null]);
+    expect(p.lay.indicators.switchDot).toBe("done");
+    expect(p.lay.indicators.attention.count).toBe(1);
+  });
+
+  it.each([
+    ["a poll lists", false],
+    ["a stream reopen releases", true],
+  ])(
+    "keeps the cue of an arrival a later arrival covers when %s them together",
+    (_name, reopen) => {
+      const p = splitXY();
+      const rows = [
+        rec("X"),
+        rec("Y"),
+        rec("Z1", { status: "done", statusSeq: 1 }),
+        rec("Z2"),
+        rec("Z3"),
+      ];
+      if (reopen) {
+        const open = p.open();
+        for (const r of rows) {
+          p.stream(r);
+        }
+        p.opened(open, rows).commit();
+      } else {
+        p.list(rows).commit();
+      }
+      expect(p.panes).not.toContain("Z1");
+      expect(p.acks).toEqual([]);
+      expect(p.lay.indicators.switchDot).toBe("done");
+      expect(p.lay.indicators.attention.count).toBe(1);
+    },
+  );
 });
 
 describe("closes", () => {
