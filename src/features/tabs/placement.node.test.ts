@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { CLOSE_TOMBSTONE_MS } from "./model.js";
 import {
+  EMPTY_LAYOUT,
   ackFailed,
   ackSettled,
   createBegan,
+  createFailed,
   createModel,
+  dragChanged,
   layoutRecord,
   layoutStale,
   mergeRecord,
@@ -13,6 +16,7 @@ import {
   paneFailed,
   paneStartFailed,
   removed,
+  reorder,
   resyncBegan,
   ownReleased,
   resyncSettled,
@@ -23,13 +27,16 @@ import {
   snap,
   splitFit,
   splitIntent,
+  splitPartner,
   splitRatio,
   switcherToggled,
   pageVisibility,
   windowFocused,
   type SplitOpening,
+  type TabsModel,
 } from "./placement.js";
-import type { TabAlias } from "./route.js";
+import type { StatusRecord } from "./model.js";
+import type { TabAlias, TabRoute } from "./route.js";
 import {
   bootPage,
   endedRec,
@@ -51,7 +58,7 @@ function own(p: Page, id: string, opening: SplitOpening | null = null): Page {
 }
 
 describe("close tombstones keep a closed tab from coming back", () => {
-  const closedAt = 1000;
+  const closedAt = 20_000;
   const listed = { listedAt: 0 };
   const closedA = () =>
     removed(
@@ -85,6 +92,17 @@ describe("close tombstones keep a closed tab from coming back", () => {
 });
 
 describe("an arrival beside a failed start", () => {
+  it("keeps both panes when a covered session the user showed on the other pane fails to start", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    expect(p.panes).toEqual(["X", "Z"]);
+    p.apply((m) => select(m, "left"))
+      .apply((m) => show(m, "Y"))
+      .commit();
+    expect(p.panes).toEqual(["Y", "Z"]);
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["Y", "Z"]);
+  });
   it.each([
     ["the arrival listed before the live tab's row", ["Z", "X", "Y"]],
     ["the arrival listed between the live row and the ended one", ["X", "Z", "Y"]],
@@ -711,5 +729,948 @@ describe("kernel pane changes", () => {
       .commit();
     expect(p.lay.split.open).toBe(false);
     expect(fx.toasts).toContain("narrow");
+  });
+});
+
+describe("the repair after a settle that placed nothing", () => {
+  function emptyPageBurst(rows: readonly StatusRecord[]): Page {
+    const p = bootPage([], null);
+    const open = p.open();
+    for (const r of rows) {
+      p.stream(r);
+    }
+    p.opened(open, rows).commit();
+    return p;
+  }
+
+  it.each([
+    ["the older session first", ["A", "B"]],
+    ["the newer session first", ["B", "A"]],
+  ])("shows the first tab of the strip whatever order a burst came in, %s", (_name, order) => {
+    const p = emptyPageBurst(order.map((id) => rec(id)));
+    expect(p.panes).toEqual(["A", null]);
+    expect(p.writes.at(-1)?.record.left).toBe("A");
+  });
+
+  it("shows a live session before one the stream reported ended", () => {
+    const p = emptyPageBurst([endedRec("A"), rec("B")]);
+    expect(p.panes).toEqual(["B", null]);
+  });
+
+  it("shows a live session before one whose pane reported a start failure", () => {
+    const p = bootPage([], null);
+    const open = p.open();
+    p.stream(rec("A")).stream(rec("B"));
+    p.apply((m) => paneStartFailed(m, "A", "spawn failed"));
+    p.opened(open, [rec("A"), rec("B")]).commit();
+    expect(p.panes).toEqual(["B", null]);
+  });
+});
+
+describe("session facts", () => {
+  it("keeps a newer status over an older stream record", () => {
+    const p = splitXY();
+    p.stream(rec("X", { status: "done", statusSeq: 2 }));
+    p.stream(rec("X", { status: "working", statusSeq: 1 }));
+    expect(p.m.sessions.get("X")?.status).toBe("done");
+  });
+
+  it("keeps a tab's alias when a record leaves it out", () => {
+    const p = splitXY();
+    const { alias: _alias, ...noAlias } = rec("X", { status: "working", statusSeq: 1 });
+    p.stream(noAlias);
+    expect(p.m.sessions.get("X")?.alias).toBe("X");
+  });
+
+  it("adds every session of a list on a page that knew none", () => {
+    const p = bootPage([], null);
+    p.list([rec("A")]).commit();
+    expect(p.m.sessions.has("A")).toBe(true);
+    expect(p.requested).toBe(0);
+  });
+
+  it("keeps a session a resync dropped from coming back on a stale record", () => {
+    const p = splitXY();
+    p.apply((m) => resyncBegan(m, ["Y"], false, 0));
+    p.stream(rec("Y", { status: "working", statusSeq: 1 }));
+    expect(p.m.sessions.has("Y")).toBe(false);
+  });
+
+  it("places arrivals after a create that failed", () => {
+    const p = splitXY();
+    p.apply(createBegan).apply(createFailed);
+    p.stream(rec("Z")).commit();
+    expect(p.panes).toContain("Z");
+  });
+
+  it("places a poll's arrivals the same whatever order the list carried them in", () => {
+    const run = (ids: readonly string[]): unknown => {
+      const p = splitXY();
+      p.list([rec("X"), rec("Y"), ...ids.map((id) => rec(id))]).commit();
+      return { panes: p.panes, split: p.lay.split };
+    };
+    expect(run(["Z2", "Z1"])).toEqual(run(["Z1", "Z2"]));
+  });
+
+  it("gives a removed tab's pane to its strip neighbour in the order the user arranged", () => {
+    const p = bootPage(["A", "B", "C"], singleRecord("B"));
+    p.apply((m) => reorder(m, ["C", "B", "A"])).commit();
+    p.apply((m) => removed(m, ["B"], { by: "user" }, 0)).commit();
+    expect(p.panes).toEqual(["A", null]);
+  });
+});
+
+describe("arrivals and start failures", () => {
+  it("never covers a session that first appeared ended", () => {
+    const p = splitXY();
+    p.stream(endedRec("X")).commit();
+    p.stream(endedRec("Z")).commit();
+    expect(p.panes).toEqual(["X", "Z"]);
+    p.stream(rec("W")).commit();
+    expect(p.panes).toEqual(["X", "Z"]);
+  });
+
+  it("places an arrival removed in the frame it arrived as two frames would", () => {
+    const run = (between: boolean): unknown => {
+      const p = splitXY();
+      p.stream(rec("Z"));
+      if (between) {
+        p.commit();
+      }
+      p.gone("Z").commit();
+      return { panes: p.panes, split: p.lay.split };
+    };
+    expect(run(false)).toEqual(run(true));
+    expect(run(true)).toEqual({ panes: ["X", null], split: { open: false, selected: "left" } });
+  });
+
+  it("keeps the user's new terminal over a failed start when the stream named it before the POST answered", () => {
+    const p = splitXY();
+    p.apply(createBegan);
+    p.stream(rec("N"));
+    own(p, "N").commit();
+    expect(p.panes).toEqual(["X", "N"]);
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["X", "N"]);
+  });
+
+  it("keeps the selection the user moved off a pane a start failure gives back", () => {
+    const p = splitXY();
+    p.stream(endedRec("X")).commit();
+    p.apply((m) => select(m, "right")).commit();
+    p.stream(rec("Z")).commit();
+    expect(p.panes).toEqual(["X", "Z"]);
+    p.apply((m) => select(m, "left")).commit();
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+    expect(p.lay.split.selected).toBe("left");
+  });
+
+  it("announces the tab a late start failure leaves selected when the arrival goes to its chip", () => {
+    const p = splitXY();
+    p.stream(endedRec("X")).commit();
+    p.stream(rec("Z")).commit();
+    const fx = p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+    expect(fx.focus?.form).toBe("announce");
+  });
+
+  it("moves the arrival without an announcement and writes the record when a late start failure keeps it selected", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    const fx = p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["Z", "Y"]);
+    expect(fx.focus).toBeNull();
+    expect(p.writes.at(-1)?.record).toEqual(layoutRecord(p.lay, 0.5));
+  });
+
+  it("gives the same panes when both covered sessions fail after the arrivals as before them", () => {
+    const first = splitXY();
+    first.stream(endedRec("X")).stream(endedRec("Y")).commit();
+    first.stream(rec("Z1")).commit();
+    first.stream(rec("Z2")).commit();
+    const late = splitXY();
+    late.stream(rec("Z1")).commit();
+    late.stream(rec("Z2")).commit();
+    late.stream(endedRec("Y")).commit();
+    late.stream(endedRec("X")).commit();
+    expect(late.panes).toEqual(first.panes);
+  });
+
+  it("leaves a pane the user's address emptied empty when the session an arrival covered there fails", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.apply((m) => route(m, { kind: "split", left: alias("X"), right: null }, false)).commit();
+    expect(p.panes).toEqual(["X", null]);
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["X", null]);
+  });
+
+  it("keeps a tab the user clicked onto an arrival's pane when the session the arrival covered fails", () => {
+    const p = splitXY("W");
+    p.stream(rec("Z")).commit();
+    p.apply((m) => show(m, "W")).commit();
+    expect(p.panes).toEqual(["X", "W"]);
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["X", "W"]);
+  });
+
+  it("leaves a pane the kernel dropped empty when the session an arrival covered there fails", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "right", id: "Z" })).commit();
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["X", null]);
+  });
+
+  it("keeps an arrival when the kernel drops the pane's previous session in the same frame", () => {
+    const p = splitXY();
+    p.stream(rec("Z"));
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "right", id: "Y" })).commit();
+    expect(p.panes).toEqual(["X", "Z"]);
+  });
+});
+
+describe("reading cues", () => {
+  it("keeps a newer ack when the server confirms an older one", () => {
+    const p = splitXY();
+    p.stream(rec("X", { status: "done", statusSeq: 1 })).commit();
+    p.stream(rec("X", { status: "input", statusSeq: 2 })).commit();
+    p.apply((m) => ackSettled(m, "X", 1)).commit();
+    expect(p.acks).toEqual([
+      { id: "X", seq: 1 },
+      { id: "X", seq: 2 },
+    ]);
+  });
+
+  it("keeps a newer ack when an older one fails", () => {
+    const p = splitXY();
+    p.stream(rec("X", { status: "done", statusSeq: 1 })).commit();
+    p.stream(rec("X", { status: "input", statusSeq: 2 })).commit();
+    p.apply((m) => ackFailed(m, "X", 1, false)).commit();
+    expect(p.acks).toEqual([
+      { id: "X", seq: 1 },
+      { id: "X", seq: 2 },
+    ]);
+  });
+
+  it("sends a failed occurrence's ack once when an older ack then succeeds", () => {
+    const p = splitXY();
+    p.stream(rec("X", { status: "done", statusSeq: 1 })).commit();
+    p.stream(rec("X", { status: "input", statusSeq: 2 })).commit();
+    p.apply((m) => ackFailed(m, "X", 2, false)).commit();
+    p.apply((m) => ackSettled(m, "X", 1)).commit();
+    expect(p.acks).toEqual([
+      { id: "X", seq: 1 },
+      { id: "X", seq: 2 },
+    ]);
+  });
+
+  it.each([
+    ["a click on its chip", (m: TabsModel) => show(m, "X")],
+    ["closing the other tab", (m: TabsModel) => removed(m, ["Y"], { by: "user" }, 0)],
+    ["closing the split", (m: TabsModel) => splitIntent(m, false)],
+    [
+      "an address naming it",
+      (m: TabsModel) => route(m, { kind: "single", tab: alias("X") }, false),
+    ],
+    ["a new terminal", (m: TabsModel) => ownCreated(m, rec("N"), null, false)],
+    ["a snap", (m: TabsModel) => snap(m, "X", "right", false)],
+  ])("re-sends a shown tab's failed seen PUT after %s", (_name, intent) => {
+    const p = splitXY();
+    p.stream(rec("X", { status: "done", statusSeq: 1 })).commit();
+    p.apply((m) => ackFailed(m, "X", 1, false)).commit();
+    p.apply(intent).commit();
+    expect(p.acks).toEqual([
+      { id: "X", seq: 1 },
+      { id: "X", seq: 1 },
+    ]);
+  });
+
+  it("re-sends a hidden tab's failed seen PUT when the tab list opens again", () => {
+    const p = splitXY("W");
+    p.stream(rec("W", { status: "done", statusSeq: 1 })).commit();
+    p.apply((m) => switcherToggled(m, true)).commit();
+    p.apply((m) => ackFailed(m, "W", 1, false)).commit();
+    p.apply((m) => switcherToggled(m, false)).commit();
+    p.apply((m) => switcherToggled(m, true)).commit();
+    expect(p.acks).toEqual([
+      { id: "W", seq: 1 },
+      { id: "W", seq: 1 },
+    ]);
+  });
+});
+
+describe("the layout record", () => {
+  it.each([
+    ["a click on a hidden tab", (m: TabsModel) => show(m, "W")],
+    ["a click on the other pane's tab", (m: TabsModel) => show(m, "Y")],
+    ["a new terminal", (m: TabsModel) => ownCreated(m, rec("N"), null, false)],
+    ["a snap", (m: TabsModel) => snap(m, "W", "right", false)],
+    ["closing the split", (m: TabsModel) => splitIntent(m, false)],
+    ["an address", (m: TabsModel) => route(m, { kind: "single", tab: alias("Y") }, false)],
+    ["a close", (m: TabsModel) => removed(m, ["Y"], { by: "user" }, 0)],
+  ])("writes the record once after %s", (_name, intent) => {
+    const p = splitXY("W");
+    const before = p.writes.length;
+    p.apply(intent).commit();
+    expect(p.writes.length).toBe(before + 1);
+    expect(p.writes.at(-1)?.record).toEqual(layoutRecord(p.lay, 0.5));
+  });
+
+  it("writes nothing for a share the kernel changed", () => {
+    const p = splitXY();
+    const before = p.writes.length;
+    p.apply((m) => splitRatio(m, 0.4, false)).commit();
+    expect(p.writes.length).toBe(before);
+  });
+
+  it("keeps a 409's owed rewrite through a divider drag", () => {
+    const p = splitXY();
+    p.apply(layoutStale)
+      .apply((m) => splitRatio(m, 0.3, true))
+      .commit();
+    expect(p.writes.at(-1)).toMatchObject({ owed: "rewrite", record: { handle: 0.3 } });
+  });
+
+  it("writes a pane change made during a resync once the resync settles", () => {
+    const p = splitXY();
+    p.list([rec("R1")]).commit();
+    p.apply((m) => select(m, "right")).commit();
+    const before = p.writes.length;
+    p.resync([rec("R1")], null).commit();
+    expect(p.writes.length).toBe(before + 1);
+    expect(p.writes.at(-1)?.record.left).toBe("R1");
+  });
+
+  it("writes nothing and settles nothing new when the last tab closes", () => {
+    const p = bootPage(["X"], singleRecord("X"));
+    const before = p.writes.length;
+    p.apply((m) => removed(m, ["X"], { by: "user" }, 0)).commit();
+    expect(p.writes.length).toBe(before);
+    expect(p.resyncs.at(-1)).toEqual([]);
+  });
+
+  it.each([
+    [
+      "a split the record lacks",
+      splitRecord("X", "Y"),
+      { left: "X", right: "W" },
+      { left: "X", right: "W", open: true },
+    ],
+    [
+      "a single view of a split's tab",
+      splitRecord("X", null),
+      { tab: "X" },
+      { left: "X", right: null, open: false },
+    ],
+  ])("writes the address's layout at boot when it names %s", (_name, record, names, want) => {
+    const r: TabRoute =
+      "tab" in names
+        ? { kind: "single", tab: alias(names.tab) }
+        : { kind: "split", left: alias(names.left), right: alias(names.right) };
+    const p = bootPage(["X", "Y", "W"], record, { route: r });
+    expect(p.writes.at(-1)?.record).toMatchObject(want);
+  });
+
+  it("writes nothing at boot for an address when there is no record", () => {
+    const p = bootPage(["X", "Y"], null, { route: { kind: "single", tab: alias("Y") } });
+    expect(p.panes).toEqual(["Y", null]);
+    expect(p.writes).toEqual([]);
+  });
+});
+
+describe("settling onto the address and the record", () => {
+  const split = (left: string | null, right: string | null): TabRoute => ({
+    kind: "split",
+    left: left === null ? null : alias(left),
+    right: right === null ? null : alias(right),
+  });
+
+  it.each([
+    [
+      "W|Y over a record X|Y with the right selected",
+      split("W", "Y"),
+      splitRecord("X", "Y", "right"),
+      "left",
+    ],
+    [
+      "X|W over a record X|Y with the right selected",
+      split("X", "W"),
+      splitRecord("X", "Y", "right"),
+      "left",
+    ],
+    [
+      "X alone over a record X|- with the right selected",
+      split("X", null),
+      splitRecord("X", null, "right"),
+      "left",
+    ],
+    ["-|Y with no record", split(null, "Y"), null, "right"],
+    [
+      "X|Y over a record X|Y with the right selected",
+      split("X", "Y"),
+      splitRecord("X", "Y", "right"),
+      "right",
+    ],
+  ])("selects a shown pane for the address %s", (_name, r, record, selected) => {
+    const p = bootPage(["X", "Y", "W"], record, { route: r });
+    expect(p.lay.split.selected).toBe(selected);
+  });
+
+  it.each([
+    ["its selected right side", ["X"], splitRecord("X", "Y", "right"), ["X", null], "left"],
+    ["its selected left side", ["Y"], splitRecord("X", "Y", "left"), [null, "Y"], "right"],
+  ])(
+    "selects the shown pane when the record's %s is gone",
+    (_name, rows, record, panes, selected) => {
+      const p = bootPage(rows, record);
+      expect(p.panes).toEqual(panes);
+      expect(p.lay.split.selected).toBe(selected);
+    },
+  );
+});
+
+describe("addresses", () => {
+  it.each([
+    ["a split with one side named", { left: "X", right: null }, false],
+    ["a split naming a closed tab on the right", { left: "X", right: "Q" }, true],
+    ["a split naming a closed tab on the left", { left: "Q", right: "X" }, true],
+  ])("tells the user about a stale address only for %s", (_name, names, stale) => {
+    const p = splitXY();
+    const fx = p
+      .apply((m) =>
+        route(
+          m,
+          {
+            kind: "split",
+            left: names.left === null ? null : alias(names.left),
+            right: names.right === null ? null : alias(names.right),
+          },
+          true,
+        ),
+      )
+      .commit();
+    expect(fx.toasts.includes("stale")).toBe(stale);
+  });
+
+  it.each([
+    ["a single view", { kind: "single", tab: alias("Y") } as TabRoute],
+    ["the split swapped", { kind: "split", left: alias("Y"), right: alias("X") } as TabRoute],
+  ])("moves no focus for an address to %s while a tab is shown", (_name, r) => {
+    const fx = splitXY()
+      .apply((m) => route(m, r, false))
+      .commit();
+    expect(fx.focus).toBeNull();
+  });
+
+  it("puts no session on a pane that failed", () => {
+    const p = splitXY("W");
+    p.apply((m) => paneFailed(m, "right")).commit();
+    p.apply((m) =>
+      route(m, { kind: "split", left: alias("X"), right: alias("W") }, false),
+    ).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+  });
+});
+
+describe("the split", () => {
+  it("keeps the other pane's tab when the split closes on an empty selected pane", () => {
+    const p = splitXY();
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "left", id: "X" })).commit();
+    p.apply((m) => splitIntent(m, false)).commit();
+    expect(p.panes).toEqual(["Y", null]);
+  });
+
+  it("marks no pane failed while the split is closed", () => {
+    const p = bootPage(["X", "Y"], singleRecord("X"));
+    p.apply((m) => paneFailed(m, "right")).commit();
+    expect(p.lay.failed.right).toBeUndefined();
+    p.apply((m) => splitIntent(m, true)).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+  });
+
+  it("refuses the split button the window cannot fit", () => {
+    const p = bootPage(["X", "Y"], singleRecord("X"), { canOpen: false });
+    p.apply((m) => splitIntent(m, true)).commit();
+    expect(p.lay.split.open).toBe(false);
+  });
+
+  it.each([
+    ["onto its own pane", "left", "focus"],
+    ["onto the other pane", "right", "announce"],
+  ])("focuses or announces a snap of the shown tab %s", (_name, side, form) => {
+    const p = bootPage(["X", "Y"], singleRecord("X"));
+    const fx = p.apply((m) => snap(m, "X", side as "left" | "right", false)).commit();
+    expect(fx.focus?.form).toBe(form);
+  });
+
+  it("pairs a split with the tab shown before", () => {
+    const p = bootPage(["A", "B", "C"], singleRecord("A"));
+    p.apply((m) => show(m, "B")).commit();
+    expect(splitPartner(p.m, p.lay, "B")).toBe("A");
+  });
+
+  it("keeps the selection on the left of a closed split", () => {
+    const p = bootPage([], null);
+    p.apply((m) => select(m, "right")).commit();
+    expect(p.lay.split.selected).toBe("left");
+  });
+
+  it("keeps the selection off an empty pane while another shows a tab", () => {
+    const p = splitXY();
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "right", id: "Y" })).commit();
+    p.apply((m) => select(m, "right")).commit();
+    expect(p.lay.split.selected).toBe("left");
+  });
+
+  it("closes the split onto the kept tab, unwritten, when a resync drops the other", () => {
+    const p = splitXY();
+    const before = p.writes.length;
+    const fx = p.apply((m) => resyncBegan(m, ["X"], true, 0)).commit();
+    expect(p.panes).toEqual(["Y", null]);
+    expect(p.lay.split.open).toBe(false);
+    expect(fx.focus?.typing).toBe(true);
+    expect(p.writes.length).toBe(before);
+  });
+});
+
+describe("the strip during a drag", () => {
+  it("keeps the dragged order and appends a new tab until the drag ends", () => {
+    const p = bootPage(["A", "B"], singleRecord("A"));
+    p.apply((m) => dragChanged(m, true)).commit();
+    p.apply((m) => reorder(m, ["B", "A"])).commit();
+    expect(p.lay.strip).toEqual(["A", "B"]);
+    p.stream(rec("Z", { order: -1 })).commit();
+    expect(p.lay.strip).toEqual(["A", "B", "Z"]);
+    p.gone("B").commit();
+    expect(p.lay.strip).toEqual(["A", "Z"]);
+  });
+});
+
+describe("more placement rules", () => {
+  it("requests one resync when a second restart list lands during it", () => {
+    const p = splitXY();
+    p.list([rec("R1")]).commit();
+    p.list([rec("R2")]).commit();
+    expect(p.requested).toBe(1);
+  });
+
+  it("keeps a 409's owed rewrite through a pane change made during a resync", () => {
+    const p = splitXY();
+    p.list([rec("R1")]).commit();
+    p.apply(layoutStale)
+      .apply((m) => select(m, "right"))
+      .commit();
+    p.resync([rec("R1")], null).commit();
+    expect(p.writes.at(-1)?.owed).toBe("rewrite");
+  });
+
+  it("pairs a split with the next tab in the order the user arranged when none was shown before", () => {
+    const p = bootPage(["A", "B", "C"], singleRecord("A"));
+    p.apply((m) => reorder(m, ["A", "C", "B"])).commit();
+    expect(splitPartner(p.m, p.lay, "A")).toBe("C");
+  });
+
+  it("puts a clicked tab on no selected pane that failed", () => {
+    const p = splitXY("W");
+    p.apply((m) => select(m, "right"))
+      .apply((m) => paneFailed(m, "right"))
+      .commit();
+    p.apply((m) => show(m, "W")).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+  });
+
+  it("puts a new terminal on the other pane when the selected one failed", () => {
+    const p = splitXY();
+    p.apply((m) => select(m, "right"))
+      .apply((m) => paneFailed(m, "right"))
+      .commit();
+    own(p, "N").commit();
+    expect(p.panes).toEqual(["N", "Y"]);
+  });
+
+  it("ignores a snap of a tab closed elsewhere before the frame paints it away", () => {
+    const p = splitXY("Z");
+    p.gone("Z");
+    p.apply((m) => snap(m, "Z", "right", false)).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+  });
+
+  it("selects the new pane when the split opens beside an empty view", () => {
+    const p = bootPage(["X", "Y"], singleRecord("X"));
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "left", id: "X" })).commit();
+    p.apply((m) => splitIntent(m, true)).commit();
+    expect(p.panes[1]).not.toBeNull();
+    expect(p.lay.split.selected).toBe("right");
+  });
+
+  it.each([
+    ["a single view", { kind: "single", tab: alias("Y") } as TabRoute],
+    ["a split", { kind: "split", left: alias("X"), right: alias("Y") } as TabRoute],
+  ])("announces the tab an address to %s shows on an empty screen", (_name, r) => {
+    const p = bootPage(["X", "Y"], singleRecord("X"));
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "left", id: "X" })).commit();
+    const fx = p.apply((m) => route(m, r, false)).commit();
+    expect(fx.focus?.form).toBe("announce");
+  });
+
+  it("still gives a failed start's pane back after an address that kept the arrival covering it", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.apply((m) =>
+      route(m, { kind: "split", left: alias("X"), right: alias("Z") }, false),
+    ).commit();
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["Z", "Y"]);
+  });
+
+  it("shows the burst's first tab when it ends in the frame after the burst, as in the same frame", () => {
+    const run = (between: boolean): unknown => {
+      const p = bootPage([], null);
+      const open = p.open();
+      p.stream(rec("A")).stream(rec("B"));
+      p.opened(open, [rec("A"), rec("B")]);
+      if (between) {
+        p.commit();
+      }
+      p.stream(rec("A", { status: "exited", statusSeq: 1 })).commit();
+      return p.panes;
+    };
+    expect(run(false)).toEqual(run(true));
+    expect(run(true)).toEqual(["A", null]);
+  });
+});
+
+describe("writes of the user's own placements", () => {
+  it("writes the neighbour a close of the single view shows", () => {
+    const p = bootPage(["X", "Y"], singleRecord("X"));
+    const before = p.writes.length;
+    p.apply((m) => removed(m, ["X"], { by: "user" }, 0)).commit();
+    expect(p.panes).toEqual(["Y", null]);
+    expect(p.writes.length).toBe(before + 1);
+  });
+
+  it("writes the selection a new terminal moves to its pane when the user already showed it", () => {
+    const p = splitXY();
+    p.apply(createBegan).stream(rec("N"));
+    p.apply((m) => show(m, "N")).commit();
+    p.apply((m) => select(m, "right")).commit();
+    own(p, "N").commit();
+    expect(p.writes.at(-1)?.record).toMatchObject({ left: "N", selected: "left" });
+  });
+
+  it("writes the split a snap's new terminal opens", () => {
+    const p = bootPage(["X"], singleRecord("X"));
+    p.apply(createBegan);
+    own(p, "N", { by: "snap", id: "X", side: "right" }).commit();
+    expect(p.panes).toEqual(["N", "X"]);
+    expect(p.writes.at(-1)?.record).toEqual(layoutRecord(p.lay, 0.5));
+  });
+
+  it("writes no record when the kernel empties both panes", () => {
+    const p = splitXY();
+    const before = p.writes.length;
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "left", id: "X" }));
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "right", id: "Y" })).commit();
+    expect(p.writes.length).toBe(before);
+  });
+
+  it("does not announce a failed start a late failure leaves selected", () => {
+    const p = splitXY();
+    p.stream(endedRec("X")).commit();
+    p.apply((m) => select(m, "right")).commit();
+    p.stream(rec("Z")).commit();
+    const fx = p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+    expect(fx.focus).toBeNull();
+  });
+
+  it("skips a burst's session that ended before the burst was placed", () => {
+    const p = bootPage([], null);
+    const open = p.open();
+    const endedA = rec("A", { status: "exited", statusSeq: 1 });
+    p.stream(rec("A")).stream(endedA).stream(rec("B"));
+    p.opened(open, [endedA, rec("B")]).commit();
+    expect(p.panes).toEqual(["B", null]);
+  });
+});
+
+describe("start failures learned after several arrivals", () => {
+  it("shows both failed starts when the second fails after the first was given back", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.apply((m) => select(m, "right")).commit();
+    p.stream(rec("Z2")).commit();
+    expect(p.panes).toEqual(["Z2", "Z"]);
+    p.stream(endedRec("Y")).commit();
+    p.stream(endedRec("X")).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+  });
+
+  it("gives an arrival's pane back when it fails to start after a failed start moved it", () => {
+    const p = splitXY();
+    p.stream(rec("Z1")).commit();
+    p.stream(rec("Z2")).commit();
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["Z2", "Y"]);
+    p.stream(endedRec("Z1")).commit();
+    expect(p.panes).toEqual(["Z1", "Y"]);
+  });
+
+  it("keeps an arrival off a pane that failed while a later arrival covered a failed start", () => {
+    const p = splitXY();
+    p.stream(rec("Z1")).commit();
+    p.apply((m) => paneFailed(m, "left")).commit();
+    p.stream(rec("Z2")).commit();
+    expect(p.panes).toEqual(["X", "Z2"]);
+    p.stream(endedRec("Y")).commit();
+    expect(p.lay.failed.left).toBe(true);
+    expect(p.panes).toEqual(["Z1", "Y"]);
+  });
+});
+
+describe("rules the mutation run found unpinned", () => {
+  it("forgets a tombstone whose window has passed when the next close is recorded", () => {
+    let m = mergeRecord(createModel(), rec("A"), { stream: true }, 0);
+    m = mergeRecord(m, rec("B"), { stream: true }, 0);
+    m = removed(m, ["A"], { by: "user" }, 0);
+    m = removed(m, ["B"], { by: "user" }, CLOSE_TOMBSTONE_MS);
+    expect([...m.tombstones.keys()]).toEqual(["B"]);
+  });
+
+  it.each([
+    ["Z1 first", ["Z1", "Z2"]],
+    ["Z2 first", ["Z2", "Z1"]],
+  ])(
+    "places a reopened stream's arrivals in strip order whatever order the snapshot sent, %s",
+    (_name, order) => {
+      const p = splitXY();
+      const open = p.open();
+      for (const id of order) {
+        p.stream(rec(id));
+      }
+      p.opened(open, [rec("X"), rec("Y"), rec("Z1"), rec("Z2")]).commit();
+      expect(p.panes).toEqual(["Z2", "Z1"]);
+    },
+  );
+
+  it("leaves a placed arrival where the user moved it when the stream reopens", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.apply((m) => show(m, "Y")).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+    const open = p.open();
+    p.opened(open, [rec("X"), rec("Y"), rec("Z")]).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+  });
+
+  it("does not acknowledge a new occurrence of a hidden tab's status the user read before", () => {
+    const p = splitXY("W");
+    p.stream(rec("W", { status: "done", statusSeq: 1 })).commit();
+    p.apply((m) => show(m, "W")).commit();
+    p.apply((m) => show(m, "X")).commit();
+    expect(p.panes).toEqual(["X", "Y"]);
+    p.stream(rec("W", { status: "done", statusSeq: 2 })).commit();
+    expect(p.acks).toEqual([{ id: "W", seq: 1 }]);
+    expect(p.lay.indicators.switchDot).toBe("done");
+  });
+
+  it("repairs onto a live tab whose status changed, before an ended one", () => {
+    const p = bootPage([], null);
+    const open = p.open();
+    p.stream(endedRec("A"))
+      .stream(rec("B"))
+      .stream(rec("B", { status: "working", statusSeq: 1 }));
+    p.opened(open, [endedRec("A"), rec("B", { status: "working", statusSeq: 1 })]).commit();
+    expect(p.panes).toEqual(["B", null]);
+  });
+
+  it("keeps a tab's title when a record carries a blank one", () => {
+    const p = splitXY();
+    p.stream(rec("X", { title: "  " }));
+    expect(p.m.sessions.get("X")?.title).toBe("X");
+  });
+
+  it("asks for no resync when the server removes a session the page never knew", () => {
+    const p = bootPage([], null);
+    const before = p.requested;
+    p.gone("Q").commit();
+    expect(p.requested).toBe(before);
+  });
+
+  it("shows the tab after a closed pair when the second of them was shown", () => {
+    const p = bootPage(["A", "B", "C", "D", "E"], singleRecord("C"));
+    p.apply((m) => removed(m, ["B", "C"], { by: "user" }, 0)).commit();
+    expect(p.panes).toEqual(["D", null]);
+  });
+
+  it("shows the nearest tab before a closed last tab", () => {
+    const p = bootPage(["A", "B", "C"], singleRecord("C"));
+    p.apply((m) => removed(m, ["C"], { by: "user" }, 0)).commit();
+    expect(p.panes).toEqual(["B", null]);
+  });
+
+  it("holds arrivals and a new terminal until a second resync queued during the first settles", () => {
+    const p = splitXY();
+    p.list([rec("R1")]).commit();
+    p.gone("X", "Y").commit();
+    expect(p.requested).toBe(2);
+    own(p.apply(createBegan), "N");
+    p.resync([rec("R1"), rec("N")], null);
+    expect(p.m.holds.resync).toBe(1);
+    expect(p.m.pendingOwn?.id).toBe("N");
+  });
+
+  it("gives an arrival's pane back after the pane it moved to failed between two start failures", () => {
+    const p = splitXY();
+    p.stream(rec("Z1")).commit();
+    p.stream(rec("Z2")).commit();
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["Z2", "Y"]);
+    p.apply((m) => paneFailed(m, "left")).commit();
+    p.stream(endedRec("Z1")).commit();
+    expect(p.panes).toEqual(["Z1", "Y"]);
+    expect(p.lay.failed.left).toBe(true);
+  });
+
+  it("writes the record when a failed start gets its pane back outside an arrival run", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.apply((m) => select(m, "right")).commit();
+    const before = p.writes.length;
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["Z", "Y"]);
+    expect(p.writes.length).toBe(before + 1);
+    expect(p.writes.at(-1)?.record).toEqual(layoutRecord(p.lay, 0.5));
+  });
+
+  it("does not re-send a failed seen PUT when the server removes a hidden tab", () => {
+    const p = splitXY("W");
+    p.stream(rec("X", { status: "done", statusSeq: 1 })).commit();
+    p.apply((m) => ackFailed(m, "X", 1, false)).commit();
+    p.gone("W").commit();
+    expect(p.acks).toEqual([{ id: "X", seq: 1 }]);
+  });
+
+  it("moves no focus when closing the last tab leaves nothing to show", () => {
+    const p = bootPage(["X"], singleRecord("X"));
+    const fx = p.apply((m) => removed(m, ["X"], { by: "user" }, 0)).commit();
+    expect(fx.focus).toBeNull();
+  });
+
+  it("returns the keyboard to a new terminal the user already put on the other pane", () => {
+    const p = splitXY();
+    p.apply(createBegan).stream(rec("N"));
+    p.apply((m) => select(m, "right"))
+      .apply((m) => show(m, "N"))
+      .commit();
+    p.apply((m) => select(m, "left")).commit();
+    const fx = own(p, "N").commit();
+    expect(p.panes).toEqual(["X", "N"]);
+    expect(p.lay.split.selected).toBe("right");
+    expect(fx.focus?.form).toBe("focus");
+  });
+
+  it("leaves a new terminal on its chip when the only free pane failed", () => {
+    const p = splitXY();
+    p.apply((m) => select(m, "right")).apply((m) => paneFailed(m, "right"));
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "right", id: "Y" })).commit();
+    const fx = own(p, "N").commit();
+    expect(p.panes).toEqual(["X", null]);
+    expect(fx.focus).toBeNull();
+  });
+
+  it("toasts a narrow window only for an address asking for a split", () => {
+    const narrow = bootPage(["X", "Y"], singleRecord("X"), { canOpen: false });
+    const single = narrow
+      .apply((m) => route(m, { kind: "single", tab: alias("Y") }, false))
+      .commit();
+    expect(single.toasts).toEqual([]);
+    const wide = splitXY("W");
+    const split = wide
+      .apply((m) => route(m, { kind: "split", left: alias("X"), right: alias("W") }, false))
+      .commit();
+    expect(split.toasts).toEqual([]);
+    expect(wide.panes).toEqual(["X", "W"]);
+  });
+
+  it("gives a failed start its pane back after an address closed the split onto the arrival covering it", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.apply((m) => route(m, { kind: "single", tab: alias("Z") }, false)).commit();
+    expect(p.panes).toEqual(["Z", null]);
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["Y", null]);
+  });
+
+  it("writes the record after an address changes the split", () => {
+    const p = splitXY("W");
+    const before = p.writes.length;
+    p.apply((m) =>
+      route(m, { kind: "split", left: alias("X"), right: alias("W") }, false),
+    ).commit();
+    expect(p.writes.length).toBe(before + 1);
+    expect(p.writes.at(-1)?.record).toEqual(layoutRecord(p.lay, 0.5));
+  });
+});
+
+describe("rules the second mutation run found unpinned", () => {
+  it("acknowledges no occurrence the user never saw, in one frame", () => {
+    const p = splitXY("W");
+    p.stream(rec("W", { status: "done", statusSeq: 1 }));
+    p.apply((m) => show(m, "W")).apply((m) => show(m, "X"));
+    p.stream(rec("W", { status: "done", statusSeq: 2 })).commit();
+    expect(p.acks).toEqual([]);
+    expect(p.lay.indicators.switchDot).toBe("done");
+  });
+
+  it("pairs a split with the first tab of the strip when nothing was shown yet", () => {
+    let m = createModel();
+    for (const id of ["A", "B", "C"]) {
+      m = mergeRecord(m, rec(id), { stream: true }, 0);
+    }
+    expect(splitPartner(m, EMPTY_LAYOUT, null)).toBe("A");
+  });
+
+  it("keeps an arrival off a failed pane after a click on a tab closed elsewhere", () => {
+    const p = splitXY("Q");
+    p.stream(rec("Z1")).commit();
+    p.apply((m) => paneFailed(m, "left")).commit();
+    p.gone("Q").commit();
+    p.apply((m) => show(m, "Q"));
+    p.stream(rec("Z2")).commit();
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["Z1", "Y"]);
+  });
+
+  it("gives a failed start its pane back after an address to the arrival closed the split from the other pane", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.apply((m) => select(m, "left")).commit();
+    p.apply((m) => route(m, { kind: "single", tab: alias("Z") }, false)).commit();
+    expect(p.panes).toEqual(["Z", null]);
+    p.stream(endedRec("Y")).commit();
+    expect(p.panes).toEqual(["Y", null]);
+  });
+
+  it("places no new terminal that was closed while a resync held it", () => {
+    const p = splitXY();
+    p.list([rec("R1")]).commit();
+    const ids = p.resyncs.shift() ?? [];
+    p.apply((m) => resyncBegan(m, ids, false, 0));
+    own(p.apply(createBegan), "N");
+    p.gone("N");
+    p.apply((m) =>
+      resyncSettled(m, {
+        sessions: [rec("R1")],
+        record: null,
+        route: null,
+        toastStale: false,
+        now: 0,
+      }),
+    );
+    p.apply(ownReleased).commit();
+    expect(p.panes).toEqual(["R1", null]);
   });
 });

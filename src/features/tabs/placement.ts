@@ -72,9 +72,9 @@ export interface SessionFact {
   /** The server-confirmed read floor; only rises, since a lower one is an older
    *  record, never a retraction. */
   readonly seenSeq: number;
-  /** This page's optimistic read floor, 0 when none. A 204 clears it once seenSeq
-   *  covers it, a non-404 failure only while it holds the failed number, and a 404
-   *  keeps it until the session is removed. */
+  /** This page's optimistic read floor, 0 when none; the page reads
+   *  max(seenSeq, ackSeq). A non-404 failure clears it only while it holds the
+   *  failed number, and a 404 keeps it until the session is removed. */
   readonly ackSeq: number;
   /** The occurrence whose ack last failed with a non-404, 0 when none; the
    *  automatic ack skips it, so a failing server sees one PUT per occurrence. */
@@ -335,7 +335,7 @@ export function createModel(opts: { readonly presumeReports?: boolean } = {}): T
 
 /** Whether new sessions are unplaceable now: a sync, create or resync is out,
  *  or a restart is pending its resync. */
-function anyHold(m: TabsModel): boolean {
+function anyHold(m: Pick<TabsModel, "holds" | "restartPending">): boolean {
   return m.holds.sync > 0 || m.holds.create || m.holds.resync > 0 || m.restartPending !== null;
 }
 
@@ -384,7 +384,7 @@ function tick(d: Draft): number {
 // held session placeable in compareTabOrder order, so a burst's arrivals are
 // placed as one sorted run whatever order they came in.
 function settleHolds(d: Draft): void {
-  const held = anyHoldDraft(d);
+  const held = anyHold(d);
   if (held === d.heldBefore) {
     return;
   }
@@ -470,7 +470,7 @@ function addFact(d: Draft, rec: StatusRecord, origin: Origin, source: RecordSour
     failedSeq: 0,
     origin,
     born,
-    placeableAt: anyHoldDraft(d) ? null : born,
+    placeableAt: anyHold(d) ? null : born,
     removedAt: null,
     endedAt: isEndedStatus(status) ? born : null,
   };
@@ -479,10 +479,6 @@ function addFact(d: Draft, rec: StatusRecord, origin: Origin, source: RecordSour
     fact.startFailure = rec.endReason ?? "";
   }
   d.sessions.set(fact.id, fact);
-}
-
-function anyHoldDraft(d: Draft): boolean {
-  return d.holds.sync > 0 || d.holds.create || d.holds.resync > 0 || d.restartPending !== null;
 }
 
 // The staleness rules of the stream-owned tuple: a list requested before the
@@ -678,7 +674,6 @@ export function mergeList(
 /** A stream open: its list is out until syncEnded. */
 export function syncBegan(m: TabsModel): TabsModel {
   const d = draft(m);
-  tick(d);
   d.holds.sync += 1;
   return finish(d);
 }
@@ -693,7 +688,6 @@ export function syncEnded(m: TabsModel): TabsModel {
 
 export function createBegan(m: TabsModel): TabsModel {
   const d = draft(m);
-  tick(d);
   d.holds.create = true;
   return finish(d);
 }
@@ -727,7 +721,6 @@ export function ownCreated(
 
 export function createFailed(m: TabsModel): TabsModel {
   const d = draft(m);
-  tick(d);
   d.holds.create = false;
   return finish(d);
 }
@@ -735,7 +728,6 @@ export function createFailed(m: TabsModel): TabsModel {
 /** The commit's request of a resync; a pending restart becomes the resync's own hold. */
 function resyncRequested(m: TabsModel): TabsModel {
   const d = draft(m);
-  tick(d);
   d.holds.resync += 1;
   d.restartPending = null;
   return finish(d);
@@ -785,7 +777,7 @@ function resolveRoute(
     if (alias === null) {
       return null;
     }
-    for (const f of [...d.sessions.values()].sort(compareTabOrder)) {
+    for (const f of d.sessions.values()) {
       if (f.alias === alias) {
         return f.id;
       }
@@ -801,12 +793,7 @@ function resolveRoute(
   const left = byAlias(route.left);
   const right = byAlias(route.right);
   const stale = left === undefined || right === undefined;
-  const l = left ?? null;
-  const r = right ?? null;
-  if (l === null && r === null) {
-    return { route: null, stale };
-  }
-  return { route: { kind: "split", left: l, right: r }, stale };
+  return { route: { kind: "split", left: left ?? null, right: right ?? null }, stale };
 }
 
 function pushSettle(d: Draft, kind: "boot" | "resync", input: SettleInput): void {
@@ -951,11 +938,8 @@ export function pageVisibility(m: TabsModel, visible: boolean): TabsModel {
   return finish(d);
 }
 
-/** The window regained focus; a sync point only while the page is visible. */
+/** The window regained focus: a sync point. */
 export function windowFocused(m: TabsModel): TabsModel {
-  if (!m.page.visible) {
-    return m;
-  }
   return stamp(m, (at) => ({ kind: "syncPoint", at, point: "focus" }));
 }
 
@@ -984,7 +968,6 @@ function withFact(
     return m;
   }
   const d = draft(m);
-  tick(d);
   d.sessions.set(id, { ...f, ...patch });
   return finish(d);
 }
@@ -996,14 +979,7 @@ function ackSent(m: TabsModel, id: string, seq: number): TabsModel {
 
 /** A 204: seq came from the server, so its floor is at least seq. */
 export function ackSettled(m: TabsModel, id: string, seq: number): TabsModel {
-  return withFact(m, id, (f) => {
-    const seenSeq = Math.max(f.seenSeq, seq);
-    return {
-      seenSeq,
-      ackSeq: f.ackSeq <= seenSeq ? 0 : f.ackSeq,
-      failedSeq: f.failedSeq <= seq ? 0 : f.failedSeq,
-    };
-  });
+  return withFact(m, id, (f) => (seq > f.seenSeq ? { seenSeq: seq } : null));
 }
 
 /** A failed ack. A 404 changes nothing: the session's removal follows. A later
@@ -1020,7 +996,6 @@ export function ackFailed(m: TabsModel, id: string, seq: number, notFound: boole
 
 export function dragChanged(m: TabsModel, dragging: boolean): TabsModel {
   const d = draft(m);
-  tick(d);
   d.page.dragging = dragging;
   return finish(d);
 }
@@ -1028,7 +1003,6 @@ export function dragChanged(m: TabsModel, dragging: boolean): TabsModel {
 /** This page's committed drag or move: the local renumber before the order PUT. */
 export function reorder(m: TabsModel, ids: readonly string[]): TabsModel {
   const d = draft(m);
-  tick(d);
   ids.forEach((id, i) => {
     const f = d.sessions.get(id);
     if (f !== undefined) {
@@ -1051,7 +1025,6 @@ export function wireTitle(m: TabsModel, id: string, title: string): TabsModel {
 /** The split's committed share changed; `dragged` when the user moved the handle. */
 export function splitRatio(m: TabsModel, ratio: number, dragged: boolean): TabsModel {
   const d = draft(m);
-  tick(d);
   d.page.ratio = ratio;
   if (dragged && d.writeOwed !== "rewrite") {
     d.writeOwed = "write";
@@ -1062,7 +1035,6 @@ export function splitRatio(m: TabsModel, ratio: number, dragged: boolean): TabsM
 /** The layout PUT answered 409 and its re-list is merged: one rewrite is owed. */
 export function layoutStale(m: TabsModel): TabsModel {
   const d = draft(m);
-  tick(d);
   d.writeOwed = "rewrite";
   return finish(d);
 }
@@ -1078,21 +1050,16 @@ function layoutOwed(m: TabsModel): TabsModel {
 }
 
 function layoutWritten(m: TabsModel): TabsModel {
-  if (m.writeOwed === null) {
-    return m;
-  }
   const d = draft(m);
   d.writeOwed = null;
   return finish(d);
 }
 
-/** A commit folded through `through`: its events and removed sessions are dropped. */
-function folded(m: TabsModel, through: number): TabsModel {
+/** A commit folded the whole timeline: its events and removed sessions are dropped. */
+function folded(m: TabsModel): TabsModel {
   const d = draft(m);
-  d.gone = d.gone.filter((f) => f.removedAt === null || f.removedAt > through);
-  const kept = d.timeline.filter((e) => e.at > through);
+  d.gone = [];
   d.timeline.length = 0;
-  d.timeline.push(...kept);
   return finish(d);
 }
 
@@ -1152,7 +1119,7 @@ interface CommitStep {
 
 export function commitStep(m: TabsModel, prev: Layout): CommitStep {
   const { layout, effects } = stepFor(m, prev);
-  let next = folded(m, layout.through);
+  let next = folded(m);
   for (const a of effects.acks) {
     next = ackSent(next, a.id, a.seq);
   }
@@ -1357,17 +1324,18 @@ class Folder {
     return id;
   }
 
-  /** Shows `id` on `side`, emptying the other side if it showed `id`. Every rule
-   *  but an arrival and the restore drops the side's covered entry. */
-  put(side: PaneSide, id: string, keepCovered = false): void {
+  /** Shows `id` on `side`, emptying the other side if it showed `id`, and drops
+   *  the side's covered entry and any entry naming `id`: a shown session is
+   *  covered nowhere. An arrival writes its own entry back after. */
+  put(side: PaneSide, id: string): void {
     const o = otherSide(side);
-    if (this.s[o] === id) {
-      this.s[o] = null;
+    if (this.s[o] === id || this.s.covered[o]?.id === id) {
       this.uncover(o);
     }
-    if (!keepCovered) {
-      this.uncover(side);
+    if (this.s[o] === id) {
+      this.s[o] = null;
     }
+    this.uncover(side);
     this.s[side] = id;
   }
 
@@ -1413,10 +1381,9 @@ class Folder {
       return this.refold(seg, ev);
     }
     const before = this.paneState();
-    this.takeCovered();
     const rule = this.apply(ev);
     const covered = this.takeCovered();
-    if (ev.kind === "arrival" && covered !== null) {
+    if (covered !== null) {
       const from = seg ?? { base: before, events: [], covers: [] };
       this.s.segment = {
         base: from.base,
@@ -1433,8 +1400,9 @@ class Folder {
 
   // A start failure of a session an arrival in the segment covered: the
   // segment's events are folded again from its base with every start failure
-  // known by now counted from the start, then the failure itself, so the panes
-  // are what the failure learned first would have given.
+  // known by now counted from the start, so the panes are what the failure
+  // learned first would have given. No replayed arrival covers the failed
+  // session, so the failure itself has nothing left to restore.
   private refold(seg: Segment, ev: FoldEvent & { readonly kind: "failure" }): Rule {
     const selectedBefore = this.s[this.s.selected];
     const recent = this.s.recent;
@@ -1442,15 +1410,13 @@ class Folder {
     this.replayAt = ev.at;
     const covers: string[] = [];
     for (const e of seg.events) {
-      this.takeCovered();
       this.apply(e);
       const covered = this.takeCovered();
-      if (e.kind === "arrival" && covered !== null) {
+      if (covered !== null) {
         covers.push(covered);
       }
     }
     this.replayAt = null;
-    this.apply(ev);
     this.s.recent = recent;
     this.s.segment = { base: seg.base, events: [...seg.events, ev], covers };
     const selected = this.s[this.s.selected];
@@ -1526,7 +1492,7 @@ class Folder {
         (cur === null
           ? undefined
           : { id: cur, other: this.s[otherSide(side)], selected: this.s.selected });
-      this.put(side, id, true);
+      this.put(side, id);
       if (entry !== undefined) {
         this.s.covered[side] = entry;
       }
@@ -1549,18 +1515,10 @@ class Folder {
         continue;
       }
       const arrival = this.s[side];
-      this.uncover(side);
-      this.put(side, id, true);
+      this.put(side, id);
       rule = { persist: true, moved: "server", form: rule.form };
       const o = otherSide(side);
-      if (
-        arrival !== null &&
-        arrival !== id &&
-        this.s.open &&
-        e.other !== null &&
-        this.s[o] === e.other &&
-        !this.failedAt(e.other, t)
-      ) {
+      if (this.s.open && e.other !== null && this.s[o] === e.other && !this.failedAt(e.other, t)) {
         this.s[o] = arrival;
         this.s.covered[o] = { id: e.other, other: id, selected: e.selected };
         this.s.selected = o;
@@ -1594,12 +1552,11 @@ class Folder {
       return NOOP;
     }
     const moved = ev.by === "user" ? "user" : "server";
-    if (this.s.open) {
-      const keep = SIDES.find((side) => this.s[side] !== null && !isGone(this.s[side]));
-      if (keep !== undefined) {
-        this.closeTo(this.s[keep], this.s.covered[keep]);
-        return { persist: true, moved, form: "focus" };
-      }
+    // A closed split's right pane is empty, so only an open split finds a keeper.
+    const keep = SIDES.find((side) => this.s[side] !== null && !isGone(this.s[side]));
+    if (keep !== undefined) {
+      this.closeTo(this.s[keep], this.s.covered[keep]);
+      return { persist: true, moved, form: "focus" };
     }
     const sel = this.s[this.s.selected];
     const x = isGone(sel) ? sel : this.s[otherSide(this.s.selected)];
@@ -1684,7 +1641,7 @@ class Folder {
     const kept = displaced === id ? null : displaced;
     const back = kept ?? (opening ? partner : null);
     const o = otherSide(side);
-    if ((from !== null || opening) && back !== null && this.s[o] === null && this.usable(o)) {
+    if ((from !== null || opening) && back !== null && this.usable(o)) {
       this.put(o, back);
     }
     return { persist: true, moved: "user", form: displaced === id ? "focus" : "announce" };
@@ -1707,9 +1664,6 @@ class Folder {
   }
 
   private closeSplit(): Rule {
-    if (!this.s.open) {
-      return NOOP;
-    }
     this.closeKeepingSelected();
     return { persist: true, moved: "user", form: null };
   }
@@ -1724,24 +1678,21 @@ class Folder {
     }
     const before = this.s[this.s.selected];
     const first = r.kind === "single" ? r.tab : (r.left ?? r.right);
-    if (first === null || !this.presentAt(first, ev.at)) {
+    if (!this.presentAt(first, ev.at)) {
       return NOOP;
     }
-    let wantSplit = r.kind === "split";
-    if (wantSplit && !this.s.open && !this.s.fit) {
-      wantSplit = false;
+    const narrow = r.kind === "split" && !this.s.open && !this.s.fit;
+    if (narrow) {
       this.toasts.push("narrow");
     }
-    if (!wantSplit || r.kind === "single") {
-      if (this.s.open) {
-        const at = this.sideOf(first);
-        if (at !== null) {
-          this.s.selected = at;
-        }
-        this.closeKeepingSelected();
+    if (narrow || r.kind === "single") {
+      const at = this.sideOf(first);
+      if (at !== null) {
+        this.s.selected = at;
       }
-      if (this.sideOf(first) === null && this.usable(this.s.selected)) {
-        this.put(this.s.selected, first);
+      this.closeKeepingSelected();
+      if (this.sideOf(first) === null) {
+        this.put("left", first);
       }
       return { persist: true, moved: "user", form: before === null ? "announce" : null };
     }
@@ -1750,18 +1701,18 @@ class Folder {
     const kept = this.s.selected;
     for (const side of [kept, otherSide(kept)]) {
       const id = want[side];
-      if (id !== null && this.s[side] !== id && this.usable(side) && this.presentAt(id, ev.at)) {
+      if (this.s[side] !== id && this.usable(side) && this.presentAt(id, ev.at)) {
         this.put(side, id);
       }
     }
     for (const side of SIDES) {
-      if (want[side] === null && this.s[side] !== null) {
+      if (want[side] === null) {
         this.s[side] = null;
         this.uncover(side);
       }
     }
     const sel = this.s.selected;
-    if (this.s[sel] === null && this.s[otherSide(sel)] !== null) {
+    if (this.s[sel] === null) {
       this.s.selected = otherSide(sel);
     }
     const announce = before === null && this.s[this.s.selected] !== null;
@@ -1918,7 +1869,8 @@ class Folder {
   }
 
   // The repair: after a settle that placed nothing, the first session present
-  // while no hold is set is shown, a live one before an ended one.
+  // while no hold is set is shown, a live one before an ended one. "First" is
+  // the strip's order: a burst's born stamps follow its delivery order.
   repair(t: number): Rule {
     if (this.anyShown()) {
       this.s.repairArmed = false;
@@ -1927,9 +1879,8 @@ class Folder {
     if (!this.s.repairArmed || this.s.held) {
       return NOOP;
     }
-    const byBirth = this.stripAt(t).sort((a, b) => a.born - b.born);
-    const pick =
-      byBirth.find((f) => f.endedAt === null || f.endedAt > t) ?? byBirth[0] ?? undefined;
+    const strip = this.stripAt(t);
+    const pick = strip.find((f) => f.endedAt === null || f.endedAt > t) ?? strip[0] ?? undefined;
     if (pick === undefined) {
       return NOOP;
     }
@@ -2004,11 +1955,7 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
     const before = { ...s };
     track(run(), before);
     const afterRule = { ...s };
-    const repaired = fold.repair(t);
-    if (repaired !== NOOP) {
-      s.segment = null;
-    }
-    track(repaired, afterRule);
+    track(fold.repair(t), afterRule);
   };
   step(prev.through, () => NOOP);
   for (const ev of eventsAfter(m, prev.through)) {
@@ -2069,8 +2016,7 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
     focus,
     toasts: fold.toasts,
     settle: fold.settle,
-    resync:
-      m.restartPending !== null && m.holds.resync === 0 ? { ids: m.restartPending.ids } : null,
+    resync: m.restartPending !== null ? { ids: m.restartPending.ids } : null,
     address: moved === "none" ? null : moved === "settle" ? "replace" : "push",
   };
   return { layout, effects };
