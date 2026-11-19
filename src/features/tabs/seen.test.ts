@@ -433,13 +433,13 @@ describe("the switch button's dot", () => {
 });
 
 describe("reading while the tab list is open", () => {
-  const openTray = (p: Page): void => {
+  const toggleTray = (p: Page): void => {
     p.root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
   };
 
   it("acknowledges a cue that arrives while the tab list is open", async () => {
     const a = await server.open();
-    openTray(a);
+    toggleTray(a);
     await settle(a);
     const before = a.puts.length;
 
@@ -451,13 +451,27 @@ describe("reading while the tab list is open", () => {
 
   it("posts a banner for a tab no pane shows while the tab list is open", async () => {
     const a = await server.open();
-    openTray(a);
+    toggleTray(a);
     await settle(a);
 
     server.notify("y", "Task finished", "done");
     await settle(a, () => a.banners.length > 0);
 
     expect(a.banners).toHaveLength(1);
+  });
+
+  it("shows an unread hidden tab's cue on the switch dot in the task that closes the list", async () => {
+    const a = await server.open();
+    a.putAnswer = 500;
+    toggleTray(a);
+    await settle(a);
+    server.setStatus("y", "done");
+    await settle(a, () => a.badge() === 1);
+    expect(a.switchDot()).toBe("");
+
+    toggleTray(a);
+
+    expect(a.switchDot()).toBe("done");
   });
 });
 

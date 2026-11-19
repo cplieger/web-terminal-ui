@@ -1455,7 +1455,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         setExpandedState(false);
-        serverInput((m) => switcherToggled(m, false));
+        userInput((m) => switcherToggled(m, false));
       }
 
       function toggleSwitcher(): void {
