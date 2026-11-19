@@ -22,6 +22,7 @@ import {
   REORDER_SLOT_FADE_MS,
   REORDER_STILL_MS,
 } from "./strip.js";
+import { nextCommit } from "./test-helpers/split.js";
 
 // The queued-row depth past which a frame arms the catching-up cue, and the
 // anti-flicker delay before it appears. Restated rather than imported because
@@ -44,7 +45,7 @@ vi.mock("@cplieger/web-terminal-engine", async (importActual) => {
 const { setSession } = fake.connection;
 // A DISTINCT view per call, never one constant: a double answering the same
 // object for every tab passes just as well when the wrong tab's position comes
-// back (index.mutants-c.test.ts's note).
+// back (chrome-repaint.test.ts's note).
 let viewSeq = 0;
 const { captureViewMemory, pendingRowCount, getHighestIndex } = fake.renderer;
 
@@ -177,7 +178,7 @@ interface FrameHarness {
 /** Two tabs, a manual rAF pump and a frozen clock, mounted with nothing owed so
  *  the BOOTSTRAP switch does not arm the cue: a cached highest index means the
  *  tab has content and an empty queue means nothing is pending, which is the one
- *  combination switchTo's own arm condition rejects. One priming frame goes in
+ *  combination a switch's own arm condition rejects. One priming frame goes in
  *  before the rAF stub so the kernel's first-frame work (which schedules its own
  *  frame) cannot be mistaken for the cue's completion poll. Every frame the tests
  *  below count is therefore one the cue asked for. */
@@ -341,6 +342,7 @@ describe("tabs: live window-title updates", () => {
     const h = await mountTitles();
 
     wire().onMessage(titleFrame("vim README.md"));
+    await nextCommit();
 
     expect(h.labels()).toEqual(["one", "vim README.md", "three"]);
   });
@@ -351,6 +353,7 @@ describe("tabs: live window-title updates", () => {
     const h = await mountTitles();
 
     wire().onMessage(titleFrame(""));
+    await nextCommit();
 
     expect(h.labels()).toEqual(["one", "two", "three"]);
   });
@@ -361,6 +364,7 @@ describe("tabs: live window-title updates", () => {
     const h = await mountTitles();
 
     wire().onMessage(titleFrame("   "));
+    await nextCommit();
 
     expect(h.labels()).toEqual(["one", "two", "three"]);
   });

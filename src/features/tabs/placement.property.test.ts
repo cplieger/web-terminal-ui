@@ -601,21 +601,12 @@ let servedTitle = "";
 
 beforeEach(() => {
   fake.reset();
-  // Every test file shares one tab's session history, which Chromium caps at 50
-  // entries, and a run's clicks would fill it for the address tests after this file.
-  vi.spyOn(History.prototype, "pushState").mockImplementation(function (
-    this: History,
-    ...args: Parameters<History["replaceState"]>
-  ) {
-    History.prototype.replaceState.apply(this, args);
-  });
   document.body.replaceChildren();
   history.replaceState(null, "", basePath);
   servedTitle = document.title;
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   Reflect.deleteProperty(document, "visibilityState");
   history.replaceState(null, "", basePath);

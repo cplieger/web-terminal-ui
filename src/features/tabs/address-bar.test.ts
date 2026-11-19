@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAddressBar, type AddressBar, type RouteOrigin } from "./address-bar.js";
+import { pushesSince } from "./test-helpers/history.js";
 
 const basePath = location.pathname + location.search;
 let bar: AddressBar | null = null;
@@ -41,10 +42,10 @@ function mount(shown: { value: string | null }, applied: [string, RouteOrigin][]
 describe("createAddressBar", () => {
   it("canonicalises on start without adding an entry, and marks it", () => {
     const shown = { value: "#aaaa" };
-    const before = history.length;
+    const pushed = pushesSince();
     mount(shown).start(true);
     expect(location.hash).toBe("#aaaa");
-    expect(history.length).toBe(before);
+    expect(pushed()).toBe(0);
     expect(history.state).toEqual({ wtTabs: 1 });
   });
 
@@ -65,36 +66,36 @@ describe("createAddressBar", () => {
     const shown = { value: "#aaaa" };
     const b = mount(shown);
     b.start(true);
-    const before = history.length;
+    const pushed = pushesSince();
     shown.value = "#bbbb";
     b.schedule("replace");
     b.schedule("push");
     b.schedule("replace");
     await nextTask();
     expect(location.hash).toBe("#bbbb");
-    expect(history.length).toBe(before + 1);
+    expect(pushed()).toBe(1);
   });
 
   it("replaces without adding an entry", async () => {
     const shown = { value: "#aaaa" };
     const b = mount(shown);
     b.start(true);
-    const before = history.length;
+    const pushed = pushesSince();
     shown.value = "#bbbb";
     b.schedule("replace");
     await nextTask();
     expect(location.hash).toBe("#bbbb");
-    expect(history.length).toBe(before);
+    expect(pushed()).toBe(0);
   });
 
   it("writes nothing when the fragment is already current", async () => {
     const shown = { value: "#aaaa" };
     const b = mount(shown);
     b.start(true);
-    const before = history.length;
+    const pushed = pushesSince();
     b.schedule("push");
     await nextTask();
-    expect(history.length).toBe(before);
+    expect(pushed()).toBe(0);
   });
 
   it("writes nothing while there is nothing to name", async () => {
@@ -111,12 +112,12 @@ describe("createAddressBar", () => {
     const shown = { value: "#aaaa" };
     const b = mount(shown);
     b.start(true);
-    const before = history.length;
+    const pushed = pushesSince();
     shown.value = "";
     b.schedule("push");
     await nextTask();
     expect(location.hash).toBe("");
-    expect(history.length).toBe(before);
+    expect(pushed()).toBe(0);
   });
 
   it("keeps the path and the query", async () => {

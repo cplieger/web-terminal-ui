@@ -514,13 +514,9 @@ describe("tabs feature", () => {
   });
 
   it("restores the saved active tab when the status snapshot wins the boot race", async () => {
-    // The test above passes with no activityMonitor, so nothing races the
-    // bootstrap. The real app always has one, and it always wins: tabs subscribes
-    // during setup, before resolveInitialSession issues GET /api/sessions, so the
-    // SSE snapshot adopts every session first. ensureActive then fired on the
-    // FIRST of those events — a one-tab view — activated it, and the bootstrap
-    // ladder found activeId already set and returned before ever reading the saved
-    // id. Every reload landed on the oldest tab.
+    // The real app always has an activityMonitor, and its snapshot reaches tabs
+    // before the bootstrap's GET /api/sessions answers: a page that placed the
+    // first snapshot row would open on the oldest tab instead of the saved one.
     layoutBody = { left: "s2", right: null, handle: 0.5, selected: "left", open: false };
     const monitor = snapshotMonitor([
       { id: "s1", status: "idle", title: "one", createdAt: "1" },
@@ -546,8 +542,8 @@ describe("tabs feature", () => {
   it("activates a tab adopted after the bootstrap failed (server down at load, then back)", async () => {
     // The bootstrap fails outright (the list, the layout read and the create all
     // reject), leaving the retry chrome up. When the status stream later adopts a
-    // session, ensureActive must still activate it, or the tab stays blank: its
-    // `started` gate is set on every bootstrap exit, not only success.
+    // session, the boot repair must still show it, or the tab stays blank: the
+    // repair is armed on every bootstrap exit, not only success.
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("server down")));
@@ -1524,7 +1520,7 @@ describe("tabs feature", () => {
     expect(setSession).toHaveBeenCalledWith("s2");
   });
 
-  it("shows the switch-button dot for a background needs-input, greens on done (latest-wins)", async () => {
+  it("shows the switch-button dot for a background needs-input, greens on its later done", async () => {
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -1542,8 +1538,8 @@ describe("tabs feature", () => {
     await nextCommit();
     expect(dot?.dataset["status"]).toBe("input");
 
-    // The same background tab then finishes a turn -> green cue (latest wins:
-    // the newer "done" overwrites the earlier "input").
+    // The same background tab then finishes a turn -> green cue: one session's
+    // cue follows its latest status.
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
     await nextCommit();
     expect(dot?.dataset["status"]).toBe("done");
@@ -2145,8 +2141,8 @@ describe("tabs feature: boot race (stream-open reconcile vs bootstrap create)", 
     // reconcile's GET /api/sessions is answered from a snapshot taken BEFORE
     // the create committed (an empty list). That stale listing is not
     // authoritative for the tab the bootstrap adopts meanwhile: dropping it
-    // cascaded into dropTab's last-tab intercept spawning a replacement — a
-    // second POST, an orphaned server session, and an aborted first WS.
+    // would leave no tab and spawn a replacement, a second POST, an orphaned
+    // server session, and an aborted first WS.
     const monitor = fakeMonitor();
     const stale: { resolve: (() => void) | null } = { resolve: null };
     let posts = 0;

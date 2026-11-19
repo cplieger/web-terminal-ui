@@ -2144,7 +2144,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(sentText()).toBe("");
     expect(window.getSelection()?.isCollapsed).toBe(false);
     // The open composition goes with its pane: destroy() cancels it, which
-    // kernel.mutants.test.ts pins directly.
+    // kernel-lifecycle.test.ts pins directly.
     handle.destroy();
   });
 

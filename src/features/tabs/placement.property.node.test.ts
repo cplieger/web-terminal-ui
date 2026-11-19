@@ -491,6 +491,8 @@ function run(
     readonly observe?: (w: World) => unknown;
     /** Reducers only: no layout is folded, so the run checks the model alone. */
     readonly reducersOnly?: boolean;
+    /** Skip checkCommit, which the first property runs on every commit. */
+    readonly unchecked?: boolean;
   } = {},
 ): { readonly seen: unknown[]; readonly w: World } {
   const w = world(opts.keep ?? null);
@@ -498,7 +500,9 @@ function run(
   const commit = (): void => {
     if (opts.reducersOnly !== true) {
       w.page.commit();
-      checkCommit(w.page);
+      if (opts.unchecked !== true) {
+        checkCommit(w.page);
+      }
     }
   };
   const seen: unknown[] = [observe(w)];
@@ -575,8 +579,8 @@ describe("placement over generated input orders", () => {
     fc.assert(
       fc.property(stepsArb(16), (steps) => {
         const observe = (w: World): unknown => chromeOf(w.page.m, w.page.lay);
-        const ref = run(steps, true, { observe });
-        const sparse = run(steps, false, { observe });
+        const ref = run(steps, true, { observe, unchecked: true });
+        const sparse = run(steps, false, { observe, unchecked: true });
         expect(sparse.seen).toEqual(ref.seen);
         expect(ref.seen[0]).toMatchObject({ active: "X" });
       }),
