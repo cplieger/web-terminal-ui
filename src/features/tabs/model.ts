@@ -695,50 +695,10 @@ export function createSessionAPI(apiBase: string, realm: SessionAPIRealm): Sessi
   };
 }
 
-/** Close tombstones: ids the user closed within the TTL, so a stale server
- *  listing (the SSE re-open snapshot, or the poll's GET /api/sessions) that
- *  predates the server reaping the session does not re-adopt (flash back) the
- *  closed tab. */
-interface Tombstones {
-  add(id: string): void;
-  /** True while `id` is tombstoned (within the TTL). A hit past the TTL clears
-   *  the entry and reports false (the adopt may proceed). */
-  active(id: string): boolean;
-}
-
+/** How long a closed or removed session stays tombstoned: a stale server listing
+ *  (the stream's reopen snapshot, or the poll) that predates the server reaping
+ *  it must not re-add the closed tab. */
 export const CLOSE_TOMBSTONE_MS = 15000;
-
-export function createTombstones(
-  clock: () => number,
-  ttlMs: number = CLOSE_TOMBSTONE_MS,
-): Tombstones {
-  const recentlyClosed = new Map<string, number>();
-  return {
-    add(id: string): void {
-      const now = clock();
-      // Sweep entries whose window already elapsed (active() treats them as
-      // untombstoned anyway) so the map cannot grow without bound over a long
-      // session of opens/closes; then record this close.
-      for (const [k, t] of recentlyClosed) {
-        if (now - t >= ttlMs) {
-          recentlyClosed.delete(k);
-        }
-      }
-      recentlyClosed.set(id, now);
-    },
-    active(id: string): boolean {
-      const closedAt = recentlyClosed.get(id);
-      if (closedAt === undefined) {
-        return false;
-      }
-      if (clock() - closedAt < ttlMs) {
-        return true;
-      }
-      recentlyClosed.delete(id);
-      return false;
-    },
-  };
-}
 
 /** The bound on a user-typed tab name, mirroring the engine's pinned-title cap so
  *  the field cannot accept text the server would silently truncate. Counted in

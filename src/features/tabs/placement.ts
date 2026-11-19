@@ -25,7 +25,7 @@ import { parseTabAlias, type TabAlias, type TabRoute } from "./route.js";
 /** How the page first learned a session: from the boot's set, a resync's set,
  *  this page's own create, or another device after the page started. Only an
  *  `elsewhere` session is placed as an arrival. */
-export type Origin = "boot" | "settle" | "own" | "elsewhere";
+type Origin = "boot" | "settle" | "own" | "elsewhere";
 
 /** One known session. Every `...At` field is a model clock stamp, which is what
  *  lets layoutFor read a fact as it was at an earlier event. */
@@ -93,7 +93,7 @@ export type SplitOpening =
   { readonly by: "button" } | { readonly by: "snap"; readonly id: string; readonly side: PaneSide };
 
 /** A route with its aliases resolved to the session ids present when it was read. */
-export type ResolvedRoute =
+type ResolvedRoute =
   | { readonly kind: "single"; readonly tab: string }
   | { readonly kind: "split"; readonly left: string | null; readonly right: string | null };
 
@@ -103,9 +103,9 @@ export type ShellChange =
   | { readonly kind: "paneDropped"; readonly side: PaneSide; readonly id: string }
   | { readonly kind: "rehome"; readonly side: PaneSide; readonly id: string };
 
-export type SyncPointKind = "visible" | "focus" | "tray" | "list";
+type SyncPointKind = "visible" | "focus" | "tray" | "list";
 
-export type Toast = "stale" | "narrow";
+type Toast = "stale" | "narrow";
 
 interface OwnIntent {
   readonly kind: "own";
@@ -115,7 +115,7 @@ interface OwnIntent {
 }
 
 /** One stamped event of the fold besides the session facts' own stamps. */
-export type TimelineEntry = { readonly at: number } & (
+type TimelineEntry = { readonly at: number } & (
   | {
       readonly kind: "removal";
       readonly ids: readonly string[];
@@ -154,7 +154,7 @@ export type TimelineEntry = { readonly at: number } & (
 );
 
 /** Requests out that keep new sessions unplaceable. Each begin has exactly one end. */
-export interface Holds {
+interface Holds {
   /** Stream opens whose list has not answered or failed. */
   readonly sync: number;
   readonly create: boolean;
@@ -162,7 +162,7 @@ export interface Holds {
   readonly resync: number;
 }
 
-export interface PageFacts {
+interface PageFacts {
   readonly visible: boolean;
   readonly switcherOpen: boolean;
   readonly started: boolean;
@@ -194,32 +194,32 @@ export interface TabsModel {
   readonly page: PageFacts;
 }
 
-export interface Panes {
+interface Panes {
   readonly left: string | null;
   readonly right: string | null;
 }
 
-export interface SplitView {
+interface SplitView {
   readonly open: boolean;
   readonly selected: PaneSide;
 }
 
 /** The session an arrival took a side from, what the other side showed then,
  *  and the side selected before the arrival. Read only by the start-failure rule. */
-export interface Covered {
+interface Covered {
   readonly id: string;
   readonly other: string | null;
   readonly selected: PaneSide;
 }
 
-export interface Indicators {
+interface Indicators {
   /** The most severe unread cue among sessions out of view, "" for none. */
   readonly switchDot: CueStatus | "";
   readonly attention: { readonly count: number; readonly worst: CueStatus | "" };
 }
 
 /** The pane state a fold carries between events, less `recent`. */
-export interface PaneState {
+interface PaneState {
   readonly left: string | null;
   readonly right: string | null;
   readonly open: boolean;
@@ -237,7 +237,7 @@ export interface PaneState {
  *  pane state before it, so a start failure of a covered session can re-fold
  *  them as if the failure had been known first. A user, kernel or settle event,
  *  or a removal that moves a pane, ends it. */
-export interface Segment {
+interface Segment {
   readonly base: PaneState;
   readonly events: readonly FoldEvent[];
   readonly covers: readonly string[];
@@ -269,14 +269,12 @@ export interface Layout {
   readonly indicators: Indicators;
 }
 
-export type FocusForm = "announce" | "focus";
+type FocusForm = "announce" | "focus";
 
 /** What the commit does for the events one stepFor call folded. */
 export interface Effects {
   /** Occurrences to acknowledge; a level read off the current facts. */
   readonly acks: readonly { readonly id: string; readonly seq: number }[];
-  /** An intent or a sync point was folded, so a failed ack is re-sent. */
-  readonly retry: boolean;
   readonly moved: "settle" | "user" | "server" | "none";
   readonly persist: boolean;
   readonly focus: {
@@ -337,7 +335,7 @@ export function createModel(opts: { readonly presumeReports?: boolean } = {}): T
 
 /** Whether new sessions are unplaceable now: a sync, create or resync is out,
  *  or a restart is pending its resync. */
-export function anyHold(m: TabsModel): boolean {
+function anyHold(m: TabsModel): boolean {
   return m.holds.sync > 0 || m.holds.create || m.holds.resync > 0 || m.restartPending !== null;
 }
 
@@ -444,7 +442,7 @@ function statusOfRecord(rec: StatusRecord): string {
 }
 
 /** Where a record came from: the stream, or a list requested at stream epoch `listedAt`. */
-export type RecordSource = { readonly stream: true } | { readonly listedAt: number };
+type RecordSource = { readonly stream: true } | { readonly listedAt: number };
 
 function addFact(d: Draft, rec: StatusRecord, origin: Origin, source: RecordSource): void {
   const born = tick(d);
@@ -735,7 +733,7 @@ export function createFailed(m: TabsModel): TabsModel {
 }
 
 /** The commit's request of a resync; a pending restart becomes the resync's own hold. */
-export function resyncRequested(m: TabsModel): TabsModel {
+function resyncRequested(m: TabsModel): TabsModel {
   const d = draft(m);
   tick(d);
   d.holds.resync += 1;
@@ -770,7 +768,7 @@ export function resyncBegan(
 
 /** What a settle read: the sessions, the record, whether the list succeeded,
  *  and the route parsed off the address then (null when not read). */
-export interface SettleInput {
+interface SettleInput {
   readonly sessions: readonly StatusRecord[];
   readonly record: PaneLayout | null;
   readonly route: TabRoute | null;
@@ -992,7 +990,7 @@ function withFact(
 }
 
 /** The commit sent an ack of `seq`. */
-export function ackSent(m: TabsModel, id: string, seq: number): TabsModel {
+function ackSent(m: TabsModel, id: string, seq: number): TabsModel {
   return withFact(m, id, () => ({ ackSeq: seq }));
 }
 
@@ -1070,7 +1068,7 @@ export function layoutStale(m: TabsModel): TabsModel {
 }
 
 /** A write the commit owed is deferred until no resync is held. */
-export function layoutOwed(m: TabsModel): TabsModel {
+function layoutOwed(m: TabsModel): TabsModel {
   if (m.writeOwed !== null) {
     return m;
   }
@@ -1079,7 +1077,7 @@ export function layoutOwed(m: TabsModel): TabsModel {
   return finish(d);
 }
 
-export function layoutWritten(m: TabsModel): TabsModel {
+function layoutWritten(m: TabsModel): TabsModel {
   if (m.writeOwed === null) {
     return m;
   }
@@ -1089,7 +1087,7 @@ export function layoutWritten(m: TabsModel): TabsModel {
 }
 
 /** A commit folded through `through`: its events and removed sessions are dropped. */
-export function folded(m: TabsModel, through: number): TabsModel {
+function folded(m: TabsModel, through: number): TabsModel {
   const d = draft(m);
   d.gone = d.gone.filter((f) => f.removedAt === null || f.removedAt > through);
   const kept = d.timeline.filter((e) => e.at > through);
@@ -1116,7 +1114,7 @@ export function layoutRecord(l: Layout, ratio: number): PaneLayout | null {
  *  the commit's own dispatches: the record to write, "owe" when a pane change
  *  meets a resync or a pending restart (the write waits for the commit that
  *  clears them), or null. */
-export function recordWrite(
+function recordWrite(
   m: TabsModel,
   prev: Layout,
   next: Layout,
@@ -1140,7 +1138,7 @@ export function recordWrite(
 /** One commit's model half: the next layout and its effects, and the model after
  *  the commit's own dispatches (folded, ackSent, resyncRequested, the record
  *  write's bookkeeping), so no later commit repeats an ack, a resync or a write. */
-export interface CommitStep {
+interface CommitStep {
   readonly model: TabsModel;
   readonly layout: Layout;
   readonly effects: Effects;
@@ -1174,44 +1172,6 @@ export function commitStep(m: TabsModel, prev: Layout): CommitStep {
   return { model: next, layout, effects, resync, write, rewrite: write !== null && rewrite };
 }
 
-/** What the selection chrome paints (the active chip, the bottom bar, the
- *  switcher's multi-tab state, the page title), read from a layout and the model. */
-export interface Chrome {
-  readonly active: string | null;
-  readonly strip: readonly string[];
-  readonly shown: readonly {
-    readonly id: string;
-    readonly status: string;
-    readonly title: string;
-    readonly pinnedTitle: string;
-    readonly progress: number;
-    readonly activity: string;
-    readonly activityCount: number;
-  }[];
-}
-
-export function chromeOf(m: TabsModel, l: Layout): Chrome {
-  const selected = l.panes[l.split.selected];
-  const active = selected ?? l.panes.left ?? l.panes.right;
-  const shown = [l.panes.left, l.panes.right].flatMap((id) => {
-    const f = id === null ? undefined : m.sessions.get(id);
-    return f === undefined
-      ? []
-      : [
-          {
-            id: f.id,
-            status: f.status,
-            title: f.title,
-            pinnedTitle: f.pinnedTitle ?? "",
-            progress: f.progress,
-            activity: f.activity,
-            activityCount: f.activityCount,
-          },
-        ];
-  });
-  return { active, strip: l.strip, shown };
-}
-
 /** The session a split opened from `of` pairs with: the selected pane's most
  *  recent other session, else its strip neighbour. Null when there is none, which
  *  makes a snap or the split button a create. */
@@ -1229,7 +1189,7 @@ export function layoutFor(m: TabsModel, prev: Layout): Layout {
   return stepFor(m, prev).layout;
 }
 
-export type FoldEvent =
+type FoldEvent =
   | { readonly at: number; readonly kind: "arrival"; readonly id: string }
   | { readonly at: number; readonly kind: "failure"; readonly id: string }
   | TimelineEntry;
@@ -2104,7 +2064,6 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
       : null;
   const effects: Effects = {
     acks,
-    retry: fold.retry,
     moved,
     persist,
     focus,

@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
+import { CLOSE_TOMBSTONE_MS } from "./model.js";
 import {
   ackFailed,
   ackSettled,
   createBegan,
+  createModel,
   layoutRecord,
   layoutStale,
+  mergeRecord,
   ownCreated,
   paneFailed,
   paneStartFailed,
@@ -46,6 +49,40 @@ function splitXY(...more: string[]): Page {
 function own(p: Page, id: string, opening: SplitOpening | null = null): Page {
   return p.apply((m) => ownCreated(m, rec(id), opening, false));
 }
+
+describe("close tombstones keep a closed tab from coming back", () => {
+  const closedAt = 1000;
+  const listed = { listedAt: 0 };
+  const closedA = () =>
+    removed(
+      mergeRecord(createModel(), rec("A"), { stream: true }, 0),
+      ["A"],
+      { by: "user" },
+      closedAt,
+    );
+
+  it("keeps a stale listing from re-adding a session closed inside the window", () => {
+    const m = mergeRecord(closedA(), rec("A"), listed, closedAt + CLOSE_TOMBSTONE_MS - 1);
+    expect(m.sessions.has("A")).toBe(false);
+  });
+
+  it("adds the session back once the window has passed", () => {
+    const m = mergeRecord(closedA(), rec("A"), listed, closedAt + CLOSE_TOMBSTONE_MS);
+    expect(m.sessions.has("A")).toBe(true);
+  });
+
+  it("adds a listed session the page never closed", () => {
+    const m = mergeRecord(closedA(), rec("B"), listed, closedAt + 1);
+    expect(m.sessions.has("B")).toBe(true);
+  });
+
+  it("keeps a live tombstone through a later close's sweep of elapsed ones", () => {
+    const later = closedAt + 1000;
+    let m = mergeRecord(closedA(), rec("B"), { stream: true }, later);
+    m = removed(m, ["B"], { by: "user" }, later);
+    expect(mergeRecord(m, rec("A"), listed, later).sessions.has("A")).toBe(false);
+  });
+});
 
 describe("an arrival beside a failed start", () => {
   it.each([

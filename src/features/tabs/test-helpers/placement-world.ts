@@ -197,3 +197,26 @@ export function bootPage(
   page.commit();
   return page;
 }
+
+/** What the selection chrome reads from a layout and the model: the active
+ *  session, the strip, and each shown session's label and status inputs. */
+export function chromeOf(m: TabsModel, l: Layout): unknown {
+  const active = l.panes[l.split.selected] ?? l.panes.left ?? l.panes.right;
+  const shown = [l.panes.left, l.panes.right].flatMap((id) => {
+    const f = id === null ? undefined : m.sessions.get(id);
+    return f === undefined
+      ? []
+      : [
+          {
+            id: f.id,
+            status: f.status,
+            title: f.title,
+            pinnedTitle: f.pinnedTitle ?? "",
+            progress: f.progress,
+            activity: f.activity,
+            activityCount: f.activityCount,
+          },
+        ];
+  });
+  return { active, strip: l.strip, shown };
+}

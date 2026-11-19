@@ -4,7 +4,7 @@
  *  whole point of SessionAPIError: a host may refuse session creation
  *  temporarily and say so (503 + Retry-After). Flattened into a message string,
  *  that is indistinguishable from a 500 and loses the retry hint. */
-import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import fc from "fast-check";
 import layoutShapes from "@cplieger/web-terminal-engine/layout-shapes.json" with { type: "json" };
 import type { CueStatus, PaneLayout, TabOrderKey } from "./model.js";
@@ -14,7 +14,6 @@ import {
   activityPhrase,
   compareTabOrder,
   createSessionAPI,
-  createTombstones,
   foldedCueStatus,
   isCueStatus,
   isEndedStatus,
@@ -985,56 +984,5 @@ describe("the session's percentage", () => {
     expect(renderedProgress("failed", 42)).toBe(42);
     expect(renderedProgress("warning", 25)).toBe(25);
     expect(renderedProgress("working", 0)).toBe(0);
-  });
-});
-
-/** Close tombstones. The failure they exist to prevent is a tab the user just
- *  closed flashing back into the strip, because a listing that predates the
- *  server reaping the session (the SSE re-open snapshot, or the poll) still
- *  carries it. Nothing exercised this before, so every rule below — the window,
- *  its far edge, and the sweep's blast radius — was load-bearing and unpinned. */
-describe("close tombstones keep a closed tab from flashing back", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("reports a session the user just closed as tombstoned", () => {
-    const tombs = createTombstones(() => Date.now(), 15_000);
-    tombs.add("sess-1");
-    expect(tombs.active("sess-1")).toBe(true);
-  });
-
-  it("reports a session it never saw as free to adopt", () => {
-    // A false positive here is worse than a flash-back: it would swallow a tab
-    // the server legitimately lists and the user never closed.
-    const tombs = createTombstones(() => Date.now(), 15_000);
-    tombs.add("sess-1");
-    expect(tombs.active("sess-2")).toBe(false);
-  });
-
-  it("stops tombstoning at exactly the end of the window, not after it", () => {
-    // The far edge is the whole contract: past it the server has had its chance
-    // to reap, so a listing that still carries the id is authoritative and the
-    // adopt must proceed.
-    const tombs = createTombstones(() => Date.now(), 15_000);
-    tombs.add("sess-1");
-    vi.advanceTimersByTime(14_999);
-    expect(tombs.active("sess-1")).toBe(true);
-    vi.advanceTimersByTime(1);
-    expect(tombs.active("sess-1")).toBe(false);
-  });
-
-  it("does not let a second close sweep away the first tab's live tombstone", () => {
-    // add() sweeps elapsed entries so the map cannot grow over a long session of
-    // opens and closes. A sweep that took live entries with it would re-adopt the
-    // tab closed a moment ago, which is the bug the tombstones exist to stop.
-    const tombs = createTombstones(() => Date.now(), 15_000);
-    tombs.add("sess-1");
-    vi.advanceTimersByTime(1000);
-    tombs.add("sess-2");
-    expect(tombs.active("sess-1")).toBe(true);
   });
 });

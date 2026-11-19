@@ -56,7 +56,7 @@ export async function mountScripted(
 
 /** One answer of the scripted session server. `hold` keeps it back until the
  *  test releases it; `then` runs once it has been answered. */
-export interface Answer {
+interface Answer {
   readonly status: number;
   readonly body?: unknown;
   readonly retryAfter?: string;
@@ -89,7 +89,7 @@ export const refuse = (message = "restoring tabs"): Answer => ({
 export const notFound: Answer = { status: 404, body: { error: "not found" } };
 
 /** A held answer: `answer` goes out once `release` is called. */
-export interface Held {
+interface Held {
   readonly answer: Answer;
   release(): void;
 }

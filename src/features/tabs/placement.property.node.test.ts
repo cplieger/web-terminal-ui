@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 
 import { isEndedStatus, type StatusRecord } from "./model.js";
 import {
-  chromeOf,
   createBegan,
   layoutRecord,
   layoutStale,
@@ -27,6 +26,7 @@ import {
 } from "./placement.js";
 import {
   bootPage,
+  chromeOf,
   createdAt,
   endedRec,
   rec,
@@ -436,16 +436,15 @@ function checkCommit(page: Page): void {
     again.layout.recent,
   ]).toEqual([l.panes, l.split, l.covered, l.recent]);
   const fx = again.effects;
-  expect([
-    fx.acks,
-    fx.retry,
-    fx.moved,
-    fx.persist,
-    fx.focus,
-    fx.toasts,
-    fx.settle,
-    fx.resync,
-  ]).toEqual([[], false, "none", false, null, [], false, null]);
+  expect([fx.acks, fx.moved, fx.persist, fx.focus, fx.toasts, fx.settle, fx.resync]).toEqual([
+    [],
+    "none",
+    false,
+    null,
+    [],
+    false,
+    null,
+  ]);
 }
 
 function snapOf(page: Page): unknown {

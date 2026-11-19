@@ -215,14 +215,13 @@ class World {
     this.ref.stream(r);
   }
 
-  arrive(cue: string): string | undefined {
+  arrive(cue: string): void {
     if (this.made >= 3) {
-      return undefined;
+      return;
     }
     this.made += 1;
     const id = `Z${String(this.made)}`;
     this.stream(cue === "" ? rec(id) : rec(id, { status: cue, statusSeq: 1 }));
-    return id;
   }
 
   async reopen(seed: number): Promise<void> {
