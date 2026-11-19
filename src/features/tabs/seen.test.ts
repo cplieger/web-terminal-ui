@@ -449,6 +449,34 @@ describe("reading while the tab list is open", () => {
     expect(a.puts.slice(before)).toEqual([{ id: "y", seq: 1 }]);
   });
 
+  it("acknowledges a cue that arrives while a dragged-open tab list is open", async () => {
+    const a = await server.open();
+    const current = a.root.querySelector<HTMLElement>(".wt-switcher-current");
+    const list = a.root.querySelector<HTMLElement>(".wt-switcher-list");
+    if (current === null || list === null) {
+      throw new Error("switcher chrome missing");
+    }
+    Object.defineProperty(list, "scrollHeight", { value: 200, configurable: true });
+    const send = (to: EventTarget, type: string, y: number, t: number): void => {
+      const e = new a.win.MouseEvent(type, { clientX: 100, clientY: y, bubbles: true });
+      Object.defineProperty(e, "timeStamp", { value: t });
+      Object.defineProperty(e, "pointerId", { value: 1 });
+      to.dispatchEvent(e);
+    };
+    // A slow drag up past half the list's height: distance opens it, not a flick.
+    send(current, "pointerdown", 300, 1000);
+    send(a.win, "pointermove", 150, 1400);
+    send(current, "pointerup", 150, 1410);
+    await settle(a);
+    const before = a.puts.length;
+
+    server.setStatus("y", "done");
+    await settle(a, () => a.puts.length > before);
+
+    expect(a.puts.slice(before)).toEqual([{ id: "y", seq: 1 }]);
+    expect(a.root.querySelector(".wt-switcher-expanded")).not.toBeNull();
+  });
+
   it("posts a banner for a tab no pane shows while the tab list is open", async () => {
     const a = await server.open();
     toggleTray(a);

@@ -671,6 +671,21 @@ describe("the switch dot and the reads", () => {
       expect(p.lay.indicators.attention.count).toBe(1);
     },
   );
+
+  it.each([
+    ["closing X and Y", (p: Page) => p.apply((m) => removed(m, ["X", "Y"], { by: "user" }, 0))],
+    ["a resync's drop", (p: Page) => p.apply((m) => resyncBegan(m, ["X", "Y", "W"], false, 0))],
+  ])("closes the tab list when %s leaves it no row, so a later cue stays unread", (_n, drop) => {
+    const p = splitXY("W");
+    p.apply((m) => switcherToggled(m, true)).commit();
+    drop(p).commit();
+    expect(p.lay.tray).toBe(false);
+    p.stream(rec("Z1", { status: "crashed", statusSeq: 1 })).commit();
+    expect(p.panes).not.toContain("Z1");
+    expect(p.acks).toEqual([]);
+    expect(p.lay.indicators.switchDot).toBe("crashed");
+    expect(p.lay.indicators.attention.count).toBe(1);
+  });
 });
 
 describe("closes", () => {

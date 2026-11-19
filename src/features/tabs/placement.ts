@@ -616,6 +616,16 @@ function removeIds(
     keyboardHeld: how.keyboardHeld,
     typing: how.typing,
   });
+  closeEmptyTray(d);
+}
+
+// The tray lists every tab but the active one, so below two tabs it has no row
+// and closes; the commit collapses the DOM tray from the layout this folds into.
+function closeEmptyTray(d: Draft): void {
+  if (d.page.switcherOpen && d.sessions.size < 2) {
+    d.page.switcherOpen = false;
+    d.timeline.push({ kind: "view", at: tick(d), visible: d.page.visible, tray: false });
+  }
 }
 
 /** Sessions the server removed, or the user's close of `ids` (one entry for a multi-close). */
@@ -756,6 +766,7 @@ export function resyncBegan(
     }
   }
   d.timeline.push({ kind: "resyncBegan", at, ids: dropping, typing });
+  closeEmptyTray(d);
   return finish(d);
 }
 

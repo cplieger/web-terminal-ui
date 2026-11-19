@@ -429,7 +429,15 @@ function learnList(
   }
   learn(w, rows, listedAt);
   for (const id of still.filter((x) => !named.has(x))) {
-    log.known.delete(id);
+    forget(w, id);
+  }
+}
+
+/** The tray lists every tab but the active one, so a removal leaving fewer
+ *  than two tabs closes it; a removal of a tab already gone removes nothing. */
+function forget(w: World, id: string): void {
+  if (w.log.known.delete(id) && w.log.known.size < 2) {
+    w.log.tray = false;
   }
 }
 
@@ -440,7 +448,7 @@ function deliver(w: World, n: number): void {
       return;
     }
     if ("removed" in ev) {
-      w.log.known.delete(ev.removed);
+      forget(w, ev.removed);
       w.page.gone(ev.removed);
     } else {
       learn(w, [ev.rec], null);
@@ -459,7 +467,9 @@ function resyncRun(w: World): void {
     return;
   }
   const rows = w.server.list();
-  w.log.known.clear();
+  for (const id of [...w.log.known]) {
+    forget(w, id);
+  }
   learn(w, rows, w.log.epoch);
   w.page.apply((m) => resyncBegan(m, ids, false, 0));
   w.page.apply((m) =>
@@ -613,7 +623,7 @@ function exec(w: World, cmd: Cmd): string | null {
       }
       for (const id of victims) {
         server.remove(id);
-        w.log.known.delete(id);
+        forget(w, id);
         w.log.closed.add(id);
       }
       w.since.held ||= cmd.held;

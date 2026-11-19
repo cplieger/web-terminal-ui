@@ -3759,11 +3759,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         swList.style.transition = "";
         swList.style.overflowY = "";
         swList.style.maxHeight = "";
+        setExpandedState(open);
+        userInput((m) => switcherToggled(m, open));
         if (open) {
-          setExpandedState(true);
           ctx.announce("Terminal list expanded");
-        } else {
-          setExpandedState(false);
         }
       }
 
@@ -4043,10 +4042,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         for (const t of tabList) {
           paintChip(t);
         }
-        // A close that empties the expanded list collapses the switcher first, so
-        // the tray animates shut with the last row still in it.
-        if (expanded && tabList.length < 2) {
-          collapseSwitcher();
+        // Collapsed before the rows repaint, so the tray the layout closed animates
+        // shut with the last row still in it.
+        if (expanded && !next.tray) {
+          setExpandedState(false);
         }
       }
 
