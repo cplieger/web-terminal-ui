@@ -10,6 +10,7 @@ import type { SessionStatus } from "@cplieger/web-terminal-engine";
 import type { PaneSide } from "../../kernel/types.js";
 import { titleMarkFor } from "../../kernel/attention.js";
 import { isEndedStatus, type PaneLayout, type StatusRecord } from "./model.js";
+import { parseTabRoute } from "./route.js";
 import {
   ackSettled,
   createBegan,
@@ -17,6 +18,8 @@ import {
   ownCreated,
   pageVisibility,
   paneStartFailed,
+  removed,
+  route,
   select,
   shellChanged,
   show,
@@ -508,6 +511,62 @@ const commands = [
       },
     ),
   ),
+  who.map((n) =>
+    command(
+      `close(${String(n)})`,
+      (w) => w.rows.size > 1,
+      async (w) => {
+        const id = w.ref.lay.strip[n % Math.max(1, w.ref.lay.strip.length)];
+        const button = chips(w.root)
+          .find((c) => label(c) === id)
+          ?.querySelector<HTMLElement>(".wt-tab-close");
+        if (id === undefined || button == null) {
+          return;
+        }
+        const lay = w.ref.lay;
+        const typing =
+          lay.split.open &&
+          (lay.panes.left === id || lay.panes.right === id) &&
+          document.activeElement?.classList.contains("term-input") === true;
+        const deletes = w.server.count("DELETE", `/api/sessions/${id}`);
+        button.click();
+        w.ref.apply((m) => removed(m, [id], { by: "user", keyboardHeld: false, typing }, 0));
+        w.ref.commit();
+        await until(() => w.server.count("DELETE", `/api/sessions/${id}`) > deletes);
+        w.rows.delete(id);
+      },
+    ),
+  ),
+  fc
+    .tuple(who, fc.constantFrom("single" as const, "split" as const, "stale" as const))
+    .map(([n, shape]) =>
+      command(
+        `route(${String(n)}, ${shape})`,
+        () => true,
+        async (w) => {
+          const strip = w.ref.lay.strip;
+          const id = strip[n % Math.max(1, strip.length)] ?? "Q9";
+          const other = strip[(n + 1) % Math.max(1, strip.length)];
+          const hash =
+            shape === "stale"
+              ? "#Q9"
+              : shape === "single"
+                ? `#${id}`
+                : `#${id},${other === id || other === undefined ? "" : other}`;
+          const r = parseTabRoute(hash);
+          if (r === null || location.hash === hash) {
+            return;
+          }
+          const navigated = new Promise<void>((resolve) => {
+            window.addEventListener("hashchange", () => resolve(), { once: true });
+          });
+          location.hash = hash;
+          await navigated;
+          w.ref.apply((m) => route(m, r, true));
+          w.ref.commit();
+        },
+      ),
+    ),
   fc.constant(
     command(
       "splitButton",

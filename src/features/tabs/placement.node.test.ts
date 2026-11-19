@@ -378,6 +378,27 @@ describe("restarts and resyncs", () => {
     expect(p.lay.strip).toContain("R3");
   });
 
+  it.each([
+    ["in a later frame", true],
+    ["in the same frame", false],
+  ])(
+    "opens the split with the new terminal beside the shown tab when its POST answers after a restart list %s",
+    (_name, frame) => {
+      const p = bootPage(["X", "Y"], singleRecord("Y"));
+      const open = p.open();
+      p.stream(rec("R1"))
+        .apply((m) => show(m, "R1"))
+        .commit();
+      p.apply(createBegan).opened(open, [rec("R1")]);
+      if (frame) {
+        p.commit();
+      }
+      own(p, "N1", { by: "button" }).commit();
+      p.resync([rec("R1"), rec("N1")], null).commit();
+      expect([p.panes, p.lay.split]).toEqual([["R1", "N1"], { open: true, selected: "right" }]);
+    },
+  );
+
   it("starts one resync when a restart list lands while another reconcile is queued", () => {
     const p = splitXY();
     p.list([rec("R1"), rec("R2")]).commit();
@@ -748,6 +769,28 @@ describe("kernel pane changes", () => {
     expect(p.lay.split.open).toBe(true);
     expect(p.lay.failed.right).toBe(true);
   });
+
+  it.each([
+    ["in a later frame", true],
+    ["in the same frame", false],
+  ])(
+    "shows a clicked tab in the healthy pane after a start failure there, clicked %s",
+    (_name, frame) => {
+      const p = splitXY();
+      p.stream(rec("Z")).commit();
+      p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "left", id: "X" }))
+        .apply((m) => paneFailed(m, "left"))
+        .commit();
+      expect([p.panes, p.lay.split.selected]).toEqual([[null, "Z"], "right"]);
+      p.stream(endedRec("Y"));
+      if (frame) {
+        p.commit();
+        expect([p.panes, p.lay.split.selected]).toEqual([[null, "Y"], "right"]);
+      }
+      p.apply((m) => show(m, "X")).commit();
+      expect([p.panes, p.lay.split.selected]).toEqual([[null, "X"], "right"]);
+    },
+  );
 
   it("opens the split beside its partner after the second pane failed and the split was closed", () => {
     const p = splitXY();

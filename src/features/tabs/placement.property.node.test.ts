@@ -1,6 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
+import type { PaneSide } from "../../kernel/types.js";
 import { isEndedStatus, type StatusRecord } from "./model.js";
 import {
   createBegan,
@@ -23,6 +24,10 @@ import {
   switcherToggled,
   ackSettled,
   ackFailed,
+  layoutFor,
+  paneFailed,
+  snap,
+  splitPartner,
   type Effects,
   type SplitOpening,
 } from "./placement.js";
@@ -48,6 +53,9 @@ class Server {
   readonly rows = new Map<string, StatusRecord>();
   queue: Ev[] = [];
   private n = 0;
+  /** Sessions whose start ran: any status but `idle`, which the engine also
+   *  reports while a deferred start waits for its first resize. */
+  private readonly started = new Set<string>();
   constructor(
     ids: readonly string[],
     private readonly keep: string | null = null,
@@ -77,16 +85,32 @@ class Server {
     }
   }
   status(id: string, status: string): void {
-    this.update(id, (r) =>
-      isEndedStatus(r.status) ? null : { ...r, status, statusSeq: (r.statusSeq ?? 0) + 1 },
-    );
+    this.update(id, (r) => {
+      if (isEndedStatus(r.status)) {
+        return null;
+      }
+      if (status !== "idle") {
+        this.started.add(id);
+      }
+      return { ...r, status, statusSeq: (r.statusSeq ?? 0) + 1 };
+    });
   }
   fail(id: string): void {
     this.update(id, (r) =>
-      (r.statusSeq ?? 0) !== 0
+      this.started.has(id) || isEndedStatus(r.status)
         ? null
-        : { ...r, status: "ended", endReason: "spawn failed", statusSeq: 1 },
+        : { ...r, status: "ended", endReason: "spawn failed", statusSeq: (r.statusSeq ?? 0) + 1 },
     );
+  }
+  /** A new server process: every session replaced, and the old stream's queue lost. */
+  restart(k: number): void {
+    this.rows.clear();
+    this.queue = [];
+    for (let i = 0; i < k; i++) {
+      this.n += 1;
+      const id = `R${String(this.n)}`;
+      this.rows.set(id, rec(id));
+    }
   }
   read(id: string): void {
     this.update(id, (r) =>
@@ -125,6 +149,7 @@ const byAge = (ids: Iterable<string>): string[] =>
   );
 
 const who = fc.nat({ max: 9 });
+const sideArb = fc.constantFrom("left" as const, "right" as const);
 const cueArb = fc.constantFrom("", "input", "done", "failed", "crashed");
 const cmdArb = fc.oneof(
   fc.record({ k: fc.constant("create" as const), cue: cueArb }),
@@ -146,10 +171,7 @@ const cmdArb = fc.oneof(
   fc.record({ k: fc.constant("visible" as const) }),
   fc.record({ k: fc.constant("resyncRun" as const) }),
   fc.record({ k: fc.constant("show" as const), who }),
-  fc.record({
-    k: fc.constant("select" as const),
-    side: fc.constantFrom("left" as const, "right" as const),
-  }),
+  fc.record({ k: fc.constant("select" as const), side: sideArb }),
   fc.record({ k: fc.constant("close" as const), who, many: fc.boolean(), held: fc.boolean() }),
   fc.record({
     k: fc.constant("route" as const),
@@ -162,6 +184,11 @@ const cmdArb = fc.oneof(
   fc.record({ k: fc.constant("tray" as const) }),
   fc.record({ k: fc.constant("narrow" as const) }),
   fc.record({ k: fc.constant("hostOpen" as const) }),
+  fc.record({ k: fc.constant("snap" as const), who, side: sideArb, typing: fc.boolean() }),
+  fc.record({ k: fc.constant("paneFail" as const), side: sideArb }),
+  fc.record({ k: fc.constant("divider" as const), ratio: fc.constantFrom(0.3, 0.6, 0.7) }),
+  fc.record({ k: fc.constant("restart" as const), n: fc.integer({ min: 1, max: 3 }) }),
+  fc.record({ k: fc.constant("layoutAns" as const) }),
 );
 type Cmd = typeof cmdArb extends fc.Arbitrary<infer T> ? T : never;
 const SERVER_KINDS: ReadonlySet<Cmd["k"]> = new Set([
@@ -191,6 +218,8 @@ const USER: ReadonlySet<Cmd["k"]> = new Set([
   "tray",
   "narrow",
   "hostOpen",
+  "snap",
+  "paneFail",
 ]);
 const COMMIT_BEFORE: ReadonlySet<Cmd["k"]> = new Set([
   "split",
@@ -198,6 +227,10 @@ const COMMIT_BEFORE: ReadonlySet<Cmd["k"]> = new Set([
   "hostOpen",
   "resyncRun",
   "ack",
+  "paneFail",
+  "divider",
+  "snap",
+  "layoutAns",
 ]);
 
 // The steps that fold an intent or a sync point, after which a failed ack is
@@ -229,6 +262,8 @@ const REFOLD_KINDS: ReadonlySet<Cmd["k"]> = new Set([
   "tray",
   "select",
   "show",
+  "snap",
+  "paneFail",
 ]);
 
 // The steps that land several arrivals in one input: a list, a hold's release.
@@ -266,10 +301,11 @@ const stepsArb = (max: number, kinds?: ReadonlySet<Cmd["k"]>): fc.Arbitrary<Step
 interface World {
   readonly page: Page;
   readonly server: Server;
-  readonly polls: { token: ListToken; epoch: number; rows: StatusRecord[] }[];
+  readonly polls: { token: ListToken; epoch: number; known: string[]; rows: StatusRecord[] }[];
   readonly opens: {
     token: ListToken;
     epoch: number;
+    known: string[];
     rows: StatusRecord[];
     pending: StatusRecord[];
   }[];
@@ -279,6 +315,8 @@ interface World {
   since: { stale: number; held: boolean; retry: boolean };
   /** The occurrences whose last ack failed with a non-404, as `id:seq`. */
   readonly failedAcks: Set<string>;
+  /** The open split's failed pane; a closed split's next open builds a fresh one. */
+  readonly down: Set<PaneSide>;
   readonly log: Log;
 }
 
@@ -298,6 +336,9 @@ interface Log {
   /** The freshest occurrence delivered while a commit showed the session on screen. */
   readonly viewed: Map<string, number>;
   readonly failed: Set<string>;
+  /** The sessions the page was told exist and not told are gone; a user close stays gone. */
+  readonly known: Set<string>;
+  readonly closed: Set<string>;
   /** Stream records delivered so far, and the count when each session's last one came. */
   epoch: number;
   readonly streamAt: Map<string, number>;
@@ -309,14 +350,18 @@ interface Log {
   step: Cmd["k"] | "list";
 }
 
+const BOOT_RECORD = splitRecord("X", "Y");
+
 function world(keep: string | null = null): World {
-  const page = bootPage(["X", "Y", "W"], splitRecord("X", "Y"));
+  const page = bootPage(["X", "Y", "W"], BOOT_RECORD);
   const log: Log = {
     occ: new Map(),
     floor: new Map(),
     acked: new Map(),
     viewed: new Map(),
     failed: new Set(),
+    known: new Set(["X", "Y", "W"]),
+    closed: new Set(),
     epoch: 0,
     streamAt: new Map(),
     visible: page.m.page.visible,
@@ -334,6 +379,7 @@ function world(keep: string | null = null): World {
     answered: [],
     since: { stale: 0, held: false, retry: false },
     failedAcks: new Set(),
+    down: new Set(),
     log,
   };
 }
@@ -344,6 +390,9 @@ function world(keep: string | null = null): World {
 function learn(w: World, rows: readonly StatusRecord[], listedAt: number | null): void {
   const { log } = w;
   for (const r of rows) {
+    if (!log.closed.has(r.id)) {
+      log.known.add(r.id);
+    }
     if (listedAt === null) {
       log.epoch += 1;
       log.streamAt.set(r.id, log.epoch);
@@ -362,6 +411,27 @@ function learn(w: World, rows: readonly StatusRecord[], listedAt: number | null)
   }
 }
 
+/** Records what a list requested while the page knew `known` tells it. A list
+ *  naming none of those sessions still known is a server restart's and tells
+ *  nothing until its resync settles (design 1.1); any other drops what it misses. */
+function learnList(
+  w: World,
+  rows: readonly StatusRecord[],
+  listedAt: number,
+  known: readonly string[],
+): void {
+  const { log } = w;
+  const still = known.filter((id) => log.known.has(id));
+  const named = new Set(rows.map((r) => r.id));
+  if (still.length > 0 && still.every((id) => !named.has(id))) {
+    return;
+  }
+  learn(w, rows, listedAt);
+  for (const id of still.filter((x) => !named.has(x))) {
+    log.known.delete(id);
+  }
+}
+
 function deliver(w: World, n: number): void {
   for (let i = 0; i < n; i++) {
     const ev = w.server.queue.shift();
@@ -369,6 +439,7 @@ function deliver(w: World, n: number): void {
       return;
     }
     if ("removed" in ev) {
+      w.log.known.delete(ev.removed);
       w.page.gone(ev.removed);
     } else {
       learn(w, [ev.rec], null);
@@ -387,6 +458,7 @@ function resyncRun(w: World): void {
     return;
   }
   const rows = w.server.list();
+  w.log.known.clear();
   learn(w, rows, w.log.epoch);
   w.page.apply((m) => resyncBegan(m, ids, false, 0));
   w.page.apply((m) =>
@@ -439,12 +511,17 @@ function exec(w: World, cmd: Cmd): string | null {
       deliver(w, cmd.n);
       return null;
     case "pollReq":
-      w.polls.push({ token: page.request(), epoch: w.log.epoch, rows: server.list() });
+      w.polls.push({
+        token: page.request(),
+        epoch: w.log.epoch,
+        known: [...w.log.known],
+        rows: server.list(),
+      });
       return null;
     case "pollAns": {
       const poll = w.polls.shift();
       if (poll !== undefined) {
-        learn(w, poll.rows, poll.epoch);
+        learnList(w, poll.rows, poll.epoch, poll.known);
         page.answer(poll.token, poll.rows);
       }
       return null;
@@ -456,12 +533,13 @@ function exec(w: World, cmd: Cmd): string | null {
       server.queue = [];
       const token = page.open();
       const epoch = w.log.epoch;
+      const known = [...w.log.known];
       const rows = shuffled(server.list(), cmd.seed);
       for (const r of rows.slice(0, cmd.early)) {
         learn(w, [r], null);
         page.stream(r);
       }
-      w.opens.push({ token, epoch, rows: server.list(), pending: rows.slice(cmd.early) });
+      w.opens.push({ token, epoch, known, rows: server.list(), pending: rows.slice(cmd.early) });
       return null;
     }
     case "openAns": {
@@ -472,7 +550,7 @@ function exec(w: World, cmd: Cmd): string | null {
           page.stream(r);
         }
         if (!cmd.fail) {
-          learn(w, o.rows, o.epoch);
+          learnList(w, o.rows, o.epoch, o.known);
         }
         page.opened(o.token, cmd.fail ? null : o.rows);
       }
@@ -534,6 +612,8 @@ function exec(w: World, cmd: Cmd): string | null {
       }
       for (const id of victims) {
         server.remove(id);
+        w.log.known.delete(id);
+        w.log.closed.add(id);
       }
       w.since.held ||= cmd.held;
       page.apply((m) => removed(m, victims, { by: "user", keyboardHeld: cmd.held }, 0));
@@ -571,7 +651,7 @@ function exec(w: World, cmd: Cmd): string | null {
       const r = server.rows.get(o.id) ?? rec(o.id);
       learn(w, [r], w.log.epoch);
       page.apply((m) => ownCreated(m, r, o.opening, false));
-      return page.m.holds.resync === 0 ? o.id : null;
+      return page.m.holds.resync === 0 && page.m.restartPending === null ? o.id : null;
     }
     case "split": {
       const open = page.lay.split.open;
@@ -599,6 +679,80 @@ function exec(w: World, cmd: Cmd): string | null {
       }
       return null;
     }
+    case "snap": {
+      const ids = present(w);
+      const id = ids[cmd.who % Math.max(1, ids.length)];
+      const l = page.lay;
+      if (id === undefined || (!l.split.open && !l.fit)) {
+        return null;
+      }
+      // index.ts `snap`: opening with no partner is a create that opens the split.
+      if (!l.split.open && splitPartner(page.m, layoutFor(page.m, l), id) === null) {
+        if (w.own === null) {
+          w.own = { id: server.create("N"), opening: { by: "snap", id, side: cmd.side } };
+          page.apply(createBegan);
+        }
+        return null;
+      }
+      w.since.retry = true;
+      page.apply((m) => snap(m, id, cmd.side, cmd.typing));
+      return w.down.has(cmd.side) ? null : id;
+    }
+    case "paneFail":
+      paneFail(w, cmd.side);
+      return null;
+    case "divider":
+      if (page.lay.split.open && page.m.page.ratio !== cmd.ratio) {
+        page.apply((m) => splitRatio(m, cmd.ratio, true));
+      }
+      return null;
+    case "layoutAns":
+      layoutAnswer(w);
+      return null;
+    case "restart":
+      // A restart would fail a POST that is out, which no step here answers.
+      if (w.own === null) {
+        server.restart(cmd.n);
+        for (const o of w.opens) {
+          o.pending = [];
+        }
+      }
+      return null;
+  }
+}
+
+/** What the kernel reports when `side`'s pane fails on the committed screen
+ *  (shell.ts `failPane`): with the split open, its only shown tab is rehomed to
+ *  an empty survivor, else dropped, and the selection leaves the failed pane;
+ *  with it closed, the single view's pane is discarded and the hidden one takes
+ *  its tab, and the hidden pane's failure changes nothing on screen. */
+function paneFail(w: World, side: PaneSide): void {
+  const { page } = w;
+  const l = page.lay;
+  const o: PaneSide = side === "left" ? "right" : "left";
+  const id = l.panes[side];
+  if (!l.split.open) {
+    if (side === "left" && id !== null) {
+      page.apply((m) => shellChanged(m, { kind: "rehome", side: "left", id }));
+    }
+    page.apply((m) => paneFailed(m, side));
+    return;
+  }
+  // Only the second pane fails on its own (a first pane's failure is the
+  // terminal's), so an open split has at most one failed pane.
+  if (w.down.size > 0) {
+    return;
+  }
+  w.down.add(side);
+  const rehomed = id !== null && l.panes[o] === null;
+  if (rehomed) {
+    page.apply((m) => shellChanged(m, { kind: "rehome", side: o, id }));
+  } else if (id !== null) {
+    page.apply((m) => shellChanged(m, { kind: "paneDropped", side, id }));
+  }
+  page.apply((m) => paneFailed(m, side));
+  if (l.split.selected === side) {
+    page.apply((m) => select(m, o));
   }
 }
 
@@ -625,6 +779,8 @@ const PLACING: ReadonlySet<Log["step"]> = new Set([
   "split",
   "narrow",
   "hostOpen",
+  "snap",
+  "paneFail",
 ]);
 
 /** No cue is lost and the switch dot is the worst unread cue off screen: the
@@ -696,6 +852,18 @@ function checkEnded(w: World): void {
   }
 }
 
+/** A failed pane shows nothing new: the open split's side the log failed shows
+ *  nothing or what the screen showed before. */
+function checkFailedPane(w: World): void {
+  const l = w.page.lay;
+  for (const side of w.down) {
+    const id = l.panes[side];
+    if (l.split.open && id !== null) {
+      expect(id, `failed ${side} pane`).toBe(w.log.screen[side]);
+    }
+  }
+}
+
 /** What every commit holds: the strip in order, each session in one pane, a
  *  closed split's right pane empty with the left selected, and a second fold
  *  that changes nothing and owes no edge effect. */
@@ -751,10 +919,20 @@ function snapOf(page: Page): unknown {
     recent: l.recent,
     dot: l.indicators.switchDot,
     attention: l.indicators.attention,
+    // What the server holds: the last write, else the boot's record. An empty
+    // screen writes none, so it keeps whichever screen before it committed.
+    written:
+      l.panes.left === null && l.panes.right === null
+        ? undefined
+        : (page.writes.at(-1)?.record ?? BOOT_RECORD),
   };
 }
 
 function drain(w: World, after: () => void): void {
+  after();
+  w.log.step = "layoutAns";
+  layoutAnswer(w);
+  after();
   w.log.step = "openAns";
   while (w.opens.length > 0) {
     exec(w, { k: "openAns", fail: false });
@@ -773,14 +951,38 @@ function drain(w: World, after: () => void): void {
   after();
   w.log.step = "list";
   const rows = w.server.list();
-  learn(w, rows, w.log.epoch);
+  learnList(w, rows, w.log.epoch, [...w.log.known]);
   w.page.list(rows);
   after();
-  w.log.step = "resyncRun";
-  for (let i = 0; i < 4 && w.page.resyncs.length > 0; i++) {
-    resyncRun(w);
+  for (let i = 0; i < 4; i++) {
+    w.log.step = "resyncRun";
+    for (let j = 0; j < 4 && w.page.resyncs.length > 0; j++) {
+      resyncRun(w);
+      after();
+    }
+    w.log.step = "layoutAns";
+    if (!layoutAnswer(w)) {
+      break;
+    }
     after();
   }
+}
+
+/** A 409 on the page's write of its committed screen when that names a session
+ *  the server does not have: the page re-lists and owes one rewrite (index.ts
+ *  `writeLayout`). Judged on the committed screen, which every frame schedule
+ *  shares at a commit point, so both runs get the same answer. */
+function layoutAnswer(w: World): boolean {
+  const { page, server } = w;
+  const l = page.lay;
+  if ([l.panes.left, l.panes.right].every((id) => id === null || server.rows.has(id))) {
+    return false;
+  }
+  const rows = server.list();
+  learnList(w, rows, w.log.epoch, [...w.log.known]);
+  page.list(rows);
+  page.apply(layoutStale);
+  return true;
 }
 
 /** Runs `steps`, committing after every step (`every`) or only where a step
@@ -809,10 +1011,14 @@ function run(
         if (every) {
           checkEnded(w);
         }
+        checkFailedPane(w);
         const l = w.page.lay;
         w.log.screen = { ...l.panes, open: l.split.open, strip: l.strip };
       }
       w.since = { stale: 0, held: false, retry: false };
+      if (!w.page.lay.split.open) {
+        w.down.clear();
+      }
     }
   };
   if (every) {

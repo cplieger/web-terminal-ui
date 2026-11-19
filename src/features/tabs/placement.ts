@@ -340,7 +340,14 @@ export function createModel(opts: { readonly presumeReports?: boolean } = {}): T
 /** Whether new sessions are unplaceable now: a sync, create or resync is out,
  *  or a restart is pending its resync. */
 function anyHold(m: Pick<TabsModel, "holds" | "restartPending">): boolean {
-  return m.holds.sync > 0 || m.holds.create || m.holds.resync > 0 || m.restartPending !== null;
+  return m.holds.sync > 0 || m.holds.create || resyncHeld(m);
+}
+
+/** A resync is out, or owed: the next commit turns a pending restart into one,
+ *  so what waits for a resync's settle waits on a pending restart too, whichever
+ *  frame the commit runs in. */
+function resyncHeld(m: Pick<TabsModel, "holds" | "restartPending">): boolean {
+  return m.holds.resync > 0 || m.restartPending !== null;
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
@@ -666,7 +673,7 @@ export function mergeList(
   if (known.length > 0 && known.every((id) => !named.has(id))) {
     // A resync already requested replaces the whole set, so a second restart
     // list during it requests nothing more.
-    if (d.restartPending === null && d.holds.resync === 0) {
+    if (!resyncHeld(d)) {
       d.restartPending = { at: tick(d), ids: known };
     }
     return finish(d);
@@ -723,7 +730,7 @@ export function ownCreated(
   const intent: OwnIntent = { kind: "own", id: info.id, opening, typing };
   d.holds.create = false;
   settleHolds(d);
-  if (d.holds.resync > 0) {
+  if (resyncHeld(d)) {
     d.pendingOwn = intent;
   } else {
     d.timeline.push({ ...intent, at: tick(d) });
@@ -863,7 +870,7 @@ export function resyncSettled(m: TabsModel, input: SettleInput): TabsModel {
  *  committed: the settled session is bound first, so its process starts at a
  *  client's size even when the new terminal then takes its pane. */
 export function ownReleased(m: TabsModel): TabsModel {
-  if (m.pendingOwn === null || m.holds.resync > 0) {
+  if (m.pendingOwn === null || resyncHeld(m)) {
     return m;
   }
   const d = draft(m);
@@ -1109,7 +1116,7 @@ function recordWrite(
   if (!changed && m.writeOwed === null) {
     return null;
   }
-  if (m.holds.resync > 0 || m.restartPending !== null) {
+  if (resyncHeld(m)) {
     return changed ? "owe" : null;
   }
   return layoutRecord(next, m.page.ratio);
@@ -1568,8 +1575,10 @@ class Folder {
         this.s.covered[o] = { id: e.other, other: id, selected: e.selected };
         this.s.selected = o;
         rule = { ...rule, form: "announce" };
-      } else if (this.s.selected === side) {
-        this.s.selected = this.s.open ? e.selected : "left";
+      } else if (this.s.selected === side && !this.s.open) {
+        this.s.selected = "left";
+      } else if (this.s.selected === side && this.usable(e.selected)) {
+        this.s.selected = e.selected;
       }
     }
     return rule;
