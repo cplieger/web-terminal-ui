@@ -1201,6 +1201,23 @@ const SEGMENT_KEEPS: ReadonlySet<FoldEvent["kind"]> = new Set([
   "view",
 ]);
 
+// Each writes its own Folder field and nothing else, so within a run of them
+// only the last of each kind reaches a replayed rule.
+const STATE_ONLY: ReadonlySet<FoldEvent["kind"]> = new Set(["view", "holdsChanged", "splitFit"]);
+
+/** The segment's events after `ev`: only what a refold's pane state can read. */
+function recorded(events: readonly FoldEvent[], ev: FoldEvent): readonly FoldEvent[] {
+  if (ev.kind === "syncPoint") {
+    return events;
+  }
+  if (!STATE_ONLY.has(ev.kind)) {
+    return [...events, ev];
+  }
+  const run = events.findLastIndex((e) => !STATE_ONLY.has(e.kind)) + 1;
+  const kept = events.slice(run).filter((e) => e.kind !== ev.kind);
+  return [...events.slice(0, run), ...kept, ev];
+}
+
 interface Rule {
   /** Whether a change this rule made is written to the shared record. */
   readonly persist: boolean;
@@ -1428,7 +1445,7 @@ class Folder {
         covers: [...from.covers, covered],
       };
     } else if (seg !== null && (SEGMENT_KEEPS.has(ev.kind) || rule === NOOP)) {
-      this.s.segment = { ...seg, events: [...seg.events, ev] };
+      this.s.segment = { ...seg, events: recorded(seg.events, ev) };
     } else if (!SEGMENT_KEEPS.has(ev.kind)) {
       this.s.segment = null;
     }

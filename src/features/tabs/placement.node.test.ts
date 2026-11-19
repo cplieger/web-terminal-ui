@@ -1547,6 +1547,29 @@ describe("a start failure that re-folds a covering arrival's events", () => {
     expect(p.commit().acks).toEqual([]);
     expect(p.panes).toEqual(["Z", "Y"]);
   });
+
+  it("keeps the covering segment's length through hide, show, tray and focus cycles", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.stream(rec("Y", { status: "idle", statusSeq: 1 })).commit();
+    const cycle = (): void => {
+      p.apply((m) => pageVisibility(m, false)).commit();
+      p.apply((m) => pageVisibility(m, true)).commit();
+      p.apply((m) => switcherToggled(m, true)).commit();
+      p.apply((m) => switcherToggled(m, false)).commit();
+      p.apply((m) => splitFit(m, false)).commit();
+      p.apply((m) => splitFit(m, true)).commit();
+      p.apply(windowFocused).commit();
+    };
+    cycle();
+    const length = p.lay.segment?.events.length;
+    for (let i = 0; i < 20; i++) {
+      cycle();
+    }
+    expect(p.lay.segment?.events.length).toBe(length);
+    p.stream(endedRec("Y", 2)).commit();
+    expect(p.panes).toEqual(["Z", "Y"]);
+  });
 });
 
 describe("rules the mutation run found unpinned", () => {
