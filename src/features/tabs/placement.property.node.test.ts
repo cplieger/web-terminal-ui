@@ -788,7 +788,7 @@ const PLACING: ReadonlySet<Log["step"]> = new Set([
  *  count covers every unread occurrence the log shows unacknowledged, the dot
  *  those the screen does not show, and an ack names only a session the log
  *  showed on screen since that occurrence was delivered. */
-function checkCues(w: World, fx: Effects, acksSeen: boolean): void {
+function checkCues(w: World, fx: Effects): void {
   const { log } = w;
   const l = w.page.lay;
   for (const a of fx.acks) {
@@ -813,12 +813,8 @@ function checkCues(w: World, fx: Effects, acksSeen: boolean): void {
   for (const id of l.strip.filter(onScreen)) {
     log.viewed.set(id, log.occ.get(id)?.seq ?? 0);
   }
-  if (acksSeen) {
-    for (const a of fx.acks) {
-      expect(log.viewed.get(a.id) ?? 0, `ack ${a.id}:${String(a.seq)}`).toBeGreaterThanOrEqual(
-        a.seq,
-      );
-    }
+  for (const a of fx.acks) {
+    expect(log.viewed.get(a.id) ?? 0, `ack ${a.id}:${String(a.seq)}`).toBeGreaterThanOrEqual(a.seq);
   }
 }
 
@@ -918,8 +914,6 @@ function snapOf(page: Page): unknown {
     split: l.split,
     strip: l.strip,
     recent: l.recent,
-    dot: l.indicators.switchDot,
-    attention: l.indicators.attention,
     // What the server holds: the last write, else the boot's record. An empty
     // screen writes none, so it keeps whichever screen before it committed.
     written:
@@ -1008,7 +1002,7 @@ function run(
       if (opts.unchecked !== true) {
         checkCommit(w.page);
         checkEdges(w, fx);
-        checkCues(w, fx, every);
+        checkCues(w, fx);
         if (every) {
           checkEnded(w);
         }

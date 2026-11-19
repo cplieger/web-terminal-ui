@@ -48,8 +48,6 @@ export interface SessionFact {
   readonly status: string;
   /** The server's number for that status, 0 when none yet. */
   readonly statusSeq: number;
-  /** When the status or its occurrence last changed. */
-  readonly statusAt: number;
   /** Sticky: the session emitted a genuine activity signal (OSC 7501, OSC 9;4 or
    *  a classified OSC 9); its dot shows only while true, so a plain shell has none. */
   readonly reports: boolean;
@@ -185,9 +183,6 @@ export interface TabsModel {
    *  list cannot re-add them within CLOSE_TOMBSTONE_MS. */
   readonly tombstones: ReadonlyMap<string, number>;
   readonly timeline: readonly TimelineEntry[];
-  /** The clock at the end of each input since the last commit, the only points
-   *  at which stepFor counts a session as seen. */
-  readonly inputEnds: readonly number[];
   readonly holds: Holds;
   /** An own create answered during a resync, folded right after its settle. */
   readonly pendingOwn: OwnIntent | null;
@@ -321,7 +316,6 @@ export function createModel(opts: { readonly presumeReports?: boolean } = {}): T
     gone: [],
     tombstones: new Map(),
     timeline: [],
-    inputEnds: [],
     holds: { sync: 0, create: false, resync: 0 },
     pendingOwn: null,
     restartPending: null,
@@ -360,14 +354,12 @@ interface Draft {
   gone: SessionFact[];
   readonly tombstones: Map<string, number>;
   readonly timeline: TimelineEntry[];
-  inputEnds: number[];
   holds: Mutable<Holds>;
   pendingOwn: OwnIntent | null;
   restartPending: { readonly at: number; readonly ids: readonly string[] } | null;
   writeOwed: null | "write" | "rewrite";
   page: Mutable<PageFacts>;
   heldBefore: boolean;
-  readonly startClock: number;
 }
 
 function draft(m: TabsModel): Draft {
@@ -379,14 +371,12 @@ function draft(m: TabsModel): Draft {
     gone: [...m.gone],
     tombstones: new Map(m.tombstones),
     timeline: [...m.timeline],
-    inputEnds: [...m.inputEnds],
     holds: { ...m.holds },
     pendingOwn: m.pendingOwn,
     restartPending: m.restartPending,
     writeOwed: m.writeOwed,
     page: { ...m.page },
     heldBefore: anyHold(m),
-    startClock: m.clock,
   };
 }
 
@@ -418,9 +408,6 @@ function settleHolds(d: Draft): void {
 // Every reducer ends here.
 function finish(d: Draft): TabsModel {
   settleHolds(d);
-  if (d.clock > d.startClock) {
-    d.inputEnds.push(d.clock);
-  }
   return {
     clock: d.clock,
     streamEpoch: d.streamEpoch,
@@ -429,7 +416,6 @@ function finish(d: Draft): TabsModel {
     gone: d.gone,
     tombstones: d.tombstones,
     timeline: d.timeline,
-    inputEnds: d.inputEnds,
     holds: d.holds,
     pendingOwn: d.pendingOwn,
     restartPending: d.restartPending,
@@ -475,7 +461,6 @@ function addFact(d: Draft, rec: StatusRecord, origin: Origin, source: RecordSour
     pinnedTitle: rec.pinnedTitle,
     status,
     statusSeq: normalizeSeq(rec.statusSeq) ?? 0,
-    statusAt: born,
     reports: reportsOf(d, rec.reportsActivity),
     progress: normalizeProgress(rec.progressValue),
     activity: normalizeActivity(rec.activity),
@@ -518,9 +503,6 @@ function mergeInto(d: Draft, f: SessionFact, rec: StatusRecord, source: RecordSo
       next.statusSeq = seq;
     }
     next.status = status;
-    if (status !== f.status || next.statusSeq !== f.statusSeq) {
-      next.statusAt = tick(d);
-    }
     if (rec.progressValue !== undefined) {
       next.progress = normalizeProgress(rec.progressValue);
     }
@@ -1079,7 +1061,6 @@ function folded(m: TabsModel): TabsModel {
   const d = draft(m);
   d.gone = [];
   d.timeline.length = 0;
-  d.inputEnds = [];
   return finish(d);
 }
 
@@ -1332,15 +1313,6 @@ class Folder {
 
   sideOf(id: string): PaneSide | null {
     return this.s.left === id ? "left" : this.s.right === id ? "right" : null;
-  }
-
-  /** The sessions in front of the user at `t`: on a pane or in the open tray, on a visible page. */
-  inViewAt(t: number): string[] {
-    if (!this.s.visible) {
-      return [];
-    }
-    const ids = this.s.tray ? [...this.facts.keys()] : [this.s.left, this.s.right];
-    return ids.filter((id) => this.presentAt(id, t));
   }
 
   anyShown(): boolean {
@@ -2013,18 +1985,6 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
       s.recent = [sel, ...s.recent.filter((id) => id !== sel)];
     }
   };
-  // An ack is owed for a cue whose session was in view at an input's end while
-  // that status was current. viewedAt[id] is its last such end.
-  const viewedAt = new Map<string, number>();
-  const inputEnds = m.inputEnds.filter((e) => e > prev.through);
-  let ends = 0;
-  const viewedBefore = (t: number): void => {
-    for (let e = inputEnds[ends]; e !== undefined && e < t; e = inputEnds[++ends]) {
-      for (const id of fold.inViewAt(e)) {
-        viewedAt.set(id, e);
-      }
-    }
-  };
   const step = (t: number, run: () => Rule): void => {
     const before = { ...s };
     track(run(), before);
@@ -2033,12 +1993,7 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
   };
   step(prev.through, () => NOOP);
   for (const ev of eventsAfter(m, prev.through)) {
-    viewedBefore(ev.at);
     step(ev.at, () => fold.event(ev));
-  }
-  viewedBefore(m.clock + 1);
-  for (const id of fold.inViewAt(m.clock)) {
-    viewedAt.set(id, m.clock);
   }
   const inView = new Set(
     m.page.visible
@@ -2047,12 +2002,11 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
         )
       : [],
   );
+  // An ack is owed only for a session this layout shows: a frame paints only
+  // a commit, so a cue placed or covered between two commits was never seen.
   const acks = [...m.sessions.values()]
     .filter(
-      (f) =>
-        isUnread(f) &&
-        (viewedAt.get(f.id) ?? -1) >= f.statusAt &&
-        (fold.edge.retry || f.failedSeq !== f.statusSeq),
+      (f) => isUnread(f) && inView.has(f.id) && (fold.edge.retry || f.failedSeq !== f.statusSeq),
     )
     .map((f) => ({ id: f.id, seq: f.statusSeq }));
   // Leaving out the sessions this call acks gives the value those acks produce.

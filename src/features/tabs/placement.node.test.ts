@@ -557,19 +557,61 @@ describe("the switch dot and the reads", () => {
     expect(p.lay.indicators.attention.count).toBe(0);
   });
 
-  it.each([
-    ["a frame between them", true],
-    ["one frame", false],
-  ])("acknowledges a cue on a shown tab whose page then hides, with %s", (_name, between) => {
+  it("acknowledges a cue a frame showed before the page hides", () => {
     const p = splitXY("W");
-    p.stream(rec("Y", { status: "input", statusSeq: 1 }));
-    if (between) {
-      p.commit();
-    }
+    p.stream(rec("Y", { status: "input", statusSeq: 1 })).commit();
     p.apply((m) => pageVisibility(m, false)).commit();
     expect(p.acks).toEqual([{ id: "Y", seq: 1 }]);
     expect(p.lay.indicators.switchDot).toBe("");
     expect(p.lay.indicators.attention.count).toBe(0);
+  });
+
+  it("counts a cue on a shown tab whose page hides before a frame, and acks it once visible", () => {
+    const p = splitXY("W");
+    p.stream(rec("Y", { status: "input", statusSeq: 1 }));
+    p.apply((m) => pageVisibility(m, false)).commit();
+    expect(p.acks).toEqual([]);
+    expect(p.lay.indicators.attention.count).toBe(1);
+    p.apply((m) => pageVisibility(m, true)).commit();
+    expect(p.acks).toEqual([{ id: "Y", seq: 1 }]);
+    expect(p.lay.indicators.attention.count).toBe(0);
+  });
+
+  it("keeps the cue of a stream arrival that later stream arrivals cover before a frame", () => {
+    const p = splitXY();
+    p.stream(rec("Z1", { status: "done", statusSeq: 1 }))
+      .stream(rec("Z2"))
+      .stream(rec("Z3"))
+      .commit();
+    expect(p.panes).not.toContain("Z1");
+    expect(p.acks).toEqual([]);
+    expect(p.lay.indicators.switchDot).toBe("done");
+    expect(p.lay.indicators.attention.count).toBe(1);
+  });
+
+  it("keeps the cue of an arrival on a dropped failed pane that a later arrival covers before a frame", () => {
+    const p = splitXY();
+    p.apply((m) => paneFailed(m, "left"));
+    p.apply((m) => shellChanged(m, { kind: "paneDropped", side: "left", id: "X" })).commit();
+    p.stream(rec("Z1", { status: "done", statusSeq: 1 }))
+      .stream(rec("Z2"))
+      .commit();
+    expect(p.panes).not.toContain("Z1");
+    expect(p.acks).toEqual([]);
+    expect(p.lay.indicators.switchDot).toBe("done");
+    expect(p.lay.indicators.attention.count).toBe(1);
+  });
+
+  it("keeps the cue of a shown tab that arrivals cover in the frame its cue lands", () => {
+    const p = splitXY();
+    p.stream(rec("Y", { status: "done", statusSeq: 1 }))
+      .stream(rec("Z2"))
+      .stream(rec("Z3"))
+      .commit();
+    expect(p.panes).toEqual(["Z3", "Z2"]);
+    expect(p.acks).toEqual([]);
+    expect(p.lay.indicators.switchDot).toBe("done");
+    expect(p.lay.indicators.attention.count).toBe(1);
   });
 
   it("shows a clicked tab while a seen PUT is out", () => {
