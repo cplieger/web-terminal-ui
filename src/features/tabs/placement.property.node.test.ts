@@ -415,7 +415,9 @@ function exec(w: World, cmd: Cmd): string | null {
   }
 }
 
-/** The invariants every commit must hold (7.3.9 to 7.3.11). */
+/** What every commit holds: the strip in order, each session in one pane, a
+ *  closed split's right pane empty with the left selected, and a second fold
+ *  that changes nothing and owes no edge effect. */
 function checkCommit(page: Page): void {
   const l = page.lay;
   expect(l.strip).toEqual(byAge(page.m.sessions.keys()));
@@ -699,7 +701,7 @@ describe("cues over generated delivery orders", () => {
   );
 });
 
-describe("the orders behind the design's findings", () => {
+describe("placement whatever order start failures, restarts, collapses and 409s arrive in", () => {
   const panesKey = (p: Page): unknown => ({ panes: p.lay.panes, split: p.lay.split });
 
   it(

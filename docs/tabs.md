@@ -57,7 +57,7 @@ The state and the count are announced in the tab's accessible name and repeated 
 
 When a program raises an OSC 9 notification and the user is not looking at that terminal, the tabs feature posts a browser notification. Permission is requested on a user gesture. A denied permission leaves the tab dots as the only signal.
 
-Clicking a notification switches to the session that raised it. Reading that session closes its notification: opening its tab, opening the tab list, or a cue arriving while it is open, returning to the page while it is on screen, or reading it on any device or window showing this server. These are non-persistent notifications. A browser that does not offer the Notification constructor, or refuses it, leaves the tab dots as the signal. iOS Safari outside an installed web app is one such browser.
+Clicking a notification switches to the session that raised it. Reading that session closes its notification: opening its tab, opening the tab list or having it open when the cue arrives, returning to the page while the tab is on screen, or reading it on any device or window showing this server. These are non-persistent notifications. A browser that does not offer the Notification constructor, or refuses it, leaves the tab dots as the signal. iOS Safari outside an installed web app is one such browser.
 
 ## Cues outside the page
 

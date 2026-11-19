@@ -235,8 +235,8 @@ interface PaneState {
 
 /** The server-only events folded since an arrival covered a session, from the
  *  pane state before it, so a start failure of a covered session can re-fold
- *  them as if the failure had been known first. A user, kernel or settle event,
- *  or a removal that moves a pane, ends it. */
+ *  them as if the failure had been known first. A user, kernel, settle or
+ *  removal event ends it, unless its rule did nothing, which carries it. */
 interface Segment {
   readonly base: PaneState;
   readonly events: readonly FoldEvent[];
@@ -287,7 +287,7 @@ export interface Effects {
   readonly settle: boolean;
   /** A restart is pending while no resync is held; a level. */
   readonly resync: { readonly ids: readonly string[] } | null;
-  /** A resync's settle placed something, so the address is rewritten. */
+  /** How the address follows a pane move this call folded: replace for a settle, push otherwise. */
   readonly address: "push" | "replace" | null;
 }
 
