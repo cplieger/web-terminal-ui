@@ -1430,6 +1430,44 @@ describe("start failures learned after several arrivals", () => {
   });
 });
 
+describe("a start failure that re-folds a covering arrival's events", () => {
+  it("does not show again a stale-address toast an earlier commit showed", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.apply((m) => route(m, { kind: "single", tab: alias("Q") }, true));
+    expect(p.commit().toasts).toEqual(["stale"]);
+    p.apply((m) => paneStartFailed(m, "Y", "spawn failed"));
+    expect(p.commit().toasts).toEqual([]);
+    expect(p.panes).toEqual(["Z", "Y"]);
+  });
+
+  it("does not take focus again for a keyboard close an earlier commit answered", () => {
+    const p = splitXY("W");
+    p.stream(rec("Z")).commit();
+    p.apply((m) => removed(m, ["W"], { by: "user", keyboardHeld: true }, 0));
+    expect(p.commit().focus?.keyboardHeld).toBe(true);
+    p.stream(endedRec("Y"));
+    expect(p.commit().focus?.keyboardHeld ?? false).toBe(false);
+    expect(p.panes).toEqual(["Z", "Y"]);
+  });
+
+  it("does not re-send an ack whose only retry already failed", () => {
+    const p = splitXY();
+    p.stream(rec("Z")).commit();
+    p.stream(rec("Z", { status: "done", statusSeq: 1 }));
+    expect(p.commit().acks).toEqual([{ id: "Z", seq: 1 }]);
+    p.apply((m) => ackFailed(m, "Z", 1, false));
+    expect(p.commit().acks).toEqual([]);
+    p.apply(windowFocused);
+    expect(p.commit().acks).toEqual([{ id: "Z", seq: 1 }]);
+    p.apply((m) => ackFailed(m, "Z", 1, false));
+    expect(p.commit().acks).toEqual([]);
+    p.stream(endedRec("Y"));
+    expect(p.commit().acks).toEqual([]);
+    expect(p.panes).toEqual(["Z", "Y"]);
+  });
+});
+
 describe("rules the mutation run found unpinned", () => {
   it("forgets a tombstone whose window has passed when the next close is recorded", () => {
     let m = mergeRecord(createModel(), rec("A"), { stream: true }, 0);

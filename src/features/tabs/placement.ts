@@ -1189,6 +1189,25 @@ interface Rule {
 }
 
 const NOOP: Rule = { persist: false, moved: null, form: null };
+
+/** The one-time effects an event raises when it is first folded. */
+interface Edge {
+  readonly toasts: Toast[];
+  retry: boolean;
+  typing: boolean;
+  keyboardHeld: boolean;
+  /** A removal left no session present. */
+  settle: boolean;
+}
+
+const noEdge = (): Edge => ({
+  toasts: [],
+  retry: false,
+  typing: false,
+  keyboardHeld: false,
+  settle: false,
+});
+
 const SIDES = ["left", "right"] as const;
 const otherSide = (side: PaneSide): PaneSide => (side === "left" ? "right" : "left");
 
@@ -1211,11 +1230,8 @@ class Folder {
   private replayAt: number | null = null;
   private lastCovered: string | null = null;
   private readonly facts = new Map<string, SessionFact[]>();
-  readonly toasts: Toast[] = [];
-  settle = false;
-  retry = false;
-  typing = false;
-  keyboardHeld = false;
+  /** The edge effects of every event this call folded for the first time. */
+  readonly edge: Edge = noEdge();
   private readonly splitEnabled: boolean;
 
   constructor(m: TabsModel, prev: Layout) {
@@ -1381,7 +1397,8 @@ class Folder {
       return this.refold(seg, ev);
     }
     const before = this.paneState();
-    const rule = this.apply(ev);
+    const { rule, edge } = this.apply(ev);
+    this.raise(edge);
     const covered = this.takeCovered();
     if (covered !== null) {
       const from = seg ?? { base: before, events: [], covers: [] };
@@ -1398,6 +1415,14 @@ class Folder {
     return rule;
   }
 
+  private raise(e: Edge): void {
+    this.edge.toasts.push(...e.toasts);
+    this.edge.retry ||= e.retry;
+    this.edge.typing ||= e.typing;
+    this.edge.keyboardHeld ||= e.keyboardHeld;
+    this.edge.settle ||= e.settle;
+  }
+
   // A start failure of a session an arrival in the segment covered: the
   // segment's events are folded again from its base with every start failure
   // known by now counted from the start, so the panes are what the failure
@@ -1409,6 +1434,8 @@ class Folder {
     this.load(seg.base);
     this.replayAt = ev.at;
     const covers: string[] = [];
+    // Only pane state is replayed: each event raised its edge effects when it
+    // was first folded, and raising them again repeats a toast, a focus or an ack.
     for (const e of seg.events) {
       this.apply(e);
       const covered = this.takeCovered();
@@ -1424,34 +1451,39 @@ class Folder {
     return { persist: true, moved: "server", form: moved ? "announce" : null };
   }
 
-  private apply(ev: FoldEvent): Rule {
+  private apply(ev: FoldEvent): { readonly rule: Rule; readonly edge: Edge } {
+    const edge = noEdge();
+    return { rule: this.ruleFor(ev, edge), edge };
+  }
+
+  private ruleFor(ev: FoldEvent, edge: Edge): Rule {
     switch (ev.kind) {
       case "arrival":
         return this.arrival(ev.id, ev.at);
       case "failure":
         return this.restore(ev.id, ev.at);
       case "removal":
-        return this.removal(ev);
+        return this.removal(ev, edge);
       case "show":
-        this.retry = true;
+        edge.retry = true;
         return this.show(ev.id, ev.at);
       case "own":
-        this.retry = true;
-        this.typing ||= ev.typing;
+        edge.retry = true;
+        edge.typing ||= ev.typing;
         return this.own(ev);
       case "snap":
-        this.retry = true;
-        return this.snap(ev);
+        edge.retry = true;
+        return this.snap(ev, edge);
       case "split":
-        this.retry = true;
+        edge.retry = true;
         return ev.open ? this.openSplit(ev.at) : this.closeSplit();
       case "route":
-        this.retry = true;
-        return this.route(ev);
+        edge.retry = true;
+        return this.route(ev, edge);
       case "settle":
-        return this.settleRule(ev);
+        return this.settleRule(ev, edge);
       case "resyncBegan":
-        return this.resyncBegan(ev);
+        return this.resyncBegan(ev, edge);
       case "select":
         return this.select(ev.side);
       case "shell":
@@ -1465,7 +1497,7 @@ class Folder {
         this.s.fit = ev.canOpen;
         return NOOP;
       case "syncPoint":
-        this.retry = true;
+        edge.retry = true;
         return NOOP;
       case "holdsChanged":
         this.s.held = ev.active;
@@ -1530,7 +1562,7 @@ class Folder {
     return rule;
   }
 
-  private removal(ev: Extract<TimelineEntry, { kind: "removal" }>): Rule {
+  private removal(ev: Extract<TimelineEntry, { kind: "removal" }>, edge: Edge): Rule {
     const gone = new Set(ev.ids);
     for (const side of SIDES) {
       const c = this.s.covered[side];
@@ -1540,12 +1572,12 @@ class Folder {
     }
     this.s.recent = this.s.recent.filter((id) => !gone.has(id));
     if (ev.by === "user") {
-      this.retry = true;
-      this.typing ||= ev.typing;
-      this.keyboardHeld ||= ev.keyboardHeld;
+      edge.retry = true;
+      edge.typing ||= ev.typing;
+      edge.keyboardHeld ||= ev.keyboardHeld;
     }
     if (this.stripAt(ev.at).length === 0) {
-      this.settle = true;
+      edge.settle = true;
     }
     const isGone = (id: string | null): id is string => id !== null && gone.has(id);
     if (!isGone(this.s.left) && !isGone(this.s.right)) {
@@ -1616,7 +1648,7 @@ class Folder {
     return { persist: true, moved: "user", form: "announce" };
   }
 
-  private snap(ev: Extract<TimelineEntry, { kind: "snap" }>): Rule {
+  private snap(ev: Extract<TimelineEntry, { kind: "snap" }>, edge: Edge): Rule {
     const { id, side, at } = ev;
     if (!this.presentAt(id, at)) {
       return NOOP;
@@ -1633,7 +1665,7 @@ class Folder {
     if (opening && partner === null) {
       return NOOP;
     }
-    this.typing ||= ev.typing;
+    edge.typing ||= ev.typing;
     this.s.open = true;
     const displaced = this.s[side];
     this.put(side, id);
@@ -1668,9 +1700,9 @@ class Folder {
     return { persist: true, moved: "user", form: null };
   }
 
-  private route(ev: Extract<TimelineEntry, { kind: "route" }>): Rule {
+  private route(ev: Extract<TimelineEntry, { kind: "route" }>, edge: Edge): Rule {
     if (ev.stale) {
-      this.toasts.push("stale");
+      edge.toasts.push("stale");
     }
     const r = ev.route;
     if (r === null) {
@@ -1683,7 +1715,7 @@ class Folder {
     }
     const narrow = r.kind === "split" && !this.s.open && !this.s.fit;
     if (narrow) {
-      this.toasts.push("narrow");
+      edge.toasts.push("narrow");
     }
     if (narrow || r.kind === "single") {
       const at = this.sideOf(first);
@@ -1719,13 +1751,13 @@ class Folder {
     return { persist: true, moved: "user", form: announce ? "announce" : null };
   }
 
-  private settleRule(ev: Extract<TimelineEntry, { kind: "settle" }>): Rule {
+  private settleRule(ev: Extract<TimelineEntry, { kind: "settle" }>, edge: Edge): Rule {
     if (this.anyShown()) {
       this.s.repairArmed = false;
       return NOOP;
     }
     if (ev.stale) {
-      this.toasts.push("stale");
+      edge.toasts.push("stale");
     }
     const t = ev.at;
     const strip = this.stripAt(t).map((f) => f.id);
@@ -1810,9 +1842,9 @@ class Folder {
     };
   }
 
-  private resyncBegan(ev: Extract<TimelineEntry, { kind: "resyncBegan" }>): Rule {
+  private resyncBegan(ev: Extract<TimelineEntry, { kind: "resyncBegan" }>, edge: Edge): Rule {
     const dropped = new Set(ev.ids);
-    this.typing ||= ev.typing;
+    edge.typing ||= ev.typing;
     this.s.recent = this.s.recent.filter((id) => !dropped.has(id));
     for (const side of SIDES) {
       const id = this.s[side];
@@ -1975,7 +2007,7 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
       (f) =>
         isUnread(f) &&
         (viewedUntil.get(f.id) ?? 0) > f.statusAt &&
-        (fold.retry || f.failedSeq !== f.statusSeq),
+        (fold.edge.retry || f.failedSeq !== f.statusSeq),
     )
     .map((f) => ({ id: f.id, seq: f.statusSeq }));
   // Leaving out the sessions this call acks gives the value those acks produce.
@@ -2005,17 +2037,15 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
     indicators: { switchDot, attention },
   };
   const { moved, persist, form } = acc;
-  const focus =
-    form !== null || fold.typing || fold.keyboardHeld
-      ? { form, typing: fold.typing, keyboardHeld: fold.keyboardHeld }
-      : null;
+  const { typing, keyboardHeld } = fold.edge;
+  const focus = form !== null || typing || keyboardHeld ? { form, typing, keyboardHeld } : null;
   const effects: Effects = {
     acks,
     moved,
     persist,
     focus,
-    toasts: fold.toasts,
-    settle: fold.settle,
+    toasts: fold.edge.toasts,
+    settle: fold.edge.settle,
     resync: m.restartPending !== null ? { ids: m.restartPending.ids } : null,
     address: moved === "none" ? null : moved === "settle" ? "replace" : "push",
   };

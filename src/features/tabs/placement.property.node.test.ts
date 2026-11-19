@@ -11,6 +11,7 @@ import {
   paneStartFailed,
   removed,
   resyncBegan,
+  route,
   ownReleased,
   resyncSettled,
   select,
@@ -22,6 +23,7 @@ import {
   switcherToggled,
   ackSettled,
   ackFailed,
+  type Effects,
   type SplitOpening,
 } from "./placement.js";
 import {
@@ -34,6 +36,7 @@ import {
   type ListToken,
   type Page,
 } from "./test-helpers/placement-world.js";
+import type { TabAlias } from "./route.js";
 
 const ORDERS = { numRuns: 4000 } as const;
 const SLOW = { timeout: 60_000 } as const;
@@ -138,7 +141,7 @@ const cmdArb = fc.oneof(
   fc.record({ k: fc.constant("pollAns" as const) }),
   fc.record({ k: fc.constant("reopen" as const), seed: fc.nat(), early: fc.nat({ max: 4 }) }),
   fc.record({ k: fc.constant("openAns" as const), fail: fc.boolean() }),
-  fc.record({ k: fc.constant("ack" as const), gone: fc.boolean() }),
+  fc.record({ k: fc.constant("ack" as const), answer: fc.constantFrom("ok", "gone", "fail") }),
   fc.record({ k: fc.constant("visible" as const) }),
   fc.record({ k: fc.constant("resyncRun" as const) }),
   fc.record({ k: fc.constant("show" as const), who }),
@@ -146,7 +149,12 @@ const cmdArb = fc.oneof(
     k: fc.constant("select" as const),
     side: fc.constantFrom("left" as const, "right" as const),
   }),
-  fc.record({ k: fc.constant("close" as const), who, many: fc.boolean() }),
+  fc.record({ k: fc.constant("close" as const), who, many: fc.boolean(), held: fc.boolean() }),
+  fc.record({
+    k: fc.constant("route" as const),
+    who,
+    shape: fc.constantFrom("single" as const, "split" as const, "stale" as const),
+  }),
   fc.record({ k: fc.constant("ownBegin" as const), button: fc.boolean() }),
   fc.record({ k: fc.constant("ownAns" as const) }),
   fc.record({ k: fc.constant("split" as const) }),
@@ -176,6 +184,7 @@ const USER: ReadonlySet<Cmd["k"]> = new Set([
   "show",
   "select",
   "close",
+  "route",
   "ownAns",
   "split",
   "tray",
@@ -188,6 +197,37 @@ const COMMIT_BEFORE: ReadonlySet<Cmd["k"]> = new Set([
   "hostOpen",
   "resyncRun",
   "ack",
+]);
+
+// The steps that fold an intent or a sync point, after which a failed ack is
+// sent again (design 2.1 `retry`). No other step may re-send one.
+const RETRIES: ReadonlySet<Cmd["k"]> = new Set([
+  "show",
+  "close",
+  "route",
+  "ownAns",
+  "split",
+  "visible",
+  "tray",
+  "openAns",
+  "resyncRun",
+]);
+
+// The steps that meet an arrival covering a session whose start then fails.
+const REFOLD_KINDS: ReadonlySet<Cmd["k"]> = new Set([
+  "create",
+  "deliver",
+  "fail",
+  "pane4001",
+  "status",
+  "read",
+  "route",
+  "close",
+  "ack",
+  "visible",
+  "tray",
+  "select",
+  "show",
 ]);
 
 interface Step {
@@ -210,6 +250,10 @@ interface World {
   readonly opens: { token: ListToken; rows: StatusRecord[]; pending: StatusRecord[] }[];
   own: { id: string; opening: SplitOpening | null } | null;
   readonly answered: boolean[];
+  /** What the steps since the last commit owe the next commit's edge effects. */
+  since: { stale: number; held: boolean; retry: boolean };
+  /** The occurrences whose last ack failed with a non-404, as `id:seq`. */
+  readonly failedAcks: Set<string>;
 }
 
 function world(keep: string | null = null): World {
@@ -220,6 +264,8 @@ function world(keep: string | null = null): World {
     opens: [],
     own: null,
     answered: [],
+    since: { stale: 0, held: false, retry: false },
+    failedAcks: new Set(),
   };
 }
 
@@ -257,6 +303,7 @@ function resyncRun(w: World): void {
 /** Runs one command; returns the id a user step must show in its own commit. */
 function exec(w: World, cmd: Cmd): string | null {
   const { page, server } = w;
+  w.since.retry ||= RETRIES.has(cmd.k);
   switch (cmd.k) {
     case "create":
       server.create("Z");
@@ -332,10 +379,16 @@ function exec(w: World, cmd: Cmd): string | null {
       const first = order[0];
       if (first !== undefined) {
         w.answered[first.i] = true;
+        const key = `${first.a.id}:${String(first.a.seq)}`;
+        if (cmd.answer === "fail") {
+          w.failedAcks.add(key);
+        } else {
+          w.failedAcks.delete(key);
+        }
         page.apply((m) =>
-          cmd.gone
-            ? ackFailed(m, first.a.id, first.a.seq, true)
-            : ackSettled(m, first.a.id, first.a.seq),
+          cmd.answer === "ok"
+            ? ackSettled(m, first.a.id, first.a.seq)
+            : ackFailed(m, first.a.id, first.a.seq, cmd.answer === "gone"),
         );
       }
       return null;
@@ -368,7 +421,25 @@ function exec(w: World, cmd: Cmd): string | null {
       for (const id of victims) {
         server.remove(id);
       }
-      page.apply((m) => removed(m, victims, { by: "user" }, 0));
+      page.apply((m) => removed(m, victims, { by: "user", keyboardHeld: cmd.held }, 0));
+      w.since.held ||= cmd.held;
+      return null;
+    }
+    case "route": {
+      const ids = present(w);
+      const id = ids[cmd.who % Math.max(1, ids.length)];
+      if (cmd.shape === "stale" || id === undefined) {
+        page.apply((m) => route(m, { kind: "single", tab: "Q9" as TabAlias }, true));
+        w.since.stale += 1;
+        return null;
+      }
+      if (cmd.shape === "single") {
+        page.apply((m) => route(m, { kind: "single", tab: id as TabAlias }, true));
+        return id;
+      }
+      const other = ids[(cmd.who + 1) % ids.length] ?? null;
+      const right = other === id ? null : (other as TabAlias | null);
+      page.apply((m) => route(m, { kind: "split", left: id as TabAlias, right }, true));
       return null;
     }
     case "ownBegin":
@@ -449,6 +520,18 @@ function checkCommit(page: Page): void {
   ]);
 }
 
+/** Each edge effect fires in the commit that first folds its input, and only
+ *  there: a stale address toasts once, a keyboard close owes its focus once,
+ *  and a failed ack is sent again only after an intent or a sync point. */
+function checkEdges(w: World, fx: Effects): void {
+  expect(fx.toasts.filter((t) => t === "stale")).toHaveLength(w.since.stale);
+  expect(fx.focus?.keyboardHeld ?? false).toBe(w.since.held);
+  if (!w.since.retry) {
+    const resent = fx.acks.filter((a) => w.failedAcks.has(`${a.id}:${String(a.seq)}`));
+    expect(resent).toEqual([]);
+  }
+}
+
 function snapOf(page: Page): unknown {
   const l = page.lay;
   return {
@@ -500,10 +583,12 @@ function run(
   const observe = opts.observe ?? ((x: World) => snapOf(x.page));
   const commit = (): void => {
     if (opts.reducersOnly !== true) {
-      w.page.commit();
+      const fx = w.page.commit();
       if (opts.unchecked !== true) {
         checkCommit(w.page);
+        checkEdges(w, fx);
       }
+      w.since = { stale: 0, held: false, retry: false };
     }
   };
   const seen: unknown[] = [observe(w)];
@@ -543,6 +628,19 @@ describe("placement over generated input orders", () => {
       );
     },
   );
+
+  it("raises each edge effect once while start failures re-fold a covering arrival", SLOW, () => {
+    const covering: Step[] = [
+      { cmd: { k: "create" }, commit: false },
+      { cmd: { k: "deliver", n: 1 }, commit: true },
+    ];
+    fc.assert(
+      fc.property(stepsArb(24, REFOLD_KINDS), (steps) => {
+        const { w } = run([...covering, ...steps], false);
+        expect(w.page.log.length).toBeGreaterThan(covering.length);
+      }),
+    );
+  });
 
   it(
     "converges every session's facts on the server's state once every delivery lands",
