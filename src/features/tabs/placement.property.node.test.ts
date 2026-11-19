@@ -1053,8 +1053,10 @@ describe("placement whatever order start failures, restarts, collapses and 409s 
         }
         const arrivals = Array.from({ length: s.k }, (_, i) => `Z${String(i + 1)}`);
         const at = Math.min(pos, s.k);
+        let failed = false;
         const steps: (() => void)[] = arrivals.map((id) => () => p.stream(rec(id)));
         steps.splice(at, 0, () => {
+          failed = true;
           if (s.source === "stream") {
             p.stream(endedRec("Y"));
           } else if (s.source === "4001") {
@@ -1071,6 +1073,9 @@ describe("placement whatever order start failures, restarts, collapses and 409s 
           step();
           if (commits[i] === true) {
             p.commit();
+            if (failed) {
+              expect([p.lay.panes.left, p.lay.panes.right], "Y once failed").toContain("Y");
+            }
           }
         });
         p.stream(endedRec("Y")).commit();
