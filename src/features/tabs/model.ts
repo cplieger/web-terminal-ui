@@ -348,19 +348,6 @@ export function compareTabOrder(a: TabOrderKey, b: TabOrderKey): number {
   return a.id < b.id ? -1 : 1;
 }
 
-/** Where `incoming` belongs in `current` under compareTabOrder: before the first
- *  tab that outranks it, else the end, so every arrival order of one session set
- *  converges on the same strip. */
-export function orderedInsertIndex(current: readonly TabOrderKey[], incoming: TabOrderKey): number {
-  for (let i = 0; i < current.length; i++) {
-    const other = current[i];
-    if (other !== undefined && compareTabOrder(other, incoming) > 0) {
-      return i;
-    }
-  }
-  return current.length;
-}
-
 /** One chip's view: its elements, its line cache and its reading position. The
  *  session's data lives in placement.ts's SessionFact. */
 export interface Tab {

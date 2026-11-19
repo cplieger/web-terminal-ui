@@ -23,7 +23,6 @@ import {
   normalizeActivityCount,
   normalizeProgress,
   normalizeSeq,
-  orderedInsertIndex,
   renderedProgress,
   statusPhrase,
   statusRevealsDot,
@@ -56,12 +55,9 @@ afterEach(() => {
 });
 
 describe("SessionAPIError carries what the server said", () => {
-  // Every case below asserts through `await expect(p).rejects`, never `.catch(cb)`.
-  // A callback says NOTHING when the promise RESOLVES: with the `!r.ok` guard gone
-  // the call succeeds, the callback never runs, and the `it` passes having asserted
-  // nothing — or on a sibling verb's assertions, when one `it` covered two verbs.
-  // That is why four mutants on those guards survived a file holding eight failure
-  // tests. `.rejects` fails on a resolve, which is the whole point.
+  // Every case below asserts through `await expect(p).rejects`, never `.catch(cb)`:
+  // a callback says nothing when the promise resolves, so with the `!r.ok` guard
+  // gone the `it` would pass having asserted nothing.
   it("exposes the status so a caller can tell 503 from 500", async () => {
     stubFetch(response(503));
     const refused = createSessionAPI("/api/sessions", window).create();
@@ -304,16 +300,12 @@ describe("the strip's order follows the server, not arrival", () => {
       ? { id, createdAt: born[id] ?? "" }
       : { id, createdAt: born[id] ?? "", order };
 
-  /** Build a strip by adopting ids in the given arrival order, the way
-   *  adoptSession does: compute the index, splice the tab in. */
-  const build = (arrival: readonly string[], order: Record<string, number>): string[] => {
-    const strip: TabOrderKey[] = [];
-    for (const id of arrival) {
-      const incoming = key(id, order[id]);
-      strip.splice(orderedInsertIndex(strip, incoming), 0, incoming);
-    }
-    return strip.map((t) => t.id);
-  };
+  /** The strip layoutFor derives from sessions learned in the given order. */
+  const build = (arrival: readonly string[], order: Record<string, number>): string[] =>
+    arrival
+      .map((id) => key(id, order[id]))
+      .sort(compareTabOrder)
+      .map((t) => t.id);
 
   it("rebuilds the server's arrangement from any arrival order", () => {
     // This is the whole point of server-owned order: a second device that has
@@ -339,11 +331,6 @@ describe("the strip's order follows the server, not arrival", () => {
     for (const arrival of permutations(["a", "b", "c", "d"])) {
       expect(build(arrival, { c: 0, b: 1 }), arrival.join(">")).toEqual(["c", "b", "d", "a"]);
     }
-  });
-
-  it("appends the first tab of an empty strip", () => {
-    expect(orderedInsertIndex([], key("a", 0))).toBe(0);
-    expect(orderedInsertIndex([], key("a"))).toBe(0);
   });
 
   it("converges on one strip from every arrival order, for any server order", () => {
@@ -459,37 +446,6 @@ describe("compareTabOrder is a total order", () => {
         ).toBe(0);
       }
     }
-  });
-
-  it("inserts a key equal to one on the strip AFTER it, never in front of it", () => {
-    // orderedInsertIndex answers "the first tab that sorts AFTER this one", and an
-    // equal key sorts after nothing: the same session can be delivered twice (the
-    // status stream's snapshot races the bootstrap's list), and the answer for it
-    // has to be the slot behind its twin. Answering the twin's own index instead
-    // is the one placement that puts a tab in front of a key it compares EQUAL to,
-    // which is also what would break the convergence property above: repeated
-    // insertion of one key would walk it backwards through the strip.
-    const strip = [at(early, "a", 0), at(late, "b", 1)];
-    expect(orderedInsertIndex(strip, at(early, "a", 0))).toBe(1);
-    expect(orderedInsertIndex(strip, at(late, "b", 1))).toBe(2);
-
-    const grown = [...strip];
-    const twin = at(early, "a", 0);
-    grown.splice(orderedInsertIndex(grown, twin), 0, twin);
-    expect(grown.map((k) => k.id)).toEqual(["a", "a", "b"]);
-  });
-
-  it("sorts a whole strip the same way inserting one at a time does", () => {
-    // applyServerOrder sorts the live list; adoptSession inserts into it. The two
-    // must agree, or a remote reorder and a fresh adopt would fight.
-    const strip = [at(late, "b", 2), at(early, "a", 0), at(late, "c", 1)];
-    const sorted = [...strip].sort(compareTabOrder).map((k) => k.id);
-    const inserted: TabOrderKey[] = [];
-    for (const k of strip) {
-      inserted.splice(orderedInsertIndex(inserted, k), 0, k);
-    }
-    expect(sorted).toEqual(inserted.map((k) => k.id));
-    expect(sorted).toEqual(["a", "c", "b"]);
   });
 });
 
