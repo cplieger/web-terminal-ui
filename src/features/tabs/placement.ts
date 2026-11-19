@@ -32,24 +32,34 @@ export type Origin = "boot" | "settle" | "own" | "elsewhere";
 export interface SessionFact {
   readonly id: string;
   readonly createdAt: string;
-  /** The server's shared position, undefined against a server that keeps none. */
+  /** The server's shared position, undefined against a server that keeps none.
+   *  Every status record carries it, so another device's reorder reaches this strip. */
   readonly order: number | undefined;
-  /** The session's URL name, undefined when the server sent none or an invalid one. */
+  /** The session's URL name, undefined when the server sent none (before engine
+   *  6.2) or one outside the alias grammar; such a tab has no address of its own. */
   readonly alias: TabAlias | undefined;
-  /** The title the server resolved; a blank record never overwrites it. */
+  /** The title the SERVER resolved (pinned name, OSC 0/2, host push, inference);
+   *  the label adds the fallback and de-duplication. A blank record never overwrites it. */
   readonly title: string;
-  /** The user's pinned name; "" or undefined is none. */
+  /** The user's pinned name; "" or undefined is none. Outranks every automatic
+   *  source in `baseLabel` and enables the menu's "use the automatic name". */
   readonly pinnedTitle: string | undefined;
   /** The raw server status ("" for none). */
   readonly status: string;
+  /** The server's number for that status, 0 when none yet. */
   readonly statusSeq: number;
   /** When the status or its occurrence last changed. */
   readonly statusAt: number;
-  /** Sticky: the session emitted a genuine activity signal. */
+  /** Sticky: the session emitted a genuine activity signal (OSC 7501, OSC 9;4 or
+   *  a classified OSC 9); its dot shows only while true, so a plain shell has none. */
   readonly reports: boolean;
-  /** The last reported percentage, or PROGRESS_ABSENT. */
+  /** The last reported percentage, or PROGRESS_ABSENT; whether it is shown is
+   *  renderedProgress's question. */
   readonly progress: number;
+  /** The host's secondary activity state ("" for none), independent of `status`
+   *  and `reports`: a background job can run after its turn finished. */
   readonly activity: string;
+  /** How many sources produced that state, 0 when the server does not count. */
   readonly activityCount: number;
   /** The stream epoch of the last stream record, 0 when none: a list requested
    *  before it is older. */
@@ -59,11 +69,15 @@ export interface SessionFact {
    *  meaningful only while failAt is set. Never cleared. */
   readonly startFailure: string;
   readonly failAt: number | null;
-  /** The server-confirmed read floor; only rises. */
+  /** The server-confirmed read floor; only rises, since a lower one is an older
+   *  record, never a retraction. */
   readonly seenSeq: number;
-  /** This page's optimistic read floor, 0 when none. */
+  /** This page's optimistic read floor, 0 when none. A 204 clears it once seenSeq
+   *  covers it, a non-404 failure only while it holds the failed number, and a 404
+   *  keeps it until the session is removed. */
   readonly ackSeq: number;
-  /** The occurrence whose ack last failed with a non-404, 0 when none. */
+  /** The occurrence whose ack last failed with a non-404, 0 when none; the
+   *  automatic ack skips it, so a failing server sees one PUT per occurrence. */
   readonly failedSeq: number;
   readonly origin: Origin;
   readonly born: number;

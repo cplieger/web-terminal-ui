@@ -8,7 +8,7 @@ Both presets need a server that serves the engine's session API: `/api/sessions`
 
 ## Tabs on a phone
 
-On a wide screen the tabs sit in a strip along the bottom edge. When the terminal is 600 px wide or less, or 500 px tall or less, the strip becomes a switcher bar that shows the current tab. Swipe the bar sideways to change tab. Swipe it up or tap it to open a list of your other tabs.
+On a wide screen the tabs sit in a strip along the bottom edge. When the terminal is 600 px wide or less, or 500 px tall or less, the strip becomes a switcher bar that shows the current tab. Swipe the bar sideways to change tab. Swipe it up or tap it to open a list of your other tabs. The switch button carries a dot for the most urgent unread tab you cannot see: a crash or an error before a request for input, and that before a finished turn.
 
 ## Tab titles
 
@@ -57,7 +57,7 @@ The state and the count are announced in the tab's accessible name and repeated 
 
 When a program raises an OSC 9 notification and the user is not looking at that terminal, the tabs feature posts a browser notification. Permission is requested on a user gesture. A denied permission leaves the tab dots as the only signal.
 
-Clicking a notification switches to the session that raised it. Reading that session closes its notification: opening its tab, opening the tab list, returning to the page while it is on screen, or reading it on any device or window showing this server. These are non-persistent notifications. A browser that does not offer the Notification constructor, or refuses it, leaves the tab dots as the signal. iOS Safari outside an installed web app is one such browser.
+Clicking a notification switches to the session that raised it. Reading that session closes its notification: opening its tab, opening the tab list, or a cue arriving while it is open, returning to the page while it is on screen, or reading it on any device or window showing this server. These are non-persistent notifications. A browser that does not offer the Notification constructor, or refuses it, leaves the tab dots as the signal. iOS Safari outside an installed web app is one such browser.
 
 ## Cues outside the page
 
