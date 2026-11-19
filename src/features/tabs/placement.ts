@@ -185,8 +185,8 @@ export interface TabsModel {
    *  list cannot re-add them within CLOSE_TOMBSTONE_MS. */
   readonly tombstones: ReadonlyMap<string, number>;
   readonly timeline: readonly TimelineEntry[];
-  /** The clock at the end of each input since the last commit: the points a
-   *  frame can paint, so the only ones at which a session counts as seen. */
+  /** The clock at the end of each input since the last commit, the only points
+   *  at which stepFor counts a session as seen. */
   readonly inputEnds: readonly number[];
   readonly holds: Holds;
   /** An own create answered during a resync, folded right after its settle. */
@@ -2014,9 +2014,7 @@ export function stepFor(m: TabsModel, prev: Layout): { layout: Layout; effects: 
     }
   };
   // An ack is owed for a cue whose session was in view at an input's end while
-  // that status was current: the input ends are the same wherever commits fall,
-  // so the acks do not depend on them, and a session placed and covered
-  // inside one input was never painted. viewedAt[id] is its last such end.
+  // that status was current. viewedAt[id] is its last such end.
   const viewedAt = new Map<string, number>();
   const inputEnds = m.inputEnds.filter((e) => e > prev.through);
   let ends = 0;
