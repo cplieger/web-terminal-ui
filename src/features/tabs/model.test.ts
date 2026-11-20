@@ -4,7 +4,7 @@
  *  whole point of SessionAPIError: a host may refuse session creation
  *  temporarily and say so (503 + Retry-After). Flattened into a message string,
  *  that is indistinguishable from a 500 and loses the retry hint. */
-import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import fc from "fast-check";
 import layoutShapes from "@cplieger/web-terminal-engine/layout-shapes.json" with { type: "json" };
 import type { CueStatus, PaneLayout, TabOrderKey } from "./model.js";
@@ -14,7 +14,6 @@ import {
   activityPhrase,
   compareTabOrder,
   createSessionAPI,
-  createTombstones,
   foldedCueStatus,
   isCueStatus,
   isEndedStatus,
@@ -23,7 +22,6 @@ import {
   normalizeActivityCount,
   normalizeProgress,
   normalizeSeq,
-  orderedInsertIndex,
   renderedProgress,
   statusPhrase,
   statusRevealsDot,
@@ -56,12 +54,9 @@ afterEach(() => {
 });
 
 describe("SessionAPIError carries what the server said", () => {
-  // Every case below asserts through `await expect(p).rejects`, never `.catch(cb)`.
-  // A callback says NOTHING when the promise RESOLVES: with the `!r.ok` guard gone
-  // the call succeeds, the callback never runs, and the `it` passes having asserted
-  // nothing — or on a sibling verb's assertions, when one `it` covered two verbs.
-  // That is why four mutants on those guards survived a file holding eight failure
-  // tests. `.rejects` fails on a resolve, which is the whole point.
+  // Every case below asserts through `await expect(p).rejects`, never `.catch(cb)`:
+  // a callback says nothing when the promise resolves, so with the `!r.ok` guard
+  // gone the `it` would pass having asserted nothing.
   it("exposes the status so a caller can tell 503 from 500", async () => {
     stubFetch(response(503));
     const refused = createSessionAPI("/api/sessions", window).create();
@@ -304,16 +299,12 @@ describe("the strip's order follows the server, not arrival", () => {
       ? { id, createdAt: born[id] ?? "" }
       : { id, createdAt: born[id] ?? "", order };
 
-  /** Build a strip by adopting ids in the given arrival order, the way
-   *  adoptSession does: compute the index, splice the tab in. */
-  const build = (arrival: readonly string[], order: Record<string, number>): string[] => {
-    const strip: TabOrderKey[] = [];
-    for (const id of arrival) {
-      const incoming = key(id, order[id]);
-      strip.splice(orderedInsertIndex(strip, incoming), 0, incoming);
-    }
-    return strip.map((t) => t.id);
-  };
+  /** The strip layoutFor derives from sessions learned in the given order. */
+  const build = (arrival: readonly string[], order: Record<string, number>): string[] =>
+    arrival
+      .map((id) => key(id, order[id]))
+      .sort(compareTabOrder)
+      .map((t) => t.id);
 
   it("rebuilds the server's arrangement from any arrival order", () => {
     // This is the whole point of server-owned order: a second device that has
@@ -339,11 +330,6 @@ describe("the strip's order follows the server, not arrival", () => {
     for (const arrival of permutations(["a", "b", "c", "d"])) {
       expect(build(arrival, { c: 0, b: 1 }), arrival.join(">")).toEqual(["c", "b", "d", "a"]);
     }
-  });
-
-  it("appends the first tab of an empty strip", () => {
-    expect(orderedInsertIndex([], key("a", 0))).toBe(0);
-    expect(orderedInsertIndex([], key("a"))).toBe(0);
   });
 
   it("converges on one strip from every arrival order, for any server order", () => {
@@ -459,37 +445,6 @@ describe("compareTabOrder is a total order", () => {
         ).toBe(0);
       }
     }
-  });
-
-  it("inserts a key equal to one on the strip AFTER it, never in front of it", () => {
-    // orderedInsertIndex answers "the first tab that sorts AFTER this one", and an
-    // equal key sorts after nothing: the same session can be delivered twice (the
-    // status stream's snapshot races the bootstrap's list), and the answer for it
-    // has to be the slot behind its twin. Answering the twin's own index instead
-    // is the one placement that puts a tab in front of a key it compares EQUAL to,
-    // which is also what would break the convergence property above: repeated
-    // insertion of one key would walk it backwards through the strip.
-    const strip = [at(early, "a", 0), at(late, "b", 1)];
-    expect(orderedInsertIndex(strip, at(early, "a", 0))).toBe(1);
-    expect(orderedInsertIndex(strip, at(late, "b", 1))).toBe(2);
-
-    const grown = [...strip];
-    const twin = at(early, "a", 0);
-    grown.splice(orderedInsertIndex(grown, twin), 0, twin);
-    expect(grown.map((k) => k.id)).toEqual(["a", "a", "b"]);
-  });
-
-  it("sorts a whole strip the same way inserting one at a time does", () => {
-    // applyServerOrder sorts the live list; adoptSession inserts into it. The two
-    // must agree, or a remote reorder and a fresh adopt would fight.
-    const strip = [at(late, "b", 2), at(early, "a", 0), at(late, "c", 1)];
-    const sorted = [...strip].sort(compareTabOrder).map((k) => k.id);
-    const inserted: TabOrderKey[] = [];
-    for (const k of strip) {
-      inserted.splice(orderedInsertIndex(inserted, k), 0, k);
-    }
-    expect(sorted).toEqual(inserted.map((k) => k.id));
-    expect(sorted).toEqual(["a", "c", "b"]);
   });
 });
 
@@ -763,12 +718,13 @@ describe("the session API's requests", () => {
 });
 
 describe("the status vocabulary", () => {
-  it("treats both ways a process ENDS as ended", () => {
+  it("treats every way a session ENDS as ended", () => {
     // A crashed session is exactly as unable to produce output as an exited one,
     // so session selection must not read it as live (reloading onto a corpse was
-    // the stuck-loading wedge).
+    // the stuck-loading wedge). An `ended` one never had a process at all.
     expect(isEndedStatus("exited")).toBe(true);
     expect(isEndedStatus("crashed")).toBe(true);
+    expect(isEndedStatus("ended")).toBe(true);
     for (const live of ["idle", "working", "warning", "failed", "input", "done", ""]) {
       expect(isEndedStatus(live), live).toBe(false);
     }
@@ -790,6 +746,7 @@ describe("the status vocabulary", () => {
     expect(statusPhrase("done")).toBe("turn finished");
     expect(statusPhrase("exited")).toBe("session ended");
     expect(statusPhrase("crashed")).toBe("process crashed");
+    expect(statusPhrase("ended")).toBe("could not start");
     expect(statusPhrase("idle")).toBe("idle");
     expect(statusPhrase("")).toBe("idle");
     // A status outside the built-in vocabulary is surfaced raw rather than
@@ -1027,56 +984,5 @@ describe("the session's percentage", () => {
     expect(renderedProgress("failed", 42)).toBe(42);
     expect(renderedProgress("warning", 25)).toBe(25);
     expect(renderedProgress("working", 0)).toBe(0);
-  });
-});
-
-/** Close tombstones. The failure they exist to prevent is a tab the user just
- *  closed flashing back into the strip, because a listing that predates the
- *  server reaping the session (the SSE re-open snapshot, or the poll) still
- *  carries it. Nothing exercised this before, so every rule below — the window,
- *  its far edge, and the sweep's blast radius — was load-bearing and unpinned. */
-describe("close tombstones keep a closed tab from flashing back", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("reports a session the user just closed as tombstoned", () => {
-    const tombs = createTombstones(() => Date.now(), 15_000);
-    tombs.add("sess-1");
-    expect(tombs.active("sess-1")).toBe(true);
-  });
-
-  it("reports a session it never saw as free to adopt", () => {
-    // A false positive here is worse than a flash-back: it would swallow a tab
-    // the server legitimately lists and the user never closed.
-    const tombs = createTombstones(() => Date.now(), 15_000);
-    tombs.add("sess-1");
-    expect(tombs.active("sess-2")).toBe(false);
-  });
-
-  it("stops tombstoning at exactly the end of the window, not after it", () => {
-    // The far edge is the whole contract: past it the server has had its chance
-    // to reap, so a listing that still carries the id is authoritative and the
-    // adopt must proceed.
-    const tombs = createTombstones(() => Date.now(), 15_000);
-    tombs.add("sess-1");
-    vi.advanceTimersByTime(14_999);
-    expect(tombs.active("sess-1")).toBe(true);
-    vi.advanceTimersByTime(1);
-    expect(tombs.active("sess-1")).toBe(false);
-  });
-
-  it("does not let a second close sweep away the first tab's live tombstone", () => {
-    // add() sweeps elapsed entries so the map cannot grow over a long session of
-    // opens and closes. A sweep that took live entries with it would re-adopt the
-    // tab closed a moment ago, which is the bug the tombstones exist to stop.
-    const tombs = createTombstones(() => Date.now(), 15_000);
-    tombs.add("sess-1");
-    vi.advanceTimersByTime(1000);
-    tombs.add("sess-2");
-    expect(tombs.active("sess-1")).toBe(true);
   });
 });

@@ -280,13 +280,49 @@ describe("process exit (the engine's definitive 4001 close)", () => {
 
     // The engine reports the process-exited close on the active socket.
     const cbs = fake.callbacks();
-    cbs.onProcessExit?.();
+    cbs.onProcessExit?.({ code: 4001, reason: "" });
 
     // The overlay comes down even though no screen frame ever rendered
     // (attach-to-already-dead-session): this is the anti-wedge guarantee.
     expect(loading.classList.contains("fade")).toBe(true);
     // And the state machine surfaces the definitive end, not a reconnect.
     expect(seen).toContain("ended");
+  });
+
+  it("shows a session's start failure with its reason beside the ended state", async () => {
+    const root = rootIn();
+    const seen: string[] = [];
+    const watcher: TerminalFeature = {
+      name: "start-failure-watcher",
+      setup(ctx) {
+        ctx.on("connection:state", (s) => {
+          seen.push(s);
+        });
+        return { teardown: () => undefined };
+      },
+    };
+    await mountTerminal(root, { features: () => [watcher] });
+    await tick();
+
+    fake.callbacks().onProcessExit?.({ code: 4001, reason: "the process failed to start" });
+
+    expect(seen).toContain("ended");
+    expect(root.querySelector(".wt-toast")?.textContent).toBe(
+      "Could not start the terminal: the process failed to start",
+    );
+  });
+
+  it.each([
+    ["a process that ran", { code: 4001, reason: "" }],
+    ["a session the server does not know", { code: 4004, reason: "unknown session" }],
+  ])("shows no start failure for %s", async (_what, close) => {
+    const root = rootIn();
+    await mountTerminal(root);
+    await tick();
+
+    fake.callbacks().onProcessExit?.(close);
+
+    expect(root.querySelector(".wt-toast")?.textContent ?? "").toBe("");
   });
 
   it("dismisses the loading overlay and emits 'incompatible' on wire refusal", async () => {
@@ -343,7 +379,7 @@ describe("process exit (the engine's definitive 4001 close)", () => {
     // The kernel must not rethrow into the engine's close handler either: the
     // socket teardown is mid-flight and has nowhere to put an exception.
     expect(() => {
-      cbs.onProcessExit?.();
+      cbs.onProcessExit?.({ code: 4001, reason: "" });
     }).not.toThrow();
 
     expect(onSessionEnded).toHaveBeenCalledTimes(1);
@@ -390,7 +426,7 @@ describe("reattach", () => {
     const term = await mountTerminal(root, { features: () => [watcher] });
     await tick();
     const cbs = fake.callbacks();
-    cbs.onProcessExit?.(); // the definitive close; also marks the kernel loaded
+    cbs.onProcessExit?.({ code: 4001, reason: "" }); // the definitive close; also marks the kernel loaded
     resetScrollback.mockClear();
     resetScreen.mockClear();
     connect.mockClear();
@@ -427,7 +463,7 @@ describe("reattach", () => {
     };
     await mountTerminal(root, { features: () => [watcher] });
     await tick();
-    fake.callbacks().onProcessExit?.();
+    fake.callbacks().onProcessExit?.({ code: 4001, reason: "" });
     seen.length = 0;
     vi.useFakeTimers();
 
@@ -2108,7 +2144,7 @@ describe("type-to-focus: a mouse selection must not swallow the next keystroke",
     expect(sentText()).toBe("");
     expect(window.getSelection()?.isCollapsed).toBe(false);
     // The open composition goes with its pane: destroy() cancels it, which
-    // kernel.mutants.test.ts pins directly.
+    // kernel-lifecycle.test.ts pins directly.
     handle.destroy();
   });
 
@@ -3258,7 +3294,7 @@ describe("feature error routing", () => {
     // ordinary close is suppressed until the first frame has landed (the loading
     // overlay owns the screen), so it would deliver no event to throw from.
     const cbs = fake.callbacks();
-    cbs.onProcessExit?.();
+    cbs.onProcessExit?.({ code: 4001, reason: "" });
 
     expect(logged).toHaveBeenCalled();
     expect(String(logged.mock.calls[0]?.[0])).toContain("noisy");
@@ -3283,7 +3319,7 @@ describe("feature error routing", () => {
     logged.mockClear();
 
     const cbs = fake.callbacks();
-    cbs.onProcessExit?.();
+    cbs.onProcessExit?.({ code: 4001, reason: "" });
 
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0]?.[0]).toBe("noisy");
@@ -3312,7 +3348,7 @@ describe("feature error routing", () => {
     const cbs = fake.callbacks();
 
     expect(() => {
-      cbs.onProcessExit?.();
+      cbs.onProcessExit?.({ code: 4001, reason: "" });
     }).not.toThrow();
 
     expect(second).toHaveBeenCalledTimes(1);
@@ -3338,7 +3374,7 @@ describe("feature error routing", () => {
     await tick();
 
     const cbs = fake.callbacks();
-    cbs.onProcessExit?.();
+    cbs.onProcessExit?.({ code: 4001, reason: "" });
 
     expect(onError).not.toHaveBeenCalled();
     logged.mockRestore();
@@ -4806,7 +4842,7 @@ describe("the loading overlay cannot be resurrected once it is down", () => {
     document.body.appendChild(loading); // the consumer re-attached its own element
 
     const cbs = fake.callbacks();
-    cbs.onProcessExit?.(); // a second path that would lower the overlay
+    cbs.onProcessExit?.({ code: 4001, reason: "" }); // a second path that would lower the overlay
     loading.dispatchEvent(new Event("transitionend"));
 
     expect(loading.isConnected).toBe(true);
@@ -4896,7 +4932,7 @@ describe("the consumer's loading overlay is always removed, not merely faded", (
       await mountTerminal(rootIn(), { features: () => [], loading });
       await vi.advanceTimersByTimeAsync(0);
       const cbs = fake.callbacks();
-      cbs.onProcessExit?.(); // any path that lowers the overlay
+      cbs.onProcessExit?.({ code: 4001, reason: "" }); // any path that lowers the overlay
       expect(loading.classList.contains("fade")).toBe(true);
       expect(loading.isConnected).toBe(true);
 
@@ -4916,7 +4952,7 @@ describe("the consumer's loading overlay is always removed, not merely faded", (
       await mountTerminal(rootIn(), { features: () => [], loading });
       await vi.advanceTimersByTimeAsync(0);
       const cbs = fake.callbacks();
-      cbs.onProcessExit?.();
+      cbs.onProcessExit?.({ code: 4001, reason: "" });
 
       loading.dispatchEvent(new Event("transitionend"));
 
@@ -4932,7 +4968,7 @@ describe("the consumer's loading overlay is always removed, not merely faded", (
     await mountTerminal(rootIn(), { features: () => [], loading });
     await tick();
     const cbs = fake.callbacks();
-    cbs.onProcessExit?.();
+    cbs.onProcessExit?.({ code: 4001, reason: "" });
     loading.dispatchEvent(new Event("transitionend"));
     expect(loading.isConnected).toBe(false);
     document.body.appendChild(loading); // a consumer re-attached it
@@ -4994,7 +5030,7 @@ describe("ctx.loadingReason (progressive status on the consumer's overlay)", () 
     await tick();
     captured?.loadingReason("Waiting for the session list");
     const cbs = fake.callbacks();
-    cbs.onProcessExit?.(); // lowers the overlay, which stops the status
+    cbs.onProcessExit?.({ code: 4001, reason: "" }); // lowers the overlay, which stops the status
 
     captured?.loadingReason("too late");
 

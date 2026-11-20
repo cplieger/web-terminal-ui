@@ -1,12 +1,9 @@
-// Additional tabs-feature tests for the middle third of src/features/tabs/index.ts:
-// the order write and its 409 answer, the explicit drag image, ordered adoption of a
-// session the server already placed, the close paths' failure and neighbour rules,
-// the stale-menu move guards, the long-press menu's release edge, the reconcile
-// overlap guard, and a pinned name arriving from another browser.
-//
-// A separate file from index.test.ts purely so three concurrent workers do not edit
-// one file; the setup idioms (real kernel, stubbed fetch, dynamic import per test,
-// a fake activityMonitor for the status stream) are the ones that file established.
+// tabs feature: the order write and its 409 answer, the explicit drag image, the
+// strip position of a session the server already placed, the close paths' failure
+// and neighbour rules, the stale-menu move guards, the long-press menu's release
+// edge, the reconcile overlap guard, and a pinned name arriving from another
+// browser. The setup idioms (real kernel, stubbed fetch, a fake activityMonitor
+// for the status stream) are index.test.ts's.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
@@ -1727,9 +1724,8 @@ describe("tabs: a tab that goes away", () => {
 
 describe("tabs: the boot-repair activation", () => {
   it("does not re-decide the active tab once one is chosen", async () => {
-    // ensureActive runs on every status event and every reconcile. Without its
-    // early return it would re-run the "first live tab" ladder each time and drag
-    // the user back to the leftmost tab on every dot update.
+    // The boot repair picks the first live tab only while nothing is shown; a
+    // status event on another tab must not drag the user back to the leftmost.
     const monitor = fakeMonitor();
     const root = document.createElement("div");
     await mount(root, monitor.feature);

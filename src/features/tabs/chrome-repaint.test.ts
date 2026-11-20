@@ -1,7 +1,7 @@
-// tabs feature, chrome-sync half: the surfaces syncChrome refreshes and the
-// per-chip wiring behind them (paintActive's reveal rule, the switch button's
-// two-tab gate, the expanded list's reconcile, motion and reel, applyServerOrder,
-// switchTo's slide direction). Each tabs test file keeps its own harness.
+// tabs feature, chrome half: the surfaces a commit repaints and the per-chip
+// wiring behind them (the reveal rule, the switch button's two-tab gate, the
+// expanded list's reconcile, motion and reel, the server's tab order, a switch's
+// slide direction). Each tabs test file keeps its own harness.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type * as Engine from "@cplieger/web-terminal-engine";
@@ -13,6 +13,7 @@ import type { TerminalFeature, TerminalHandle } from "../../kernel/types.js";
 import type { ActivityMonitorApi } from "../activity-monitor.js";
 import type { MobileToolbarApi } from "../mobile-toolbar.js";
 import { engineNumbering } from "./test-helpers/sessions-server.js";
+import { nextCommit } from "./test-helpers/split.js";
 
 // A fake activityMonitor: lets a test push status events (a new title, a new
 // server `order`, a status change) into tabs without the real SSE.
@@ -328,6 +329,7 @@ describe("tabs: the expanded list follows state changes", () => {
       createdAt: "2",
       reportsActivity: true,
     });
+    await nextCommit();
 
     expect(m.rowLabels()).toEqual(["two: waiting"]);
     expect(pick(m.root, ".wt-switcher-row-dot").dataset["status"]).toBe("input");
@@ -392,13 +394,14 @@ describe("tabs: revealing the newly active chip", () => {
     monitor.emit({ id: "s3", status: "working", title: "three", createdAt: "3" });
     monitor.emit({ id: "s1", status: "working", title: "one", createdAt: "1" });
     monitor.emit({ id: "s1", status: "idle", title: "one renamed", createdAt: "1" });
+    await nextCommit();
 
     expect(seen.targets().length).toBe(1);
     expect(m.labels()[0]).toBe("one renamed");
   });
 });
 
-describe("tabs: applyServerOrder (the read half of tab-order sync)", () => {
+describe("tabs: the strip follows the server's tab order", () => {
   it("re-sorts the strip when a status event carries a new server order", async () => {
     four();
     const monitor = fakeMonitor();
@@ -408,6 +411,7 @@ describe("tabs: applyServerOrder (the read half of tab-order sync)", () => {
     // A drag on another device: the server placed s4 first and s1 after it.
     monitor.emit({ id: "s4", status: "idle", title: "four", createdAt: "4", order: 0 });
     monitor.emit({ id: "s1", status: "idle", title: "one", createdAt: "1", order: 1 });
+    await nextCommit();
 
     // Both the list order and the DOM order move, or the next keyboard arrow
     // steps to a neighbour that is somewhere else on screen.
@@ -419,12 +423,14 @@ describe("tabs: applyServerOrder (the read half of tab-order sync)", () => {
     const monitor = fakeMonitor();
     const m = await mount([monitor.feature, tabs({ activityMonitor: monitor.feature })]);
     monitor.emit({ id: "s3", status: "idle", title: "three", createdAt: "3", order: 0 });
+    await nextCommit();
     expect(m.labels()).toEqual(["three", "one", "two", "four"]);
 
     // The echo of a locally-committed reorder, and any later status tick, must
     // land as a no-op rather than a second visible move.
     monitor.emit({ id: "s3", status: "working", title: "three", createdAt: "3", order: 0 });
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
+    await nextCommit();
 
     expect(m.labels()).toEqual(["three", "one", "two", "four"]);
   });
@@ -444,11 +450,13 @@ describe("tabs: applyServerOrder (the read half of tab-order sync)", () => {
 
     // A remote reorder arriving mid-gesture must not re-sort under the finger.
     monitor.emit({ id: "s4", status: "idle", title: "four", createdAt: "4", order: 0 });
+    await nextCommit();
     expect(m.labels()).toEqual(["one", "two", "three", "four"]);
 
     // Once the pointer lets go, the pending server order is applied.
     chip.dispatchEvent(new Event("dragend", { bubbles: true }));
     monitor.emit({ id: "s2", status: "working", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(m.labels()).toEqual(["four", "one", "two", "three"]);
   });
 });
@@ -580,7 +588,7 @@ describe("tabs: per-chip event wiring", () => {
   });
 });
 
-describe("tabs: switchTo", () => {
+describe("tabs: switching tabs", () => {
   const SWITCH_CLASSES = ["wt-switching", "wt-switching-next", "wt-switching-prev"];
   function switchClass(surface: Element): string | undefined {
     return SWITCH_CLASSES.find((c) => surface.classList.contains(c));
@@ -1260,10 +1268,10 @@ describe("tabs: chrome that only a runtime change moves", () => {
 
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
     monitor.emit({ id: "s3", status: "done", title: "three", createdAt: "3" });
+    await nextCommit();
     expect(document.title).toBe("(2) one · Host page");
 
-    // s2 is not the dot's subject (latest wins, so that is s3), so nothing else on
-    // the close path repaints the count.
+    // s2's input cue is the dot's subject, and s3's done cue still counts after it.
     pick(m.chips()[1] ?? m.root, ".wt-tab-close").click();
     await until(() => m.chips().length === 2);
 
@@ -1431,6 +1439,7 @@ describe("tabs: the expanded row's live bits", () => {
       createdAt: "2",
       progressValue: 60,
     });
+    await nextCommit();
 
     const bar = pick(m.root, ".wt-switcher-row .wt-progress-bar");
     expect(bar.hidden).toBe(false);
@@ -1438,6 +1447,7 @@ describe("tabs: the expanded row's live bits", () => {
 
     // And it goes away with the percentage, rather than sitting at its last value.
     monitor.emit({ id: "s2", status: "idle", title: "two", createdAt: "2", progressValue: -1 });
+    await nextCommit();
     expect(bar.hidden).toBe(true);
   });
 });

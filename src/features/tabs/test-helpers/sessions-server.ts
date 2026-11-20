@@ -87,7 +87,7 @@ function nextTask(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
 }
 
-export async function until(pred: () => boolean, tries = 60): Promise<void> {
+async function until(pred: () => boolean, tries = 60): Promise<void> {
   for (let i = 0; i < tries && !pred(); i++) {
     await nextTask();
   }

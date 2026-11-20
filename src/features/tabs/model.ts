@@ -4,7 +4,6 @@ import type { LineStore } from "@cplieger/web-terminal-engine";
 import type { SessionInfo } from "@cplieger/web-terminal-engine";
 import type { ViewMemory } from "@cplieger/web-terminal-engine";
 import type { PaneSide, TabHandle } from "../../kernel/types.js";
-import type { TabAlias } from "./route.js";
 
 export type { SessionInfo };
 
@@ -32,6 +31,11 @@ const STATUS_EXITED = "exited";
  *  restart never paints as a failure. Terminal, like "exited". */
 const STATUS_CRASHED = "crashed";
 
+/** A session that ended before its process started; the server keeps it listed,
+ *  with its endReason, until a client closes it or the server removes it.
+ *  Terminal, like "exited". */
+const STATUS_ENDED = "ended";
+
 /** An error the program reported: OSC 7501 state `error`, or OSC 9;4 progress
  *  state 2 (iTerm2 semantics). A STATE that persists until the program reports
  *  another, or the process dies. */
@@ -42,10 +46,15 @@ const STATUS_FAILED = "failed";
  *  terminal reset (RIS): OSC 7501 outranks OSC 9;4 until a RIS forgets it. */
 const STATUS_WARNING = "warning";
 
-/** Whether the session's process is GONE, whichever way it went: reloading onto
- *  a crashed session is the same stuck-loading wedge as onto an exited one. */
+/** Whether the session's process is GONE, or never came: reloading onto a
+ *  crashed session is the same stuck-loading wedge as onto an exited one. */
 export function isEndedStatus(status: string): boolean {
-  return status === STATUS_EXITED || status === STATUS_CRASHED;
+  return status === STATUS_EXITED || status === STATUS_CRASHED || status === STATUS_ENDED;
+}
+
+/** Whether the session ended before its process started. */
+export function isStartFailureStatus(status: string): boolean {
+  return status === STATUS_ENDED;
 }
 
 /** The statuses whose dot shows even without the sticky reportsActivity flag: a
@@ -75,6 +84,8 @@ export function statusPhrase(status: string): string {
       return "session ended";
     case STATUS_CRASHED:
       return "process crashed";
+    case STATUS_ENDED:
+      return "could not start";
     case "idle":
     case "":
       return "idle";
@@ -337,42 +348,12 @@ export function compareTabOrder(a: TabOrderKey, b: TabOrderKey): number {
   return a.id < b.id ? -1 : 1;
 }
 
-/** Where `incoming` belongs in `current` under compareTabOrder: before the first
- *  tab that outranks it, else the end, so every arrival order of one session set
- *  converges on the same strip. */
-export function orderedInsertIndex(current: readonly TabOrderKey[], incoming: TabOrderKey): number {
-  for (let i = 0; i < current.length; i++) {
-    const other = current[i];
-    if (other !== undefined && compareTabOrder(other, incoming) > 0) {
-      return i;
-    }
-  }
-  return current.length;
-}
-
+/** One chip's view: its elements, its line cache and its reading position. The
+ *  session's data lives in placement.ts's SessionFact. */
 export interface Tab {
   id: string;
-  /** The session's public URL name from the server, or undefined when it sent
-   *  none (a server before engine 6.2) or one outside the alias grammar; such a
-   *  tab has no address of its own. */
-  alias: TabAlias | undefined;
-  /** The local mutation epoch at which this tab was adopted. The list reconcile
-   *  snapshots the counter BEFORE its GET and drops an unlisted tab only when
-   *  the tab predates the snapshot: a tab born while the list was in flight is
-   *  invisible to that stale listing, and dropping it cascaded into a duplicate
-   *  replacement session. */
-  born: number;
-  /** The title the SERVER resolved: the pinned name, else the program's OSC 0/2
-   *  title, else a host-pushed title, else the engine's own inference. The
-   *  displayed label adds a numbered fallback and de-duplication. */
-  title: string;
   /** The computed, de-duplicated label actually shown in the chrome. */
   display: string;
-  createdAt: string;
-  /** The server's shared position for this session, or undefined against a server
-   *  that keeps no order. Updated from every status event, so a reorder made on
-   *  another device reaches this strip (see compareTabOrder). */
-  order: number | undefined;
   store: LineStore;
   el: HTMLElement;
   label: HTMLElement;
@@ -380,63 +361,27 @@ export interface Tab {
   /** The chip's determinate progress bar (the 2px line on its bottom edge).
    *  Present on every chip, hidden until a percentage exists. */
   progressEl: HTMLElement;
-  /** The last percentage the server reported for this session, or
-   *  PROGRESS_ABSENT. Held raw: whether it is currently SHOWN is a render-time
-   *  question (renderedProgress). */
-  progress: number;
   /** The chip's secondary activity mark (the rounded-square ring beside the
    *  status dot). Present on every chip, and costing no layout until a state
    *  arrives. */
   activityEl: HTMLElement;
-  /** The host's secondary activity state for this session, normalised to the
-   *  closed set ("" for none). Independent of `status` and of `reports`: a
-   *  background task can be running while the turn that launched it is finished. */
-  activity: string;
-  /** How many sources produced that state, 0 when the server does not count. */
-  activityCount: number;
   aria: TabHandle;
   /** This tab's saved reading position as captureViewMemory() returned it when
    *  the tab was last left; null (follow the tail) for a tab never viewed or left
    *  on the alternate screen. NOT a pixel scrollTop: a rebuild has built only
    *  ~301 of up to 5000 rows when the restore lands, so the browser clamped the
-   *  offset away, and it stopped meaning the same line once the session produced
-   *  output while backgrounded. In memory only. */
+   *  offset away. In memory only. */
   view: ViewMemory | null;
-  /** Sticky: true once this session emitted a genuine activity signal (OSC 7501
-   *  status, OSC 9;4 progress or a classified OSC 9 notification). Its activity
-   *  dot is shown only while true; a session that never reports activity (a
-   *  plain shell) keeps a clean, dot-less tab. Fed from the server's
-   *  reportsActivity via applyStatus. */
-  reports: boolean;
-  /** The user's pinned name (the server's `pinnedTitle` wire field). Outranks
-   *  every automatic source in `baseLabel`, and its presence is what enables the
-   *  tab menu's "use the automatic name" action. Undefined or empty means the tab
-   *  has no user-set name. */
-  pinnedTitle?: string | undefined;
-  /** The server's number for the status this tab holds (0: none yet). */
-  statusSeq: number;
-  /** The server-confirmed seen floor. Only rises: a record carrying a lower one
-   *  is older, never a retraction. */
-  seenSeq: number;
-  /** This page's optimistic read floor: the occurrence its latest ack sent, 0
-   *  when none. A 204 clears it once seenSeq covers it, and a non-404 failure
-   *  only while it still holds the failed number; a 404 keeps it until the
-   *  vanished tab is removed. */
-  ackSeq: number;
-  /** The occurrence whose ack last failed with a non-404, 0 when none; the
-   *  automatic ack skips it so a failing server sees one PUT per occurrence. */
-  failedSeq: number;
-  /** The occurrence a banner this page posted for the session belongs to, 0
-   *  when none. */
-  bannerSeq: number;
-  /** The stream epoch at which a status-stream record last updated this tab, 0
-   *  when none: a list requested before it is older. */
-  streamAt: number;
-  /** Monotonic per-tab rename counter. A rename or clear increments it and
-   *  captures the value; the response is applied only if it is still current when
-   *  it lands, so a slow failure cannot roll back a newer rename, a later clear,
-   *  or a status-stream update from another client. */
+  /** Monotonic per-tab rename counter: a rename's failure rolls back only while
+   *  its captured value is still current, so a slow failure cannot undo a newer
+   *  rename, a later clear, or a status-stream update from another client. */
   nameSeq: number;
+}
+
+/** The two label sources a chip is named from. */
+export interface Labelled {
+  readonly title: string;
+  readonly pinnedTitle?: string | undefined;
 }
 
 /** A tab's label before de-duplication: the pinned name, else the title the
@@ -444,20 +389,20 @@ export interface Tab {
  *  source into `title` and a client re-implementing that ladder could only
  *  disagree with it. The pin is still read here so a rename paints before the
  *  round trip. fallback=true marks "New tab" so relabelAll leaves it unnumbered. */
-export function baseLabel(tab: Tab): { text: string; fallback: boolean } {
+export function baseLabel(tab: Labelled): { text: string; fallback: boolean } {
   const real = pinnedNameOf(tab) || tab.title.trim();
   return real ? { text: real, fallback: false } : { text: "New tab", fallback: true };
 }
 
 /** A tab's pin, trimmed, with a whitespace-only value reading as absent; one
  *  definition so baseLabel and the menu's enabled state cannot disagree. */
-function pinnedNameOf(tab: Tab): string {
+function pinnedNameOf(tab: Labelled): string {
   return tab.pinnedTitle?.trim() ?? "";
 }
 
 /** Whether a tab carries a user-set name, which gates the tab menu's "use the
  *  automatic name" item. */
-export function hasPinnedName(tab: Tab): boolean {
+export function hasPinnedName(tab: Labelled): boolean {
   return pinnedNameOf(tab) !== "";
 }
 
@@ -750,50 +695,10 @@ export function createSessionAPI(apiBase: string, realm: SessionAPIRealm): Sessi
   };
 }
 
-/** Close tombstones: ids the user closed within the TTL, so a stale server
- *  listing (the SSE re-open snapshot, or the poll's GET /api/sessions) that
- *  predates the server reaping the session does not re-adopt (flash back) the
- *  closed tab. */
-interface Tombstones {
-  add(id: string): void;
-  /** True while `id` is tombstoned (within the TTL). A hit past the TTL clears
-   *  the entry and reports false (the adopt may proceed). */
-  active(id: string): boolean;
-}
-
-const CLOSE_TOMBSTONE_MS = 15000;
-
-export function createTombstones(
-  clock: () => number,
-  ttlMs: number = CLOSE_TOMBSTONE_MS,
-): Tombstones {
-  const recentlyClosed = new Map<string, number>();
-  return {
-    add(id: string): void {
-      const now = clock();
-      // Sweep entries whose window already elapsed (active() treats them as
-      // untombstoned anyway) so the map cannot grow without bound over a long
-      // session of opens/closes; then record this close.
-      for (const [k, t] of recentlyClosed) {
-        if (now - t >= ttlMs) {
-          recentlyClosed.delete(k);
-        }
-      }
-      recentlyClosed.set(id, now);
-    },
-    active(id: string): boolean {
-      const closedAt = recentlyClosed.get(id);
-      if (closedAt === undefined) {
-        return false;
-      }
-      if (clock() - closedAt < ttlMs) {
-        return true;
-      }
-      recentlyClosed.delete(id);
-      return false;
-    },
-  };
-}
+/** How long a closed or removed session stays tombstoned: a stale server listing
+ *  (the stream's reopen snapshot, or the poll) that predates the server reaping
+ *  it must not re-add the closed tab. */
+export const CLOSE_TOMBSTONE_MS = 15000;
 
 /** The bound on a user-typed tab name, mirroring the engine's pinned-title cap so
  *  the field cannot accept text the server would silently truncate. Counted in

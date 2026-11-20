@@ -358,9 +358,10 @@ export interface ShellContext {
   onSelectionChange(cb: (side: PaneSide) => void): Unsubscribe;
   /** A pane built, hidden, shown or torn down. */
   onPanesChange(cb: () => void): Unsubscribe;
-  /** Where a click on `sessionId`'s tab would show it: the first empty pane, left
-   *  then right, else the selected pane. */
-  targetFor(sessionId: string): PaneSide;
+  /** Where a new tab, or a click on a tab, would show it: the first empty pane,
+   *  left then right, else the selected pane. Deprecated: `sessionId` is
+   *  ignored, and is removed at the next major. */
+  targetFor(sessionId?: string): PaneSide;
   /** The second half of closing a shown tab: `forgetSession(sessionId)` on every
    *  built pane's connection other than `side` (whose own `clearActiveSession()`
    *  already did it), and the scrollback keeper's forget. */
@@ -420,6 +421,10 @@ export interface TerminalEvents {
   "input:ready": { cols: number; rows: number };
   /** A session's process exited (from the status SSE; reaches background tabs). */
   "session:exited": { session: string };
+  /** The shown session ended before its process started, such as a command
+   *  that cannot run: from its socket's 4001 close with a reason, on each attach
+   *  to it. The pane shows the ended state and toasts `reason`, the server's. */
+  "session:startFailed": { session: string; reason: string };
   /** An OSC title change for a session. */
   "wire:title": { session: string; title: string };
   /** Inbound OSC 52 clipboard content. */

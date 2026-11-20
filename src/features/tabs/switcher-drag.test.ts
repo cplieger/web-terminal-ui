@@ -30,6 +30,7 @@ import {
   VELOCITY_STALE_MS,
 } from "./switcher.js";
 import { engineNumbering } from "./test-helpers/sessions-server.js";
+import { nextCommit } from "./test-helpers/split.js";
 
 // The engine is a fake, as in index.test.ts: a switch re-points the renderer
 // and reconnects the socket, and neither belongs in a DOM-only test. getMouseMode
@@ -1512,6 +1513,7 @@ describe("tabs: destroy hands the out-of-page surfaces back", () => {
       await until(() => root.querySelectorAll(".wt-tab").length === 3);
 
       monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+      await nextCommit();
       expect(iconHref()).toBe("/favicon-input.svg");
 
       term.destroy();

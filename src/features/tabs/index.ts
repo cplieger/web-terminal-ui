@@ -19,40 +19,68 @@ import { createClickSwallow, placeMenuAt } from "../menu-position.js";
 import { centreChipLabels } from "./ink-centre.js";
 import { SWITCH_ANIMATIONS, SWITCH_CLASSES } from "./switch-anim.js";
 import { createAddressBar, type AddressBar, type RouteOrigin } from "./address-bar.js";
-import {
-  formatTabRoute,
-  parseTabAlias,
-  parseTabRoute,
-  type TabAlias,
-  type TabRoute,
-} from "./route.js";
-import type { CueStatus, PaneLayout, SessionInfo, StatusRecord, Tab } from "./model.js";
+import { formatTabRoute, parseTabRoute, type TabAlias } from "./route.js";
+import type { CueStatus, Labelled, PaneLayout, SessionInfo, Tab } from "./model.js";
 import {
   MAX_PINNED_NAME,
   PROGRESS_ABSENT,
   SWIPE_HINT_KEY,
   SessionAPIError,
   baseLabel,
-  compareTabOrder,
   createSessionAPI,
-  createTombstones,
   cueIconName,
-  foldedCueStatus,
   hasPinnedName,
-  isCueStatus,
   isEndedStatus,
-  isUnread,
-  normalizeActivity,
-  normalizeActivityCount,
-  normalizeProgress,
   normalizeSeq,
-  orderedInsertIndex,
   renderedProgress,
   sanitizePinnedName,
   statusPhrase,
-  summarizeCues,
   tabAccessibleName,
 } from "./model.js";
+import {
+  EMPTY_LAYOUT,
+  ackFailed,
+  ackSettled,
+  bootSettled,
+  commitStep,
+  createBegan,
+  createFailed,
+  createModel,
+  dragChanged,
+  layoutFor,
+  layoutStale,
+  mergeList,
+  mergeRecord,
+  ownCreated,
+  ownReleased,
+  pageVisibility,
+  paneFailed,
+  paneStartFailed,
+  removed as sessionsRemoved,
+  renamed,
+  reorder,
+  resyncBegan,
+  resyncSettled,
+  route as routeIntent,
+  select as selectIntent,
+  shellChanged,
+  show,
+  snap as snapIntent,
+  splitFit,
+  splitIntent,
+  splitPartner,
+  splitRatio,
+  switcherToggled,
+  syncBegan,
+  syncEnded,
+  windowFocused,
+  wireTitle,
+  type Layout,
+  type SessionFact,
+  type ShellChange,
+  type SplitOpening,
+  type TabsModel,
+} from "./placement.js";
 import {
   REORDER_REST_MS,
   REORDER_STILL_MS,
@@ -100,18 +128,6 @@ const DEFAULT_POLL_MS = 4000;
 // loaded /<session-id> on iPadOS. It also keeps the id out of the pasteboard.
 const TAB_DRAG_TYPE = "application/x-web-terminal-tab";
 const STALE_TAB_NOTICE = "That tab is no longer open";
-
-// Whether two records show the same tabs the same way; the handle is a device's
-// preference and does not count.
-function sameShownLayout(a: PaneLayout, b: PaneLayout | null): boolean {
-  return (
-    b !== null &&
-    a.left === b.left &&
-    a.right === b.right &&
-    a.open === b.open &&
-    a.selected === b.selected
-  );
-}
 
 /** The value a peer or a host reads through `ctx.use(tabs(...))`. `create` and
  *  `close` are server round trips and NEITHER rejects: a refusal is toasted and
@@ -206,10 +222,6 @@ function retryWait(win: Window, ms: number, signal: AbortSignal): Promise<void> 
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
-
-/** Where a status record came from: the stream, or a list requested when the
- *  stream epoch read `listedAt`. */
-type RecordSource = { readonly stream: true } | { readonly listedAt: number };
 
 /** How long a run of refusals has waited and when it last told the user. */
 interface RefusalWait {
@@ -360,6 +372,7 @@ async function settleSessionSet(
     let layout: PaneLayout | null = null;
     try {
       layout = await api.getLayout();
+      signal.throwIfAborted();
       if (layout === null) {
         warnLayout("this server has no GET/PUT /api/sessions/layout route");
       }
@@ -380,6 +393,7 @@ async function settleSessionSet(
     let listed = false;
     try {
       sessions = await api.list();
+      signal.throwIfAborted();
       listed = true;
     } catch (err) {
       if (isRefusal(err)) {
@@ -419,18 +433,6 @@ async function settleSessionSet(
   }
 }
 
-interface ShowOptions {
-  readonly dir?: "next" | "prev" | undefined;
-  /** Leave the selection where it is, unless the selected pane shows nothing. */
-  readonly keepSelection?: boolean;
-}
-
-/** How a create opens the split once its tab exists. `button`: the single view
- *  keeps its tab and the new tab fills the other pane, selected. `snap`: `id`
- *  lands on `side`, selected, and the new tab fills the other pane. */
-type SplitOpening =
-  { readonly by: "button" } | { readonly by: "snap"; readonly id: string; readonly side: PaneSide };
-
 /** Build the tabs feature.
  *  Requires a server that speaks the session API (`GET`/`POST`/`DELETE` on
  *  `/api/sessions`, `?session=<id>` on the WebSocket, ideally the status SSE).
@@ -442,7 +444,6 @@ type SplitOpening =
 export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
   const apiBase = opts.apiBase ?? DEFAULT_API_BASE;
   const presumeReports = opts.presumeReports ?? false;
-  const reportsOf = (reports?: boolean): boolean => presumeReports || (reports ?? false);
 
   // The registration must exist on the feature VALUE, read before setup, while
   // its members need setup-scoped state; setup() wires the closure.
@@ -652,167 +653,122 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       const swSwitchDot = pick(swSwitch, ".wt-switcher-switch-dot");
       const swNew = makeNewButton("wt-switcher-new wt-btn wt-switcher-new-btn");
       swBar.append(swKb, ...(swSplit === null ? [] : [swSplit]), swSwitch, swNew);
-      // Latest-wins cue for the switch button's dot, cleared when the list opens,
-      // the raising tab is visited or closed, or its occurrence (switchNotifySeq)
-      // is read on any window or device; "" is no pending cue.
-      let switchNotify: "" | CueStatus = "";
-      // The session that raised the pending cue, so arriving on that tab (a
-      // swipe or any switch) acknowledges it without opening the list.
-      let switchNotifyId: string | null = null;
-      let switchNotifySeq = 0;
-      // Counts status-stream records; applyStatus compares a list's reading of it
-      // with each tab's streamAt to skip a list older than the stream.
-      let streamEpoch = 0;
       let warnedSeen = false;
-      // The out-of-page surfaces render the SAME unread-cue set the switch dot
-      // shows, fed only through paintAttention below.
+      // Painted only by the commit, from layoutFor's indicators.
       const attention = ctx.shell.attention({ icons: opts.attentionIcons === true });
-      // markCueSeen acknowledges t's current occurrence for every reader: the tab
-      // is on screen, or the tray listing every tab's dot was opened. Every read
-      // re-asserts the badge, which may still show a write the platform dropped,
-      // and closes the session's banner. The surfaces clear before the round trip,
-      // so a cue landing on the watched tab never paints a count. The automatic
-      // path (retry false) skips an occurrence whose ack already failed, so a
-      // failing server sees one PUT per occurrence rather than one per record.
-      function markCueSeen(t: Tab, how: { readonly retry: boolean }): void {
-        attention.resync();
-        ctx.shell.notifications.retract(t.id);
-        t.bannerSeq = 0;
-        if (!isCueStatus(statusOf(t)) || t.statusSeq <= Math.max(t.seenSeq, t.ackSeq)) {
-          return;
-        }
-        if (!how.retry && t.failedSeq === t.statusSeq) {
-          return;
-        }
-        const seq = t.statusSeq;
-        t.ackSeq = seq;
-        closeReadSurfaces(t);
-        paintAttention();
-        api.markSeen(t.id, seq).then(
-          () => {
-            if (tornDown() || !tabList.includes(t)) {
-              return;
-            }
-            // seq came from the server, so a 204 means its floor is at least seq.
-            t.seenSeq = Math.max(t.seenSeq, seq);
-            if (t.ackSeq <= t.seenSeq) {
-              t.ackSeq = 0;
-            }
-            if (t.failedSeq <= seq) {
-              t.failedSeq = 0;
-            }
-          },
-          (err: unknown) => {
-            if (tornDown() || !tabList.includes(t)) {
-              return;
-            }
-            if (err instanceof SessionAPIError && err.status === 404) {
-              return; // the session is gone; its removal drops the tab
-            }
-            // A later ack owns ackSeq, and seenSeq is never written here: a
-            // broadcast may already carry this ack though its response was lost.
-            if (t.ackSeq === seq) {
-              t.ackSeq = 0;
-            }
-            t.failedSeq = Math.max(t.failedSeq, seq);
-            if (!warnedSeen) {
-              warnedSeen = true;
-              console.warn("web-terminal-ui: marking a session read failed", err);
-            }
-            paintAttention();
-          },
-        );
-      }
-      // A surface this page raised for an occurrence closes once the page's read
-      // floor reaches that occurrence, keyed on the number rather than the fold: a
-      // done held by background activity folds to "" yet may own a banner, and a
-      // late ack of an older occurrence must not close one raised for a newer.
-      function closeReadSurfaces(t: Tab): void {
-        const floor = Math.max(t.seenSeq, t.ackSeq);
-        if (t.bannerSeq !== 0 && floor >= t.bannerSeq) {
-          ctx.shell.notifications.retract(t.id); // only this page can close its own banners
-          t.bannerSeq = 0;
-        }
-        if (switchNotifyId === t.id && floor >= switchNotifySeq) {
-          clearSwitchNotify();
-        }
-        attention.resync();
-      }
+
       // visibilityState, not document.hasFocus(), which is false for a
       // visible-but-unfocused window where the terminal IS on screen.
       function pageVisible(): boolean {
         return doc.visibilityState !== "hidden";
       }
 
-      // The DEFERRED half of the shown-tab acknowledgement: a cue that latched on
-      // a hidden page raised the out-of-page surfaces and is acknowledged when the
-      // user can see the terminal. The SHOWN tabs only: blanking a background
-      // tab's cue the viewer never saw loses the thing they came back for. Also
-      // the retry point for a failed ack.
-      function onPageVisible(): void {
-        if (!pageVisible()) {
+      // The only writer of the session model besides the commit's own dispatches.
+      let model: TabsModel = pageVisibility(createModel({ presumeReports }), pageVisible());
+      // The layout the screen shows; `next` while a commit applies it.
+      let committed: Layout = EMPTY_LAYOUT;
+      let applying: Layout | null = null;
+      let pendingCommit: { readonly timer: "frame" | "timeout"; readonly id: number } | null = null;
+      // Kernel facts raised while a commit applies its own changes, dispatched
+      // after it: the commit decided those changes, so they are not inputs.
+      const raisedInCommit: ((m: TabsModel) => TabsModel)[] = [];
+
+      function update(f: (m: TabsModel) => TabsModel): void {
+        if (tornDown()) {
           return;
         }
-        for (const t of tabList) {
-          if (isShown(t.id)) {
-            markCueSeen(t, { retry: true });
-          }
+        if (applying !== null) {
+          raisedInCommit.push(f);
+          return;
         }
+        model = f(model);
       }
-      doc.addEventListener("visibilitychange", onPageVisible);
+      /** A server or page fact: committed in the next frame with whatever else lands in it. */
+      function serverInput(f: (m: TabsModel) => TabsModel): void {
+        update(f);
+        scheduleCommit();
+      }
+      /** A user action: committed in its own task. */
+      function userInput(f: (m: TabsModel) => TabsModel): void {
+        update(f);
+        commitNow();
+      }
+      // A hidden document gets no animation frames, and the title count, badge and
+      // icon must still follow a cue that latches there.
+      function scheduleCommit(): void {
+        if (tornDown() || pendingCommit !== null) {
+          return;
+        }
+        const run = (): void => {
+          pendingCommit = null;
+          commit();
+        };
+        pendingCommit = pageVisible()
+          ? { timer: "frame", id: win.requestAnimationFrame(run) }
+          : { timer: "timeout", id: win.setTimeout(run, 0) };
+      }
+      function cancelCommit(): void {
+        if (pendingCommit === null) {
+          return;
+        }
+        if (pendingCommit.timer === "frame") {
+          win.cancelAnimationFrame(pendingCommit.id);
+        } else {
+          win.clearTimeout(pendingCommit.id);
+        }
+        pendingCommit = null;
+      }
+      function commitNow(): void {
+        cancelCommit();
+        commit();
+      }
+      ctx.defer(cancelCommit);
+
+      // Committed in this task: the attention surface re-asserts the badge one
+      // task after visibilitychange, and a commit a frame later would write it twice.
+      function onVisibility(): void {
+        update((m) => pageVisibility(m, pageVisible()));
+        commitNow();
+      }
+      function onWindowFocus(): void {
+        serverInput(windowFocused);
+      }
+      doc.addEventListener("visibilitychange", onVisibility);
       // A desktop window can regain focus while it stays visible, which fires no
       // visibilitychange.
-      win.addEventListener("focus", onPageVisible);
+      win.addEventListener("focus", onWindowFocus);
       ctx.defer(() => {
-        doc.removeEventListener("visibilitychange", onPageVisible);
-        win.removeEventListener("focus", onPageVisible);
+        doc.removeEventListener("visibilitychange", onVisibility);
+        win.removeEventListener("focus", onWindowFocus);
       });
 
-      /** The cue fold's view of a tab (isUnread), shared by the count and the raise. */
-      function fold(t: Tab): {
-        status: string;
-        statusSeq: number;
-        seenSeq: number;
-        ackSeq: number;
-      } {
-        return {
-          status: cueStatusOf(t),
-          statusSeq: t.statusSeq,
-          seenSeq: t.seenSeq,
-          ackSeq: t.ackSeq,
-        };
+      // The ack effect: the commit already dispatched ackSent, so the answer only
+      // settles or fails the floor.
+      function sendAck(id: string, seq: number): void {
+        api.markSeen(id, seq).then(
+          () => {
+            serverInput((m) => ackSettled(m, id, seq));
+          },
+          (err: unknown) => {
+            const notFound = err instanceof SessionAPIError && err.status === 404;
+            if (!notFound && !warnedSeen && !tornDown()) {
+              warnedSeen = true;
+              console.warn("web-terminal-ui: marking a session read failed", err);
+            }
+            serverInput((m) => ackFailed(m, id, seq, notFound));
+          },
+        );
       }
 
-      // A FOLD over the tab list rather than incremental bookkeeping: no state of
-      // its own can go stale, and the shell no-ops when nothing changed.
-      function paintAttention(): void {
-        const { count, worst } = summarizeCues(tabList.map(fold));
-        attention.report({ count, icon: worst === "" ? null : cueIconName(worst) });
-      }
-      function paintSwitchDot(): void {
-        // The dot carries .wt-status-dot, so data-status colours it like the tabs'
-        // own dots, and its tooltip comes from their wording map, so the aggregate
-        // cue names the state it shows.
-        if (switchNotify === "") {
+      // The dot carries .wt-status-dot, so data-status colours it like the tabs'
+      // own dots, and its tooltip comes from their wording map.
+      function paintSwitchDot(cue: CueStatus | ""): void {
+        if (cue === "") {
           delete swSwitchDot.dataset["status"];
           swSwitchDot.removeAttribute("title");
         } else {
-          swSwitchDot.dataset["status"] = switchNotify;
-          swSwitchDot.title = statusPhrase(switchNotify);
-        }
-      }
-      function clearSwitchNotify(): void {
-        switchNotify = "";
-        switchNotifyId = null;
-        switchNotifySeq = 0;
-        paintSwitchDot();
-      }
-      // The pending cue is resolved when its session is reached (a switch, a swipe
-      // arriving on it) and moot when the session ceases to exist (a close, a
-      // reap).
-      function acknowledgeSwitchNotify(id: string): void {
-        if (switchNotifyId === id) {
-          clearSwitchNotify();
+          swSwitchDot.dataset["status"] = cue;
+          swSwitchDot.title = statusPhrase(cue);
         }
       }
       ctx.region("bottom-switcher", "switcher").appendChild(switcher);
@@ -919,21 +875,16 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       tabMenu.setAttribute("role", "menu");
       ctx.region("overlay", "tab-menu").appendChild(tabMenu);
 
+      // The chips in the committed strip's order; only the commit writes it.
       const tabList: Tab[] = [];
-      // Monotonic local-mutation counter stamped onto each adopted tab (Tab.born)
-      // and snapshotted by reconcileOnce before its GET /api/sessions, so a
-      // stale listing can never drop a tab adopted while it was in flight (the
-      // boot race: the bootstrap's create vs the SSE stream-open reconcile).
-      let tabEpoch = 0;
-      // Close tombstones (model.ts): ids the user closed recently, so a stale
-      // server listing (the SSE re-open snapshot, or the poll's GET
-      // /api/sessions) that predates the server reaping the session does not
-      // re-adopt (flash back) a closed tab.
-      const tombstones = createTombstones(() => win.Date.now());
+      const chips = new Map<string, Tab>();
+      // The occurrence a banner this page posted belongs to, per session.
+      const bannerSeq = new Map<string, number>();
       // The expanded mobile list's row elements, keyed by tab id. Rows are
       // reused across re-renders (reconcile, not rebuild) so a swipe can FLIP the
       // same elements from their old slots to their new ones (the rotation).
       const rowEls = new Map<string, HTMLElement>();
+      const factOf = (id: string): SessionFact | undefined => model.sessions.get(id);
       // Which tab each pane shows is the PANES' fact, read from them rather than
       // mirrored: the shell empties a pane on a close of the split without asking.
       function shownIn(side: PaneSide): string | null {
@@ -949,45 +900,15 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return null;
       }
       const isShown = (id: string): boolean => sideOf(id) !== null;
-      const anyShown = (): boolean => ctx.shell.panes().some((p) => p.state() === "shown");
       /** The tab that receives typing: the selected pane's. */
       const selectedId = (): string | null => shownIn(ctx.shell.selected());
       const otherSide = (side: PaneSide): PaneSide => (side === "left" ? "right" : "left");
-      /** Tabs the selected pane has shown, most recent first; fed from
-       *  `syncChrome`, which every change of the selected tab ends in. */
-      const recent: string[] = [];
-      function noteSelected(): void {
-        const id = selectedId();
-        if (id === null || recent[0] === id) {
-          return;
-        }
-        const older = recent.filter((r) => r !== id && tabList.some((t) => t.id === r));
-        recent.splice(0, recent.length, id, ...older);
-      }
-      // Set by a bootstrap that showed nothing, cleared by the first showIn: the
-      // one case a status event may pick a tab to show.
-      let bootShowedNothing = false;
-      // While a reconcile that may resync onto a restarted server runs, a tab
-      // arriving on the stream is held rather than placed by arrival, which would
-      // beat the address and the record to the panes (withPlacementHold). A depth,
-      // because two stream reopens inside one long settle each hold.
-      let holdDepth = 0;
-      let heldPlacements: string[] = [];
-      // Whether a resync ran inside the current outermost hold; its release then
-      // places none of the held tabs, so a late arrival cannot replace a pane the
-      // address and the record restored.
-      let holdResynced = false;
-      // While a resync settles, the address bar is left alone so the dead tabs it
-      // drops write no history entries (scheduleAddress).
-      let settling = false;
-      // The coalesced layout write (scheduleLayoutWrite): one PUT per macrotask,
-      // one in flight at a time, and a change during the flight sends the latest
-      // state once it lands, so an older record can never become the server's.
+      // The coalesced layout write: one PUT per macrotask, one in flight at a
+      // time, and a record the commit decides during the flight is sent once it
+      // lands, so an older record can never become the server's.
       let layoutWrite: number | null = null;
       let layoutInFlight: Promise<void> | null = null;
-      let layoutDirty = false;
-      // The record is read once and never written back by a read.
-      let applyingRecord = false;
+      let queuedRecord: { readonly record: PaneLayout; readonly retry: boolean } | null = null;
       let warnedLayout = false;
       // The page address names the shown tabs only when the terminal owns the page.
       const address: AddressBar | null =
@@ -1058,89 +979,89 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       let dragActive = false;
       // True while a reel's reconcile runs (a swipe switch): renderSwitcherList
       // suppresses its add/remove row animation then, since the reel owns row
-      // motion. creatingTab suppresses the reel for a create, so the new listed
-      // row grows+fades in (animateRowIn) rather than rotating.
+      // motion.
       let reelReconcile = false;
-      let creatingTab = false;
+      // How the input the next commit folds moved: a swipe's direction for the
+      // slide, and a create's id, whose listed row grows in (animateRowIn) rather
+      // than rotating with the reel. Presentation only; placement never reads it.
+      let switchHint: { readonly id: string; readonly dir?: "next" | "prev" | undefined } | null =
+        null;
+      let creatingId: string | null = null;
       let collapseClearTimer: number | null = null;
       let hintShown = false;
       const prefersReduce = (): boolean =>
         win.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-      // Recomputes every display label with de-duplication.
-      function relabelAll(): void {
-        // The "(k)" suffix is numbered by the session's AGE, never by its slot:
-        // numbered by encounter order, the labels stayed put while the sessions
-        // moved underneath them, so a reorder was invisible. Server createdAt
-        // rather than the local `born` counter, so every device agrees which
-        // "workspace" is (2). Recomputed over the LIVE group, so closing "(2)" of
-        // three renumbers the survivor.
-        const groups = new Map<string, Tab[]>();
-        for (const t of tabList) {
-          const { text, fallback } = baseLabel(t);
+      /** A chip's label sources; a chip whose fact is gone reads as untitled. */
+      const labelOf = (t: Tab): Labelled => factOf(t.id) ?? { title: "" };
+      // The display label of every session, de-duplicated. The "(k)" suffix is
+      // numbered by the session's AGE, never by its slot: numbered by encounter
+      // order, the labels stayed put while the sessions moved underneath them.
+      // Server createdAt, so every device agrees which "workspace" is (2).
+      function displayLabels(): Map<string, string> {
+        const groups = new Map<string, SessionFact[]>();
+        const out = new Map<string, string>();
+        for (const f of model.sessions.values()) {
+          const { text, fallback } = baseLabel(f);
+          out.set(f.id, text);
           // Several untitled tabs all read "New tab" with no numbering.
-          if (fallback) {
-            continue;
-          }
-          const group = groups.get(text);
-          if (group) {
-            group.push(t);
-          } else {
-            groups.set(text, [t]);
+          if (!fallback) {
+            groups.set(text, [...(groups.get(text) ?? []), f]);
           }
         }
-        const ordinals = new Map<Tab, number>();
-        for (const group of groups.values()) {
+        for (const [text, group] of groups) {
           if (group.length < 2) {
-            continue; // nothing to disambiguate from, so no suffix at all
+            continue;
           }
           [...group]
             .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
-            .forEach((t, i) => {
-              ordinals.set(t, i + 1);
+            .forEach((f, i) => {
+              if (i > 0) {
+                out.set(f.id, `${text} (${String(i + 1)})`);
+              }
             });
         }
+        return out;
+      }
+      function relabelAll(): void {
+        const labels = displayLabels();
         for (const t of tabList) {
-          const { text } = baseLabel(t);
-          const k = ordinals.get(t);
-          const display = k !== undefined && k > 1 ? `${text} (${String(k)})` : text;
+          const display = labels.get(t.id) ?? baseLabel(labelOf(t)).text;
           t.display = display;
           t.label.textContent = display;
           // The accessible name carries the state and the percentage as well as
           // the label: the dots are aria-hidden decoration and the progress bar
-          // is a 2px line with no text, so without this a screen-reader user
-          // cannot tell a working tab from a crashed one, or hear how far along
-          // a determinate one is.
+          // is a 2px line with no text.
           t.aria.setLabel(
             tabAccessibleName({
               label: display,
-              status: statusOf(t),
-              progress: shownProgress(t),
-              activity: t.activity,
-              activityCount: t.activityCount,
+              status: statusOf(t.id),
+              progress: shownProgress(t.id),
+              activity: factOf(t.id)?.activity ?? "",
+              activityCount: factOf(t.id)?.activityCount ?? 0,
             }),
           );
         }
       }
 
-      /** statusOf reads a tab's current status back off its dot, which is where
-       *  applyStatus records it (the dot is the one element that always has it,
-       *  on every chip site). */
-      function statusOf(t: Tab): string {
-        return t.dot.dataset["status"] ?? "idle";
+      /** A session's status as its dot shows it: a server's empty status is idle. */
+      function statusOf(id: string): string {
+        const status = factOf(id)?.status ?? "";
+        return status === "" ? "idle" : status;
       }
 
-      /** cueStatusOf folds a tab for the cue surfaces (foldedCueStatus). Off the
-       *  DOT rather than the wire status, so a server's empty status arrives here
-       *  as "idle" and cannot be mistaken for the blanked-cue sentinel. */
-      function cueStatusOf(t: Tab): string {
-        return foldedCueStatus(statusOf(t), t.activity);
-      }
-
-      /** shownProgress is a tab's percentage as it may currently be DISPLAYED;
+      /** shownProgress is a session's percentage as it may currently be DISPLAYED;
        *  renderedProgress owns when that is. */
-      function shownProgress(t: Tab): number {
-        return renderedProgress(statusOf(t), t.progress);
+      function shownProgress(id: string): number {
+        return renderedProgress(statusOf(id), factOf(id)?.progress ?? PROGRESS_ABSENT);
+      }
+
+      /** Repaints a chip's dot, progress bar and activity mark from its fact. */
+      function paintChip(t: Tab): void {
+        const f = factOf(t.id);
+        paintStatusDot(t.dot, f?.status ?? "", f?.reports ?? false);
+        paintProgress(t.progressEl, shownProgress(t.id));
+        paintActivityMark(t.activityEl, f?.activity ?? "", f?.activityCount ?? 0);
       }
 
       const termInput = (): HTMLElement | null =>
@@ -1243,10 +1164,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       function syncMobile(): void {
         const current = selectedId();
         const active = tabList.find((t) => t.id === current);
+        const f = current === null ? undefined : factOf(current);
         swLabel.textContent = active ? active.display : "";
-        paintStatusDot(swDot, active ? statusOf(active) : "idle", active?.reports ?? false);
-        paintProgress(swProgress, active ? shownProgress(active) : PROGRESS_ABSENT);
-        paintActivityMark(swActivity, active?.activity ?? "", active?.activityCount ?? 0);
+        paintStatusDot(swDot, f === undefined ? "idle" : statusOf(f.id), f?.reports ?? false);
+        paintProgress(swProgress, f === undefined ? PROGRESS_ABSENT : shownProgress(f.id));
+        paintActivityMark(swActivity, f?.activity ?? "", f?.activityCount ?? 0);
         // The aggregate background-notification cue rides the dedicated switch
         // button's dot (paintSwitchDot), not the active surface (it did not fit
         // there).
@@ -1265,16 +1187,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const heldKeyboard = keyboardAtPressOf(rowClose);
         rowClose.addEventListener("click", (e) => {
           e.stopPropagation();
-          void dropTab(t.id, { remote: true, keyboardHeld: heldKeyboard() });
+          void closeTabs([t.id], heldKeyboard());
         });
         return row;
       }
       // updateRow refreshes a reused row's live bits (status dot + label +
       // progress bar).
       function updateRow(row: HTMLElement, t: Tab): void {
-        paintStatusDot(pick(row, ".wt-switcher-row-dot"), statusOf(t), t.reports);
-        paintProgress(pick(row, ".wt-progress-bar"), shownProgress(t));
-        paintActivityMark(pick(row, ".wt-activity-mark"), t.activity, t.activityCount);
+        const f = factOf(t.id);
+        paintStatusDot(pick(row, ".wt-switcher-row-dot"), f?.status ?? "", f?.reports ?? false);
+        paintProgress(pick(row, ".wt-progress-bar"), shownProgress(t.id));
+        paintActivityMark(pick(row, ".wt-activity-mark"), f?.activity ?? "", f?.activityCount ?? 0);
         pick(row, ".wt-switcher-row-label").textContent = t.display;
       }
       // Rows are REUSED, never rebuilt, so their identity is stable for the swipe
@@ -1443,9 +1366,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         };
       }
 
-      // syncChrome refreshes every surface after any state change. Idempotent.
-      function syncChrome(): void {
-        noteSelected();
+      // The selection chrome, read from the screen the commit just applied and the
+      // model. Idempotent.
+      function paintChrome(): void {
         relabelAll();
         paintActive();
         syncMobile();
@@ -1459,45 +1382,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           renderSwitcherList();
         }
         maybeSwipeHint();
-        applyServerOrder();
-        // Every list mutation ends in syncChrome, so no path can forget the
-        // out-of-page surfaces; the fold is idempotent and the sinks no-op.
-        paintAttention();
+        // The percentage is deliberately NOT written into the title: a page has ONE
+        // title over many sessions, so any rule for whose percentage it shows is
+        // arbitrary. The unseen-cue count names no session.
         const active = selectedId();
         pageTitle?.set(tabList.find((t) => t.id === active)?.display ?? null);
-      }
-
-      // The percentage is deliberately NOT written into the document title: a page
-      // has ONE title over many sessions, so any rule for whose percentage it shows
-      // is arbitrary, and it churns the browser-tab label and bookmark name. The
-      // unseen-cue COUNT is not a softening of this rule: it names no session.
-
-      // The read half of tab-order sync, hung off syncChrome so no path can forget
-      // it. Safe that often because it is a no-op when the strip already matches,
-      // skipped mid-drag (the DOM then holds a preview not yet in tabList), and
-      // sorted by the same order adoption inserts by.
-      function applyServerOrder(): void {
-        if (draggingEl !== null) {
-          return;
-        }
-        const sorted = [...tabList].sort(compareTabOrder);
-        let moved = false;
-        for (let i = 0; i < sorted.length; i++) {
-          if (sorted[i] !== tabList[i]) {
-            moved = true;
-            break;
-          }
-        }
-        if (!moved) {
-          return;
-        }
-        tabList.length = 0;
-        tabList.push(...sorted);
-        // appendChild MOVES an existing node, so one pass in the wanted sequence
-        // both reorders the chips and leaves no duplicates behind.
-        for (const tab of tabList) {
-          scroller.appendChild(tab.el);
-        }
       }
 
       // closeKeyGrid closes the mobile key grid (if a keyboardToggle is wired and
@@ -1548,23 +1437,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       // expandSwitcher grows the bar to list the other tabs below the active row
       // (swipe-up / tap). No-op with a single tab (nothing to list). Not modal:
       // it never steals focus (focusing the hidden input on touch would pop the
-      // keyboard).
+      // keyboard). While it is open every tab is in view, so the commit reads them.
       function expandSwitcher(): void {
         if (expanded || tabList.length < 2) {
           return;
         }
-        // Opening the list acknowledges any pending background-tab notification:
-        // the user is now looking at the tabs, so clear the switch button's dot.
-        // The tray lists EVERY tab with its own status dot, so every latched tab
-        // is acknowledged here, not just the cue's latest subject — several tabs
-        // can be latched at once while the dot only ever showed the newest, and an
-        // unread sibling would stay unread on every device.
-        for (const t of tabList) {
-          markCueSeen(t, { retry: true });
-        }
-        clearSwitchNotify();
         renderSwitcherList();
         setExpandedState(true);
+        userInput((m) => switcherToggled(m, true));
         ctx.announce("Terminal list expanded");
       }
 
@@ -1575,6 +1455,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return;
         }
         setExpandedState(false);
+        userInput((m) => switcherToggled(m, false));
       }
 
       function toggleSwitcher(): void {
@@ -1585,7 +1466,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
 
-      function addTabChrome(info: StatusRecord): Tab {
+      // The chip for a session the strip gained; the commit inserts and paints it.
+      function addTabChrome(id: string): Tab {
         const el = fromHTML(doc, TAB_HTML);
         const label = el.querySelector<HTMLElement>(".wt-tab-label");
         const dot = el.querySelector<HTMLElement>(".wt-tab-dot");
@@ -1595,11 +1477,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (!label || !dot || !activityEl || !progressEl || !close) {
           throw new Error("web-terminal-ui: tab chrome missing parts");
         }
-        paintStatusDot(dot, info.status, reportsOf(info.reportsActivity));
         const aria = tablist.registerTab(el);
-        // Append to the scroller's end: the tab list is ALL the scroller holds
-        // (the "+" and keyboard button are fixed bar items outside it).
-        scroller.appendChild(el);
         // Runtime-added tabs animate in; initial tabs do not (see `started`).
         // The timer (not animationend) also clears the class on the hidden mobile
         // strip, where the animation never fires.
@@ -1609,59 +1487,27 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             el.classList.remove("wt-tab-enter");
           });
         }
-
         const tab: Tab = {
-          id: info.id,
-          alias: parseTabAlias(info.alias) ?? undefined,
-          born: ++tabEpoch,
-          title: info.title,
-          pinnedTitle: info.pinnedTitle,
+          id,
           nameSeq: 0,
           display: "",
-          createdAt: info.createdAt,
-          order: info.order,
           // Through the kernel factory, never `new LineStore()`: the factory
           // applies the consumer's scrollbackLines cap, so per-tab caches and
           // the kernel's implicit store share one retained-line budget. The id
           // is what lets it come back HYDRATED when the consumer enabled
           // persistScrollback, and registers it to be saved.
-          store: ctx.newLineStore(info.id),
+          store: ctx.newLineStore(id),
           el,
           label,
           dot,
           activityEl,
           progressEl,
-          // A percentage exists only on the status STREAM, so a tab adopted from
-          // the REST list starts with none; the first status event fills it in.
-          progress: normalizeProgress(info.progressValue),
-          activity: normalizeActivity(info.activity),
-          activityCount: normalizeActivityCount(info.activityCount),
           aria,
           view: null,
-          reports: reportsOf(info.reportsActivity),
-          // The boot list adopts without applyStatus, so these carry its numbers.
-          statusSeq: normalizeSeq(info.statusSeq) ?? 0,
-          seenSeq: normalizeSeq(info.seenSeq) ?? 0,
-          ackSeq: 0,
-          failedSeq: 0,
-          bannerSeq: 0,
-          streamAt: 0,
         };
-        paintProgress(progressEl, renderedProgress(info.status, tab.progress));
-        paintActivityMark(activityEl, tab.activity, tab.activityCount);
-        // Set an initial label immediately (relabelAll refines it with de-dup
-        // once the tab is in tabList and syncChrome runs).
-        tab.display = baseLabel(tab).text;
+        tab.display = baseLabel(labelOf(tab)).text;
         label.textContent = tab.display;
-        aria.setLabel(
-          tabAccessibleName({
-            label: tab.display,
-            status: info.status,
-            progress: renderedProgress(info.status, tab.progress),
-            activity: tab.activity,
-            activityCount: tab.activityCount,
-          }),
-        );
+        paintChip(tab);
         el.addEventListener("click", () => {
           if (editingId === tab.id) {
             return; // the rename field owns this chip
@@ -1734,7 +1580,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         const heldKeyboard = keyboardAtPressOf(close);
         close.addEventListener("click", (e) => {
           e.stopPropagation();
-          void dropTab(tab.id, { remote: true, keyboardHeld: heldKeyboard() });
+          void closeTabs([tab.id], heldKeyboard());
         });
         // Middle-click closes the tab (#8). Suppress the middle-click default on
         // mousedown so the browser's autoscroll/paste affordance does not fire.
@@ -1798,30 +1644,22 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return tab;
       }
 
-      /** Show `id` in the pane on `side`: the pane's current tab becomes an
-       *  ordinary tab, a pane elsewhere showing `id` is emptied first (a session is
-       *  never shown twice), and the pane is selected unless `keepSelection` holds
-       *  it on a pane that shows a tab. False when `side` names no pane that can
-       *  show a tab (absent, failed or hidden) or `id` no tab. */
-      function showIn(side: PaneSide, id: string, how: ShowOptions = {}): boolean {
+      /** The pane primitive the commit binds a session with: a pane elsewhere
+       *  showing `id` is emptied first (a session is never shown twice), the
+       *  leaving tab's reading position is kept, and the switch is flashed and
+       *  reeled. Nothing when the pane already shows `id`, cannot show a tab, or
+       *  `id` has no chip. `boot` binds and notifies only. Returns the reel to
+       *  play once the chrome is painted. */
+      function bindPane(side: PaneSide, id: string, boot: boolean): (() => void) | undefined {
         const pane = ctx.shell.pane(side);
-        const next = tabList.find((t) => t.id === id);
-        if (pane === null || !next) {
-          return false;
+        const next = chips.get(id);
+        if (pane === null || next === undefined) {
+          return undefined;
         }
         const state = pane.state();
-        if (state === "failed" || state === "hidden") {
-          return false;
-        }
         const curId = shownIn(side);
-        if (curId === id) {
-          // The press that delivered this click has already moved the keyboard onto
-          // the chip, so the FOCUS rule still owes an answer or the input stays
-          // stranded (a click on the shown tab, or the second activation of one
-          // press).
-          ctx.shell.select(side);
-          focusAfterSwitch();
-          return true;
+        if (state === "failed" || state === "hidden" || curId === id) {
+          return undefined;
         }
         const from = sideOf(id);
         if (from !== null) {
@@ -1831,9 +1669,14 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             losing.clearActiveSession();
           }
         }
+        if (boot) {
+          pane.render.bind(next.store);
+          pane.notifySwitch({ id });
+          return undefined;
+        }
         // A later tab slides in from the right, an earlier one from the left, so a
         // desktop switch feels like the mobile swipe.
-        let slide = how.dir;
+        let slide = switchHint?.id === id ? switchHint.dir : undefined;
         const fromIdx = curId === null ? -1 : tabList.findIndex((t) => t.id === curId);
         const toIdx = tabList.findIndex((t) => t.id === id);
         if (slide === undefined && fromIdx >= 0) {
@@ -1841,7 +1684,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         // A LINE, never surface.scrollTop: the line survives the rebuild and the
         // background output this tab's session produces before we come back.
-        const cur = curId === null ? undefined : tabList.find((t) => t.id === curId);
+        const cur = curId === null ? undefined : chips.get(curId);
         if (cur) {
           cur.view = pane.render.captureViewMemory();
         }
@@ -1852,34 +1695,18 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         let playReel: (() => void) | undefined;
         if (
           expanded &&
-          !creatingTab &&
+          creatingId !== id &&
           (slide === "next" || slide === "prev") &&
           (stepGap === 1 || stepGap === tabList.length - 1) &&
           !prefersReduce()
         ) {
           playReel = prepareReel(slide, next);
         }
-        bootShowedNothing = false;
-        // The terminal is now on screen, so a reload must not notify about a state
-        // the user just looked at.
-        acknowledgeSwitchNotify(next.id);
-        markCueSeen(next, { retry: true });
-        const moveSelection = how.keepSelection !== true || selectedId() === null;
         // The view goes in WITH the bind, which makes the swap atomic: the pane's
         // follow flag is one per renderer, so a bind without it gated the first
-        // flush on the state of the tab we LEFT and the cached screen rendered
-        // above the viewport until a touch re-engaged follow.
+        // flush on the state of the tab we LEFT.
         pane.render.bind(next.store, { view: next.view });
-        pane.notifySwitch({ id: next.id });
-        // Mark the reconcile as reel-driven so renderSwitcherList suppresses its
-        // add/remove row animation (the reel owns row motion here); set before the
-        // selection change, whose listener reconciles the list too.
-        reelReconcile = playReel !== undefined;
-        if (moveSelection) {
-          ctx.shell.select(side);
-        }
-        scheduleLayoutWrite();
-        scheduleAddress("push");
+        pane.notifySwitch({ id });
         // Only when the user is about to wait: a revisited tab with a warm store
         // paints from cache in one frame and must not flash a cue at every switch.
         if (
@@ -1889,91 +1716,47 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           armCatchup(pane);
         }
         flashSwitch(pane.surface(), slide);
-        syncChrome(); // reconciles the expanded list into the new order
-        reelReconcile = false;
-        playReel?.(); // FLIP the rows so the reorder reads as a rotation, not a reload
-        if (moveSelection) {
-          ctx.announce(`Switched to ${next.display}`);
-          focusAfterSwitch();
-        }
-        return true;
+        return playReel;
       }
 
-      // The tab-click rule: a tab a pane shows has that pane selected; any other
-      // tab fills the first empty pane, else replaces the selected pane's tab.
+      // The tab-click rule is layoutFor's show rule.
       function switchTo(id: string, dir?: "next" | "prev"): void {
-        const shownOn = sideOf(id);
-        if (shownOn !== null) {
-          ctx.shell.select(shownOn);
-          focusAfterSwitch();
-          return;
-        }
-        showIn(ctx.shell.targetFor(id), id, { dir });
+        switchHint = { id, dir };
+        userInput((m) => show(m, id, dir));
       }
 
-      // The one rule every split entry point reduces to (`TabsApi.snap`).
+      // The one rule every split entry point reduces to (`TabsApi.snap`); with
+      // nothing to pair the moved tab with, the split opens once a created tab can
+      // fill the other pane.
       function snap(id: string, side: PaneSide): boolean {
-        if (!isPaneSide(side) || !tabList.some((t) => t.id === id)) {
+        if (!isPaneSide(side) || factOf(id) === undefined) {
           return false;
         }
-        const split = ctx.shell.split;
-        const opening = !split.isOpen();
-        const from = sideOf(id);
-        if (from === side && !opening) {
-          return true;
-        }
-        if (opening && !split.canOpen()) {
+        const opening = !committed.split.open;
+        if (opening && !ctx.shell.split.canOpen()) {
           return false;
         }
-        // Nothing to pair the moved tab with: the split opens once a created tab
-        // can fill the other pane.
-        if (opening && splitPartner(id) === null) {
+        if (opening && splitPartner(model, layoutFor(model, committed), id) === null) {
           void create({ by: "snap", id, side });
           return true;
         }
-        if (opening && !split.open()) {
-          return false;
-        }
         // Emptying the tab's old pane drops a keyboard its input held to the body.
         const typing = keyboardInPaneInput();
-        const displaced = shownIn(side);
-        if (!showIn(side, id)) {
-          return false;
-        }
-        // Opening pairs the moved tab with the single view's tab, or its partner
-        // when they are one, so no pane opens empty; an open split only re-homes
-        // the displaced tab, into a pane the move emptied.
-        const kept = displaced === id ? null : displaced;
-        const back = kept ?? (opening ? splitPartner(id) : null);
-        if ((from !== null || opening) && back !== null && shownIn(otherSide(side)) === null) {
-          showIn(otherSide(side), back, { keepSelection: true });
-        }
-        if (typing) {
-          focusInput();
-        }
-        return true;
+        userInput((m) => snapIntent(m, id, side, typing));
+        return committed.panes[side] === id;
       }
 
       function toggleSplit(): void {
-        const split = ctx.shell.split;
-        if (split.isOpen()) {
-          split.close();
+        if (committed.split.open) {
+          userInput((m) => splitIntent(m, false));
           return;
         }
-        const partner = splitPartner(selectedId());
-        if (partner === null) {
+        const now = layoutFor(model, committed);
+        if (splitPartner(model, now, now.panes[now.split.selected]) === null) {
           void create({ by: "button" });
-        } else if (split.open()) {
-          showIn("right", partner, { keepSelection: true });
+        } else {
+          userInput((m) => splitIntent(m, true));
         }
-      }
-      function splitPartner(of: string | null): string | null {
-        const used = recent.find((id) => id !== of && tabList.some((t) => t.id === id));
-        if (used !== undefined) {
-          return used;
-        }
-        const at = tabList.findIndex((t) => t.id === of);
-        return (tabList[at + 1] ?? tabList[at - 1])?.id ?? null;
       }
 
       // A switched-into tab's cached screen is stale until its resume delta lands,
@@ -2166,17 +1949,17 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
 
       // A shown session's OSC 0/2 title arrives on its live socket and relabels
       // the tab at once; a background tab's title waits for the status sweep.
-      ctx.on("wire:title", ({ session, title }) => {
-        const t = tabList.find((x) => x.id === session);
-        // Ignore a blank title (an OSC 0/2 clear the process may emit when it
-        // redraws its prompt after idling): keep the last good label until a real
-        // replacement arrives, rather than reverting to "New tab". A non-blank
-        // change updates the label at once.
-        if (t && title.trim() !== "" && title !== t.title) {
-          t.title = title;
-          syncChrome();
-        }
-      });
+      ctx.defer(
+        ctx.on("wire:title", ({ session, title }) => {
+          serverInput((m) => wireTitle(m, session, title));
+        }),
+      );
+      // A pane's 4001 close with a reason: the session never started.
+      ctx.defer(
+        ctx.on("session:startFailed", ({ session, reason }) => {
+          serverInput((m) => paneStartFailed(m, session, reason));
+        }),
+      );
 
       // switchRelative moves delta tabs from the active one (swipe left = next).
       // The direction feeds the slide animation (next slides in from the right,
@@ -2334,9 +2117,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         shiftTimer = win.setTimeout(endShift, REORDER_SETTLE_MS);
       }
 
-      // Moves the DOM and NOT tabList, which is what makes the preview a preview:
-      // only a drop writes tabList, so a cancel is a re-projection and a syncChrome
-      // arriving mid-drag renders the committed order.
+      // Moves the DOM and NOT the model, which is what makes the preview a preview:
+      // only a drop reorders the sessions, so a cancel is a re-projection, and a
+      // commit mid-drag leaves the chips' order to the preview.
       function commitSlot(before: HTMLElement | null): void {
         const dragged = draggingEl;
         if (!dragged?.isConnected) {
@@ -2430,6 +2213,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         endShift(); // ...and nothing mid-slide, so this gesture starts from rest
         dropped = false;
         draggingEl = el;
+        update((m) => dragChanged(m, true));
         ghost();
         el.classList.add("wt-tab-dragging");
         hideTabMenu();
@@ -2444,6 +2228,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           revertPreview();
         }
         draggingEl = null;
+        serverInput((m) => dragChanged(m, false));
         // The gesture's state goes; a slide started by the revert above is left to
         // finish under its own settle timer (see endReorderPreview).
         endReorderPreview();
@@ -2467,36 +2252,28 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       }
 
       function syncOrderFromDom(): void {
-        const order: Tab[] = [];
+        const ids: string[] = [];
         for (const el of scroller.querySelectorAll<HTMLElement>(".wt-tab")) {
           const t = tabList.find((x) => x.el === el);
           if (t) {
-            order.push(t);
+            ids.push(t.id);
           }
         }
-        tabList.length = 0;
-        tabList.push(...order);
-        // Before syncChrome: it ends in applyServerOrder, which would undo this
-        // move while the tabs still carry their old positions.
-        publishOrder();
-        syncChrome();
+        publishOrder(ids);
       }
 
       // The write half of tab-order sync, called only from the paths that COMMIT
-      // a reorder. It renumbers BEFORE sending: every tab still carries the
-      // server's old position, and the caller's applyServerOrder pass would sort
-      // the strip straight back. A 409 means this client's list is stale, so the
-      // server's word is taken; any other failure leaves the arrangement local.
-      function publishOrder(): void {
-        tabList.forEach((tab, i) => {
-          tab.order = i;
-        });
+      // a reorder. It renumbers BEFORE sending: every session still carries the
+      // server's old position, and the strip would sort straight back. A 409 means
+      // this client's list is stale, so the server's word is taken; any other
+      // failure leaves the arrangement local.
+      function publishOrder(ids: readonly string[]): void {
+        userInput((m) => reorder(m, ids));
         if (!started) {
           return;
         }
-        const ids = tabList.map((t) => t.id);
-        void api.setOrder(ids).catch((err: unknown) => {
-          if (!tornDown() && err instanceof SessionAPIError && err.status === 409) {
+        void api.setOrder([...ids]).catch((err: unknown) => {
+          if (err instanceof SessionAPIError && err.status === 409) {
             void reconcileOnce();
           }
         });
@@ -2552,66 +2329,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         if (from < 0 || to < 0 || to >= tabList.length) {
           return;
         }
-        const [tab] = tabList.splice(from, 1);
-        if (!tab) {
+        const ids = tabList.map((t) => t.id);
+        const [moved] = ids.splice(from, 1);
+        const tab = moved === undefined ? undefined : chips.get(moved);
+        if (moved === undefined || tab === undefined) {
           return;
         }
-        tabList.splice(to, 0, tab);
-        for (const item of tabList) {
-          scroller.appendChild(item.el);
-        }
-        publishOrder(); // before syncChrome, for the reason at its definition
-        syncChrome();
+        ids.splice(to, 0, moved);
+        publishOrder(ids);
         ctx.announce(`Moved ${tab.display} to position ${String(to + 1)}`);
-      }
-
-      // Add a tab for a session that exists server-side but has no local tab yet
-      // (one created in another browser), so every client's tab set converges on
-      // the server. The caller runs syncChrome.
-      function adoptSession(info: SessionInfo): void {
-        if (tabList.find((t) => t.id === info.id)) {
-          return;
-        }
-        if (tombstones.active(info.id)) {
-          return;
-        }
-        const tab = addTabChrome(info);
-        // Placed by the SERVER's order, not by arrival: the stream's snapshot and
-        // the bootstrap's list race, so arrival order is not stable between loads.
-        const at = orderedInsertIndex(tabList, info);
-        tabList.splice(at, 0, tab);
-        // addTabChrome appended the chip at the end; the DOM must read in list order.
-        const after = tabList[at + 1];
-        if (after) {
-          scroller.insertBefore(tab.el, after.el);
-        }
-        if (started) {
-          showCreatedElsewhere(tab.id);
-        }
-      }
-
-      // The runtime repair for a bootstrap whose list AND create both failed: the
-      // sessions the stream later adopts would otherwise render inert until the
-      // user taps a tab. Gated on that one case, so a pane the closing rules
-      // emptied is never refilled by a status event. A live tab outranks an ENDED
-      // one, which would wedge the page the same way.
-      function ensureActive(): void {
-        if (holdDepth > 0 || !bootShowedNothing || anyShown()) {
-          return;
-        }
-        const first = tabList.find((t) => !isEndedStatus(statusOf(t))) ?? tabList[0];
-        if (first) {
-          switchTo(first.id);
-        }
       }
 
       // One press does not reliably arrive as one activation (two POSTs 0-3 ms
       // apart from a single "+" tap were measured), and sharing the in-flight
       // promise needs no threshold: a duplicate lands while the POST is open and
       // collapses into it, while a deliberate second tap still opens a second
-      // terminal. It also stops "+" mashing from queueing sessions across the
-      // server's retry window. The first coalesced caller asking for the split
-      // decides how it opens.
+      // terminal. The first coalesced caller asking for the split decides how it
+      // opens.
       let creating: Promise<void> | null = null;
       let createOpening: SplitOpening | null = null;
       function create(opening: SplitOpening | null = null): Promise<void> {
@@ -2626,34 +2360,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         return creating;
       }
 
-      function showNewTab(id: string): void {
-        const side = ctx.shell.targetFor(id);
-        const other = otherSide(side);
-        // Suppress the swipe reel for a new tab: the list should grow and fade the
-        // new row in (animateRowIn) rather than rotate.
-        creatingTab = true;
-        showIn(shownIn(side) !== null && shownIn(other) !== null ? other : side, id);
-        creatingTab = false;
-      }
-      // This client's own new session can reach the stream before its POST
-      // answers, so the placement waits until a create in flight has shown its tab.
-      function showCreatedElsewhere(id: string): void {
-        if (holdDepth > 0) {
-          heldPlacements.push(id);
-          return;
-        }
-        if (creating !== null) {
-          void creating.then(() => {
-            showCreatedElsewhere(id);
-          });
-          return;
-        }
-        if (!tornDown() && ctx.shell.split.isOpen() && sideOf(id) === null) {
-          showNewTab(id);
-        }
-      }
-
+      // The create holds placement until its POST answers, so a session the
+      // stream delivers first is never placed as another device's.
       async function openNewSession(): Promise<void> {
+        update(createBegan);
         let info: SessionInfo;
         try {
           info = await createSessionHonouringRetry(api, ctx, lifetime.signal);
@@ -2661,250 +2371,70 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           if (tornDown()) {
             return;
           }
-          // A create can still fail transiently (network, server error); tell
-          // the user rather than throwing. A 503 has already been retried on the
-          // server's own schedule by this point, so reaching here means it never
-          // became ready: say so with the server's own words when it gave any.
+          serverInput(createFailed);
+          // A 503 has already been retried on the server's own schedule by this
+          // point, so reaching here means it never became ready.
           toastCreateFailure(err);
           return;
         }
-        // The status SSE may have adopted this session during the POST round-trip
-        // (server broadcasts the new session to all clients); reuse that tab.
-        let tab = tabList.find((t) => t.id === info.id);
-        if (!tab) {
-          tab = addTabChrome(info);
-          tabList.push(tab);
+        if (tornDown()) {
+          closeOrphan(api, info.id);
+          return;
         }
-        // Opened once the tab exists, so a failed create leaves the single view
-        // as it was rather than an empty pane. A snap whose tab closed meanwhile
-        // has nothing left to pair, so the new tab takes the single view.
-        const opening = createOpening;
-        const split = ctx.shell.split;
-        if (opening?.by === "button" && !split.isOpen()) {
-          split.open();
-        } else if (
-          opening?.by === "snap" &&
-          !split.isOpen() &&
-          tabList.some((t) => t.id === opening.id) &&
-          split.open()
-        ) {
-          const typing = keyboardInPaneInput();
-          if (showIn(opening.side, opening.id)) {
-            creatingTab = true;
-            showIn(otherSide(opening.side), tab.id, { keepSelection: true });
-            creatingTab = false;
-            if (typing) {
-              focusInput();
-            }
+        const typing = keyboardInPaneInput();
+        creatingId = info.id;
+        userInput((m) => ownCreated(m, info, createOpening, typing));
+        creatingId = null;
+      }
+
+      // A user close of `ids`, one removal for the whole set. Closing every tab
+      // spawns the replacement first, so the strip never empties and the "+" never
+      // teleports while the POST is out; a failed create keeps the tabs.
+      async function closeTabs(ids: readonly string[], keyboardHeld = false): Promise<void> {
+        const closing = ids.filter((id) => factOf(id) !== undefined);
+        if (closing.length === 0) {
+          return;
+        }
+        if ([...model.sessions.keys()].every((id) => closing.includes(id))) {
+          await create();
+          if ([...model.sessions.keys()].every((id) => closing.includes(id))) {
             return;
           }
         }
-        showNewTab(tab.id);
-      }
-
-      // dropTab removes a tab's chrome + cache and, for a shown tab, decides what
-      // its pane shows next. remote also DELETEs the session (a user close);
-      // without it the server already ended it. keyboardHeld: the terminal input
-      // held the keyboard when the press on this tab's close button began, so
-      // focus returns to it. quiet: the caller (a resync) places what the panes
-      // show next, so no pane transaction or focus move runs.
-      async function dropTab(
-        id: string,
-        opts: { remote: boolean; keyboardHeld?: boolean; quiet?: boolean },
-      ): Promise<void> {
-        const { remote, keyboardHeld = false, quiet = false } = opts;
-        const idx = tabList.findIndex((t) => t.id === id);
-        if (idx < 0) {
-          return;
-        }
-        // Closing the only remaining tab: spawn its replacement BEFORE removing
-        // this one, so the strip never empties and the "+" never teleports to the
-        // far left while the create POST is in flight. The replacement lands as any
-        // new tab does, and dropping the old tab is then an ordinary non-last
-        // close, so this intercept does not re-fire. A user close only.
-        if (remote && tabList.length === 1) {
-          await create();
-          // A failed create adds nothing (and toasts): keep the existing tab
-          // rather than stranding the user on an empty strip.
-          if (tabList.some((t) => t.id !== id)) {
-            await dropTab(id, { remote: true });
-          }
-          return;
-        }
-        // Which pane shows the tab decides the transaction below; read before
-        // anything moves.
-        const side = sideOf(id);
-        const splitOpen = ctx.shell.split.isOpen();
         // Emptying a pane makes it inert, which drops a keyboard it held to the
         // body before the view moves; the keyboard follows the view instead.
-        const typing = splitOpen && side !== null && keyboardInPaneInput();
-        const [tab] = tabList.splice(idx, 1);
-        if (!tab) {
-          return;
-        }
-        // A tab removed mid-edit (a user close, an SSE removal, or the list
-        // reconcile dropping it) abandons the edit with no request: the field
-        // lives inside the chip and goes away with it, so the state must not
-        // outlive it.
-        if (editingId === id) {
-          endEdit();
-        }
-        // Tombstone this id briefly so a stale status snapshot/poll that predates
-        // the server reaping it cannot re-adopt the just-closed tab.
-        tombstones.add(id);
-        // A pending switch-button cue whose subject just closed is moot: clear
-        // it rather than leaving a dot no tab visit can ever resolve.
-        acknowledgeSwitchNotify(id);
-        ctx.shell.notifications.forget(id);
-        tab.aria.remove();
-        // Remove immediately (no exit animation): a lingering element made the
-        // "+" teleport after a delay, and made a last-tab replacement appear in
-        // the second slot before shifting left. The strip reflows in one frame.
-        // A live desktop drag holds references to chips, so tell it first: this
-        // element may be the one it is dragging or the one it means to insert
-        // before, and both stop existing on the next line.
-        abortReorderFor(tab.el);
-        tab.el.remove();
-        // Each connection forgets the session exactly once: the showing pane's
-        // through clearActiveSession (which closes its socket and empties the
-        // pane), every other through dropSessionExcept. A quiet drop empties a
-        // single view's pane too, since no switch will replace what it shows.
-        if (side !== null && (splitOpen || quiet)) {
-          ctx.shell.pane(side)?.clearActiveSession();
-          ctx.shell.dropSessionExcept(id, side);
-        } else {
-          ctx.dropSession(id);
-        }
-        // A close that empties the expanded list collapses the switcher FIRST, so
-        // the tray animates shut with the last row still in it; `expanded` going off
-        // makes the syncChrome below leave that row for the collapse to sweep away.
-        if (expanded && tabList.length < 2) {
-          collapseSwitcher();
-        }
-        syncChrome(); // reflect the drop immediately (count, position)
-        // What the panes show next is decided here, before the server's answer:
-        // selection must not sit on an emptied pane for a DELETE round trip.
-        if (!quiet) {
-          placeAfterDrop(idx, side, splitOpen);
-          if (typing || keyboardHeld) {
-            focusInput();
-          }
-        }
-        if (remote) {
+        const typing = ctx.shell.split.isOpen() && closing.some(isShown) && keyboardInPaneInput();
+        userInput((m) =>
+          sessionsRemoved(m, closing, { by: "user", keyboardHeld, typing }, win.Date.now()),
+        );
+        // The person asked for these closes, so every DELETE still goes out past a
+        // teardown.
+        for (const id of closing) {
           try {
             await api.close(id);
           } catch {
             if (!tornDown()) {
-              ctx.toast("Could not close the terminal on the server");
+              ctx.toast(
+                closing.length === 1
+                  ? "Could not close the terminal on the server"
+                  : "Could not close a terminal on the server",
+              );
             }
           }
         }
-      }
-
-      // The pane transaction for a dropped tab that `side` showed (null: none).
-      function placeAfterDrop(idx: number, side: PaneSide | null, splitOpen: boolean): void {
-        if (side === null) {
-          return;
-        }
-        if (splitOpen && shownIn(otherSide(side)) !== null) {
-          ctx.shell.split.closeSide(side);
-          focusAfterSwitch();
-          return;
-        }
-        if (splitOpen) {
-          ctx.shell.split.close();
-        }
-        const neighbor = tabList[idx] ?? tabList[idx - 1];
-        if (neighbor) {
-          switchTo(neighbor.id);
-          return;
-        }
-        // Only the server removes a last tab here (a user's close of it took the
-        // create-first branch of dropTab). Its server either restarted or saw
-        // another device replace it, so settle rather than create a second tab.
-        // Not awaited: this may run inside the reconcile slot itself.
-        void inReconcileSlot(() => resync([]));
       }
 
       async function close_(id: string): Promise<void> {
-        await dropTab(id, { remote: true });
+        await closeTabs([id]);
       }
 
-      // Each tab is a running agent, so closing two or more asks first. This path
-      // drops tabs itself, so every per-tab state dropTab releases is released here.
+      // Each tab is a running agent, so closing two or more asks first.
       async function closeMany(ids: readonly string[]): Promise<void> {
-        const victims = tabList.filter((t) => ids.includes(t.id));
-        if (victims.length === 0) {
-          return;
-        }
+        const victims = ids.filter((id) => factOf(id) !== undefined);
         if (victims.length >= 2 && !win.confirm(`Close ${String(victims.length)} terminals?`)) {
           return;
         }
-        const selectedBefore = selectedId();
-        const closingSelected = selectedBefore !== null && ids.includes(selectedBefore);
-        const splitOpen = ctx.shell.split.isOpen();
-        // An editor left open on a removed tab keeps editingId alive past its chip
-        // and suppresses focus-on-switch for good.
-        if (editingId !== null && ids.includes(editingId)) {
-          endEdit();
-        }
-        let emptiedPane = false;
-        for (const t of victims) {
-          const idx = tabList.indexOf(t);
-          if (idx >= 0) {
-            tabList.splice(idx, 1);
-          }
-          // A stale status snapshot that predates the server's reap must not
-          // re-adopt a just-closed tab.
-          tombstones.add(t.id);
-          acknowledgeSwitchNotify(t.id);
-          ctx.shell.notifications.forget(t.id);
-          t.aria.remove();
-          abortReorderFor(t.el); // a live drag holds this node
-          t.el.remove();
-          const side = sideOf(t.id);
-          if (side !== null && splitOpen) {
-            ctx.shell.pane(side)?.clearActiveSession();
-            ctx.shell.dropSessionExcept(t.id, side);
-            emptiedPane = true;
-          } else {
-            ctx.dropSession(t.id);
-          }
-        }
-        // Re-home before the DELETEs: selection must not sit on an emptied pane for
-        // a round trip.
-        let needsTab = !splitOpen && closingSelected;
-        if (emptiedPane) {
-          const keep = ctx.shell.panes().find((p) => p.state() === "shown")?.side;
-          if (keep === undefined) {
-            ctx.shell.split.close();
-            needsTab = true;
-          } else {
-            ctx.shell.split.closeSide(otherSide(keep));
-          }
-        }
-        if (needsTab && tabList[0]) {
-          switchTo(tabList[0].id);
-        } else {
-          syncChrome();
-        }
-        // One terminal always stays open.
-        let replacement: Promise<void> | undefined;
-        if (tabList.length === 0) {
-          replacement = create();
-        }
-        // The person asked for these closes, so every DELETE still goes out past a
-        // teardown; only what the page shows for them stops.
-        for (const t of victims) {
-          try {
-            await api.close(t.id);
-          } catch {
-            if (!tornDown()) {
-              ctx.toast("Could not close a terminal on the server");
-            }
-          }
-        }
-        await replacement;
+        await closeTabs(victims);
       }
 
       function closeOthers(id: string): Promise<void> {
@@ -2973,42 +2503,37 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       /** commitRename applies a finished edit. An empty value CLEARS the pin, but
        *  only on an explicit confirm — see beginEdit's Enter/blur split. */
       function commitRename(id: string, raw: string): boolean {
-        const t = tabList.find((x) => x.id === id);
-        if (!t) {
+        const t = chips.get(id);
+        const f = factOf(id);
+        if (!t || !f) {
           return false;
         }
         // Sanitize client-side rather than trusting the round-trip: strip control
         // characters and bound the length exactly as the server does.
         const name = sanitizePinnedName(raw);
-        const before = t.pinnedTitle ?? "";
+        const before = f.pinnedTitle ?? "";
         if (name === before) {
           return false; // nothing to do; no request, no toast
         }
-        // Optimistic: paint it now, guarded by a monotonic counter AND the tab's
-        // birth epoch so a slow response cannot roll back a newer rename, a later
-        // clear, or — if this id were ever reused by a fresh session — a
-        // different tab entirely.
+        // Optimistic: paint it now, guarded by a monotonic counter AND the chip's
+        // identity so a slow response cannot roll back a newer rename, a later
+        // clear, or a different session reusing the id.
         const seq = ++t.nameSeq;
-        const born = t.born;
-        t.pinnedTitle = name;
-        syncChrome();
+        userInput((m) => renamed(m, id, name));
         // Announce the OUTCOME, which for a clear is whatever the automatic
-        // sources now yield — and that can be the "New tab" fallback, in which
-        // case claiming an automatic name would be false.
+        // sources now yield, and that can be the "New tab" fallback.
         if (name !== "") {
           ctx.announce(`Renamed to ${name}`);
         } else {
-          const { text, fallback } = baseLabel(t);
+          const { text, fallback } = baseLabel(labelOf(t));
           ctx.announce(fallback ? "Custom name removed" : `Using automatic name: ${text}`);
         }
         const request = name === "" ? api.clearPinnedTitle(id) : api.setPinnedTitle(id, name);
         void request.catch(() => {
-          const cur = tabList.find((x) => x.id === id);
-          if (cur?.born !== born || cur.nameSeq !== seq) {
+          if (tornDown() || chips.get(id) !== t || t.nameSeq !== seq) {
             return; // gone, reused, or superseded: the newer state stands
           }
-          cur.pinnedTitle = before;
-          syncChrome();
+          userInput((m) => renamed(m, id, before));
           ctx.toast("Could not save the terminal name");
         });
         return true;
@@ -3039,7 +2564,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // The PIN, never the rendered label: a blur commits a non-empty value, so a
         // prefilled automatic title or de-dup suffix would be pinned by a click-away.
         // An unpinned tab starts EMPTY with the label as its placeholder.
-        input.value = t.pinnedTitle ?? "";
+        input.value = factOf(id)?.pinnedTitle ?? "";
         input.placeholder = t.display;
         // maxLength is a UI affordance only, in UTF-16 code units; the server
         // counts runes, so sanitizePinnedName (code points) is the real bound.
@@ -3215,7 +2740,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // item up or down by a row depending on whether the tab happens to be
         // renamed, so right-clicking two tabs and clicking the same point could
         // reset a name on one and close tabs on the other.
-        tabMenuItem("Use automatic name", !hasPinnedName(target), () => {
+        tabMenuItem("Use automatic name", !hasPinnedName(labelOf(target)), () => {
           commitRename(id, ""); // the same operation an emptied, confirmed edit performs
         });
         tabMenuSeparator();
@@ -3291,133 +2816,11 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         ctx.toast("Swipe to switch terminals");
       }
 
-      // Takes the record whole: its title fields are interchangeable strings that
-      // as positional parameters would be swappable. `reports` travels separately
-      // because it is normalised (reportsOf) first. `source` says whether the
-      // record came off the stream or from a list requested at stream epoch
-      // `listedAt`.
-      function applyStatus(rec: StatusRecord, reports: boolean, source: RecordSource): void {
-        const t = tabList.find((tab) => tab.id === rec.id);
-        if (!t) {
-          return;
-        }
-        if ("stream" in source) {
-          t.streamAt = streamEpoch;
-        }
-        // The stream-owned tuple is skipped from a list older than the stream's
-        // last record for the tab, or carrying an older occurrence: anything such a
-        // list could add arrives on the stream anyway, and applying it can hide a
-        // cue no later frame restores.
-        const seq = normalizeSeq(rec.statusSeq);
-        const stale =
-          ("listedAt" in source && t.streamAt > source.listedAt) ||
-          (seq !== null && seq < t.statusSeq);
-        if (!stale) {
-          applyStreamTuple(t, rec, reports, seq);
-        }
-        // The server's shared position. Only an explicitly PRESENT value updates
-        // the tab, for the same reason as progressValue below: an engine that
-        // keeps no order sends no field, and reading that absence as "position 0"
-        // would drag every tab to the front of the strip on every status tick.
-        // syncChrome's applyServerOrder then moves the chip if this changed.
-        if (rec.order !== undefined) {
-          t.order = rec.order;
-        }
-        // A changed alias renames the tab it already is, so the address it is
-        // shown under is rewritten in place rather than pushed.
-        if (rec.alias !== undefined) {
-          const alias = parseTabAlias(rec.alias) ?? undefined;
-          if (alias !== t.alias) {
-            t.alias = alias;
-            scheduleAddress("replace");
-          }
-        }
-        // The seen floor only rises, so a lower value is an older record.
-        const seen = normalizeSeq(rec.seenSeq);
-        if (seen !== null && seen > t.seenSeq) {
-          t.seenSeq = seen;
-          closeReadSurfaces(t);
-        }
-        // A program that reports activity may also post an OSC 9 notification:
-        // arm the permission request for the next user gesture.
-        if (reports) {
-          ctx.shell.notifications.arm();
-        }
-        // The switch button's latest-wins dot. The acknowledgement reads the RAW
-        // status; the raise reads the FOLDED one, so a done held by background
-        // activity raises nothing.
-        const folded = fold(t);
-        if (isShown(rec.id) && pageVisible() && isCueStatus(statusOf(t))) {
-          // BOTH halves: keyed on the shown tabs alone, this swallowed the cue of
-          // the one session the user left running on a hidden page, the case the
-          // out-of-page surfaces exist for.
-          markCueSeen(t, { retry: false });
-        } else if (isUnread(folded)) {
-          switchNotify = folded.status;
-          switchNotifyId = rec.id;
-          switchNotifySeq = t.statusSeq;
-          paintSwitchDot();
-        }
-        // A BLANK title (a status sweep, or the process clearing its OSC 0/2
-        // title) must not drop an idle tab back to "New tab". The typeof check is
-        // live: rec is unvalidated server JSON, and a missing title would abort
-        // the caller's whole reconcile loop.
-        if (typeof rec.title === "string" && rec.title.trim() !== "") {
-          t.title = rec.title;
-        }
-        // "" is meaningful here: it is how a clear made in ANOTHER browser reaches
-        // this one. It never bumps nameSeq: SSE delivery and REST mutation are not
-        // one total order, so a record arriving during a pending request may
-        // predate our own PUT, and a bump would suppress that request's rollback.
-        if (rec.pinnedTitle !== undefined) {
-          t.pinnedTitle = rec.pinnedTitle;
-        }
-      }
-
-      // The fields only the stream decides: the status and its dot, its
-      // occurrence number, the reveal gate, the percentage and the activity pair.
-      function applyStreamTuple(
-        t: Tab,
-        rec: StatusRecord,
-        reports: boolean,
-        seq: number | null,
-      ): void {
-        t.reports = reports;
-        if (seq !== null) {
-          t.statusSeq = seq;
-        }
-        paintStatusDot(t.dot, rec.status, reports);
-        // Only a PRESENT percentage updates the tab: the polling fallback lists
-        // SessionInfo, which carries none, and reading absence as cleared would
-        // blank a live bar every tick. A clear arrives as an explicit -1.
-        if (rec.progressValue !== undefined) {
-          t.progress = normalizeProgress(rec.progressValue);
-        }
-        paintProgress(t.progressEl, shownProgress(t));
-        // The host's secondary activity, read with the same PRESENT-only guard and
-        // for the same reason: the polling fallback lists SessionInfo, and a
-        // pre-release server carries neither field at all, so reading absence as
-        // "no background task" would blank a live mark on every tick. An empty
-        // string IS the withdrawal, and it arrives explicitly.
-        if (rec.activity !== undefined) {
-          t.activity = normalizeActivity(rec.activity);
-        }
-        if (rec.activityCount !== undefined) {
-          t.activityCount = normalizeActivityCount(rec.activityCount);
-        }
-        paintActivityMark(t.activityEl, t.activity, t.activityCount);
-      }
-
-      // One list reconcile for both status sources: adopt every session the
-      // server lists, then drop tabs it no longer lists. The SSE path runs it on
-      // every (re)open because a RESTARTED manager's snapshot carries no
-      // tombstones for sessions it never knew, so those tabs would otherwise spin
-      // "Reconnecting…" forever. reconcileOnce joins the run in flight, so a
-      // caller that awaits it sees a listing; inReconcileSlot queues behind it.
+      // One reconcile slot for every list, resync and settle: runs never join,
+      // they queue behind the run in flight. The slot never rejects, so a failed
+      // run cannot skip the runs queued behind it, and only the run still stored
+      // clears it.
       let reconciling: Promise<void> | null = null;
-      // Runs fn in the single reconcile slot: it never joins, it queues behind the
-      // run in flight. The slot never rejects, so a failed run cannot skip the
-      // runs queued behind it, and only the run still stored clears it.
       function inReconcileSlot(fn: () => Promise<void>): Promise<void> {
         const slot: Promise<void> = (reconciling ?? Promise.resolve())
           .then(() => fn())
@@ -3432,128 +2835,51 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         reconciling = slot;
         return slot;
       }
-      const reconcileOnce = (): Promise<void> => reconciling ?? inReconcileSlot(reconcileNow);
-      // Placement of a tab arriving on the stream waits until fn ends. Then, unless
-      // a resync ran meanwhile, the held tabs still open are placed as they would
-      // have been; either way a page that booted onto nothing gets its repair.
-      async function withPlacementHold(fn: () => Promise<void>): Promise<void> {
-        holdDepth++;
-        try {
-          await fn();
-        } finally {
-          holdDepth--;
-          if (holdDepth === 0) {
-            const held = holdResynced ? [] : heldPlacements;
-            heldPlacements = [];
-            holdResynced = false;
-            for (const id of held) {
-              if (tabList.some((t) => t.id === id)) {
-                showCreatedElsewhere(id);
-              }
-            }
-            ensureActive();
-          }
+      // The list is authoritative only for sessions known when it was requested,
+      // so the token is read before the request (for a stream open, at the open).
+      const listToken = (): { readonly listedAt: number; readonly epochAtList: number } => ({
+        listedAt: model.streamEpoch,
+        epochAtList: model.clock,
+      });
+      async function reconcileWith(token: ReturnType<typeof listToken>): Promise<void> {
+        if (tornDown()) {
+          return;
         }
-      }
-      // While settling, the dead tabs a resync drops must write no history entry.
-      function scheduleAddress(mode: "push" | "replace"): void {
-        if (!settling) {
-          address?.schedule(mode);
-        }
-      }
-      async function reconcileNow(): Promise<void> {
-        // The listing is authoritative only for tabs that existed when it was
-        // requested: a tab adopted while the GET was in flight is invisible to
-        // it, and dropping it here cascaded into a duplicate replacement session.
-        const epochAtList = tabEpoch;
-        const listedAt = streamEpoch;
         let list: SessionInfo[];
         try {
           list = await api.list();
         } catch {
           return; // transient; try again on the next trigger
         }
+        serverInput((m) => mergeList(m, list, token, win.Date.now()));
+      }
+      const reconcileNow = (): Promise<void> => reconcileWith(listToken());
+      const reconcileOnce = (): Promise<void> => reconciling ?? inReconcileSlot(reconcileNow);
+
+      // Rebuild the page onto a server whose sessions replaced `ids` (a restart,
+      // or the server's last session removed): drop them, settle the new set, and
+      // place it the way a boot does. Runs inside the reconcile slot.
+      async function runResync(ids: readonly string[]): Promise<void> {
         if (tornDown()) {
           return;
         }
-        const seen = new Set(list.map((s) => s.id));
-        // Every tab the listing could have named is missing from it: the server
-        // restarted (or replaced every tab). Decided before the adopt loop, so the
-        // tabs it lists are placed by the address and the record, not by arrival.
-        // Because this branch takes every such case, the gone loop below drops a
-        // strict subset of the known tabs and never reaches dropTab's last-tab arm.
-        const known = tabList.filter((t) => t.born <= epochAtList).map((t) => t.id);
-        if (known.length > 0 && known.every((id) => !seen.has(id))) {
-          await resync(known);
-          return;
-        }
-        for (const info of list) {
-          adoptSession(info); // add sessions created elsewhere (no local tab)
-          applyStatus(info, reportsOf(info.reportsActivity), { listedAt });
-        }
-        // Already gone server-side, so no DELETE; tabs born after the snapshot
-        // wait for the next reconcile.
-        const gone = tabList
-          .filter((t) => !seen.has(t.id) && t.born <= epochAtList)
-          .map((t) => t.id);
-        for (const id of gone) {
-          await dropTab(id, { remote: false });
-        }
-        ensureActive();
-        syncChrome();
-      }
-      // Rebuild the page onto a server whose sessions replaced `known` (a restart,
-      // or the server's last tab removed): drop them without placing anything,
-      // settle the new set, then place it the way a boot does, by the address and
-      // the record. Runs inside the reconcile slot.
-      async function resync(known: readonly string[]): Promise<void> {
-        await withPlacementHold(async () => {
-          holdResynced = true;
-          const typing = keyboardInPaneInput();
-          settling = true;
-          let placed: "kept" | "shown" | "none" = "none";
-          try {
-            for (const id of known) {
-              await dropTab(id, { remote: false, quiet: true });
-            }
-            // showSettled reopens a split through restoreSplit, which refuses an
-            // open one; closed under applyingRecord so no record write goes out.
-            if (ctx.shell.split.isOpen()) {
-              applyingRecord = true;
-              try {
-                ctx.shell.split.close();
-              } finally {
-                applyingRecord = false;
-              }
-            }
-            const listedAt = streamEpoch;
-            const settled = await settleOrToast();
-            if (tornDown()) {
-              return;
-            }
-            for (const info of settled.sessions) {
-              adoptSession(info);
-              applyStatus(info, reportsOf(info.reportsActivity), { listedAt });
-            }
-            // Read now, so an address the user navigated to during the wait wins.
-            const route =
-              address !== null && settled.listed ? parseTabRoute(win.location.hash) : null;
-            // No stale-tab toast: the user did not open this address in this act.
-            placed = showSettled(settled, route, false);
-          } finally {
-            settling = false;
-            if (placed === "none") {
-              bootShowedNothing = true;
-            }
-            if (!tornDown()) {
-              syncChrome();
-              if (typing) {
-                focusInput();
-              }
-              scheduleAddress("replace");
-            }
-          }
-        });
+        const typing = keyboardInPaneInput();
+        update((m) => resyncBegan(m, ids, typing, win.Date.now()));
+        commitNow();
+        const settled = await settleOrToast();
+        // Read now, so an address the user navigated to during the wait wins.
+        const route = address !== null && settled.listed ? parseTabRoute(win.location.hash) : null;
+        update((m) =>
+          resyncSettled(m, {
+            sessions: settled.sessions,
+            record: settled.layout,
+            route,
+            toastStale: false,
+            now: win.Date.now(),
+          }),
+        );
+        commitNow();
+        userInput(ownReleased);
       }
       function warnLayoutOnce(what: string, err?: unknown): void {
         if (warnedLayout) {
@@ -3561,26 +2887,6 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
         warnedLayout = true;
         console.warn(`web-terminal-ui: ${what}; the pane layout is not persisted`, err);
-      }
-      function currentLayout(): PaneLayout | null {
-        const left = ctx.shell.pane("left")?.session.id ?? null;
-        const right = ctx.shell.pane("right")?.session.id ?? null;
-        if (left === null && right === null) {
-          return null;
-        }
-        const split = ctx.shell.split.state();
-        return {
-          left,
-          right,
-          handle: split.committedRatio,
-          selected: split.selected,
-          open: split.open,
-        };
-      }
-      // Own-field equality over the list, never a keyed object, so an alias such
-      // as `constructor` finds nothing rather than Object.prototype.
-      function tabByAlias(alias: TabAlias | null): Tab | undefined {
-        return alias === null ? undefined : tabList.find((t) => t.alias === alias);
       }
       /** The fragment naming what the panes show: `""` when a shown tab has no
        *  alias, null while no pane shows a tab. */
@@ -3591,7 +2897,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           return null;
         }
         const aliasOf = (id: string | null): TabAlias | null | undefined =>
-          id === null ? null : tabList.find((t) => t.id === id)?.alias;
+          id === null ? null : factOf(id)?.alias;
         const l = aliasOf(left);
         const r = aliasOf(right);
         if (l === undefined || r === undefined) {
@@ -3607,66 +2913,9 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
        *  are shown: a URL never creates or closes a session, because a history
        *  entry would otherwise resurrect a tab closed on another device. */
       function applyFragment(fragment: string, origin: RouteOrigin): void {
-        const route = parseTabRoute(fragment);
-        if (route === null) {
-          return;
-        }
-        const [wantLeft, wantRight] =
-          route.kind === "single" ? [route.tab, null] : [route.left, route.right];
-        const left = tabByAlias(wantLeft);
-        const right = tabByAlias(wantRight);
-        if (
-          origin === "deeplink" &&
-          ((wantLeft !== null && !left) || (wantRight !== null && !right))
-        ) {
-          ctx.toast(STALE_TAB_NOTICE);
-        }
-        const first = left ?? right;
-        if (first === undefined) {
-          return;
-        }
-        const split = ctx.shell.split;
-        let wantSplit = route.kind === "split" && split.enabled;
-        if (wantSplit && !split.isOpen() && !split.canOpen()) {
-          wantSplit = false;
-          ctx.toast("Split view needs a wider window");
-        }
-        if (!wantSplit) {
-          if (split.isOpen()) {
-            // Closing keeps the selected pane's tab, so select the one wanted.
-            const at = sideOf(first.id);
-            if (at !== null) {
-              ctx.shell.select(at);
-            }
-            split.close();
-          }
-          if (sideOf(first.id) === null) {
-            showIn(ctx.shell.selected(), first.id, { keepSelection: true });
-          }
-          return;
-        }
-        if (!split.isOpen() && !split.open()) {
-          return;
-        }
-        const want: Record<PaneSide, Tab | undefined> = { left, right };
-        // The selected side goes first: filling the peer first could empty the
-        // selected pane (a tab moving across), and showIn then moves the
-        // selection to the peer. A moving tab is emptied from its old side by showIn.
-        const kept = ctx.shell.selected();
-        for (const side of [kept, otherSide(kept)]) {
-          const tab = want[side];
-          if (tab !== undefined && shownIn(side) !== tab.id) {
-            showIn(side, tab.id, { keepSelection: true });
-          }
-        }
-        for (const side of ["left", "right"] as const) {
-          if (want[side] === undefined && shownIn(side) !== null) {
-            ctx.shell.pane(side)?.clearActiveSession();
-          }
-        }
-        const sel = ctx.shell.selected();
-        if (shownIn(sel) === null && shownIn(otherSide(sel)) !== null) {
-          ctx.shell.select(otherSide(sel));
+        const r = parseTabRoute(fragment);
+        if (r !== null) {
+          userInput((m) => routeIntent(m, r, origin === "deeplink"));
         }
       }
       async function writeLayout(layout: PaneLayout, retryOnStale: boolean): Promise<void> {
@@ -3678,14 +2927,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           }
           if (err instanceof SessionAPIError && err.status === 409 && retryOnStale) {
             // A side names a session the server no longer has: this client's view
-            // is behind, so re-list and write the reconciled row once more. The
-            // reconcile's own change is folded into that one write.
+            // is behind. The rewrite is owed only once the re-list is merged, so no
+            // commit sends the row the server just refused.
             await reconcileOnce();
-            const reconciled = tornDown() ? null : currentLayout();
-            if (reconciled !== null) {
-              layoutDirty = false;
-              await writeLayout(reconciled, false);
-            }
+            serverInput(layoutStale);
             return;
           }
           if (err instanceof SessionAPIError && err.status === 404) {
@@ -3696,29 +2941,19 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         }
       }
       function flushLayout(): void {
-        layoutDirty = false;
-        const layout = currentLayout();
-        if (layout === null || tornDown()) {
+        const q = queuedRecord;
+        queuedRecord = null;
+        if (q === null || tornDown()) {
           return;
         }
-        layoutInFlight = writeLayout(layout, true).finally(() => {
+        layoutInFlight = writeLayout(q.record, q.retry).finally(() => {
           layoutInFlight = null;
-          if (layoutDirty && !tornDown()) {
-            flushLayout();
-          }
+          flushLayout();
         });
       }
-      // Every change of the shown tab writes the record; coalesced so a switch
-      // that clears and shows sends one PUT, and held while no tab is shown.
-      function scheduleLayoutWrite(): void {
-        if (tornDown() || applyingRecord) {
-          return;
-        }
-        if (layoutInFlight !== null) {
-          layoutDirty = true;
-          return;
-        }
-        if (layoutWrite !== null) {
+      function scheduleLayoutWrite(record: PaneLayout, retry: boolean): void {
+        queuedRecord = { record, retry };
+        if (layoutInFlight !== null || layoutWrite !== null) {
           return;
         }
         layoutWrite = win.setTimeout(() => {
@@ -3726,86 +2961,147 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           flushLayout();
         }, 0);
       }
-      // Of the split's state, `open`, the remembered handle share and the selected
-      // pane are the record's; a drag preview and a resize clamp are not.
-      let lastSplit = ctx.shell.split.state();
+      // Only the committed share is the record's; a drag preview and a resize
+      // clamp are not. A change outside a commit is the user's drag.
+      let lastRatio = ctx.shell.split.state().committedRatio;
       ctx.defer(
-        ctx.shell.split.onChange((s) => {
-          const changed =
-            s.open !== lastSplit.open ||
-            s.committedRatio !== lastSplit.committedRatio ||
-            s.selected !== lastSplit.selected;
-          lastSplit = s;
-          if (changed) {
-            scheduleLayoutWrite();
+        ctx.shell.split.onChange((st) => {
+          if (st.committedRatio === lastRatio) {
+            return;
           }
+          lastRatio = st.committedRatio;
+          const dragged = applying === null;
+          serverInput((m) => splitRatio(m, st.committedRatio, dragged));
         }),
       );
-      // The shell empties a pane on a close of the split, drops a failed pane's
-      // tab from the shown set and moves selection on its own drivers; the chrome
-      // and the record read the panes, so both follow.
+      // A pane's kernel failing is a fact the fold reads; its teardown is derived.
+      const failedSides = new Set<PaneSide>();
+      function notePaneFailures(): void {
+        for (const side of ["left", "right"] as const) {
+          const failed = ctx.shell.pane(side)?.state() === "failed";
+          if (failed && !failedSides.has(side)) {
+            failedSides.add(side);
+            update((m) => paneFailed(m, side));
+          } else if (!failed) {
+            failedSides.delete(side);
+          }
+        }
+      }
+      // What the kernel changed on the committed screen by its own drivers or a
+      // host's call: a split it opened or closed, or a failed pane that dropped
+      // its tab.
+      function kernelChange(): ShellChange | null {
+        if (!committed.split.open && ctx.shell.split.isOpen()) {
+          return { kind: "splitOpened", selected: ctx.shell.selected() };
+        }
+        if (committed.split.open && !ctx.shell.split.isOpen()) {
+          return { kind: "splitClosed", keptId: shownIn("left") ?? shownIn("right") };
+        }
+        for (const side of ["left", "right"] as const) {
+          const id = committed.panes[side];
+          if (id !== null && shownIn(side) !== id && sideOf(id) === null) {
+            return { kind: "paneDropped", side, id };
+          }
+        }
+        return null;
+      }
+      // The pane plumbing runs on every change, inside a commit or not, because a
+      // pane the commit's own split.open() builds is reached only this way.
       ctx.defer(
         ctx.shell.onPanesChange(() => {
           markSurfaces();
           syncCatchups();
-          syncChrome();
-          scheduleLayoutWrite();
-          scheduleAddress("push");
+          if (applying !== null) {
+            notePaneFailures();
+            return;
+          }
+          // The split change before the pane failures: a pane that fails while
+          // the opening split builds it is a failure of an open split's pane.
+          const change = kernelChange();
+          if (change !== null) {
+            update((m) => shellChanged(m, change));
+          }
+          notePaneFailures();
+          if (change === null) {
+            scheduleCommit();
+          } else {
+            commitNow();
+          }
         }),
       );
-      ctx.defer(ctx.shell.onSelectionChange(syncChrome));
+      ctx.defer(
+        ctx.shell.onSelectionChange((side) => {
+          if (applying === null && side !== committed.split.selected) {
+            userInput((m) => selectIntent(m, side));
+          }
+        }),
+      );
+      // The kernel's rehome hands the only shown tab to an empty surviving pane.
+      function ownerShowIn(side: PaneSide, id: string): boolean {
+        if (applying !== null) {
+          return applying.panes[side] === id;
+        }
+        userInput((m) => shellChanged(m, { kind: "rehome", side, id }));
+        return committed.panes[side] === id;
+      }
       if (ctx.shell.split.enabled) {
         // The controller reports a resize only while the split is open; the
         // buttons' width rule holds while it is closed too.
-        const rowResize = new win.ResizeObserver(paintSplitButtons);
+        // The row's width, not split.canOpen(), which also reads false while the
+        // split is open.
+        let fits = rowFitsSplit();
+        const rowResize = new win.ResizeObserver(() => {
+          paintSplitButtons();
+          const now = rowFitsSplit();
+          if (now !== fits) {
+            fits = now;
+            serverInput((m) => splitFit(m, now));
+          }
+        });
         rowResize.observe(ctx.shell.root);
         ctx.defer(() => {
           rowResize.disconnect();
         });
       }
+      /** Whether the frame the model now holds shows `id`, for a notification's
+       *  "the session's tab is on screen". */
+      function onScreenNext(id: string): boolean {
+        const { panes } = layoutFor(model, committed);
+        return panes.left === id || panes.right === id;
+      }
       if (monitor) {
         const offStatus = monitor.onStatus((s) => {
           if (s.removed) {
-            void dropTab(s.id, { remote: false }); // already gone server-side; no DELETE
+            serverInput((m) => sessionsRemoved(m, [s.id], { by: "server" }, win.Date.now()));
             return;
           }
-          streamEpoch++;
-          adoptSession(s);
-          applyStatus(s, reportsOf(s.reportsActivity), { stream: true });
-          ensureActive();
-          syncChrome();
+          serverInput((m) => mergeRecord(m, s, { stream: true }, win.Date.now()));
           // A notification is an EVENT delivered once, so it is handled here and
-          // not in applyStatus, which also runs on re-delivered STATE. After
-          // syncChrome, so its title is the label the user would see.
+          // not by the commit, which also runs on re-delivered STATE.
           const posted = ctx.shell.notifications.deliver(s, {
-            sessionIsActive: isShown(s.id),
-            label: tabList.find((t) => t.id === s.id)?.display ?? s.title,
-            // switchTo no-ops on an id that is gone, which is the case that
-            // matters: the tab may have closed between post and click.
+            sessionIsActive: onScreenNext(s.id),
+            label: displayLabels().get(s.id) ?? s.title,
+            // An id that is gone shows nothing: the tab may have closed between
+            // post and click.
             activate: () => {
               switchTo(s.id);
             },
           });
-          const shownFor = posted ? tabList.find((t) => t.id === s.id) : undefined;
-          if (shownFor) {
-            // The event's own number: a skipped tuple leaves the tab's newer.
-            shownFor.bannerSeq = normalizeSeq(s.statusSeq) ?? shownFor.statusSeq;
+          if (posted) {
+            // The event's own number: a skipped tuple leaves the session's newer.
+            bannerSeq.set(s.id, normalizeSeq(s.statusSeq) ?? factOf(s.id)?.statusSeq ?? 0);
           }
         });
         ctx.defer(offStatus);
-        // The first open joins the boot's reconcile. A reopen queues a fresh one
-        // under a placement hold, so its decision comes from a list issued after
-        // the reopen and a restarted server's tabs are placed by resync.
-        let streamOpens = 0;
+        // Every open holds placement until its own list answers or fails, so a
+        // snapshot burst is placed as one run and a restarted server's sessions by
+        // its resync.
         const offStreamOpen = monitor.onStreamOpen?.(() => {
-          streamOpens++;
-          const settled =
-            streamOpens === 1
-              ? reconcileOnce()
-              : withPlacementHold(() => inReconcileSlot(reconcileNow));
-          void settled.then(() => {
+          update(syncBegan);
+          const token = listToken();
+          void inReconcileSlot(() => reconcileWith(token)).finally(() => {
             attention.resync();
-            onPageVisible(); // re-acks the shown tabs, now reconciled
+            serverInput(syncEnded);
           });
         });
         if (offStreamOpen) {
@@ -3843,6 +3139,8 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         // A release decides by POSITION, not by whatever slot a timer had pending.
         endRestNet();
         commitSlot(dropTargetBefore(clientX));
+        // The drop ends the preview, so the strip takes the order it commits.
+        update((m) => dragChanged(m, false));
         syncOrderFromDom();
         announceMoved(moved);
       }
@@ -4461,11 +3759,10 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         swList.style.transition = "";
         swList.style.overflowY = "";
         swList.style.maxHeight = "";
+        setExpandedState(open);
+        userInput((m) => switcherToggled(m, open));
         if (open) {
-          setExpandedState(true);
           ctx.announce("Terminal list expanded");
-        } else {
-          setExpandedState(false);
         }
       }
 
@@ -4618,41 +3915,46 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
       });
 
       // The bootstrap (paneLayoutOwner.resolveInitialLayout): settle the session
-      // set (creating the first session when nothing live is listed), adopt it,
-      // pick the start tab and show it. A false return (nothing could be listed
-      // or spawned) keeps the chrome up with the "+" retry alive, and the
-      // terminal dismisses the loading overlay over it. The record is read once
-      // and never written back by a read.
+      // set (creating the first session when nothing live is listed) and place it
+      // by the address, the record or the oldest live tab. A false return (nothing
+      // could be listed or spawned) keeps the chrome up with the "+" retry alive,
+      // and the terminal dismisses the loading overlay over it.
       const resolveInitialLayout = async (): Promise<boolean> => {
         const settled = await settleOrToast();
         if (tornDown()) {
           return false;
         }
-        // Adopt rather than push: the status stream's open snapshot may already
-        // have given a listed session its tab, since the subscription precedes
-        // this list.
-        for (const info of settled.sessions) {
-          adoptSession(info);
-        }
-        // From here on, tabs added at runtime (create / adopt) animate in.
-        started = true;
+        // A tap on a snapshot chip while the list was in flight outranks the record.
+        commitNow();
+        const kept = committed.panes.left !== null || committed.panes.right !== null;
         // Read only with the server's list in hand, so a failed list never
         // declares a tab gone, and only once settled, so a wait keeps its intent.
         const route = address !== null && settled.listed ? parseTabRoute(win.location.hash) : null;
-        switch (showSettled(settled, route, address?.bootOrigin() === "deeplink")) {
-          case "kept":
-            address?.start(settled.listed);
-            return true;
-          case "shown":
-            syncChrome();
-            focusInput();
-            address?.start(settled.listed);
-            return true;
-          case "none":
-            bootShowedNothing = true;
-            address?.start(false);
-            return false;
+        update((m) =>
+          bootSettled(m, {
+            sessions: settled.sessions,
+            record: settled.layout,
+            route,
+            toastStale: address?.bootOrigin() === "deeplink",
+            now: win.Date.now(),
+            canOpen: ctx.shell.split.enabled && rowFitsSplit(),
+            splitEnabled: ctx.shell.split.enabled,
+          }),
+        );
+        commitNow();
+        // From here on, tabs added at runtime animate in.
+        started = true;
+        if (kept) {
+          address?.start(settled.listed);
+          return true;
         }
+        if (committed.panes.left !== null || committed.panes.right !== null) {
+          focusInput();
+          address?.start(settled.listed);
+          return true;
+        }
+        address?.start(false);
+        return false;
       };
 
       // settleSessionSet, toasting a failure the way a failed create always has
@@ -4681,133 +3983,231 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
         );
       }
 
-      // Place a settled set: "kept" when a pane already shows a tab (a tap while
-      // the list was in flight outranks the record), "shown" when the address,
-      // the record or a fallback placed one, "none" when nothing could be shown.
-      // toastStale says whether an address naming a closed tab is news to the user.
-      function showSettled(
-        settled: Settled,
-        route: TabRoute | null,
-        toastStale: boolean,
-      ): "kept" | "shown" | "none" {
-        const { sessions, layout } = settled;
-        // ensureActive is deliberately NOT one of this function's callers during
-        // boot (see its bootShowedNothing gate), or the SSE snapshot would win
-        // this race on every load.
-        if (anyShown()) {
-          return "kept";
+      // A chip the strip lost: its edit, banners, drag and connection go with it.
+      // The pane showing it keeps no connection unless the commit binds another
+      // session there next, whose bind replaces it.
+      function dropChip(t: Tab, next: Layout): void {
+        if (editingId === t.id) {
+          endEdit();
         }
-        // The record's sessions where they still exist, else the oldest LIVE tab:
-        // a reload must not restore onto the corpse of a session that died while
-        // away. Only when nothing is live does a dead tab start, a frozen final
-        // screen beating a blank page.
-        const liveIds = new Set(sessions.filter((s) => !isEndedStatus(s.status)).map((s) => s.id));
-        const oldestLive = tabList.find((t) => liveIds.has(t.id));
-        const saved = (id: string | null): Tab | undefined => {
-          const tab = id === null ? undefined : tabList.find((x) => x.id === id);
-          return tab && (liveIds.has(tab.id) || oldestLive === undefined) ? tab : undefined;
-        };
-        // Shown directly rather than through showIn: a boot announces no switch
-        // and no selection, animates none, and writes no record.
-        const showAtBoot = (side: PaneSide, tab: Tab): boolean => {
-          const pane = ctx.shell.pane(side);
-          if (pane === null) {
-            return false;
-          }
-          pane.render.bind(tab.store);
-          pane.notifySwitch({ id: tab.id });
-          return true;
-        };
-        let shown = false;
-        // The address outranks the record when it names an open tab: it is the
-        // explicit instruction for this load.
-        if (route !== null) {
-          const [wantLeft, wantRight] =
-            route.kind === "single" ? [route.tab, null] : [route.left, route.right];
-          const fromRoute = (alias: TabAlias | null): Tab | undefined => {
-            const tab = tabByAlias(alias);
-            return tab === undefined ? undefined : saved(tab.id);
-          };
-          const sides: Record<PaneSide, Tab | undefined> = {
-            left: fromRoute(wantLeft),
-            right: fromRoute(wantRight),
-          };
-          // Gone means absent from the list: an ended tab still in the row is
-          // refused here only because a boot never lands on a corpse.
-          const gone = (alias: TabAlias | null): boolean =>
-            alias !== null && tabByAlias(alias) === undefined;
-          if ((gone(wantLeft) || gone(wantRight)) && toastStale) {
-            ctx.toast(STALE_TAB_NOTICE);
-          }
-          applyingRecord = true;
-          try {
-            if (route.kind === "split" && (sides.left || sides.right)) {
-              const record =
-                layout?.open === true &&
-                layout.left === (sides.left?.id ?? null) &&
-                layout.right === (sides.right?.id ?? null)
-                  ? layout.selected
-                  : null;
-              const selected: PaneSide =
-                record !== null && sides[record] ? record : sides.left ? "left" : "right";
-              if (ctx.shell.restoreSplit(layout?.handle ?? 0.5, selected)) {
-                for (const side of ["left", "right"] as const) {
-                  const tab = sides[side];
-                  if (tab) {
-                    shown = showAtBoot(side, tab) || shown;
-                  }
-                }
-              }
-            }
-            const only = sides.left ?? sides.right;
-            if (!shown && only) {
-              shown = showAtBoot(ctx.shell.targetFor(only.id), only);
-            }
-          } finally {
-            applyingRecord = false;
-          }
-          // The shared record follows the address this load was opened at.
-          if (shown && layout !== null && !sameShownLayout(layout, currentLayout())) {
-            scheduleLayoutWrite();
-          }
+        ctx.shell.notifications.forget(t.id);
+        bannerSeq.delete(t.id);
+        t.aria.remove();
+        // A live drag holds references to chips, so tell it first.
+        abortReorderFor(t.el);
+        t.el.remove();
+        chips.delete(t.id);
+        const side = sideOf(t.id);
+        if (side !== null && (ctx.shell.split.isOpen() || next.panes[side] === null)) {
+          ctx.shell.pane(side)?.clearActiveSession();
+          ctx.shell.dropSessionExcept(t.id, side);
+        } else {
+          ctx.dropSession(t.id);
         }
-        if (!shown && layout?.open === true) {
-          const sides: Record<PaneSide, Tab | undefined> = {
-            left: saved(layout.left),
-            right: saved(layout.right),
-          };
-          // The record's side while it still has a tab to show, else the side that has one.
-          const selected: PaneSide = sides[layout.selected]
-            ? layout.selected
-            : sides.left
-              ? "left"
-              : "right";
-          applyingRecord = true;
-          try {
-            if ((sides.left || sides.right) && ctx.shell.restoreSplit(layout.handle, selected)) {
-              for (const side of ["left", "right"] as const) {
-                const tab = sides[side];
-                if (tab) {
-                  shown = showAtBoot(side, tab) || shown;
-                }
-              }
-            }
-          } finally {
-            applyingRecord = false;
-          }
-        }
-        if (!shown) {
-          const startTab =
-            saved(
-              layout === null ? null : layout.selected === "right" ? layout.right : layout.left,
-            ) ??
-            oldestLive ??
-            tabList[0];
-          shown = startTab !== undefined && showAtBoot(ctx.shell.targetFor(startTab.id), startTab);
-        }
-        return shown ? "shown" : "none";
       }
-      live = { resolveInitialLayout, shownIn, showIn };
+
+      function applyStrip(next: Layout): void {
+        const want = new Set(next.strip);
+        for (const t of [...tabList]) {
+          if (!want.has(t.id)) {
+            dropChip(t, next);
+          }
+        }
+        const fresh = new Set<Tab>();
+        const ordered = next.strip.map((id) => {
+          let t = chips.get(id);
+          if (t === undefined) {
+            t = addTabChrome(id);
+            chips.set(id, t);
+            fresh.add(t);
+          }
+          return t;
+        });
+        tabList.splice(0, tabList.length, ...ordered);
+        // Only a chip out of place moves: moving a node blurs a focused chip or
+        // rename field. A drag's preview owns the order until it ends, so only the
+        // new chips are placed then.
+        let ref: HTMLElement | null = null;
+        for (let i = ordered.length - 1; i >= 0; i--) {
+          const t = ordered[i];
+          if (t === undefined) {
+            continue;
+          }
+          const placed = t.el.parentNode === scroller && t.el.nextElementSibling === ref;
+          if (!placed && (!model.page.dragging || fresh.has(t))) {
+            scroller.insertBefore(t.el, ref);
+          }
+          ref = t.el;
+        }
+        for (const t of tabList) {
+          paintChip(t);
+        }
+        // Collapsed before the rows repaint, so the tray the layout closed animates
+        // shut with the last row still in it.
+        if (expanded && !next.tray) {
+          setExpandedState(false);
+        }
+      }
+
+      // The split row, then the panes against what the kernel shows now (a
+      // close relabels the surviving slot to the left), then the selection.
+      function applyPanes(next: Layout, boot: boolean): (() => void)[] {
+        const split = ctx.shell.split;
+        if (next.split.open !== split.isOpen()) {
+          if (!next.split.open) {
+            // closeSide, never close(): close() keeps the kernel's selected slot,
+            // not the one the layout keeps.
+            const keep =
+              next.panes.left !== null && shownIn("right") === next.panes.left ? "right" : "left";
+            const leaving = otherSide(keep);
+            ctx.shell.pane(leaving)?.clearActiveSession();
+            split.closeSide(leaving);
+          } else if (boot) {
+            ctx.shell.restoreSplit(model.page.ratio, next.split.selected);
+          } else {
+            split.open();
+          }
+        }
+        const reels: (() => void)[] = [];
+        // The selected side first, so a tab moving across never empties it.
+        for (const side of [next.split.selected, otherSide(next.split.selected)]) {
+          const want = next.panes[side];
+          if (want === null) {
+            if (shownIn(side) !== null) {
+              ctx.shell.pane(side)?.clearActiveSession();
+            }
+            continue;
+          }
+          const reel = bindPane(side, want, boot);
+          if (reel !== undefined) {
+            reels.push(reel);
+          }
+        }
+        if (ctx.shell.selected() !== next.split.selected) {
+          ctx.shell.select(next.split.selected);
+        }
+        return reels;
+      }
+
+      // A banner closes once the read floor reaches its occurrence, keyed on the
+      // number rather than the fold: a done held by background activity folds to
+      // "" yet may own a banner.
+      function closeReadSurfaces(prev: Layout, next: Layout): void {
+        let resync = false;
+        for (const id of next.inView) {
+          if (!prev.inView.has(id)) {
+            ctx.shell.notifications.retract(id);
+            bannerSeq.delete(id);
+            resync = true;
+          }
+        }
+        for (const [id, seq] of bannerSeq) {
+          const f = factOf(id);
+          if (f !== undefined && Math.max(f.seenSeq, f.ackSeq) >= seq) {
+            ctx.shell.notifications.retract(id); // only this page can close its own banners
+            bannerSeq.delete(id);
+          }
+        }
+        // A server floor that rose is a read too, even one this page's own ack
+        // already covered.
+        for (const f of model.sessions.values()) {
+          const was = floors.get(f.id);
+          if (f.seenSeq > (was?.seen ?? 0) || Math.max(f.seenSeq, f.ackSeq) > (was?.page ?? 0)) {
+            resync = true;
+          }
+          floors.set(f.id, { seen: f.seenSeq, page: Math.max(f.seenSeq, f.ackSeq) });
+        }
+        // Every read re-asserts the badge, which may still show a write the
+        // platform dropped.
+        if (resync) {
+          attention.resync();
+        }
+      }
+      const floors = new Map<string, { readonly seen: number; readonly page: number }>();
+      let lastFragment: string | null = null;
+
+      // The only code that turns a layout into DOM, kernel and server effects:
+      // layoutFor decides, this applies the difference and starts the effects.
+      function commit(): void {
+        if (tornDown() || applying !== null) {
+          return;
+        }
+        cancelCommit();
+        const prev = committed;
+        const step = commitStep(model, prev);
+        const next = step.layout;
+        const { effects } = step;
+        const boot = effects.moved === "settle";
+        let reels: (() => void)[];
+        applying = next;
+        try {
+          applyStrip(next);
+          reels = applyPanes(next, boot);
+          reelReconcile = reels.length > 0;
+          paintChrome();
+          reelReconcile = false;
+          paintSwitchDot(next.indicators.switchDot);
+        } finally {
+          applying = null;
+        }
+        committed = next;
+        model = step.model;
+        switchHint = null;
+        for (const f of raisedInCommit.splice(0)) {
+          model = f(model);
+          scheduleCommit();
+        }
+        for (const reel of reels) {
+          reel(); // FLIP the rows so the reorder reads as a rotation, not a reload
+        }
+        // A program that reports activity may also post an OSC 9 notification:
+        // arm the permission request for the next user gesture.
+        if ([...model.sessions.values()].some((f) => f.reports)) {
+          ctx.shell.notifications.arm();
+        }
+        for (const a of effects.acks) {
+          sendAck(a.id, a.seq);
+        }
+        closeReadSurfaces(prev, next);
+        // After the read's re-assert, which a changed count's write then cancels,
+        // so one read writes the badge once.
+        const { count, worst } = next.indicators.attention;
+        attention.report({ count, icon: worst === "" ? null : cueIconName(worst) });
+        if (step.write !== null) {
+          scheduleLayoutWrite(step.write, !step.rewrite);
+        }
+        // A resync's drops write no history entry; its settle replaces the entry.
+        const fragment = currentFragment();
+        if (model.holds.resync === 0) {
+          if (effects.address !== null) {
+            address?.schedule(effects.address);
+          } else if (fragment !== lastFragment) {
+            address?.schedule("replace");
+          }
+        }
+        lastFragment = fragment;
+        const focus = effects.focus;
+        if (focus !== null && !boot && focus.form === "announce") {
+          const label = chips.get(selectedId() ?? "")?.display;
+          if (label !== undefined) {
+            ctx.announce(`Switched to ${label}`);
+          }
+        }
+        if (focus !== null && !boot && focus.form !== null) {
+          focusAfterSwitch();
+        }
+        if (focus?.typing === true || focus?.keyboardHeld === true) {
+          focusInput();
+        }
+        for (const toast of effects.toasts) {
+          ctx.toast(toast === "stale" ? STALE_TAB_NOTICE : "Split view needs a wider window");
+        }
+        const resync = step.resync;
+        if (resync !== null) {
+          void inReconcileSlot(() => runResync(resync));
+        }
+      }
+      live = { resolveInitialLayout, shownIn, showIn: ownerShowIn };
 
       return {
         api: {
@@ -4815,10 +4215,23 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
           close: close_,
           switchTo,
           snap,
-          list: () => tabList.map((t) => ({ id: t.id, title: t.display, active: isShown(t.id) })),
+          list: () => {
+            const { strip, panes } = layoutFor(model, committed);
+            const labels = displayLabels();
+            return strip.map((id) => ({
+              id,
+              title: labels.get(id) ?? "",
+              active: panes.left === id || panes.right === id,
+            }));
+          },
         },
         teardown() {
           live = null;
+          // A create answered during a resync and never placed is this page's
+          // unfinished action, not a session anyone was shown.
+          if (model.pendingOwn !== null) {
+            closeOrphan(api, model.pendingOwn.id);
+          }
           if (layoutWrite !== null) {
             win.clearTimeout(layoutWrite);
             layoutWrite = null;
@@ -4843,6 +4256,7 @@ export function tabs(opts: TabsOptions = {}): TerminalFeature<TabsApi> {
             t.el.remove();
           }
           tabList.length = 0;
+          chips.clear();
           rowEls.clear();
           bar.remove();
           newBtn.remove();

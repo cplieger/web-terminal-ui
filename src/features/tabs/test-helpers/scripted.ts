@@ -23,6 +23,8 @@ export async function mountScripted(
   spec: {
     readonly tabsOpts?: TabsOptions;
     readonly before?: readonly TerminalFeature<unknown>[];
+    /** Pane features, built fresh for each pane, mounted after `before`. */
+    readonly paneFeatures?: () => readonly TerminalFeature<unknown>[];
     readonly opts?: Partial<CreateTerminalOptions>;
   } = {},
 ): Promise<ScriptedMount> {
@@ -38,7 +40,7 @@ export async function mountScripted(
   const feature = tabs(spec.tabsOpts);
   const term = await mountTerminal(root, {
     split: true,
-    features: () => [probe, ...(spec.before ?? []), feature],
+    features: () => [probe, ...(spec.before ?? []), ...(spec.paneFeatures?.() ?? []), feature],
     ...spec.opts,
   });
   for (let i = 0; i < 40 && (ctxRef === undefined || feature.api === undefined); i++) {
@@ -54,7 +56,7 @@ export async function mountScripted(
 
 /** One answer of the scripted session server. `hold` keeps it back until the
  *  test releases it; `then` runs once it has been answered. */
-export interface Answer {
+interface Answer {
   readonly status: number;
   readonly body?: unknown;
   readonly retryAfter?: string;
@@ -87,7 +89,7 @@ export const refuse = (message = "restoring tabs"): Answer => ({
 export const notFound: Answer = { status: 404, body: { error: "not found" } };
 
 /** A held answer: `answer` goes out once `release` is called. */
-export interface Held {
+interface Held {
   readonly answer: Answer;
   release(): void;
 }
@@ -105,8 +107,12 @@ export interface ScriptedServer {
   list: Answer[];
   layout: Answer[];
   post: Answer[];
-  /** Every request, in arrival order. */
-  readonly log: { method: string; path: string }[];
+  /** `PUT /api/sessions/layout`. */
+  putLayout: Answer[];
+  /** `PUT /api/sessions/{id}/seen`. */
+  seen: Answer[];
+  /** Every request, in arrival order, with its body when it had one. */
+  readonly log: { method: string; path: string; body?: unknown }[];
   /** Called as each request arrives, before it is answered. */
   onRequest: ((method: string, path: string) => void) | null;
   readonly fetch: Mock<(url: string | URL, init?: RequestInit) => Promise<Response>>;
@@ -127,12 +133,15 @@ export function scriptedServer(): ScriptedServer {
     list: [ok([])],
     layout: [notFound],
     post: [created({ id: "s-new", title: "", createdAt: "9", status: "idle" })],
+    putLayout: [{ status: 204 }],
+    seen: [{ status: 204 }],
     log: [],
     onRequest: null,
     fetch: vi.fn(async (url: string | URL, init?: RequestInit): Promise<Response> => {
       const method = init?.method ?? "GET";
       const path = new URL(String(url), location.href).pathname;
-      server.log.push({ method, path });
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
+      server.log.push(body === undefined ? { method, path } : { method, path, body });
       server.onRequest?.(method, path);
       let a: Answer;
       if (path === SESSIONS && method === "GET") {
@@ -141,8 +150,12 @@ export function scriptedServer(): ScriptedServer {
         a = next(server.post);
       } else if (path === `${SESSIONS}/layout` && method === "GET") {
         a = next(server.layout);
+      } else if (path === `${SESSIONS}/layout` && method === "PUT") {
+        a = next(server.putLayout);
+      } else if (method === "PUT" && path.endsWith("/seen")) {
+        a = next(server.seen);
       } else {
-        // PUT layout and order, DELETE: accepted.
+        // PUT order, DELETE: accepted.
         a = { status: 204 };
       }
       await a.hold;

@@ -406,7 +406,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
     // "Session ended" banner.
     const { term, cb } = await bootRestored();
     try {
-      cb.onProcessExit?.();
+      cb.onProcessExit?.({ code: 4001, reason: "" });
       expect(haveThrough()).toBe(-1);
     } finally {
       term.destroy();
@@ -432,7 +432,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
     const { term, cb } = await bootRestored();
     try {
       ackEpoch(fake.renderer.boundStore(), 777);
-      cb.onProcessExit?.();
+      cb.onProcessExit?.({ code: 4001, reason: "" });
       expect(haveThrough()).toBe(308);
     } finally {
       term.destroy();
@@ -478,7 +478,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
       ackEpoch(a, 777);
 
       // A's process exits. That condemns A's restore only — B's session is alive.
-      cb.onProcessExit?.();
+      cb.onProcessExit?.({ code: 4001, reason: "" });
       expect(b.highestIndex()).toBe(508);
 
       // A wire refusal is terminal for the whole page, so every unverified
@@ -530,7 +530,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
     const term = await mountTerminal(rootIn(), { persistScrollback: store });
     try {
       printOnBoundStore(4, 0);
-      engineCallbacks().onProcessExit?.();
+      engineCallbacks().onProcessExit?.({ code: 4001, reason: "" });
       // Live content, not a restore: an exit must not erase what this session drew.
       expect(haveThrough()).toBe(3);
     } finally {
@@ -547,7 +547,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
     try {
       resetScreen.mockClear();
 
-      cb.onProcessExit?.();
+      cb.onProcessExit?.({ code: 4001, reason: "" });
 
       expect(resetScreen).toHaveBeenCalledTimes(1);
       expect(haveThrough()).toBe(-1);
@@ -582,7 +582,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
       expect(a.highestIndex()).toBe(0);
 
       currentSessionId.mockReturnValue("sess-a");
-      engineCallbacks().onProcessExit?.();
+      engineCallbacks().onProcessExit?.({ code: 4001, reason: "" });
 
       expect(a.highestIndex()).toBe(-1);
     } finally {
@@ -621,7 +621,7 @@ describe("persistScrollback: a restore that will never be verified", () => {
       expect(a.highestIndex()).toBe(3);
 
       currentSessionId.mockReturnValue("sess-a");
-      engineCallbacks().onProcessExit?.();
+      engineCallbacks().onProcessExit?.({ code: 4001, reason: "" });
 
       expect(a.highestIndex()).toBe(3);
     } finally {

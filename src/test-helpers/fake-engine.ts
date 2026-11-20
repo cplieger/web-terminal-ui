@@ -49,7 +49,7 @@ export interface FakeEngineRecord extends EngineParts {
   sentInput(): string[];
 }
 
-export interface EngineFakeOptions {
+interface EngineFakeOptions {
   /** Override mode readers on top of a real mode state (`getMouseMode` answering
    *  a tracking mode, say). */
   modes?: Partial<ModeState>;
@@ -507,9 +507,9 @@ export function createEngineFake(fakeOpts: EngineFakeOptions = {}): EngineFake {
     }
     if (consumer.onProcessExit !== undefined) {
       const onProcessExit = consumer.onProcessExit.bind(consumer);
-      callbacks.onProcessExit = () => {
+      callbacks.onProcessExit = (close) => {
         parts.markEnded();
-        onProcessExit();
+        onProcessExit(close);
       };
     }
     let mouseController: MouseController = parts.mouse;

@@ -2,6 +2,7 @@ import {
   createTerminalEngine,
   keyboard,
   LineStore,
+  PROCESS_EXITED_CLOSE_CODE,
   type Connection,
   type DeferredInput,
   type TerminalEngine,
@@ -694,14 +695,21 @@ function buildPaneInto(
       onClose() {
         connState.closed();
       },
-      onProcessExit() {
-        // The definitive 4001 close. markReady() first, so an exit that lands
-        // before any screen frame still lowers the overlay; then the end state
-        // (no reconnect is coming); the host's turn LAST, so a throwing handler
-        // cannot leave the page without its banner.
-        services.stores.discardUnverified({ session: engine.connection.currentSessionId() });
+      onProcessExit({ code, reason }) {
+        // The definitive 4001 close, or 4004 for a session the server does not
+        // know. markReady() first, so an exit that lands before any screen frame
+        // still lowers the overlay; then the end state (no reconnect is coming);
+        // the host's turn LAST, so a throwing handler cannot leave the page
+        // without its banner. A 4001 reason is the server's why a session never
+        // started (the engine's docs/sessions.md); a process that ran sends none.
+        const session = engine.connection.currentSessionId();
+        services.stores.discardUnverified({ session });
         markReady();
         connState.ended();
+        if (code === PROCESS_EXITED_CLOSE_CODE && reason !== "") {
+          toast(`Could not start the terminal: ${reason}`);
+          bus.emit("session:startFailed", { session, reason });
+        }
         services.onSessionEnded();
       },
       onWireIncompatible() {

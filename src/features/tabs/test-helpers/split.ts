@@ -38,7 +38,7 @@ export function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /** A fake answer held back until the test releases it. */
-export interface Gate {
+interface Gate {
   readonly promise: Promise<void>;
   resolve(): void;
 }
@@ -168,6 +168,14 @@ export function fakeServer(): FakeSessionServer {
 }
 
 export const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+/** Waits out the commit a server input schedules: the next animation frame on a
+ *  visible page, a task on a hidden one. */
+export const nextCommit = (): Promise<void> =>
+  new Promise((r) => {
+    requestAnimationFrame(() => {
+      setTimeout(r, 0);
+    });
+  });
 /** Two frames: a ResizeObserver delivers after layout, between them. */
 export const settle = (): Promise<void> =>
   new Promise((r) => {
@@ -239,7 +247,7 @@ export function fakeMonitor(): FakeMonitor {
   };
 }
 
-export interface LateRejecting {
+interface LateRejecting {
   /** A fresh feature object per thunk invocation, as the fresh-objects rule asks. */
   readonly feature: () => TerminalFeature;
   /** Fail the second pane's setup now; throws when it never started. */
@@ -385,7 +393,7 @@ export function menuItem(items: HTMLElement[], label: string): HTMLButtonElement
   }
   return b;
 }
-export interface FakeDataTransfer {
+interface FakeDataTransfer {
   effectAllowed: string;
   dropEffect: string;
   data: Record<string, string>;

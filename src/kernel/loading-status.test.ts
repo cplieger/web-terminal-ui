@@ -345,16 +345,9 @@ describe("loading overlay status text", () => {
 
   it("leaves nothing armed from ANY state, including mid-fade", () => {
     // The general form of the three cases above, and the reason show() and
-    // announce() need no `stopped` test of their own: stop() is the single owner
-    // of "nothing further happens", and it discharges that by cancelling
-    // everything `later()` armed. A guard inside show() could only re-assert
-    // this, which is why no input could ever make one fire — 5 permanently
-    // unkillable mutants, measured 2026-08-23.
-    //
-    // Written as a sweep rather than one more case because the guards were three
-    // and the reachable states are five: the two MID-FADE states are the ones the
-    // per-case tests above miss, and the deleted guard inside the fade callback
-    // is precisely the one that claimed to defend them.
+    // announce() need no `stopped` test of their own: stop() owns "nothing
+    // further happens" by cancelling everything `later()` armed. A sweep, because
+    // the two mid-fade states are the ones the per-case tests above miss.
     const reach: { name: string; go: (s: LoadingStatus) => void }[] = [
       { name: "fresh, both thresholds pending", go: () => undefined },
       {

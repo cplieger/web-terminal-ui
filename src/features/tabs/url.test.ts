@@ -6,6 +6,7 @@ import {
   fakeMonitor,
   fakeServer,
   mountTabbed,
+  nextCommit,
   rootIn,
   shown,
   stripSplit,
@@ -14,6 +15,7 @@ import {
   type FakeMonitor,
   type FakeSessionServer,
 } from "./test-helpers/split.js";
+import { pushesSince } from "./test-helpers/history.js";
 
 const fake = await vi.hoisted(async () => {
   const { createEngineFake } = await import("../../test-helpers/fake-engine.js");
@@ -100,12 +102,12 @@ async function mount(
 describe("boot", () => {
   it("shows the tab the address names over the record, without a history entry, and moves the record to it", async () => {
     server.layout = { open: false, left: "s1", right: null, handle: 0.5, selected: "left" };
-    const before = history.length;
+    const pushed = pushesSince();
     const { ctx } = await mount(`#${B}`);
 
     expect(shown(ctx, "left")).toBe("s2");
     expect(location.hash).toBe(`#${B}`);
-    expect(history.length).toBe(before);
+    expect(pushed()).toBe(0);
     await until(() => server.writes.length > 0);
     expect(server.writes).toEqual([
       { left: "s2", right: null, handle: 0.5, selected: "left", open: false },
@@ -138,13 +140,13 @@ describe("boot", () => {
   });
 
   it("boots the record's tab on an unknown alias, tells a deep link once and canonicalises in place", async () => {
-    const before = history.length;
+    const pushed = pushesSince();
     const { root, ctx } = await mount("#zzzzzzzz");
 
     expect(shown(ctx, "left")).toBe("s1");
     expect(toastText(root)).toBe(STALE);
     expect(location.hash).toBe(`#${A}`);
-    expect(history.length).toBe(before);
+    expect(pushed()).toBe(0);
   });
 
   it("corrects an unknown alias silently on a reload", async () => {
@@ -188,12 +190,12 @@ describe("boot", () => {
 describe("switching writes the address", () => {
   it("pushes one entry for a tab click", async () => {
     const { root } = await mount();
-    const before = history.length;
+    const pushed = pushesSince();
     chipOf(root, "s2").click();
     await tick();
 
     expect(location.hash).toBe(`#${B}`);
-    expect(history.length).toBe(before + 1);
+    expect(pushed()).toBe(1);
   });
 
   it("pushes the split form when the split opens and the single form when it closes", async () => {
@@ -210,27 +212,27 @@ describe("switching writes the address", () => {
 
   it("adds nothing for a ratio change, a selection change or a re-click of a shown tab", async () => {
     const { root, term, ctx } = await mount(`#${A},${B}`);
-    const before = history.length;
+    const pushed = pushesSince();
     term.split?.setRatio(0.4, true);
     ctx.shell.select("right");
     chipOf(root, "s1").click();
     await tick();
 
     expect(location.hash).toBe(`#${A},${B}`);
-    expect(history.length).toBe(before);
+    expect(pushed()).toBe(0);
   });
 
   it("rewrites the address in place when a shown tab's alias changes, and not for a tab off screen", async () => {
     await mount();
-    const before = history.length;
+    const pushed = pushesSince();
     monitor.emit(session("s3", "tab_offscreen", "3"));
-    await tick();
+    await nextCommit();
     expect(location.hash).toBe(`#${A}`);
 
     monitor.emit(session("s1", "host_alias", "1"));
-    await tick();
+    await nextCommit();
     expect(location.hash).toBe("#host_alias");
-    expect(history.length).toBe(before);
+    expect(pushed()).toBe(0);
   });
 
   it("pushes the new tab's alias when one is created", async () => {
@@ -267,10 +269,10 @@ describe("the page title", () => {
   it("follows a rename of the active tab, and not of another", async () => {
     await mount();
     monitor.emit({ ...session("s2", B, "2"), title: "background" } as SessionStatus);
-    await tick();
+    await nextCommit();
     expect(document.title).toBe("s1 · Served page");
     monitor.emit({ ...session("s1", A, "1"), title: "renamed" } as SessionStatus);
-    await tick();
+    await nextCommit();
     expect(document.title).toBe("renamed · Served page");
   });
 
@@ -279,7 +281,7 @@ describe("the page title", () => {
     chipOf(root, "s3").click();
     await tick();
     monitor.emit({ ...session("s1", A, "1"), status: "input" } as SessionStatus);
-    await tick();
+    await nextCommit();
     expect(document.title).toBe("(1) s3 · Served page");
   });
 
@@ -289,6 +291,7 @@ describe("the page title", () => {
     cbs.onMessage({ type: "title", title: "vim" });
     cbs.onMessage({ type: "title", title: "vim" });
     cbs.onMessage({ type: "title", title: "make" });
+    await nextCommit();
     expect(document.title).toBe("make · Served page");
   });
 
@@ -297,6 +300,7 @@ describe("the page title", () => {
     await mount();
     // A program's own window title renames its tab, and must not outlive it.
     fake.callbacks().onMessage({ type: "title", title: "program title" });
+    await nextCommit();
     expect(document.title).toBe("program title · Served page");
     monitor.emit({ id: "s1", removed: true } as SessionStatus);
     await until(() => document.title === SERVED);
@@ -403,7 +407,7 @@ describe("navigating the address", () => {
     chipOf(root, "s1").click();
     await tick();
     monitor.emit({ id: "s2", removed: true } as SessionStatus);
-    await tick();
+    await nextCommit();
 
     await travel(() => {
       history.back();

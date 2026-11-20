@@ -324,7 +324,7 @@ describe("the writes", () => {
     });
   });
 
-  it("closing the split while no pane shows a tab writes nothing; the record resumes with the next shown tab", async () => {
+  it("closing every tab keeps them until the replacement exists, then writes the record once for it", async () => {
     const root = rootIn();
     const { term, ctx } = await mountTabbed(root, server);
     menuItem(openTabMenu(root, "two"), "Snap to right").click();
@@ -335,8 +335,8 @@ describe("the writes", () => {
 
     menuItem(openTabMenu(root, "one"), "Close all").click();
     await until(() => server.posts() === 1);
-    expect(term.split?.isOpen()).toBe(false);
-    expect(ctx.shell.panes().some((p) => p.state() === "shown")).toBe(false);
+    expect(term.split?.isOpen()).toBe(true);
+    expect([shown(ctx, "left"), shown(ctx, "right")]).toEqual(["s1", "s2"]);
     await tick();
     await tick();
     expect(server.writes).toHaveLength(1);
@@ -344,6 +344,7 @@ describe("the writes", () => {
     held.resolve();
     await until(() => shown(ctx, "left") === "s-new");
     await until(() => server.writes.length === 2);
+    expect(term.split?.isOpen()).toBe(false);
     expect(server.writes[1]).toEqual({
       left: "s-new",
       right: null,

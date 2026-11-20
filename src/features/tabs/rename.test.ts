@@ -1,18 +1,12 @@
-// Tests for the tab-title model changes and the inline rename editor: the
-// eligibility filter, the first-message latch, baseLabel's pinned rung, the
-// client-side name sanitizer, and the editor's own state machine (entry paths,
+// The tab title's label sources and the inline rename editor (entry paths,
 // commit/cancel, the empty asymmetry, the nameSeq guard, the edit-mode
-// stand-downs, and teardown mid-edit).
-//
-// What these CANNOT prove: headless Chromium on a desktop is not an iPad, so the
-// WebKit user-select hazard around caret placement and selection inside the field,
-// double-tap entering edit rather than zooming, long-press still starting a reorder
-// drag, soft-keyboard dismissal, and how the entry-only 300px expansion feels in a
-// crowded strip are all on the manual Safari/iPad checklist in the spec instead.
+// stand-downs, teardown mid-edit). Headless desktop Chromium cannot show the
+// iPad behaviours (caret and selection in the field, double-tap, long-press
+// reorder, soft-keyboard dismissal); those stay on a manual Safari check.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_PINNED_NAME, baseLabel, hasPinnedName, sanitizePinnedName } from "./model.js";
-import type { Tab } from "./model.js";
+import type { Labelled } from "./model.js";
 import { tabs } from "./index.js";
 import { mountTerminal } from "../../test-helpers/mount.js";
 import { shortAnnounced, shortenReannounce } from "../../test-helpers/delays.js";
@@ -36,8 +30,8 @@ describe("sanitizePinnedName", () => {
   });
 });
 
-function fakeTab(over: Partial<Tab>): Tab {
-  return { title: "", nameSeq: 0, ...over } as Tab;
+function fakeTab(over: Partial<Labelled>): Labelled {
+  return { title: "", ...over };
 }
 
 describe("baseLabel", () => {
@@ -604,8 +598,7 @@ describe("inline rename", () => {
     vi.stubGlobal("confirm", () => true);
     const root = document.createElement("div");
     await mount(root);
-    // Edit tab 2, then close it via the bulk path (Close others from tab 1), which
-    // drops tabs itself rather than through dropTab.
+    // Edit tab 2, then close it via the bulk path (Close others from tab 1).
     const chips = root.querySelectorAll<HTMLElement>(".wt-tab");
     chips[1]?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
     expect(field(root)).not.toBeNull();
@@ -628,10 +621,9 @@ describe("inline rename", () => {
     item(openMenu(root, 0), "Rename\u2026")?.click();
     expect(chip?.hasAttribute("role")).toBe(false);
 
-    // syncChrome repaints the active state and runs on every status event, every
-    // switch and every close. It must not re-add aria-selected / the roving
-    // tabindex to a chip hosting a textbox. Switching to the OTHER tab is the
-    // synchronous way to force that repaint while the edit stays open.
+    // Every commit repaints the active state. It must not re-add aria-selected /
+    // the roving tabindex to a chip hosting a textbox. Switching to the OTHER tab
+    // is the synchronous way to force that repaint while the edit stays open.
     root
       .querySelectorAll<HTMLElement>(".wt-tab")[1]
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));

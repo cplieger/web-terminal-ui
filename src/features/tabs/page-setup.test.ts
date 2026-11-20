@@ -1,16 +1,9 @@
-// Additional tabs-feature tests for the FIRST ~1000 lines of
-// src/features/tabs/index.ts: the chrome the feature builds at setup (the two
-// ResizeObservers that publish the strip's measurements as CSS variables, the
-// roles that make the strip, the catch-up banner and the context menu
-// navigable, the bar buttons that must not take the keyboard off the terminal),
-// the acknowledgement store's eviction and write discipline, the page-lifecycle
-// listeners (visibilitychange / pagehide / pageshow), and the physical-keyboard
-// heuristic.
-//
-// A separate file from index.test.ts purely so concurrent workers do not edit
-// one file; the setup idioms (real kernel, stubbed fetch, dynamic import per
-// test, a fake activityMonitor for the status stream, a query-aware matchMedia)
-// are the ones that file established.
+// tabs feature: the chrome built at setup (the ResizeObservers that publish the
+// strip's measurements as CSS variables, the roles that make the strip, the
+// catch-up banner and the context menu navigable, the bar buttons that must not
+// take the keyboard off the terminal), the acknowledgement store's eviction and
+// write discipline, the page-lifecycle listeners, and the physical-keyboard
+// heuristic. The setup idioms are index.test.ts's.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionStatus } from "@cplieger/web-terminal-engine";
@@ -23,6 +16,7 @@ import type { MobileToolbarApi } from "../mobile-toolbar.js";
 // (dynamically re-imported) feature under test is safe.
 import { PRESSED_CLASS } from "../dom.js";
 import { engineNumbering, seenAcks } from "./test-helpers/sessions-server.js";
+import { nextCommit } from "./test-helpers/split.js";
 
 // A fake activityMonitor: lets a test push status events into tabs without the
 // real SSE. tabs reads it via ctx.use, so the same feature value goes into the
@@ -169,8 +163,13 @@ function stubMedia(answers: Record<string, boolean>): void {
 // Page visibility is a FIXTURE, not ambient state: the active-tab
 // acknowledgement defers while hidden, so a test that inherited whatever the
 // previous one left would pass or fail by ordering.
+// A browser fires visibilitychange whenever the state changes.
 function setVisibility(state: "visible" | "hidden"): void {
+  const changed = document.visibilityState !== state;
   Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+  if (changed) {
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
 }
 
 let term: TerminalHandle | undefined;
@@ -558,10 +557,10 @@ describe("tabs: returning to the page acknowledges what the user can now see", (
 
     setVisibility("hidden");
     monitor.emit({ id: "s2", status: "done", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(document.title).toBe("(1) two · Host page");
 
     setVisibility("visible");
-    document.dispatchEvent(new Event("visibilitychange"));
     expect(document.title).toBe("two · Host page");
   });
 
@@ -573,6 +572,7 @@ describe("tabs: returning to the page acknowledges what the user can now see", (
     const { monitor } = await mountWithMonitor();
     setVisibility("hidden");
     monitor.emit({ id: "s1", status: "input", title: "one", createdAt: "1" });
+    await nextCommit();
     expect(document.title).toBe("(1) one · Host page");
 
     document.dispatchEvent(new Event("visibilitychange"));
@@ -598,6 +598,7 @@ describe("tabs: the switch button's dot", () => {
     const dot = root.querySelector<HTMLElement>(".wt-switcher-switch-dot");
 
     monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+    await nextCommit();
     expect(dot?.dataset["status"]).toBe("input");
     expect(dot?.getAttribute("title")).toBe("waiting for you");
 
@@ -626,6 +627,7 @@ describe("tabs: the attention icons are opt-in", () => {
     try {
       const { monitor } = await mountWithMonitor();
       monitor.emit({ id: "s2", status: "input", title: "two", createdAt: "2" });
+      await nextCommit();
       // The title count still rises: only the icon needs the generated assets.
       expect(document.title).toBe("(1) one · Host page");
       expect(iconHref()).toBe("/favicon.svg");

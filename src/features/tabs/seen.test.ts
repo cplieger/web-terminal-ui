@@ -5,7 +5,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createSessionsServer,
-  until,
   type Page,
   type SessionsServer,
 } from "./test-helpers/sessions-server.js";
@@ -25,10 +24,37 @@ afterEach(() => {
 
 const counted = (p: Page): boolean => p.doc.title.startsWith("(");
 
-async function settle(p: Page, pred: () => boolean = () => false): Promise<void> {
-  await until(pred, pred() ? 1 : 30);
-  await until(() => false, 3);
-  void p;
+// A setTimeout(0) nested more than five deep waits 4 ms (HTML, the timer
+// initialization steps: https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html),
+// so a case that settles a dozen times slept through most of its 2 s budget.
+// A message is a whole task without the clamp.
+function nextTask(): Promise<void> {
+  const { port1, port2 } = new MessageChannel();
+  return new Promise((resolve) => {
+    port1.onmessage = () => {
+      port1.close();
+      resolve();
+    };
+    port2.postMessage(null);
+  });
+}
+
+/** A server event is painted by the page's commit in its next frame, and the
+ *  requests it starts answer in the tasks after it. */
+async function round(p: Page): Promise<void> {
+  await new Promise((resolve) => p.win.requestAnimationFrame(resolve));
+  for (let i = 0; i < 5; i++) {
+    await nextTask();
+  }
+}
+
+async function settle(p: Page, pred?: () => boolean): Promise<void> {
+  for (let i = 0; i < 30 && pred !== undefined && !pred(); i++) {
+    await round(p);
+  }
+  for (let i = 0; i < 3; i++) {
+    await round(p);
+  }
 }
 
 /** x is unread on both pages, both hidden; B shows y, A shows x. */
@@ -221,6 +247,7 @@ describe("this page's own ack", () => {
     await settle(a, () => a.badge() === 1);
     expect(a.badge()).toBe(1);
     a.putAnswer = 204;
+    a.setVisible(false);
     a.setVisible(true);
     await settle(a, () => a.badge() === 0);
     expect(a.puts).toEqual([
@@ -256,6 +283,7 @@ describe("this page's own ack", () => {
     const a = await server.open();
     a.holdPuts();
     server.setStatus("x", "done");
+    await settle(a, () => a.puts.length === 1);
     server.setStatus("x", "working");
     server.setStatus("x", "done");
     await settle(a, () => a.puts.length === 2);
@@ -288,6 +316,7 @@ describe("this page's own ack", () => {
       await settle(a);
     }
     expect(a.puts, "one PUT for ten records of one occurrence").toHaveLength(1);
+    a.setVisible(false);
     a.setVisible(true);
     await settle(a, () => a.puts.length === 2);
     expect(a.puts).toHaveLength(2);
@@ -383,6 +412,122 @@ describe("this page's own ack", () => {
     expect(a.puts).toHaveLength(2);
     expect(a.badge()).toBe(0);
     expect(counted(a)).toBe(false);
+  });
+});
+
+describe("the switch button's dot", () => {
+  it("shows the next unread tab's cue after the most urgent is read", async () => {
+    server.add("w");
+    server.add("v");
+    const a = await server.open();
+    server.setStatus("w", "done");
+    server.setStatus("v", "crashed");
+    await settle(a, () => a.switchDot() === "crashed");
+    expect(a.switchDot()).toBe("crashed");
+
+    a.show(3);
+    await settle(a);
+
+    expect(a.switchDot()).toBe("done");
+  });
+});
+
+describe("reading while the tab list is open", () => {
+  const toggleTray = (p: Page): void => {
+    p.root.querySelector<HTMLElement>(".wt-switcher-switch")?.click();
+  };
+
+  it("acknowledges a cue that arrives while the tab list is open", async () => {
+    const a = await server.open();
+    toggleTray(a);
+    await settle(a);
+    const before = a.puts.length;
+
+    server.setStatus("y", "done");
+    await settle(a, () => a.puts.length > before);
+
+    expect(a.puts.slice(before)).toEqual([{ id: "y", seq: 1 }]);
+  });
+
+  it("acknowledges a cue that arrives while a dragged-open tab list is open", async () => {
+    const a = await server.open();
+    const current = a.root.querySelector<HTMLElement>(".wt-switcher-current");
+    const list = a.root.querySelector<HTMLElement>(".wt-switcher-list");
+    if (current === null || list === null) {
+      throw new Error("switcher chrome missing");
+    }
+    Object.defineProperty(list, "scrollHeight", { value: 200, configurable: true });
+    const send = (to: EventTarget, type: string, y: number, t: number): void => {
+      const e = new a.win.MouseEvent(type, { clientX: 100, clientY: y, bubbles: true });
+      Object.defineProperty(e, "timeStamp", { value: t });
+      Object.defineProperty(e, "pointerId", { value: 1 });
+      to.dispatchEvent(e);
+    };
+    // A slow drag up past half the list's height: distance opens it, not a flick.
+    send(current, "pointerdown", 300, 1000);
+    send(a.win, "pointermove", 150, 1400);
+    send(current, "pointerup", 150, 1410);
+    await settle(a);
+    const before = a.puts.length;
+
+    server.setStatus("y", "done");
+    await settle(a, () => a.puts.length > before);
+
+    expect(a.puts.slice(before)).toEqual([{ id: "y", seq: 1 }]);
+    expect(a.root.querySelector(".wt-switcher-expanded")).not.toBeNull();
+  });
+
+  it("posts a banner for a tab no pane shows while the tab list is open", async () => {
+    const a = await server.open();
+    toggleTray(a);
+    await settle(a);
+
+    server.notify("y", "Task finished", "done");
+    await settle(a, () => a.banners.length > 0);
+
+    expect(a.banners).toHaveLength(1);
+  });
+
+  it("shows an unread hidden tab's cue on the switch dot in the task that closes the list", async () => {
+    const a = await server.open();
+    a.putAnswer = 500;
+    toggleTray(a);
+    await settle(a);
+    server.setStatus("y", "done");
+    await settle(a, () => a.badge() === 1);
+    expect(a.switchDot()).toBe("");
+
+    toggleTray(a);
+
+    expect(a.switchDot()).toBe("done");
+  });
+});
+
+describe("a switch while an ack is out", () => {
+  it("keeps the clicked tab shown when the seen PUT answers after the click", async () => {
+    const a = await server.open();
+    a.holdPuts();
+    server.setStatus("x", "done");
+    await settle(a, () => a.puts.length === 1);
+
+    a.show(1);
+    await settle(a);
+    await a.releasePut(204);
+    await settle(a);
+
+    expect(a.root.querySelector(".wt-tab-active .wt-tab-label")?.textContent).toBe("why");
+  });
+});
+
+describe("a cue on a hidden page", () => {
+  it("updates the title count for a cue that latches while the page is hidden", async () => {
+    const a = await server.open();
+    a.setVisible(false);
+
+    server.setStatus("x", "done");
+    await settle(a, () => counted(a));
+
+    expect(counted(a)).toBe(true);
   });
 });
 
